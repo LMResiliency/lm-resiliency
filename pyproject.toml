@@ -54,7 +54,7 @@ all = [
     "deepspeed>=0.19.4,<0.20",
     "ninja",
 ]
-dev = ["pytest", "pytest-timeout", "pre-commit", "ruff==0.16.0"]
+dev = ["pytest", "pytest-timeout", "pre-commit", "ruff==0.16.2"]
 
 [build-system]
 requires = ["setuptools>=77.0"]
