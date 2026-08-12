@@ -4,12 +4,15 @@
 
 ### Fast checkpoint recovery and fault localization for distributed LLM pre-training
 
+[![16 GPU Feature Tests](https://img.shields.io/badge/16_GPU_Feature_Tests-passing-brightgreen.svg)](docs/validation.md#release-baseline)
+[![pip](https://img.shields.io/pypi/v/lm-resiliency?color=blue)](https://pypi.org/project/lm-resiliency/)
+[![PyTorch 2.10–2.13](https://img.shields.io/badge/PyTorch-2.10--2.13-EE4C2C.svg)](https://pytorch.org/)
+[![TorchTitan 0.2.2](https://img.shields.io/badge/TorchTitan-0.2.2-EE4C2C.svg)](https://github.com/pytorch/torchtitan)
+[![Megatron Core 0.18.2](https://img.shields.io/badge/Megatron_Core-0.18.2-76B900.svg)](https://github.com/NVIDIA/Megatron-LM)
+[![DeepSpeed 0.19.4](https://img.shields.io/badge/DeepSpeed-0.19.4-0078D4.svg)](https://github.com/deepspeedai/DeepSpeed)
+[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
 [![arXiv](https://img.shields.io/badge/arXiv-2608.11034-b31b1b.svg)](https://arxiv.org/abs/2608.11034)
 [![SOSP](https://img.shields.io/badge/SOSP-2023-violet.svg)](https://doi.org/10.1145/3600006.3613145)
-[![PyPI](https://img.shields.io/pypi/v/lm-resiliency.svg)](https://pypi.org/project/lm-resiliency/)
-[![Python 3.10–3.12](https://img.shields.io/badge/Python-3.10--3.12-3776AB.svg)](https://www.python.org/)
-[![PyTorch 2.10–2.13](https://img.shields.io/badge/PyTorch-2.10--2.13-EE4C2C.svg)](https://pytorch.org/)
-[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
 
 [Quick Start](#quick-start) · [API Guide](docs/api.md) · [Frameworks](#framework-support) · [Validation](docs/validation.md)
 
