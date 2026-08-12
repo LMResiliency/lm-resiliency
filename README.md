@@ -6,6 +6,7 @@
 
 [![arXiv](https://img.shields.io/badge/arXiv-2608.11034-b31b1b.svg)](https://arxiv.org/abs/2608.11034)
 [![SOSP](https://img.shields.io/badge/SOSP-2023-violet.svg)](https://doi.org/10.1145/3600006.3613145)
+[![PyPI](https://img.shields.io/pypi/v/lm-resiliency.svg)](https://pypi.org/project/lm-resiliency/)
 [![Python 3.10–3.12](https://img.shields.io/badge/Python-3.10--3.12-3776AB.svg)](https://www.python.org/)
 [![PyTorch 2.10–2.13](https://img.shields.io/badge/PyTorch-2.10--2.13-EE4C2C.svg)](https://pytorch.org/)
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
@@ -37,15 +38,13 @@
 ### Install
 
 ```bash
-git clone https://github.com/LMResiliency/lm-resiliency.git
-cd lm-resiliency
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e ".[megatron]"
+python -m pip install "lm-resiliency[megatron]"
 ```
 
-Use `.[torchtitan]`, `.[deepspeed]`, `.[all]`, or the core package without an extra for other environments.
+Use `[torchtitan]`, `[deepspeed]`, `[all]`, or the core package without an extra for other environments.
 
 ### Add resiliency to Megatron Core
 
@@ -127,6 +126,11 @@ Launcher-specific retry, placement, and replacement policy remains external. See
 ## Development
 
 ```bash
+git clone https://github.com/LMResiliency/lm-resiliency.git
+cd lm-resiliency
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 CUDA_VISIBLE_DEVICES="" python -m pytest -q
 ```
