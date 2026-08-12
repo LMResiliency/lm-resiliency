@@ -5,6 +5,10 @@ The project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 
 ## [Unreleased]
 
+### Changed
+
+- Quick Start installs the released package from PyPI, while editable installation remains in the development workflow.
+
 ## [0.1.0] - 2026-08-12
 
 ### Added
