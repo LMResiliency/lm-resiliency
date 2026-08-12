@@ -14,7 +14,7 @@
 [![arXiv](https://img.shields.io/badge/arXiv-2608.11034-b31b1b.svg)](https://arxiv.org/abs/2608.11034)
 [![SOSP](https://img.shields.io/badge/SOSP-2023-violet.svg)](https://doi.org/10.1145/3600006.3613145)
 
-[Quick Start](#quick-start) · [API Guide](docs/api.md) · [Frameworks](#framework-support) · [Validation](docs/validation.md)
+[Quick Start](#quick-start) · [API Guide](docs/api.md) · [Frameworks](#framework-support) · [Validation](docs/validation.md) · [Roadmap](ROADMAP.md)
 
 </div>
 
@@ -147,6 +147,7 @@ Launcher-specific retry, placement, and replacement policy remains external. See
 | SCOUT coverage, replay, fault reports, and checkpoint certification | [SCOUT guide](docs/scout.md) |
 | MoE regime discovery, qualification, and measured results | [MoE execution regimes](docs/moe_execution_regimes.md) |
 | Complete test evidence and limitations | [Validation report](docs/validation.md) |
+| Planned project direction and priorities | [Roadmap](ROADMAP.md) |
 
 ## Development
 
