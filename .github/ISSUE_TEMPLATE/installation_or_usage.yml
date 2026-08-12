@@ -1,0 +1,75 @@
+name: Installation or usage help
+description: Request help with installation, configuration, or framework attachment.
+title: "[Help] "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues and review the README, API guide, and compatibility policy before submitting.
+
+  - type: dropdown
+    id: topic
+    attributes:
+      label: Topic
+      options:
+        - Installation or dependency resolution
+        - PyTorch integration
+        - TorchTitan integration
+        - Megatron Core integration
+        - DeepSpeed integration
+        - GEMINI configuration or recovery
+        - SCOUT configuration or reports
+        - Manager integration
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include Python, PyTorch, CUDA, GPU, operating system, and framework versions.
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command or configuration
+      description: Provide the exact installation command or the smallest relevant configuration.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: Explain what you are trying to accomplish and where you are blocked.
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output or error
+      description: Include the complete error after removing sensitive data.
+
+  - type: textarea
+    id: attempted
+    attributes:
+      label: Troubleshooting attempted
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched open and closed issues for this question.
+          required: true
+        - label: I reviewed the compatibility policy and relevant API documentation.
+          required: true
+        - label: I removed credentials, private data, and unrelated production logs.
+          required: true

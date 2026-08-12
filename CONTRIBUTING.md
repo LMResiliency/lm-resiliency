@@ -45,6 +45,9 @@ If the required hardware is unavailable, state exactly which validation remains 
 ## Pull Requests
 
 Keep each pull request focused on one coherent change.
+Use `[Type] Concise imperative summary` for the pull-request title.
+Supported type tags are `[Bugfix]`, `[Feature]`, `[Docs]`, `[Refactor]`, `[Perf]`, `[Test]`, and `[CI/Release]`.
+An optional subsystem tag may follow the type, such as `[Bugfix][SCOUT] Reject an inconclusive replay precondition`.
 Describe the problem, implementation, compatibility impact, and validation performed.
 Update public documentation and contract tests when changing supported behavior or import paths.
 Preserve backward compatibility for stable interfaces as defined in [Compatibility](docs/compatibility.md).

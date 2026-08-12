@@ -1,0 +1,40 @@
+name: Documentation issue
+description: Report missing, inaccurate, or unclear documentation.
+title: "[Docs] "
+labels:
+  - documentation
+body:
+  - type: input
+    id: location
+    attributes:
+      label: Documentation location
+      description: Link the README section, guide, example, or source comment.
+      placeholder: "docs/api.md#manager-integration"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Explain what is missing, inaccurate, outdated, or unclear.
+    validations:
+      required: true
+
+  - type: textarea
+    id: correction
+    attributes:
+      label: Suggested correction
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I checked the current main branch and searched existing issues.
+          required: true
