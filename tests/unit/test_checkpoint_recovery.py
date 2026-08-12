@@ -41,6 +41,26 @@ def test_flush_for_restart_own_shard_round_trip(tmp_path):
     reloaded_manager.close()
 
 
+def test_flush_for_restart_disarms_exit_flush_until_next_save(tmp_path):
+    config = InMemoryCkptConfig(
+        enable=True,
+        interval=1,
+        disk_flush_interval=0,
+        disk_folder=str(tmp_path),
+    )
+    manager = InMemoryCheckpointManager(config)
+    manager.save({"model": {"w": torch.ones(4)}}, step=1)
+    manager.maybe_wait()
+
+    assert manager._exit_flush_registered
+    assert manager.flush_for_restart() == 1
+    assert not manager._exit_flush_registered
+
+    manager.save({"model": {"w": torch.full((4,), 2.0)}}, step=2)
+    assert manager._exit_flush_registered
+    manager.close()
+
+
 def test_gemini_is_single_tier(tmp_path):
     config = InMemoryCkptConfig(
         enable=True,

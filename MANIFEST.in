@@ -4,3 +4,4 @@ include CODE_OF_CONDUCT.md
 include CONTRIBUTING.md
 include SECURITY.md
 recursive-include docs *.md
+recursive-include examples *.md *.py

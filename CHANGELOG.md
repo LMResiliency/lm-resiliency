@@ -5,9 +5,13 @@ The project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 
 ## [Unreleased]
 
+### Added
+
+- A runnable CPU quick-start example with a complete native PyTorch training loop and GEMINI checkpoint resume.
+
 ### Changed
 
-- Quick Start installs the released package from PyPI, while editable installation remains in the development workflow.
+- Quick Start installs the core package from PyPI before introducing optional framework integrations.
 
 ## [0.1.0] - 2026-08-12
 
