@@ -5,7 +5,7 @@ The project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 
 ## [Unreleased]
 
-## [0.1.0] - Pending
+## [0.1.0] - 2026-08-12
 
 ### Added
 
@@ -21,4 +21,4 @@ The project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 
 Accumulate user-visible changes under `Unreleased`.
 Before tagging a release, move those entries under the new version, replace `Pending` with the release date, and update the versions in `pyproject.toml` and `CITATION.cff`.
-See the [open-source release checklist](docs/open_source_release_checklist.md) for staging, validation, tagging, and publication requirements.
+Release artifacts are built and published by the [Release workflow](.github/workflows/release.yml).
