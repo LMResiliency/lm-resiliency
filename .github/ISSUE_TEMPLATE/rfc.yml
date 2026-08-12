@@ -1,0 +1,96 @@
+name: Request for comments
+description: Propose a substantial architecture, protocol, API, or compatibility change.
+title: "[RFC] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        RFCs are for changes that need design agreement before implementation.
+        Review existing RFCs and related issues before proposing a new design.
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Describe the problem, affected users, and why the current behavior is insufficient.
+    validations:
+      required: true
+
+  - type: textarea
+    id: goals
+    attributes:
+      label: Goals and non-goals
+      description: Define the intended scope and explicitly identify what the proposal will not address.
+    validations:
+      required: true
+
+  - type: textarea
+    id: design
+    attributes:
+      label: Proposed design
+      description: Describe components, control flow, data flow, ownership boundaries, and operational behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: contracts
+    attributes:
+      label: Contracts and compatibility
+      description: >
+        Describe public APIs, checkpoint formats, framework integration, manager contracts,
+        failure semantics, backward compatibility, and migration requirements.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Compare the proposal with credible alternatives and explain the tradeoffs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation plan
+      description: >
+        Define correctness criteria, unit and integration coverage, distributed or GPU experiments,
+        fault injection, performance measurements, and acceptance thresholds.
+    validations:
+      required: true
+
+  - type: textarea
+    id: rollout
+    attributes:
+      label: Rollout and operational impact
+      description: Describe staging, feature gates, observability, rollback, and release implications.
+
+  - type: textarea
+    id: questions
+    attributes:
+      label: Unresolved questions
+      description: List decisions that require maintainer or community feedback.
+
+  - type: input
+    id: feedback_period
+    attributes:
+      label: Proposed feedback period
+      description: Allow enough time for design review before implementation begins.
+      placeholder: "7 days"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing RFCs, issues, and pull requests for related designs.
+          required: true
+        - label: I separated design agreement from implementation work.
+          required: true
+        - label: I removed credentials, private data, and security-sensitive details.
+          required: true

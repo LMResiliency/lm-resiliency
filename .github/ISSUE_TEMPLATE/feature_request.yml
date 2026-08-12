@@ -1,0 +1,59 @@
+name: Feature request
+description: Propose a new capability or extension.
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use the RFC form instead for substantial architecture, protocol, public API,
+        checkpoint-format, or compatibility changes.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the user or system problem that the proposal would address.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the intended behavior and public API, if applicable.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Framework and topology scope
+      description: Identify affected frameworks, parallel dimensions, checkpoint tiers, or manager contracts.
+
+  - type: textarea
+    id: validation
+    attributes:
+      label: Suggested validation
+      description: Describe the CPU, distributed, GPU, or production-loop evidence needed to validate the proposal.
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched open and closed issues for related proposals.
+          required: true
+        - label: I described the problem independently of the proposed implementation.
+          required: true

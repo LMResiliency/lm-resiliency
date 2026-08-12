@@ -1,0 +1,112 @@
+name: Bug report
+description: Report a reproducible defect in GEMINI, SCOUT, or a framework integration.
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues before filing a report.
+        Do not include credentials, private model data, proprietary logs, or security vulnerabilities.
+        Report security vulnerabilities through the repository's private vulnerability reporting page.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - GEMINI checkpointing or recovery
+        - SCOUT replay or fault localization
+        - Checkpoint certification or recovery selection
+        - PyTorch integration
+        - TorchTitan integration
+        - Megatron Core integration
+        - DeepSpeed integration
+        - MoE execution regimes
+        - Packaging or installation
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: lm-resiliency version
+      description: Provide the release version or commit SHA.
+      placeholder: "0.1.0 or cd3dd642"
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include Python, PyTorch, CUDA, NCCL, GPU, operating system, and framework versions.
+      placeholder: |
+        Python:
+        PyTorch:
+        CUDA / NCCL:
+        GPU:
+        Operating system:
+        Framework and version:
+    validations:
+      required: true
+
+  - type: textarea
+    id: topology
+    attributes:
+      label: Distributed topology
+      description: Include host count, world size, launcher, and active parallel dimensions.
+      placeholder: |
+        Hosts:
+        World size:
+        Launcher:
+        DP / TP / PP / CP / SP / EP:
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide the smallest runnable script and exact command that reproduce the issue.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the complete traceback or the point at which execution stalls.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: SCOUT or GEMINI evidence
+      description: >
+        Include relevant fault reports, recovery decisions, checkpoint steps,
+        or replay evidence after removing sensitive data.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched open and closed issues for this problem.
+          required: true
+        - label: I reduced the report to a minimal reproduction.
+          required: true
+        - label: I removed credentials, private data, and unrelated production logs.
+          required: true
+        - label: This report does not disclose a security vulnerability.
+          required: true
