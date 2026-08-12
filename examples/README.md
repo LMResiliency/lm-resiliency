@@ -1,5 +1,28 @@
 # Examples
 
+## Quick Start
+
+Run [quickstart.py](quickstart.py) with plain Python to train a tiny causal LM on CPU.
+The example executes the complete forward, backward, optimizer, and GEMINI checkpoint lifecycle without requiring a GPU.
+
+```bash
+python examples/quickstart.py \
+  --checkpoint-dir /tmp/lm-resiliency-quickstart/checkpoints
+```
+
+Run it again with a larger step target to resume from the saved GEMINI checkpoint:
+
+```bash
+python examples/quickstart.py \
+  --steps 6 \
+  --checkpoint-dir /tmp/lm-resiliency-quickstart/checkpoints
+```
+
+The single-process example validates training-loop integration and recovery.
+Use the distributed examples below to exercise SCOUT replay and multi-rank localization.
+
+## Production Loops
+
 The production-loop examples train tiny causal language models with deterministic synthetic tokens while preserving each framework's real training lifecycle.
 They support one or two hosts through standard `torchrun` arguments.
 

@@ -9,7 +9,8 @@ Focused integration programs use deterministic training workloads and fault inje
 
 | Check | Result |
 |---|---|
-| CPU unit tests | 632 passed |
+| CPU unit tests | 634 passed |
+| Clean PyPI quick start | Python 3.12 environment passed `pip check`; tiny CPU causal LM trained through step 4, recovered step 4, and continued through step 6 |
 | Ruff | Passed |
 | Python bytecode compilation | Passed |
 | 4-rank two-host OOB checkpoint I/O | Delayed checkpoint write localized to rank 2 after two confirmations |

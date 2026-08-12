@@ -671,7 +671,9 @@ class InMemoryCheckpointManager:
 
         Blocking. Returns the latest own step flushed, or -1 if nothing flushed.
         """
-        return self._flush_slots(self._disk)
+        flushed_step = self._flush_slots(self._disk)
+        self._disarm_exit_flush()
+        return flushed_step
 
     def set_restart_destination(
         self,

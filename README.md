@@ -41,15 +41,33 @@
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install "lm-resiliency[megatron]"
+python -m pip install lm-resiliency
 ```
 
-Use `[torchtitan]`, `[deepspeed]`, `[all]`, or the core package without an extra for other environments.
+Install `[torchtitan]`, `[megatron]`, `[deepspeed]`, or `[all]` when integrating one of those frameworks.
+
+### Run a tiny end-to-end loop
+
+Clone the examples and run the CPU quick start with plain Python:
+
+```bash
+git clone --depth 1 https://github.com/LMResiliency/lm-resiliency.git
+python lm-resiliency/examples/quickstart.py \
+  --checkpoint-dir /tmp/lm-resiliency-quickstart/checkpoints
+```
+
+The example trains a tiny causal LM through a complete forward, backward, and optimizer loop while GEMINI saves recovery state.
+Run it again with `--steps 6` to resume from the saved checkpoint.
+See [Examples](examples/README.md) for the recovery command and distributed production loops that exercise SCOUT.
 
 ### Add resiliency to Megatron Core
 
 Attach resiliency after Megatron creates its model chunks, optimizer, and scheduler.
 Then resume the existing `train()` loop from the recovered iteration.
+
+```bash
+python -m pip install "lm-resiliency[megatron]"
+```
 
 ```python
 from megatron.training import get_args
@@ -77,6 +95,10 @@ See the [Megatron Core production-loop example](examples/production_loops/megatr
 
 Pass the initialized TorchTitan `Trainer` before entering its existing training loop.
 The adapter discovers the model, optimizer, scheduler, dataloader, topology, and checkpoint state.
+
+```bash
+python -m pip install "lm-resiliency[torchtitan]"
+```
 
 ```python
 from torchtitan.train import Trainer
