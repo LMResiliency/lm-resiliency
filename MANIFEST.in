@@ -1,0 +1,6 @@
+include CHANGELOG.md
+include CITATION.cff
+include CODE_OF_CONDUCT.md
+include CONTRIBUTING.md
+include SECURITY.md
+recursive-include docs *.md

@@ -1,0 +1,53 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the relevant GEMINI and SCOUT references."
+title: "LLM Resiliency"
+type: software
+authors:
+  - family-names: "Wang"
+    given-names: "Zhuang"
+version: 0.1.0rc1
+license: BSD-3-Clause
+repository-code: "https://github.com/LMResiliency/lm-resiliency"
+url: "https://github.com/LMResiliency/lm-resiliency"
+abstract: >-
+  GEMINI in-memory checkpointing and SCOUT fault localization for
+  distributed large-language-model pre-training.
+keywords:
+  - checkpointing
+  - distributed training
+  - fault tolerance
+  - large language models
+  - silent data corruption
+references:
+  - type: conference-paper
+    title: "GEMINI: Fast Failure Recovery in Distributed Training with In-Memory Checkpoints"
+    authors:
+      - family-names: "Wang"
+        given-names: "Zhuang"
+      - family-names: "Jia"
+        given-names: "Zhen"
+      - family-names: "Zheng"
+        given-names: "Shuai"
+      - family-names: "Zhang"
+        given-names: "Zhen"
+      - family-names: "Fu"
+        given-names: "Xinwei"
+      - family-names: "Ng"
+        given-names: "T. S. Eugene"
+      - family-names: "Wang"
+        given-names: "Yida"
+    collection-title: "Proceedings of the 29th ACM Symposium on Operating Systems Principles"
+    year: 2023
+    start: 364
+    end: 381
+    publisher:
+      name: "Association for Computing Machinery"
+    doi: "10.1145/3600006.3613145"
+  - type: generic
+    title: "SCOUT: Symmetric Consensus Outlier Detection for Failure Localization in LLM Pre-Training"
+    authors:
+      - family-names: "Wang"
+        given-names: "Zhuang"
+    year: 2026
+    url: "https://arxiv.org/abs/2608.11034"
+    notes: "arXiv:2608.11034 [cs.DC]"

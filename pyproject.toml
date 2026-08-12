@@ -1,0 +1,90 @@
+[project]
+name = "lm-resiliency"
+version = "0.1.0rc1"
+description = "GEMINI in-memory checkpointing and SCOUT fault localization for LLM training"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+license = "BSD-3-Clause"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+authors = [{ name = "Zhuang Wang" }]
+maintainers = [{ name = "Zhuang Wang" }]
+keywords = [
+    "checkpointing",
+    "distributed-training",
+    "fault-tolerance",
+    "large-language-models",
+    "pytorch",
+    "resiliency",
+    "silent-data-corruption",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Distributed Computing",
+]
+dependencies = [
+    "numpy>=1.26,<3",
+    "torch>=2.10,<2.14",
+]
+
+[project.scripts]
+lm-resiliency-discover-moe-regimes = "lm_resiliency.cli.discover_moe_regimes:main"
+
+[project.urls]
+Homepage = "https://github.com/LMResiliency/lm-resiliency"
+Documentation = "https://github.com/LMResiliency/lm-resiliency/tree/main/docs"
+Source = "https://github.com/LMResiliency/lm-resiliency"
+Issues = "https://github.com/LMResiliency/lm-resiliency/issues"
+Changelog = "https://github.com/LMResiliency/lm-resiliency/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+torchtitan = ["torchtitan>=0.2.2,<0.3"]
+megatron = ["megatron-core>=0.18.2,<0.19"]
+deepspeed = ["deepspeed>=0.19.4,<0.20", "ninja"]
+all = [
+    "torchtitan>=0.2.2,<0.3",
+    "megatron-core>=0.18.2,<0.19",
+    "deepspeed>=0.19.4,<0.20",
+    "ninja",
+]
+dev = ["pytest", "pytest-timeout", "pre-commit", "ruff==0.16.0"]
+
+[build-system]
+requires = ["setuptools>=77.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["lm_resiliency*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit"]
+markers = [
+    "integration: exercises multiple lm_resiliency components",
+    "distributed: must be launched with torchrun or another distributed launcher",
+    "gpu: requires a CUDA-capable GPU",
+    "multi_node: requires more than one host",
+    "deepspeed: requires the optional DeepSpeed integration",
+    "megatron: requires the optional Megatron Core integration",
+    "torchtitan: requires the optional TorchTitan integration",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["F841", "E402"]
+
+[tool.ruff.format]
+quote-style = "double"
