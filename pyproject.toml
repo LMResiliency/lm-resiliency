@@ -1,6 +1,6 @@
 [project]
 name = "lm-resiliency"
-version = "0.1.0rc1"
+version = "0.1.0"
 description = "GEMINI in-memory checkpointing and SCOUT fault localization for LLM training"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
