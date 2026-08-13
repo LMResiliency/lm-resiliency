@@ -15,6 +15,7 @@ Correctness under partial failure is more important than convenience. Prefer con
 - For checkpoint or recovery changes, read `docs/gemini.md` and the relevant tests.
 - For detection, replay, consensus, hang, telemetry, or checkpoint-certification changes, read `docs/scout.md` and the relevant tests.
 - For public APIs, framework adapters, package imports, or supported versions, read `docs/compatibility.md` and `docs/api.md`.
+- Treat this file as review guidance, not as a replacement for tests or the documented runtime contracts.
 - Do not duplicate deterministic CI feedback. Ruff, formatting, pre-commit, packaging, and the CPU unit suite are handled by CI.
 - Do not weaken a documented safety property merely to make a test pass. Update implementation, tests, and documentation together when the contract intentionally changes.
 - Keep optional framework dependencies lazy. Importing `lm_resiliency` must not require DeepSpeed, Megatron Core, TorchTitan, Triton, or CUDA-only packages.
