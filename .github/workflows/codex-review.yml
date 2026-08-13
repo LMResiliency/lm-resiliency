@@ -204,7 +204,7 @@ jobs:
             and public compatibility guarantees.
 
             Optional maintainer focus:
-            ${{ inputs.focus }}
+            ${{ github.event.inputs.focus }}
 
             Look for high-confidence violations that can survive existing tests: corrupt or mixed
             checkpoint state, unsafe recovery selection, incorrect trust-state transitions, false
