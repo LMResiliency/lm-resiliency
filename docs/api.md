@@ -510,6 +510,35 @@ The `"torch_dist"` and `"nixl"` backends share the `CheckpointTransfer` contract
 
 Launcher retry, placement, replacement, and quarantine policy remain outside this repository.
 
+## Monitor Hardware Health
+
+The optional hardware-health API complements replay and out-of-band consensus with direct telemetry for permanent or imminent device failures.
+It is not enabled automatically by `enable_resiliency()`.
+
+```python
+from lm_resiliency.manager_api import (
+    HardwareHealthMonitor,
+    HealthConfig,
+    NvmlSource,
+)
+
+monitor = HardwareHealthMonitor(
+    HealthConfig(poll_interval_s=5.0),
+    [NvmlSource(device_index=physical_gpu_index)],
+    on_event=manager_health_callback,
+)
+monitor.start()
+```
+
+The caller resolves `physical_gpu_index` and supplies `manager_health_callback`.
+`on_event` receives one deduplicated `HealthEvent` for each fatal device-and-metric pair.
+The built-in NVML source covers uncorrectable ECC, row-remap failure, NVLink error growth, temperature near shutdown, and device loss.
+Custom `HealthSource` implementations can supply XID, PCIe, InfiniBand, NIC, HCA, or fabric telemetry.
+Warnings such as correctable ECC growth, pending row remaps, nonfatal XIDs, and elevated temperature are logged but do not invoke `on_event`.
+
+Call `monitor.close()` when the manager or worker lifecycle ends.
+See [SCOUT hardware telemetry](scout.md#hardware-telemetry) for thresholds, localization granularity, and manager ownership.
+
 ## Lifecycle
 
 Every framework adapter returns the same lifecycle surface:
