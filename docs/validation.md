@@ -1,6 +1,6 @@
 # Validation
 
-Date: 2026-08-12 UTC.
+Date: 2026-08-13 UTC.
 
 This report summarizes the release-candidate validation evidence for GEMINI and SCOUT.
 Focused integration programs use deterministic training workloads and fault injection to verify checkpoint equivalence, exact fault localization, candidate exclusion, and framework topology handling.
@@ -33,7 +33,7 @@ Focused integration programs use deterministic training workloads and fault inje
 | 16-rank DeepSpeed matrix | 2/2 passed across ZeRO-1 and ZeRO-2 |
 | 16-rank framework lifecycle matrix | 11/11 passed across PyTorch, TorchTitan, Megatron, and durable dense and expert cases |
 
-The CPU suite covers checkpoint capture and recovery, replay preconditions, peer metadata, local persistence, integrity failures, recipe-cycle accounting, emergency scheduler preservation, recovery-mode selection, durable promotion, checkpoint I/O boundaries, representative AllToAll policy generation, FSDP materialization timing, framework adapters, and public lifecycle behavior.
+The CPU suite covers checkpoint capture and recovery, replay preconditions, peer metadata, local persistence, integrity failures, recipe-cycle accounting, emergency scheduler preservation, recovery-mode selection, durable promotion, checkpoint I/O boundaries, hardware-health classification and callback delivery, representative AllToAll policy generation, FSDP materialization timing, framework adapters, and public lifecycle behavior.
 
 The final distributed campaign used two hosts with eight A100 GPUs per host and 16 ranks over TCP on Amazon ENA.
 Every current-lifecycle and focused feature job completed successfully.

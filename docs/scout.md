@@ -1,7 +1,8 @@
 # SCOUT
 
-SCOUT localizes silent data corruption (SDC), stragglers, collective desynchronization, and process stalls by comparing equivalent training peers.
-It also certifies which checkpoints are safe to use for recovery.
+SCOUT localizes latent failures such as silent data corruption (SDC), stragglers, collective desynchronization, and process stalls by comparing equivalent training peers.
+It also localizes telemetry-visible permanent GPU and NVLink endpoint failures through direct hardware health sources.
+SCOUT also certifies which checkpoints are safe to use for recovery.
 
 For the system design, algorithms, and evaluation rationale, see [SCOUT: Symmetric Consensus Outlier Detection for Failure Localization in LLM Pre-Training](https://arxiv.org/abs/2608.11034).
 This guide defines the operational contract of the current implementation.
@@ -21,6 +22,13 @@ Coverage is sampled rather than continuous.
 | Process stall | Out-of-band stall timer | Visible progress has stopped. |
 | DataLoader stall | Instrumented `next()` latency | The delay exceeds absolute, relative, and persistence thresholds. |
 | Checkpoint I/O stall | Instrumented read or write latency | The delay exceeds absolute, relative, and persistence thresholds. |
+| Permanent GPU memory or device failure | Uncorrectable ECC, row-remap failure, fatal XID, or device loss | A health source reports the physical device and fatal metric. |
+| NVLink endpoint failure | Per-GPU NVLink recovery and CRC error growth | The counter delta exceeds the configured fatal threshold. |
+| Imminent thermal shutdown | GPU temperature and hardware shutdown limit | Temperature reaches the configured fatal margin below shutdown. |
+
+Replay and out-of-band progress localization require equivalent peers and consensus.
+Direct health telemetry identifies the reporting physical device without cross-rank consensus.
+Correctable ECC growth, pending row remaps, nonfatal XIDs, and elevated temperature produce warnings but do not trigger recovery.
 
 SCOUT does not provide an oracle for common-mode failures.
 Two disagreeing peers can detect a mismatch but cannot identify the faulty peer without an independent reference.
@@ -30,12 +38,14 @@ Use HSDP replication, a shadow copy, parity, trusted recomputation, or another i
 
 ## Runtime Paths
 
-SCOUT uses two complementary paths:
+SCOUT uses three complementary paths:
 
 - In-process replay checks numerical results, optimizer transitions, and timing at optimizer boundaries.
 - An out-of-band Gloo process compares progress and metadata while the training process may be blocked.
+- A low-frequency health-monitor thread polls direct device or fabric telemetry independently of training progress.
 
 Replay uses the training GPU and cannot run while that process is blocked.
+The health monitor can report telemetry-visible failures without replaying the workload.
 The out-of-band process exits with its parent.
 Worker termination, relaunch, placement, and quarantine remain manager responsibilities.
 
@@ -187,16 +197,47 @@ See the [API guide](api.md#configure-protection) for configuration examples and 
 
 ## Hardware Telemetry
 
-SCOUT consensus can be complemented by direct device telemetry.
-The built-in NVML source reports ECC state, row remapping, NVLink error growth, temperature, and device loss.
-Complete XID, InfiniBand, or fabric coverage requires DCGM, system-log, or deployment-specific sources.
+SCOUT complements workload-based inference with direct telemetry for permanent or imminent hardware failures.
+`HardwareHealthMonitor` polls caller-supplied `HealthSource` implementations in a low-frequency daemon thread and emits each fatal device-and-metric event once through `on_event`.
 
-Health events are advisory inputs to the manager.
+The built-in `NvmlSource` reports:
+
+- uncorrectable and correctable ECC state;
+- pending or failed row remapping;
+- aggregate per-GPU NVLink recovery and CRC errors;
+- temperature and hardware shutdown limit; and
+- device loss when all NVML queries fail.
+
+The monitor treats uncorrectable ECC, row-remap exhaustion, device loss, a configured fatal XID, severe NVLink error growth, and temperature near shutdown as fatal.
+Warnings record precursor conditions without requesting recovery.
+
+```python
+from lm_resiliency.manager_api import (
+    HardwareHealthMonitor,
+    HealthConfig,
+    NvmlSource,
+)
+
+health_monitor = HardwareHealthMonitor(
+    HealthConfig(),
+    [NvmlSource(device_index=physical_gpu_index)],
+    on_event=manager_health_callback,
+)
+health_monitor.start()
+```
+
+The caller resolves `physical_gpu_index` and supplies `manager_health_callback`.
+`device_index` is the physical NVML index, not necessarily the CUDA ordinal after `CUDA_VISIBLE_DEVICES` remapping.
+The built-in NVLink reading localizes a failing GPU endpoint, not an individual link, cable, or switch.
+Complete XID, InfiniBand, PCIe, NIC, HCA, or fabric coverage requires DCGM, system-log, or deployment-specific `HealthSource` implementations.
+
+Fatal health events are direct localization inputs to the manager.
 SCOUT does not terminate workers or quarantine hardware.
 
 ## Guarantee Boundary
 
-- SCOUT covers active permanent failures and intermittent failures that recur under a qualified replay.
+- SCOUT covers telemetry-visible permanent failures directly and active permanent or intermittent computational failures that recur under a qualified replay.
+- Health localization is limited to signals exposed by configured sources and their device or endpoint granularity.
 - One-shot transients, common-mode failures, and finite-signature collisions remain outside the guarantee.
 - Replay samples computation and is not continuous duplication.
 - Pure single-owner shards require an independent oracle.
