@@ -9,6 +9,7 @@ The project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 
 - A runnable CPU quick-start example with a complete native PyTorch training loop and GEMINI checkpoint resume.
 - A scheduled and maintainer-dispatched two-GPU qualification workflow with machine-readable revision, environment, topology, command, log, and checksum evidence.
+- A framework-neutral fault injection evaluation kit with incident schedules, automatic training-iteration hooks, verified ground truth, capability-checked executors, neutral localization scoring, and a systematic eight-GPU DDP/SCOUT evaluation matrix.
 
 ### Changed
 

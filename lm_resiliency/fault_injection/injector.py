@@ -1,0 +1,669 @@
+"""Automatic incident scheduler and framework-neutral evaluation runtime."""
+
+from __future__ import annotations
+
+import hashlib
+import random
+import time
+from dataclasses import dataclass
+from typing import Any, Mapping, Sequence
+
+import torch.distributed as dist
+
+from lm_resiliency.fault_injection.config import (
+    ClockOrigin,
+    FailureType,
+    FaultCampaign,
+    FaultIncident,
+    RetriggerPolicy,
+)
+from lm_resiliency.fault_injection.executors import (
+    FaultExecutionRequest,
+    FaultExecutionResult,
+    FaultExecutor,
+)
+from lm_resiliency.fault_injection.frameworks import (
+    TrainingContext,
+    resolve_training_context,
+)
+from lm_resiliency.fault_injection.local import (
+    LocalFaultEffect,
+    LocalFaultExecutor,
+)
+from lm_resiliency.fault_injection.reports import (
+    CampaignReport,
+    FaultEvaluation,
+    FaultInjectionRecord,
+    InjectionStatus,
+    LocalizationResult,
+)
+from lm_resiliency.fault_injection.state import (
+    CampaignJournal,
+    CampaignStateStore,
+    MemoryCampaignStateStore,
+)
+from lm_resiliency.lifecycle import (
+    register_automatic_cleanup,
+    unregister_automatic_cleanup,
+)
+
+
+class UnsupportedFaultError(ValueError):
+    """Raised before training when no configured executor supports a fault."""
+
+
+@dataclass(slots=True)
+class _ExternalEffect:
+    request: FaultExecutionRequest
+    record: FaultInjectionRecord
+    executor: FaultExecutor
+    result: FaultExecutionResult
+    done: bool = False
+
+    def complete(self) -> None:
+        if self.done:
+            return
+        try:
+            evidence = self.executor.deactivate(self.request, self.result)
+        except Exception as error:
+            self.record.status = InjectionStatus.FAILED
+            self.record.error = f"fault deactivation failed: {error}"
+            self.record.completed_at_ns = time.monotonic_ns()
+            self.done = True
+            raise
+        if evidence:
+            merged = dict(self.record.evidence)
+            merged.update(evidence)
+            self.record.evidence = merged
+        self.record.status = (
+            InjectionStatus.COMPLETED if self.record.verified else InjectionStatus.CANCELLED
+        )
+        self.record.completed_at_ns = time.monotonic_ns()
+        self.done = True
+
+
+@dataclass(slots=True)
+class _ActiveFault:
+    incident: FaultIncident
+    start_iteration: int
+    effect: LocalFaultEffect | _ExternalEffect
+
+    @property
+    def done(self) -> bool:
+        return self.effect.done
+
+    def complete(self) -> None:
+        self.effect.complete()
+
+
+class FaultInjectionSession:
+    """Automatically scheduled rank-local campaign runtime."""
+
+    def __init__(
+        self,
+        target: Any,
+        optimizer: Any | None,
+        *,
+        campaign: FaultCampaign,
+        completed_iterations: int | None = None,
+        state_store: CampaignStateStore | None = None,
+        executors: Sequence[FaultExecutor] = (),
+        rank: int | None = None,
+    ) -> None:
+        if not isinstance(campaign, FaultCampaign):
+            raise TypeError("campaign must be a FaultCampaign")
+        self.campaign = campaign
+        self._context: TrainingContext = resolve_training_context(target, optimizer)
+        self.framework = self._context.framework
+        self.rank = _distributed_rank() if rank is None else int(rank)
+        if self.rank < 0:
+            raise ValueError("fault injection rank must be non-negative")
+        if campaign.clock.origin is ClockOrigin.CAMPAIGN_START:
+            completed = 0
+        elif completed_iterations is None:
+            completed = self._context.inferred_completed_iterations
+        else:
+            completed = int(completed_iterations)
+        if completed < 0:
+            raise ValueError("completed_iterations must be non-negative")
+        self._completed_iterations = completed
+        self._current_iteration = completed + 1
+        self._state_store = state_store or MemoryCampaignStateStore()
+        self._journal: CampaignJournal = self._state_store.load(campaign.name)
+        self._executors = tuple(executors)
+        self._local = LocalFaultExecutor(self._context, self.rank)
+        self._records: list[FaultInjectionRecord] = []
+        self._active: list[_ActiveFault] = []
+        self._closed = False
+        self._faults = tuple(fault for incident in campaign.incidents for fault in incident.faults)
+
+        try:
+            self._validate_capabilities()
+            self._local.prepare_history(self._faults)
+            self._local.refresh_state_history(self._faults)
+            self._context.register_step_callback(self._on_step_complete)
+            self._enter_iteration(self._current_iteration)
+            register_automatic_cleanup(self)
+        except Exception:
+            self._local.close()
+            self._context.close()
+            raise
+
+    @property
+    def completed_iterations(self) -> int:
+        return self._completed_iterations
+
+    @property
+    def current_iteration(self) -> int:
+        return self._current_iteration
+
+    @property
+    def records(self) -> tuple[FaultInjectionRecord, ...]:
+        return tuple(self._records)
+
+    @property
+    def supported_failure_types(self) -> frozenset[FailureType]:
+        supported: set[FailureType] = set()
+        for failure_type in FailureType:
+            for fault in self._faults:
+                if fault.type is not failure_type:
+                    continue
+                if self._local.supports(fault) or any(
+                    executor.supports(fault) for executor in self._executors
+                ):
+                    supported.add(failure_type)
+                    break
+        return frozenset(supported)
+
+    def notify_recovery(self) -> None:
+        """End permanent effects configured to last until recovery."""
+        self._complete_until("recovery")
+
+    def notify_replacement(self) -> None:
+        """End permanent effects configured to last until replacement."""
+        self._complete_until("replacement")
+
+    def evaluate(
+        self,
+        results: Sequence[LocalizationResult | Mapping[str, Any]] = (),
+    ) -> CampaignReport:
+        """Compare neutral localization results with verified incident ground truth."""
+        normalized = tuple(
+            LocalizationResult.from_dict(result) if isinstance(result, Mapping) else result
+            for result in results
+        )
+        if not all(isinstance(result, LocalizationResult) for result in normalized):
+            raise TypeError("localization results must be LocalizationResult instances or mappings")
+        by_occurrence: dict[str, LocalizationResult] = {}
+        for result in normalized:
+            if result.occurrence_id in by_occurrence:
+                raise ValueError(f"duplicate localization result for {result.occurrence_id!r}")
+            by_occurrence[result.occurrence_id] = result
+        grouped = _group_records(self._records)
+        unknown = sorted(set(by_occurrence) - set(grouped))
+        if unknown:
+            raise ValueError(f"localization results reference unknown occurrences: {unknown}")
+
+        evaluations = tuple(
+            _evaluate_occurrence(occurrence_id, records, by_occurrence.get(occurrence_id))
+            for occurrence_id, records in grouped.items()
+        )
+        return CampaignReport(
+            campaign=self.campaign.name,
+            manifest=self.campaign.to_dict(),
+            framework=self.framework,
+            rank=self.rank,
+            completed_iterations=self.completed_iterations,
+            injections=tuple(self._records),
+            localizations=normalized,
+            evaluations=evaluations,
+            metadata=self.campaign.metadata,
+        )
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        unregister_automatic_cleanup(self)
+        first_error: Exception | None = None
+        for active in reversed(self._active):
+            if not active.done:
+                try:
+                    active.complete()
+                except Exception as error:
+                    if first_error is None:
+                        first_error = error
+        self._active.clear()
+        try:
+            self._local.close()
+        except Exception as error:
+            if first_error is None:
+                first_error = error
+        try:
+            self._context.close()
+        except Exception as error:
+            if first_error is None:
+                first_error = error
+        self._closed = True
+        if first_error is not None:
+            raise RuntimeError("fault injection cleanup failed") from first_error
+
+    def __enter__(self) -> "FaultInjectionSession":
+        return self
+
+    def __exit__(self, _exc_type: Any, _exc: Any, _traceback: Any) -> None:
+        self.close()
+
+    def _validate_capabilities(self) -> None:
+        unsupported: list[str] = []
+        for incident in self.campaign.incidents:
+            for fault in incident.faults:
+                if fault.target.execution_rank != self.rank:
+                    continue
+                if self._local.supports(fault):
+                    continue
+                if any(executor.supports(fault) for executor in self._executors):
+                    continue
+                unsupported.append(
+                    f"{incident.incident_id}/{fault.fault_id}: "
+                    f"{fault.type.value} on {fault.target.surface.value}"
+                )
+        if unsupported:
+            joined = "; ".join(unsupported)
+            raise UnsupportedFaultError(f"campaign has no configured executor for: {joined}")
+
+    def _on_step_complete(self) -> None:
+        if self._closed:
+            return
+        finished = self._current_iteration
+        for active in self._active:
+            lifetime = active.incident.lifetime
+            if (
+                not active.done
+                and lifetime.iterations is not None
+                and finished >= active.start_iteration + lifetime.iterations - 1
+            ):
+                active.complete()
+        self._discard_completed()
+        self._completed_iterations = finished
+        self._local.refresh_state_history(self._faults)
+        self._current_iteration = finished + 1
+        self._enter_iteration(self._current_iteration)
+
+    def _enter_iteration(self, iteration: int) -> None:
+        for incident in self.campaign.incidents:
+            if not incident.trigger.matches(iteration):
+                continue
+            attempt_count = self._journal.attempt_count(
+                incident.incident_id,
+                iteration,
+            )
+            if incident.retrigger is RetriggerPolicy.ONCE and attempt_count >= 1:
+                continue
+            if incident.retrigger is RetriggerPolicy.MAX_OCCURRENCES and attempt_count >= int(
+                incident.max_occurrences or 0
+            ):
+                continue
+            attempt = self._journal.record_attempt(incident.incident_id, iteration)
+            self._state_store.save(self._journal)
+            occurrence_id = _occurrence_id(incident, iteration, attempt)
+            if not _probability_selected(
+                self.campaign.seed,
+                incident.incident_id,
+                iteration,
+                incident.trigger.probability,
+            ):
+                self._record_probability_skip(
+                    incident,
+                    occurrence_id,
+                    iteration,
+                    attempt,
+                )
+                continue
+            self._activate_incident(
+                incident,
+                occurrence_id,
+                iteration,
+                attempt,
+            )
+
+    def _activate_incident(
+        self,
+        incident: FaultIncident,
+        occurrence_id: str,
+        iteration: int,
+        attempt: int,
+    ) -> None:
+        activated: list[_ActiveFault] = []
+        try:
+            for fault in incident.faults:
+                if fault.target.execution_rank != self.rank:
+                    continue
+                request = FaultExecutionRequest(
+                    campaign=self.campaign.name,
+                    seed=_fault_seed(
+                        self.campaign.seed,
+                        incident.incident_id,
+                        fault.fault_id,
+                        iteration,
+                    ),
+                    occurrence_id=occurrence_id,
+                    incident_id=incident.incident_id,
+                    iteration=iteration,
+                    attempt=attempt,
+                    temporal_behavior=incident.temporal_behavior,
+                    lifetime=incident.lifetime,
+                    fault=fault,
+                )
+                record = self._new_record(request, incident)
+                self._records.append(record)
+                if self._local.supports(fault):
+                    effect: LocalFaultEffect | _ExternalEffect = self._local.activate(
+                        request,
+                        record,
+                    )
+                else:
+                    effect = self._activate_external(request, record)
+                active = _ActiveFault(incident, iteration, effect)
+                activated.append(active)
+                if not active.done:
+                    self._active.append(active)
+        except Exception:
+            for active in reversed(activated):
+                if not active.done:
+                    active.complete()
+            self._discard_completed()
+            raise
+
+    def _activate_external(
+        self,
+        request: FaultExecutionRequest,
+        record: FaultInjectionRecord,
+    ) -> _ExternalEffect:
+        executor = next(
+            (candidate for candidate in self._executors if candidate.supports(request.fault)),
+            None,
+        )
+        if executor is None:
+            raise UnsupportedFaultError(f"no executor supports {request.fault.type.value}")
+        try:
+            result = executor.activate(request)
+        except Exception as error:
+            record.status = InjectionStatus.FAILED
+            record.error = str(error)
+            record.completed_at_ns = time.monotonic_ns()
+            raise
+        if not isinstance(result, FaultExecutionResult):
+            record.status = InjectionStatus.FAILED
+            record.error = "fault executor activate must return FaultExecutionResult"
+            record.completed_at_ns = time.monotonic_ns()
+            raise TypeError(record.error)
+        record.executor = executor.name
+        record.verified = result.verified
+        record.evidence = dict(result.evidence)
+        record.activated_at_ns = time.monotonic_ns()
+        if not result.verified:
+            deactivation_error: Exception | None = None
+            if result.active:
+                try:
+                    executor.deactivate(request, result)
+                except Exception as error:
+                    deactivation_error = error
+            record.status = InjectionStatus.FAILED
+            record.error = "fault executor could not verify activation"
+            if deactivation_error is not None:
+                record.error += f"; deactivation also failed: {deactivation_error}"
+            record.completed_at_ns = time.monotonic_ns()
+            raise RuntimeError(record.error)
+        if request.lifetime.matching_calls is not None and result.active:
+            try:
+                executor.deactivate(request, result)
+            except Exception as error:
+                record.status = InjectionStatus.FAILED
+                record.error = (
+                    "external executor returned an active matching_calls fault "
+                    f"and deactivation failed: {error}"
+                )
+                record.completed_at_ns = time.monotonic_ns()
+                raise RuntimeError(record.error) from error
+            record.status = InjectionStatus.FAILED
+            record.error = (
+                "external executors must complete matching_calls faults during activation"
+            )
+            record.completed_at_ns = time.monotonic_ns()
+            raise ValueError(
+                "external executors must complete matching_calls faults during activation"
+            )
+        record.status = InjectionStatus.ACTIVE if result.active else InjectionStatus.COMPLETED
+        if not result.active:
+            record.completed_at_ns = time.monotonic_ns()
+        return _ExternalEffect(
+            request=request,
+            record=record,
+            executor=executor,
+            result=result,
+            done=not result.active,
+        )
+
+    def _new_record(
+        self,
+        request: FaultExecutionRequest,
+        incident: FaultIncident,
+    ) -> FaultInjectionRecord:
+        return FaultInjectionRecord(
+            injection_id=f"{request.occurrence_id}/{request.fault.fault_id}",
+            occurrence_id=request.occurrence_id,
+            incident_id=request.incident_id,
+            fault_id=request.fault.fault_id,
+            iteration=request.iteration,
+            attempt=request.attempt,
+            temporal_behavior=request.temporal_behavior,
+            failure_type=request.fault.type.value,
+            expected_kind=request.fault.expected_kind,
+            safety=request.fault.safety.value,
+            framework=self.framework,
+            executor=self._local.name,
+            execution_rank=request.fault.target.execution_rank,
+            target=request.fault.target.to_dict(),
+            parameters=request.fault.parameters,
+        )
+
+    def _record_probability_skip(
+        self,
+        incident: FaultIncident,
+        occurrence_id: str,
+        iteration: int,
+        attempt: int,
+    ) -> None:
+        for fault in incident.faults:
+            if fault.target.execution_rank != self.rank:
+                continue
+            record = FaultInjectionRecord(
+                injection_id=f"{occurrence_id}/{fault.fault_id}",
+                occurrence_id=occurrence_id,
+                incident_id=incident.incident_id,
+                fault_id=fault.fault_id,
+                iteration=iteration,
+                attempt=attempt,
+                temporal_behavior=incident.temporal_behavior,
+                failure_type=fault.type.value,
+                expected_kind=fault.expected_kind,
+                safety=fault.safety.value,
+                framework=self.framework,
+                executor="none",
+                execution_rank=fault.target.execution_rank,
+                target=fault.target.to_dict(),
+                parameters=fault.parameters,
+                status=InjectionStatus.SKIPPED_PROBABILITY,
+                completed_at_ns=time.monotonic_ns(),
+            )
+            self._records.append(record)
+
+    def _complete_until(self, boundary: str) -> None:
+        for active in self._active:
+            if not active.done and active.incident.lifetime.until == boundary:
+                active.complete()
+        self._discard_completed()
+
+    def _discard_completed(self) -> None:
+        self._active = [active for active in self._active if not active.done]
+
+
+def enable_fault_injection(
+    target: Any,
+    optimizer: Any | None = None,
+    *,
+    campaign: FaultCampaign,
+    completed_iterations: int | None = None,
+    state_store: CampaignStateStore | None = None,
+    executors: Sequence[FaultExecutor] = (),
+    rank: int | None = None,
+) -> FaultInjectionSession:
+    """Enable an automatically scheduled campaign on initialized training objects."""
+    arguments = {
+        "campaign": campaign,
+        "completed_iterations": completed_iterations,
+        "state_store": state_store,
+        "executors": executors,
+        "rank": rank,
+    }
+    if not dist.is_available() or not dist.is_initialized() or dist.get_world_size() <= 1:
+        return FaultInjectionSession(target, optimizer, **arguments)
+
+    session: FaultInjectionSession | None = None
+    local_error: Exception | None = None
+    try:
+        session = FaultInjectionSession(target, optimizer, **arguments)
+    except Exception as error:
+        local_error = error
+
+    error_summary = None if local_error is None else f"{type(local_error).__name__}: {local_error}"
+    gathered_errors: list[str | None] = [None] * dist.get_world_size()
+    dist.all_gather_object(gathered_errors, error_summary)
+    failures = [
+        f"rank {failed_rank}: {error}"
+        for failed_rank, error in enumerate(gathered_errors)
+        if error is not None
+    ]
+    if failures:
+        if session is not None:
+            session.close()
+        message = "fault injection enablement failed; " + "; ".join(failures)
+        raise RuntimeError(message) from local_error
+    if session is None:
+        raise AssertionError("distributed fault injection enablement returned no session")
+    return session
+
+
+def _distributed_rank() -> int:
+    return dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+
+
+def _probability_selected(
+    campaign_seed: int,
+    incident_id: str,
+    iteration: int,
+    probability: float,
+) -> bool:
+    if probability >= 1.0:
+        return True
+    if probability <= 0.0:
+        return False
+    seed = _stable_seed(campaign_seed, incident_id, str(iteration))
+    return random.Random(seed).random() < probability
+
+
+def _fault_seed(
+    campaign_seed: int,
+    incident_id: str,
+    fault_id: str,
+    iteration: int,
+) -> int:
+    return _stable_seed(campaign_seed, incident_id, fault_id, str(iteration))
+
+
+def _stable_seed(campaign_seed: int, *parts: str) -> int:
+    digest = hashlib.blake2b(digest_size=8)
+    digest.update(int(campaign_seed).to_bytes(16, "little", signed=True))
+    for part in parts:
+        digest.update(b"\0")
+        digest.update(part.encode("utf-8"))
+    return int.from_bytes(digest.digest(), "little")
+
+
+def _occurrence_id(
+    incident: FaultIncident,
+    iteration: int,
+    attempt: int,
+) -> str:
+    base = f"{incident.incident_id}@{iteration}"
+    return base if attempt == 1 else f"{base}#{attempt}"
+
+
+def _group_records(
+    records: Sequence[FaultInjectionRecord],
+) -> dict[str, tuple[FaultInjectionRecord, ...]]:
+    grouped: dict[str, list[FaultInjectionRecord]] = {}
+    for record in records:
+        grouped.setdefault(record.occurrence_id, []).append(record)
+    return {
+        occurrence_id: tuple(occurrence_records)
+        for occurrence_id, occurrence_records in grouped.items()
+    }
+
+
+def _evaluate_occurrence(
+    occurrence_id: str,
+    records: tuple[FaultInjectionRecord, ...],
+    result: LocalizationResult | None,
+) -> FaultEvaluation:
+    expected_ranks = tuple(
+        sorted({rank for record in records if (rank := record.expected_rank) is not None})
+    )
+    expected_resources = tuple(
+        sorted(
+            {resource for record in records if (resource := record.expected_resource) is not None}
+        )
+    )
+    expected_components = {
+        component for record in records if (component := record.expected_component) is not None
+    }
+    injection_succeeded = bool(records) and all(record.injection_succeeded for record in records)
+    detected = bool(result is not None and result.detected)
+    reported_ranks = () if result is None else result.failed_ranks
+    reported_resources = () if result is None else result.failed_resources
+    ranks_match = not expected_ranks or set(expected_ranks).issubset(reported_ranks)
+    resources_match = not expected_resources or set(expected_resources).issubset(reported_resources)
+    localized = injection_succeeded and detected and ranks_match and resources_match
+    unexpected_ranks = tuple(rank for rank in reported_ranks if rank not in expected_ranks)
+    unexpected_resources = tuple(
+        resource for resource in reported_resources if resource not in expected_resources
+    )
+    expected_kinds = {record.expected_kind for record in records}
+    kind_matches = None if result is None or result.kind is None else result.kind in expected_kinds
+    component_matches = (
+        None
+        if result is None or not result.components
+        else expected_components.issubset(result.components)
+    )
+    return FaultEvaluation(
+        occurrence_id=occurrence_id,
+        injection_succeeded=injection_succeeded,
+        detected=detected,
+        localized=localized,
+        expected_ranks=expected_ranks,
+        reported_ranks=reported_ranks,
+        unexpected_ranks=unexpected_ranks,
+        expected_resources=expected_resources,
+        reported_resources=reported_resources,
+        unexpected_resources=unexpected_resources,
+        kind_matches=kind_matches,
+        component_matches=component_matches,
+        latency_ms=None if result is None else result.latency_ms,
+    )
+
+
+__all__ = [
+    "FaultInjectionSession",
+    "UnsupportedFaultError",
+    "enable_fault_injection",
+]

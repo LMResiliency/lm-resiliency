@@ -87,29 +87,33 @@ under test detects and localizes that fault correctly.
 The injector should not depend on SCOUT or GEMINI being enabled, and it should
 not require adapters for individual resiliency systems.
 
-### Planned Capabilities
+### Initial Implementation
 
-- Extract and generalize the current test-only fault injection helpers.
-- Support injection through PyTorch, TorchTitan, Megatron Core, and DeepSpeed
-  framework integrations.
-- Provide a declarative campaign format for targets, triggers, duration,
-  persistence, probability, seeds, and expected outcomes.
-- Support deterministic, intermittent, probabilistic, and persistent faults.
-- Cover several fault classes:
-  - numerical corruption, including bit flips, NaN/Inf values, scaling, noise,
-    and sign changes;
-  - stale, dropped, duplicated, or corrupted gradients and optimizer state;
-  - model, checkpoint, RNG, sampler, and input-pipeline corruption;
-  - compute, collective, DataLoader, and checkpoint-I/O delays;
-  - process hangs, termination, worker loss, and node loss; and
-  - communication faults that can be injected safely in a controlled environment.
-- Separate safe in-process simulation from destructive cluster-level injection.
-- Verify that an injection took effect before scoring the system under test.
-- Record the expected faulty rank, device, node, layer, operation, or endpoint as
-  campaign ground truth.
-- Accept a neutral localization result from the resiliency system under test and
-  compare it with the injected-fault ground truth.
-- Emit a common machine-readable result format.
+- Provide framework-aware model targeting for PyTorch, TorchTitan, Megatron Core,
+  and DeepSpeed.
+- Provide versioned incident manifests with arbitrary training-iteration
+  triggers, bounded or permanent lifetimes, deterministic probability, and
+  restart-stable retrigger policy.
+- Represent common numerical, state-flow, performance, storage, process,
+  communication, cluster, and configuration failures.
+- Execute safe model, gradient, optimizer-state, and delay faults through a
+  built-in local backend.
+- Connect destructive process, storage, communication, and cluster effects
+  through capability-checked executors and explicit safety ceilings.
+- Verify each local injection before recording it as ground truth.
+- Accept neutral localization results and emit comparable JSON reports.
+
+See [Fault injection evaluation](docs/fault_injection.md) for the implemented
+API, fault matrix, and safety boundaries.
+
+### Planned Extensions
+
+- Add built-in framework instrumentation for RNG, sampler, input-pipeline,
+  checkpoint-I/O, and public collective surfaces.
+- Provide reference process, storage, communication, and training-manager
+  executors for isolated evaluation environments.
+- Extend logical target resolution and ground truth to devices, nodes, links,
+  ports, switches, and other deployment resource identifiers.
 - Record the software, hardware, topology, model, workload, seed, and injection
   parameters needed to reproduce a campaign.
 
