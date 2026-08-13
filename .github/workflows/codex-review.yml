@@ -21,10 +21,7 @@ concurrency:
 jobs:
   pr-review:
     name: Review distributed-systems invariants
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.draft == false &&
-      github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -33,21 +30,32 @@ jobs:
       final_message: ${{ steps.codex.outputs.final-message }}
 
     steps:
-      - name: Check Codex configuration
+      - name: Check Codex review eligibility
         id: codex-config
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          TARGET_REPOSITORY: ${{ github.repository }}
         shell: bash
         run: |
-          if [[ -n "$OPENAI_API_KEY" ]]; then
-            echo "configured=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "configured=false" >> "$GITHUB_OUTPUT"
+          enabled=true
+          if [[ "$PR_DRAFT" == "true" ]]; then
+            enabled=false
+            echo "Codex systems review skipped while the pull request is a draft." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ "$PR_HEAD_REPOSITORY" != "$TARGET_REPOSITORY" ]]; then
+            enabled=false
+            echo "Codex systems review skipped for fork pull requests to avoid exposing repository secrets." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ -z "$OPENAI_API_KEY" ]]; then
+            enabled=false
             echo "Codex systems review skipped: configure the OPENAI_API_KEY repository secret." >> "$GITHUB_STEP_SUMMARY"
           fi
+          echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
 
       - name: Check out pull request merge commit
-        if: steps.codex-config.outputs.configured == 'true'
+        if: steps.codex-config.outputs.enabled == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
@@ -55,7 +63,7 @@ jobs:
           fetch-depth: 1
 
       - name: Fetch pull request base and head
-        if: steps.codex-config.outputs.configured == 'true'
+        if: steps.codex-config.outputs.enabled == 'true'
         env:
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -66,7 +74,7 @@ jobs:
             "+refs/pull/$PR_NUMBER/head"
 
       - name: Run Codex systems review
-        if: steps.codex-config.outputs.configured == 'true'
+        if: steps.codex-config.outputs.enabled == 'true'
         id: codex
         uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
         with:
