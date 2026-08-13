@@ -21,6 +21,21 @@ python examples/quickstart.py \
 The single-process example validates training-loop integration and recovery.
 Use the distributed examples below to exercise SCOUT replay and multi-rank localization.
 
+## Fault Injection Evaluation
+
+Run [fault_injection.py](fault_injection.py) with plain Python to inject one
+transient output corruption, record its ground truth, and score a neutral
+localization result:
+
+```bash
+python examples/fault_injection.py
+```
+
+The example uses the public framework-aware evaluation API without enabling
+SCOUT or GEMINI.
+See the [fault injection guide](../docs/fault_injection.md) for campaign
+manifests, target selection, supported faults, and safety boundaries.
+
 ## Production Loops
 
 The production-loop examples train tiny causal language models with deterministic synthetic tokens while preserving each framework's real training lifecycle.

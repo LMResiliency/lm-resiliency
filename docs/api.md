@@ -26,6 +26,7 @@ The stable package-root exports are:
 | Fault reporting | `SCOUTFaultReport`, `SCOUTFaultCallback`, `OrchestrationHooks`, `replay_fault_reports` |
 | Recovery handoff | `RecoveryDecision`, `RecoveryDecisionCallback` |
 | Checkpoint tuning | `estimate_chunk_size` |
+| Fault injection evaluation | `enable_fault_injection`, `FaultCampaign`, `FaultSpec`, `FaultTarget`, `FaultType`, `FaultMagnitude`, `FaultScope`, `FaultLocation`, `FaultPersistence`, `FaultInjectionSession`, `FaultInjectionRecord`, `InjectionStatus`, `LocalizationResult`, `FaultEvaluation`, `CampaignReport` |
 
 The stable manager API exports are:
 
@@ -121,6 +122,48 @@ resiliency = enable_resiliency(engine, interval=10)
 ```
 
 Unsupported arguments for the selected adapter raise `TypeError`.
+
+## Evaluate Fault Localization
+
+The fault injection evaluation kit binds a declarative campaign to PyTorch,
+TorchTitan, Megatron Core, or DeepSpeed training objects:
+
+```python
+from lm_resiliency import (
+    FaultCampaign,
+    FaultLocation,
+    FaultPersistence,
+    FaultSpec,
+    FaultTarget,
+    FaultType,
+    enable_fault_injection,
+)
+
+campaign = FaultCampaign(
+    name="output-sdc",
+    faults=(
+        FaultSpec(
+            fault_id="hidden-sign-flip",
+            fault_type=FaultType.SIGN_FLIP,
+            target=FaultTarget(
+                rank=0,
+                module="layers.2",
+                location=FaultLocation.OUTPUT,
+            ),
+            steps=(20,),
+            persistence=FaultPersistence.TRANSIENT,
+        ),
+    ),
+)
+faults = enable_fault_injection(model, campaign)
+```
+
+Call `faults.trigger(step)` before each target training step.
+The injector records verified ground truth independently of SCOUT and GEMINI,
+then `faults.evaluate(...)` compares neutral localization results with the
+expected faulty rank and component.
+See [Fault injection evaluation](fault_injection.md) for manifests, framework
+targets, supported faults, scoring, and safety boundaries.
 
 ## Native PyTorch
 
@@ -549,6 +592,7 @@ See [MoE execution regimes](moe_execution_regimes.md#build-and-audit-the-catalog
 ## Related Guides
 
 - [Production-loop examples](../examples/README.md)
+- [Fault injection evaluation](fault_injection.md)
 - [GEMINI](gemini.md)
 - [SCOUT](scout.md)
 - [MoE execution regimes](moe_execution_regimes.md)

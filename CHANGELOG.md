@@ -8,6 +8,7 @@ The project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 ### Added
 
 - A runnable CPU quick-start example with a complete native PyTorch training loop and GEMINI checkpoint resume.
+- A framework-aware fault injection evaluation kit with declarative campaigns, verified ground truth, and neutral localization scoring.
 
 ### Changed
 
