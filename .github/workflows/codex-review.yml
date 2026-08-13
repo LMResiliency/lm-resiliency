@@ -54,24 +54,13 @@ jobs:
           fi
           echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
 
-      - name: Check out pull request merge commit
+      - name: Check out pull request head
         if: steps.codex_config.outputs.enabled == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
-          fetch-depth: 1
-
-      - name: Fetch pull request base and head
-        if: steps.codex_config.outputs.enabled == 'true'
-        env:
-          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        shell: bash
-        run: |
-          git fetch --no-tags origin \
-            "$PR_BASE_REF" \
-            "+refs/pull/$PR_NUMBER/head"
+          fetch-depth: 0
 
       - name: Run Codex systems review
         if: steps.codex_config.outputs.enabled == 'true'
