@@ -1,0 +1,221 @@
+name: Codex Systems Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      focus:
+        description: Optional focus for a full-repository systems review
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-systems-review-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pr-review:
+    name: Review distributed-systems invariants
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      final_message: ${{ steps.codex.outputs.final-message }}
+
+    steps:
+      - name: Check Codex configuration
+        id: codex-config
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        shell: bash
+        run: |
+          if [[ -n "$OPENAI_API_KEY" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "Codex systems review skipped: configure the OPENAI_API_KEY repository secret." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Check out pull request merge commit
+        if: steps.codex-config.outputs.configured == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Fetch pull request base and head
+        if: steps.codex-config.outputs.configured == 'true'
+        env:
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          git fetch --no-tags origin \
+            "$PR_BASE_REF" \
+            "+refs/pull/$PR_NUMBER/head"
+
+      - name: Run Codex systems review
+        if: steps.codex-config.outputs.configured == 'true'
+        id: codex
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          permission-profile: ":read-only"
+          prompt: |
+            You are performing a specialized distributed-systems correctness review for
+            ${{ github.repository }} PR #${{ github.event.pull_request.number }}.
+
+            Read AGENTS.md first and follow its Code Review Rules. Also consult the relevant
+            contracts in docs/gemini.md, docs/scout.md, docs/api.md, docs/compatibility.md,
+            CONTRIBUTING.md, and tests when the changed code touches those areas.
+
+            Review ONLY changes introduced by this PR. Inspect the diff using:
+
+              git diff --find-renames ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}
+
+            Focus on reachable, high-confidence issues involving distributed correctness and
+            liveness, checkpoint/recovery invariants, SDC detection and certification, framework
+            integration, concurrency/resource cleanup, security-sensitive boundaries, and silent
+            performance regressions. Do not duplicate Ruff/format/pre-commit feedback and do not
+            report style-only issues.
+
+            For each finding:
+            - assign P0, P1, or P2 using AGENTS.md;
+            - cite the smallest relevant file and line range;
+            - describe a concrete failure scenario and why existing guards/tests do not prevent it;
+            - suggest the minimal direction for a fix, without modifying files.
+
+            If there are no actionable findings, say "No actionable systems findings." Do not
+            invent speculative issues to fill the response. Keep the review concise.
+
+            Pull request title and body:
+            ----
+            ${{ github.event.pull_request.title }}
+            ${{ github.event.pull_request.body }}
+
+  post-pr-review:
+    name: Publish Codex review
+    needs: pr-review
+    if: needs.pr-review.outputs.final_message != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Create or update review comment
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          CODEX_FINAL_MESSAGE: ${{ needs.pr-review.outputs.final_message }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const marker = '<!-- codex-systems-review -->';
+            const body = `${marker}\n## Codex systems review\n\n${process.env.CODEX_FINAL_MESSAGE}`;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              per_page: 100,
+            });
+            const previous = comments.find(
+              (comment) => comment.user?.type === 'Bot' && comment.body?.includes(marker),
+            );
+            if (previous) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: previous.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+  repository-review:
+    name: Full repository systems review
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check Codex configuration
+        id: codex-config
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        shell: bash
+        run: |
+          if [[ -n "$OPENAI_API_KEY" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "Codex repository review skipped: configure the OPENAI_API_KEY repository secret." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Check out selected ref
+        if: steps.codex-config.outputs.configured == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Run full repository systems review
+        if: steps.codex-config.outputs.configured == 'true'
+        id: codex
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          permission-profile: ":read-only"
+          prompt: |
+            Perform a full-repository distributed-systems correctness review of
+            ${{ github.repository }} at ${{ github.sha }}.
+
+            Read AGENTS.md and follow its Code Review Rules. This is not a style review and not a
+            request to modify files. Inspect the implementation, tests, and documented contracts,
+            prioritizing GEMINI checkpoint/recovery paths, SCOUT replay/consensus/certification,
+            process-group and background-worker lifecycle, manager handoff, framework adapters,
+            and public compatibility guarantees.
+
+            Optional maintainer focus:
+            ${{ inputs.focus }}
+
+            Look for high-confidence violations that can survive existing tests: corrupt or mixed
+            checkpoint state, unsafe recovery selection, incorrect trust-state transitions, false
+            attribution, collective mismatch/hang risks, partial-failure races, resource-lifecycle
+            bugs, optional-dependency breakage, unsafe boundary handling, and material hot-path
+            regressions.
+
+            Report only actionable P0/P1/P2 findings. For each, cite file/line, explain the concrete
+            failure scenario, identify the violated invariant, and suggest a minimal fix direction.
+            If no actionable findings are found, say so explicitly. Do not invent speculative issues.
+
+      - name: Publish repository review summary
+        if: steps.codex.outputs.final-message != ''
+        env:
+          CODEX_FINAL_MESSAGE: ${{ steps.codex.outputs.final-message }}
+        shell: bash
+        run: |
+          {
+            echo "## Codex repository systems review"
+            echo
+            printf '%s\n' "$CODEX_FINAL_MESSAGE"
+          } >> "$GITHUB_STEP_SUMMARY"
