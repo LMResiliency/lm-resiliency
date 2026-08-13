@@ -1,6 +1,6 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite the relevant GEMINI and SCOUT references."
-title: "LLM Resiliency"
+title: "LM Resiliency"
 type: software
 authors:
   - family-names: "Wang"

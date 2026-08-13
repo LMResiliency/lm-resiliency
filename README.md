@@ -1,6 +1,6 @@
 <div align="center">
 
-# LLM Resiliency
+# LM Resiliency
 
 ### Fast checkpoint recovery and fault localization for distributed LLM pre-training
 
@@ -25,7 +25,7 @@
 | **SCOUT** | Latent SDC; selection of recovery checkpoints corrupted by SDC; compute, input-pipeline, and communication stragglers; collective desynchronization (hangs); process stalls; uncorrectable ECC, row-remap exhaustion, fatal XIDs, device loss, severe NVLink errors, and imminent thermal shutdown | Pinpoint faulty ranks, GPUs, nodes, communication endpoints, or telemetry-reported physical devices, and exclude checkpoints affected by recurring SDC from recovery; see the [coverage contract](docs/scout.md#coverage-contract) |
 | **GEMINI** | Slow, infrequent durable checkpoints | Frequent asynchronous in-memory checkpoints, peer replication, and fast recovery from nearby state |
 
-## Why LLM Resiliency
+## Why LM Resiliency
 
 - **SDC-safe recovery-verified checkpoint:** SCOUT certifies recovery checkpoints and excludes candidates affected by recurring SDC, preventing corrupted state from being selected during recovery.
 - **Localize latent and permanent failures at runtime:** SCOUT identifies affected ranks, GPUs, nodes, communication endpoints, peer groups, or telemetry-reported physical devices, including failures observed while the training job is blocked.
