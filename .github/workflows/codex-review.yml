@@ -1,0 +1,93 @@
+name: Codex Deep Systems Review
+
+on:
+  workflow_dispatch:
+    inputs:
+      focus:
+        description: Optional maintainer focus for the deep repository review
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-deep-systems-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository_review:
+    name: Deep repository systems review
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check Codex configuration
+        id: codex_config
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        shell: bash
+        run: |
+          if [[ -n "$OPENAI_API_KEY" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "Codex deep review skipped: configure the OPENAI_API_KEY repository secret." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Check out selected ref
+        if: steps.codex_config.outputs.configured == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Run deep systems review
+        if: steps.codex_config.outputs.configured == 'true'
+        id: codex
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          permission-profile: ":read-only"
+          prompt: |
+            Perform a deep distributed-systems correctness review of
+            ${{ github.repository }} at ${{ github.sha }}.
+
+            Read AGENTS.md and follow its Code Review Rules. This is not a style review and not a
+            request to modify files. Inspect the implementation, tests, and documented contracts,
+            prioritizing GEMINI checkpoint/recovery paths, SCOUT replay/consensus/certification,
+            process-group and background-worker lifecycle, manager handoff, framework adapters,
+            and public compatibility guarantees.
+
+            This workflow is a maintainer-triggered deep audit. Routine pull-request review is
+            handled by the native Codex GitHub integration, which should also follow AGENTS.md.
+
+            Optional maintainer focus:
+            ${{ github.event.inputs.focus }}
+
+            Look for high-confidence violations that can survive existing tests: corrupt or mixed
+            checkpoint state, unsafe recovery selection, incorrect trust-state transitions, false
+            attribution, collective mismatch/hang risks, partial-failure races, resource-lifecycle
+            bugs, optional-dependency breakage, unsafe boundary handling, and material hot-path
+            regressions.
+
+            Report only actionable P0/P1/P2 findings. For each, cite file/line, explain the concrete
+            failure scenario, identify the violated invariant, and suggest a minimal fix direction.
+            If no actionable findings are found, say so explicitly. Do not invent speculative issues.
+
+      - name: Publish deep review summary
+        if: steps.codex.outputs['final-message'] != ''
+        env:
+          CODEX_FINAL_MESSAGE: ${{ steps.codex.outputs['final-message'] }}
+        shell: bash
+        run: |
+          {
+            echo "## Codex deep systems review"
+            echo
+            echo "Reviewed revision: \`${{ github.sha }}\`"
+            echo
+            printf '%s\n' "$CODEX_FINAL_MESSAGE"
+          } >> "$GITHUB_STEP_SUMMARY"
