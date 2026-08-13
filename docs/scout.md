@@ -1,6 +1,6 @@
 # SCOUT
 
-SCOUT localizes latent failures such as silent data corruption (SDC), stragglers, collective desynchronization, and process stalls by comparing equivalent training peers.
+SCOUT localizes latent failures such as silent data corruption (SDC), stragglers, collective desynchronization (hangs), and process stalls by comparing equivalent training peers.
 It also localizes telemetry-visible permanent GPU and NVLink endpoint failures through direct hardware health sources.
 SCOUT also certifies which checkpoints are safe to use for recovery.
 

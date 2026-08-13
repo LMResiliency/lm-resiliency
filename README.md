@@ -22,7 +22,7 @@
 
 | | Protects against | What you gain |
 |---|---|---|
-| **SCOUT** | Latent SDC; selection of recovery checkpoints corrupted by SDC; compute, input-pipeline, and communication stragglers; collective desynchronization; process stalls; uncorrectable ECC, row-remap exhaustion, fatal XIDs, device loss, severe NVLink errors, and imminent thermal shutdown | Pinpoint faulty ranks, GPUs, nodes, communication endpoints, or telemetry-reported physical devices, and exclude checkpoints affected by recurring SDC from recovery; see the [coverage contract](docs/scout.md#coverage-contract) |
+| **SCOUT** | Latent SDC; selection of recovery checkpoints corrupted by SDC; compute, input-pipeline, and communication stragglers; collective desynchronization (hangs); process stalls; uncorrectable ECC, row-remap exhaustion, fatal XIDs, device loss, severe NVLink errors, and imminent thermal shutdown | Pinpoint faulty ranks, GPUs, nodes, communication endpoints, or telemetry-reported physical devices, and exclude checkpoints affected by recurring SDC from recovery; see the [coverage contract](docs/scout.md#coverage-contract) |
 | **GEMINI** | Slow, infrequent durable checkpoints | Frequent asynchronous in-memory checkpoints, peer replication, and fast recovery from nearby state |
 
 ## Why LLM Resiliency
