@@ -239,12 +239,12 @@ carry both the current rank mapping and stable infrastructure identities.
 ```python
 class AgentIdentity(TypedDict):
     run_id: str
-    node_id: str              # Stable scheduler or infrastructure identity.
-    agent_id: str             # Unique torchrun agent incarnation.
+    node_id: str  # Stable scheduler or infrastructure identity.
+    agent_id: str  # Unique torchrun agent incarnation.
     hostname: str
     local_world_size: int
-    resource_ids: list[str]   # GPU UUIDs, NICs, HCAs, or deployment IDs.
-    environment_digest: str   # Software, configuration, and capability identity.
+    resource_ids: list[str]  # GPU UUIDs, NICs, HCAs, or deployment IDs.
+    environment_digest: str  # Software, configuration, and capability identity.
 
 
 class WorkerIdentity(TypedDict):
@@ -252,7 +252,7 @@ class WorkerIdentity(TypedDict):
     generation: int
     node_id: str
     agent_id: str
-    logical_node_slot: int    # Stable for the lifetime of the training job.
+    logical_node_slot: int  # Stable for the lifetime of the training job.
     global_rank: int
     local_rank: int
     local_world_size: int
