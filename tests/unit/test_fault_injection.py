@@ -607,6 +607,24 @@ def test_non_indexed_logical_targets_reject_index(component: str | None) -> None
         )
 
 
+@pytest.mark.parametrize("resource", [[], {}, 1, True])
+def test_fault_target_rejects_non_string_resources(resource: object) -> None:
+    with pytest.raises(TypeError, match="resource must be a string"):
+        FaultTarget(
+            surface=FaultSurface.RESOURCE,
+            resource=resource,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("resource", ["", "   "])
+def test_fault_target_rejects_empty_resources(resource: str) -> None:
+    with pytest.raises(ValueError, match="resource must be non-empty"):
+        FaultTarget(
+            surface=FaultSurface.RESOURCE,
+            resource=resource,
+        )
+
+
 @pytest.mark.parametrize("delay_ms", ["nan", "inf", True])
 def test_delay_rejects_non_numeric_parameters(delay_ms: object) -> None:
     with pytest.raises(TypeError, match="delay_ms must be a number"):
@@ -750,10 +768,11 @@ def test_distributed_enablement_arms_iteration_one_after_consensus() -> None:
         )
 
     assert events == [("activate", "process_termination")]
+    assert gathers == 4
     session.close()
 
 
-def test_distributed_destructive_activation_failure_is_propagated() -> None:
+def test_distributed_destructive_activation_failure_raises_without_post_consensus() -> None:
     def activate(_request):
         raise RuntimeError("executor refused activation")
 
@@ -766,11 +785,15 @@ def test_distributed_destructive_activation_failure_is_propagated() -> None:
     )
     model = TinyModel()
 
+    gathers = 0
+
     def gather(values, local_value) -> None:
+        nonlocal gathers
+        gathers += 1
+        if gathers > 4:
+            raise AssertionError("destructive activation must not enter post-activation consensus")
         if isinstance(local_value, dict):
             values[:] = [local_value, dict(local_value)]
-        elif local_value is None:
-            values[:] = [local_value, "RuntimeError: executor refused activation"]
         else:
             values[:] = [local_value, local_value]
 
@@ -783,7 +806,7 @@ def test_distributed_destructive_activation_failure_is_propagated() -> None:
             "lm_resiliency.fault_injection.injector.dist.all_gather_object",
             side_effect=gather,
         ),
-        pytest.raises(RuntimeError, match="rank 1: RuntimeError: executor refused activation"),
+        pytest.raises(RuntimeError, match="executor refused activation"),
     ):
         enable_fault_injection(
             model,
@@ -791,16 +814,18 @@ def test_distributed_destructive_activation_failure_is_propagated() -> None:
             campaign=_campaign(
                 _incident(
                     at=(1,),
+                    lifetime=IncidentLifetime(until="campaign_end"),
                     faults=(
                         _external_fault(
                             FailureType.PROCESS_TERMINATION,
-                            rank=1,
+                            rank=0,
                         ),
                     ),
                 )
             ),
             executors=(executor,),
         )
+    assert gathers == 4
 
 
 def test_distributed_attempt_persistence_precedes_destructive_activation() -> None:
@@ -856,29 +881,24 @@ def test_distributed_attempt_persistence_precedes_destructive_activation() -> No
 def test_distributed_safe_arming_failure_is_propagated_before_return() -> None:
     model = TinyModel()
     optimizer = _optimizer(model)
-    session = MagicMock()
-    session.current_iteration = 1
-    session._has_safe_current_activation.return_value = True
+    baseline = model.layers[0].weight.detach().clone()
     gathers = 0
 
     def gather(values, local_value) -> None:
         nonlocal gathers
         gathers += 1
-        if gathers == 1:
+        if isinstance(local_value, dict):
             values[:] = [local_value, dict(local_value)]
-        elif gathers == 2:
-            values[:] = [local_value, local_value]
-        else:
+        elif gathers == 5:
             values[:] = [local_value, "LookupError: optimizer state is unavailable"]
+        else:
+            values[:] = [local_value, local_value]
 
     with (
-        patch(
-            "lm_resiliency.fault_injection.injector.FaultInjectionSession",
-            return_value=session,
-        ),
         patch("lm_resiliency.fault_injection.injector.dist.is_available", return_value=True),
         patch("lm_resiliency.fault_injection.injector.dist.is_initialized", return_value=True),
         patch("lm_resiliency.fault_injection.injector.dist.get_world_size", return_value=2),
+        patch("lm_resiliency.fault_injection.injector.dist.get_rank", return_value=0),
         patch(
             "lm_resiliency.fault_injection.injector.dist.all_gather_object",
             side_effect=gather,
@@ -888,11 +908,22 @@ def test_distributed_safe_arming_failure_is_propagated_before_return() -> None:
             enable_fault_injection(
                 model,
                 optimizer,
-                campaign=_campaign(_incident(at=(1,))),
+                campaign=_campaign(
+                    _incident(
+                        at=(1,),
+                        lifetime=IncidentLifetime(until="campaign_end"),
+                        faults=(
+                            _corruption(
+                                target=_target(surface=FaultSurface.WEIGHT),
+                                scope=FaultScope.SINGLE,
+                            ),
+                        ),
+                    )
+                ),
             )
 
-    session._start.assert_called_once()
-    session.close.assert_called_once()
+    assert gathers == 5
+    torch.testing.assert_close(model.layers[0].weight, baseline)
 
 
 def test_safe_arming_consensus_decision_includes_remote_rank_faults() -> None:
@@ -4047,7 +4078,7 @@ def test_correlated_faults_share_one_occurrence_and_evaluation() -> None:
     session.close()
 
 
-def test_correlated_multi_rank_incident_uses_job_wide_expected_targets() -> None:
+def test_correlated_multi_rank_incident_requires_all_action_records() -> None:
     rank_zero = _corruption(
         fault_id="rank-zero",
         target=_target(rank=0),
@@ -4077,9 +4108,9 @@ def test_correlated_multi_rank_incident_uses_job_wide_expected_targets() -> None
         ]
     ).evaluations[0]
 
-    assert evaluation.injection_succeeded
+    assert not evaluation.injection_succeeded
     assert evaluation.expected_ranks == (0, 1)
-    assert evaluation.localized
+    assert not evaluation.localized
     session.close()
 
 

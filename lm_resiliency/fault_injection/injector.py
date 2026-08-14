@@ -561,6 +561,7 @@ class FaultInjectionSession:
         candidates = self._candidate_incidents_for_iteration(iteration)
         if not candidates:
             return
+        requires_activation_consensus = self._has_safe_activation(iteration)
         if _distributed_world_size() <= 1:
             self._preflight_iteration(iteration)
             staged = self._stage_iteration_attempts(iteration, candidates)
@@ -624,7 +625,7 @@ class FaultInjectionSession:
         except Exception as error:
             activation_error = error
 
-        failures = _gather_rank_errors(activation_error)
+        failures = _gather_rank_errors(activation_error) if requires_activation_consensus else []
         if failures:
             boundary_error = RuntimeError(
                 "fault injection iteration arming failed; " + "; ".join(failures)
@@ -646,6 +647,14 @@ class FaultInjectionSession:
                     f"fault injection cleanup also failed: {cleanup_error}",
                 )
             raise boundary_error from activation_error
+        if activation_error is not None:
+            cleanup_error = self._cleanup()
+            if cleanup_error is not None:
+                _add_exception_note(
+                    activation_error,
+                    f"fault injection cleanup also failed: {cleanup_error}",
+                )
+            raise activation_error
 
     def _stage_iteration_attempts(
         self,
@@ -1115,50 +1124,16 @@ def enable_fault_injection(
                 f"fault injection cleanup also failed: {cleanup_error}",
             )
         raise enablement_error from journal_error
-    active_start = len(session._active)
-    record_start = len(session._records)
-    activation_error: Exception | None = None
     try:
         session._start()
     except Exception as error:
-        activation_error = error
-    activation_summary = (
-        None
-        if activation_error is None
-        else f"{type(activation_error).__name__}: {activation_error}"
-    )
-    gathered_activations: list[str | None] = [None] * world_size
-    dist.all_gather_object(gathered_activations, activation_summary)
-    activation_failures = [
-        f"rank {failed_rank}: {summary}"
-        for failed_rank, summary in enumerate(gathered_activations)
-        if summary is not None
-    ]
-    if activation_failures:
-        enablement_error = RuntimeError(
-            "fault injection arming failed; " + "; ".join(activation_failures)
-        )
-        rollback_error = session._rollback_new_activations(
-            active_start,
-            record_start,
-            enablement_error,
-        )
-        cleanup_error: Exception | None = None
-        try:
-            session.close()
-        except Exception as error:
-            cleanup_error = error
-        if rollback_error is not None:
-            _add_exception_note(
-                enablement_error,
-                f"fault activation rollback also failed: {rollback_error}",
-            )
+        cleanup_error = session._cleanup()
         if cleanup_error is not None:
             _add_exception_note(
-                enablement_error,
+                error,
                 f"fault injection cleanup also failed: {cleanup_error}",
             )
-        raise enablement_error from activation_error
+        raise
     return session
 
 
@@ -1345,7 +1320,17 @@ def _evaluate_occurrence(
         )
         is not None
     }
-    injection_succeeded = bool(records) and all(record.injection_succeeded for record in records)
+    expected_fault_ids = {fault.fault_id for fault in incident.faults}
+    recorded_fault_ids = [record.fault_id for record in records]
+    complete_action_set = (
+        len(recorded_fault_ids) == len(expected_fault_ids)
+        and set(recorded_fault_ids) == expected_fault_ids
+    )
+    injection_succeeded = (
+        complete_action_set
+        and bool(records)
+        and all(record.injection_succeeded for record in records)
+    )
     detected_results = tuple(result for result in results if result.detected)
     detected = bool(detected_results)
     reported_ranks = tuple(

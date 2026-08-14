@@ -437,6 +437,11 @@ class FaultTarget:
                 )
         if self.module_path is not None and not self.module_path:
             raise ValueError("fault target module_path must be non-empty")
+        if self.resource is not None:
+            if not isinstance(self.resource, str):
+                raise TypeError("fault target resource must be a string")
+            if not self.resource.strip():
+                raise ValueError("fault target resource must be non-empty")
         module_surfaces = {
             FaultSurface.INPUT,
             FaultSurface.OUTPUT,

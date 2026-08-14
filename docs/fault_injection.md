@@ -293,7 +293,7 @@ injection IDs but the same occurrence ID.
 | `index` | For indexed components | - | Global layer or expert index. |
 | `module_path` | For explicit module targets | - | Exact path from the user model's `named_modules()`, such as `model.layers.12.mlp`. It is attempted before logical component resolution. |
 | `operation` | Executor-specific | - | Runtime operation such as `all_reduce` for a collective fault. |
-| `resource` | Executor-specific | - | Resource selector such as a GPU, NIC, worker, or node identifier. |
+| `resource` | Executor-specific | - | Non-empty string identifying a GPU, NIC, worker, node, or other resource. |
 | `path` | Executor-specific | - | Checkpoint or storage path. |
 | `metadata` | No | `{}` | Additional selector data consumed by framework resolution or a custom executor. |
 
@@ -514,6 +514,14 @@ Executor activation and deactivation evidence is captured as a deep JSON
 snapshot, so later mutation of callback-owned dictionaries or lists cannot
 change campaign ground truth.
 
+Distributed preflight and attempt persistence complete on every rank before any
+executor runs. After activation begins, an in-band post-activation consensus is
+used only when every selected action is `safe_in_process`. A successful process
+termination, hang, resource loss, or network partition may make its execution
+rank unable to enter another training-process collective, so destructive
+executors must report activation and failures through their training manager or
+other out-of-band control plane.
+
 The kit injects observable effects, not physical defects.
 For example, an ECC event is represented as tensor corruption or resource loss;
 a failed cable is represented as delay, message loss, or network partition.
@@ -625,6 +633,11 @@ session later activates or completes another hook.
 Reports are rank-local.
 A distributed campaign runner or training manager should collect reports from all
 ranks and preserve the software, hardware, topology, model, and workload metadata.
+A rank-local evaluation of a correlated multi-rank occurrence remains
+unsuccessful when records for any manifest action are absent, even if the
+submitted localization identifies every job-wide target. Aggregate the
+rank-local injection records, as the eight-GPU example does, before certifying
+the complete occurrence.
 
 ## Current Boundaries
 
