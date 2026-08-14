@@ -14,10 +14,7 @@ _REPO_LINK = re.compile(r"(?P<prefix>\]\()(?P<target>\.\./[^)\s]+)(?P<suffix>\))
 def _repository_url(target: str) -> str:
     path_and_fragment = target[3:]
     path, separator, fragment = path_and_fragment.partition("#")
-    url = (
-        f"https://github.com/{_REPOSITORY}/blob/{_SOURCE_REF}/"
-        f"{quote(path, safe='/')}"
-    )
+    url = f"https://github.com/{_REPOSITORY}/blob/{_SOURCE_REF}/{quote(path, safe='/')}"
     if separator:
         url = f"{url}#{fragment}"
     return url
