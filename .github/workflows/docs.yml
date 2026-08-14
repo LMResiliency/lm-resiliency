@@ -4,11 +4,6 @@ on:
   push:
     branches:
       - main
-  workflow_run:
-    workflows:
-      - Release
-    types:
-      - completed
   workflow_dispatch:
 
 permissions:
@@ -20,22 +15,18 @@ concurrency:
 
 jobs:
   build:
-    name: Build documentation
-    if: >-
-      github.event_name != 'workflow_run' ||
-      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    name: Build development docs
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
 
     steps:
-      - name: Check out documentation source
+      - name: Check out main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
           persist-credentials: false
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || 'main' }}
+          ref: main
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -65,7 +56,7 @@ jobs:
           retention-days: 1
 
   publish:
-    name: Publish versioned docs
+    name: Publish development docs
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -73,7 +64,7 @@ jobs:
       contents: write
 
     steps:
-      - name: Check out trusted publishing logic
+      - name: Check out trusted publishing base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -86,11 +77,9 @@ jobs:
           name: documentation-site
           path: ${{ runner.temp }}/documentation-site
 
-      - name: Publish documentation tree
+      - name: Publish development documentation tree
         env:
-          EVENT_NAME: ${{ github.event_name }}
           GH_TOKEN: ${{ github.token }}
-          RELEASE_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           SITE_DIR: ${{ runner.temp }}/documentation-site
         shell: bash
         run: |
@@ -99,36 +88,6 @@ jobs:
           if find "$SITE_DIR" -type l -print -quit | grep -q .; then
             echo "Downloaded documentation artifact contains a symbolic link" >&2
             exit 1
-          fi
-
-          publish_name=dev
-          publish_kind=dev
-          release_tag=""
-          prerelease=false
-
-          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
-            mapfile -t matching_releases < <(
-              while IFS=$'\t' read -r tag is_prerelease; do
-                commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq '.sha')
-                if [[ "$commit" == "$RELEASE_HEAD_SHA" ]]; then
-                  printf '%s\t%s\n' "$tag" "$is_prerelease"
-                fi
-              done < <(
-                gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-                  --jq '.[] | select(.draft == false) | [.tag_name, .prerelease] | @tsv'
-              )
-            )
-            if [[ "${#matching_releases[@]}" -ne 1 ]]; then
-              echo "Expected exactly one published release at $RELEASE_HEAD_SHA" >&2
-              exit 1
-            fi
-            IFS=$'\t' read -r release_tag prerelease <<<"${matching_releases[0]}"
-            [[ "$release_tag" == v* ]] || {
-              echo "Release tag must begin with v: $release_tag" >&2
-              exit 1
-            }
-            publish_name="${release_tag#v}"
-            publish_kind=release
           fi
 
           git remote set-url origin \
@@ -141,50 +100,28 @@ jobs:
             git rm -rf .
           fi
 
-          rm -rf -- "$publish_name"
-          mkdir -p -- "$publish_name"
-          cp -a "$SITE_DIR"/. "$publish_name"/
+          rm -rf dev
+          mkdir -p dev
+          cp -a "$SITE_DIR"/. dev/
           touch .nojekyll
 
-          write_redirect() {
-            target=$1
-            cat > index.html <<EOF
+          if [[ ! -f index.html ]]; then
+            cat > index.html <<'EOF'
           <!doctype html>
           <meta charset="utf-8">
-          <meta http-equiv="refresh" content="0; url=$target/">
-          <link rel="canonical" href="$target/">
+          <meta http-equiv="refresh" content="0; url=dev/">
+          <link rel="canonical" href="dev/">
           <title>LM Resiliency documentation</title>
-          <p>Redirecting to <a href="$target/">$target documentation</a>.</p>
+          <p>Redirecting to <a href="dev/">development documentation</a>.</p>
           EOF
-          }
-
-          if [[ "$publish_kind" == "dev" ]]; then
-            if [[ ! -f index.html ]]; then
-              write_redirect dev
-            fi
-          elif [[ "$prerelease" == "false" ]]; then
-            latest_tag=$(
-              gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-                --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' |
-                grep -E '^v[0-9]+([.][0-9]+){1,2}([.-].*)?$' |
-                sort -V |
-                tail -n 1
-            )
-            test -n "$latest_tag"
-            if [[ "$release_tag" == "$latest_tag" ]]; then
-              rm -rf latest
-              mkdir -p latest
-              cp -a "$SITE_DIR"/. latest/
-              write_redirect latest
-            fi
           fi
 
           git add -A
           if git diff --cached --quiet; then
-            echo "Documentation tree is already current"
+            echo "Development documentation is already current"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "Publish documentation ${publish_name}"
+          git commit -m "Publish documentation dev"
           git push origin gh-pages
