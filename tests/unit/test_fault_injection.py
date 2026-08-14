@@ -253,6 +253,7 @@ def _external_fault(
     *,
     fault_id: str | None = None,
     resource: str = "node-0",
+    rank: int = 0,
 ) -> FaultSpec:
     parameters: dict[str, object] = {}
     if failure_type is FailureType.TENSOR_CORRUPTION:
@@ -263,7 +264,7 @@ def _external_fault(
         fault_id=fault_id or failure_type.value,
         type=failure_type,
         target=FaultTarget(
-            rank=0,
+            rank=rank,
             surface=FaultSurface.RESOURCE,
             resource=resource,
         ),
@@ -717,8 +718,13 @@ def test_distributed_enablement_arms_iteration_one_after_consensus() -> None:
         )
     )
 
+    gathers = 0
+
     def gather(preparations, local_preparation) -> None:
-        assert events == []
+        nonlocal gathers
+        gathers += 1
+        if gathers < 4:
+            assert events == []
         if isinstance(local_preparation, dict):
             assert local_preparation["error"] is None
             preparations[:] = [local_preparation, dict(local_preparation)]
@@ -745,6 +751,56 @@ def test_distributed_enablement_arms_iteration_one_after_consensus() -> None:
 
     assert events == [("activate", "process_termination")]
     session.close()
+
+
+def test_distributed_destructive_activation_failure_is_propagated() -> None:
+    def activate(_request):
+        raise RuntimeError("executor refused activation")
+
+    executor = CallbackFaultExecutor(
+        name="failing-destructive",
+        supported_types={FailureType.PROCESS_TERMINATION},
+        activate=activate,
+        deactivate=lambda _request, _result: None,
+        max_safety=SafetyClass.ISOLATED_DESTRUCTIVE,
+    )
+    model = TinyModel()
+
+    def gather(values, local_value) -> None:
+        if isinstance(local_value, dict):
+            values[:] = [local_value, dict(local_value)]
+        elif local_value is None:
+            values[:] = [local_value, "RuntimeError: executor refused activation"]
+        else:
+            values[:] = [local_value, local_value]
+
+    with (
+        patch("lm_resiliency.fault_injection.injector.dist.is_available", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.is_initialized", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.get_world_size", return_value=2),
+        patch("lm_resiliency.fault_injection.injector.dist.get_rank", return_value=0),
+        patch(
+            "lm_resiliency.fault_injection.injector.dist.all_gather_object",
+            side_effect=gather,
+        ),
+        pytest.raises(RuntimeError, match="rank 1: RuntimeError: executor refused activation"),
+    ):
+        enable_fault_injection(
+            model,
+            _optimizer(model),
+            campaign=_campaign(
+                _incident(
+                    at=(1,),
+                    faults=(
+                        _external_fault(
+                            FailureType.PROCESS_TERMINATION,
+                            rank=1,
+                        ),
+                    ),
+                )
+            ),
+            executors=(executor,),
+        )
 
 
 def test_distributed_attempt_persistence_precedes_destructive_activation() -> None:
@@ -1717,6 +1773,38 @@ def test_input_drop_and_output_reorder() -> None:
 
     assert not torch.equal(dropped, clean)
     torch.testing.assert_close(reordered, torch.flip(clean, dims=(0,)))
+    session.close()
+
+
+def test_empty_output_tensor_fails_record_without_aborting_training() -> None:
+    class EmptyOutput(nn.Module):
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            return value[:0]
+
+    model = nn.Sequential(EmptyOutput())
+    optimizer = torch.optim.SGD([nn.Parameter(torch.ones(()))], lr=0.0)
+    fault = FaultSpec(
+        fault_id="drop-empty-output",
+        type=FailureType.DROP,
+        target=FaultTarget(
+            rank=0,
+            surface=FaultSurface.OUTPUT,
+            module_path="0",
+        ),
+        parameters={"scope": FaultScope.FULL.value},
+    )
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(_incident(at=(1,), faults=(fault,))),
+        rank=0,
+    )
+
+    output = model(torch.ones(2, 4))
+
+    assert output.shape == (0, 4)
+    assert session.records[0].status is InjectionStatus.FAILED
+    assert "non-empty" in (session.records[0].error or "")
     session.close()
 
 
@@ -3554,6 +3642,66 @@ def test_replacement_attempts_all_matching_effect_cleanup_after_failure() -> Non
     session.close()
 
 
+def test_expiration_attempts_all_matching_effect_cleanup_after_failure() -> None:
+    events: list[tuple[str, str]] = []
+
+    def activate(request):
+        events.append(("activate", request.fault.fault_id))
+        return FaultExecutionResult(verified=True, active=True)
+
+    def deactivate(request, _result):
+        events.append(("deactivate", request.fault.fault_id))
+        if request.fault.fault_id == "first":
+            raise RuntimeError("first expiration cleanup failed")
+        return None
+
+    executor = CallbackFaultExecutor(
+        name="partial-expiration-failure",
+        supported_types={
+            FailureType.RESOURCE_UNAVAILABLE,
+            FailureType.PROCESS_TERMINATION,
+        },
+        activate=activate,
+        deactivate=deactivate,
+        max_safety=SafetyClass.CLUSTER_DESTRUCTIVE,
+    )
+    faults = (
+        _external_fault(
+            FailureType.RESOURCE_UNAVAILABLE,
+            fault_id="first",
+            resource="gpu-0",
+        ),
+        _external_fault(
+            FailureType.PROCESS_TERMINATION,
+            fault_id="second",
+            resource="process-0",
+        ),
+    )
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(iterations=1),
+                faults=faults,
+            )
+        ),
+        executors=(executor,),
+        rank=0,
+    )
+
+    with pytest.raises(RuntimeError, match="first expiration cleanup failed"):
+        _step(model, optimizer)
+
+    assert events[-2:] == [("deactivate", "first"), ("deactivate", "second")]
+    assert session.records[0].status is InjectionStatus.FAILED
+    assert session.records[1].status is InjectionStatus.COMPLETED
+    session.close()
+
+
 def test_close_cleans_optimizer_hook_when_external_deactivation_fails() -> None:
     def activate(_request):
         return FaultExecutionResult(verified=True, active=True)
@@ -3812,6 +3960,44 @@ def test_optimizer_state_history_survives_state_dict_tensor_replacement() -> Non
     _step(model, optimizer)
     _step(model, optimizer)
 
+    assert session.records[0].injection_succeeded
+    session.close()
+
+
+def test_stale_state_uses_one_update_old_snapshot() -> None:
+    model = nn.Sequential(nn.Linear(1, 1, bias=False))
+    with torch.no_grad():
+        model[0].weight.fill_(1.0)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    baseline = model[0].weight.detach().clone()
+    stale = FaultSpec(
+        fault_id="stale-weight",
+        type=FailureType.STALE_STATE,
+        target=FaultTarget(
+            rank=0,
+            surface=FaultSurface.WEIGHT,
+            module_path="0",
+        ),
+        parameters={"scope": FaultScope.FULL.value},
+    )
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(2,),
+                lifetime=IncidentLifetime(iterations=1),
+                faults=(stale,),
+            )
+        ),
+        rank=0,
+    )
+
+    optimizer.zero_grad()
+    model(torch.ones(1, 1)).sum().backward()
+    optimizer.step()
+
+    torch.testing.assert_close(model[0].weight, baseline)
     assert session.records[0].injection_succeeded
     session.close()
 
@@ -4581,7 +4767,7 @@ def test_integer_only_input_fault_fails_without_aborting_training() -> None:
     optimizer.step()
 
     assert session.records[0].status is InjectionStatus.FAILED
-    assert "no floating-point tensor" in (session.records[0].error or "")
+    assert "floating-point tensor" in (session.records[0].error or "")
     session.close()
 
 

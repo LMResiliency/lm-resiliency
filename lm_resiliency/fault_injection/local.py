@@ -746,12 +746,12 @@ def _transform_tree(
 ) -> tuple[Any, int]:
     leaves, spec = tree_flatten(value)
     for index, leaf in enumerate(leaves):
-        if not isinstance(leaf, torch.Tensor) or not leaf.is_floating_point():
+        if not isinstance(leaf, torch.Tensor) or not leaf.is_floating_point() or leaf.numel() == 0:
             continue
         transformed, affected = _transform_tensor(leaf, request, history)
         leaves[index] = transformed
         return tree_unflatten(leaves, spec), affected
-    raise _UnsupportedTargetTensorError("target value contains no floating-point tensor")
+    raise _UnsupportedTargetTensorError("target value contains no non-empty floating-point tensor")
 
 
 def _prepare_state_values(
@@ -806,7 +806,7 @@ def _transform_tensor(
     reference = tensor
     tensor = _local_shard(tensor)
     if tensor.numel() == 0:
-        raise ValueError("fault target tensor must be non-empty")
+        raise _UnsupportedTargetTensorError("fault target tensor must be non-empty")
     if not tensor.is_floating_point():
         raise TypeError("fault target tensor must be floating point")
     transformed = tensor.clone().contiguous()

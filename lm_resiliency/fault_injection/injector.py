@@ -495,6 +495,7 @@ class FaultInjectionSession:
         )
         preparation_error: Exception | None = None
         try:
+            expiration_error: Exception | None = None
             for active in self._active:
                 lifetime = active.incident.lifetime
                 if (
@@ -502,8 +503,14 @@ class FaultInjectionSession:
                     and lifetime.iterations is not None
                     and finished >= active.start_iteration + lifetime.iterations - 1
                 ):
-                    active.complete()
+                    try:
+                        active.complete()
+                    except Exception as error:
+                        if expiration_error is None:
+                            expiration_error = error
             self._discard_completed()
+            if expiration_error is not None:
+                raise expiration_error
             self._completed_iterations = finished
             self._current_iteration = next_iteration
             self._local.sync_history(self._history_faults_for(self._current_iteration))
@@ -554,12 +561,6 @@ class FaultInjectionSession:
         candidates = self._candidate_incidents_for_iteration(iteration)
         if not candidates:
             return
-        selected = self._selected_incidents_for_iteration(iteration)
-        safe_activation = not selected or all(
-            fault.safety is SafetyClass.SAFE_IN_PROCESS
-            for incident, _attempt in selected
-            for fault in incident.faults
-        )
         if _distributed_world_size() <= 1:
             self._preflight_iteration(iteration)
             staged = self._stage_iteration_attempts(iteration, candidates)
@@ -622,10 +623,6 @@ class FaultInjectionSession:
             self._activate_staged_iteration(iteration, staged)
         except Exception as error:
             activation_error = error
-        if not safe_activation:
-            if activation_error is not None:
-                raise activation_error
-            return
 
         failures = _gather_rank_errors(activation_error)
         if failures:
@@ -1118,63 +1115,50 @@ def enable_fault_injection(
                 f"fault injection cleanup also failed: {cleanup_error}",
             )
         raise enablement_error from journal_error
-    if session._has_safe_current_activation():
-        active_start = len(session._active)
-        record_start = len(session._records)
-        activation_error: Exception | None = None
-        try:
-            session._start()
-        except Exception as error:
-            activation_error = error
-        activation_summary = (
-            None
-            if activation_error is None
-            else f"{type(activation_error).__name__}: {activation_error}"
+    active_start = len(session._active)
+    record_start = len(session._records)
+    activation_error: Exception | None = None
+    try:
+        session._start()
+    except Exception as error:
+        activation_error = error
+    activation_summary = (
+        None
+        if activation_error is None
+        else f"{type(activation_error).__name__}: {activation_error}"
+    )
+    gathered_activations: list[str | None] = [None] * world_size
+    dist.all_gather_object(gathered_activations, activation_summary)
+    activation_failures = [
+        f"rank {failed_rank}: {summary}"
+        for failed_rank, summary in enumerate(gathered_activations)
+        if summary is not None
+    ]
+    if activation_failures:
+        enablement_error = RuntimeError(
+            "fault injection arming failed; " + "; ".join(activation_failures)
         )
-        gathered_activations: list[str | None] = [None] * world_size
-        dist.all_gather_object(gathered_activations, activation_summary)
-        activation_failures = [
-            f"rank {failed_rank}: {summary}"
-            for failed_rank, summary in enumerate(gathered_activations)
-            if summary is not None
-        ]
-        if activation_failures:
-            enablement_error = RuntimeError(
-                "fault injection arming failed; " + "; ".join(activation_failures)
-            )
-            rollback_error = session._rollback_new_activations(
-                active_start,
-                record_start,
-                enablement_error,
-            )
-            cleanup_error: Exception | None = None
-            try:
-                session.close()
-            except Exception as error:
-                cleanup_error = error
-            if rollback_error is not None:
-                _add_exception_note(
-                    enablement_error,
-                    f"fault activation rollback also failed: {rollback_error}",
-                )
-            if cleanup_error is not None:
-                _add_exception_note(
-                    enablement_error,
-                    f"fault injection cleanup also failed: {cleanup_error}",
-                )
-            raise enablement_error from activation_error
-    else:
+        rollback_error = session._rollback_new_activations(
+            active_start,
+            record_start,
+            enablement_error,
+        )
+        cleanup_error: Exception | None = None
         try:
-            session._start()
+            session.close()
         except Exception as error:
-            try:
-                session.close()
-            except Exception as cleanup_error:
-                _add_exception_note(
-                    error,
-                    f"fault injection cleanup also failed: {cleanup_error}",
-                )
-            raise
+            cleanup_error = error
+        if rollback_error is not None:
+            _add_exception_note(
+                enablement_error,
+                f"fault activation rollback also failed: {rollback_error}",
+            )
+        if cleanup_error is not None:
+            _add_exception_note(
+                enablement_error,
+                f"fault injection cleanup also failed: {cleanup_error}",
+            )
+        raise enablement_error from activation_error
     return session
 
 

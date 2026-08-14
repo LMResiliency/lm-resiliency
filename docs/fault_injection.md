@@ -350,6 +350,10 @@ training iteration before a candidate and is removed at the optimizer boundary
 after the occurrence. State surfaces retain only the selected values over the
 equivalent two-boundary window. A stale or duplicate incident scheduled for the
 first iteration fails verification because no prior value exists.
+For state surfaces, an incident at iteration N is armed after iteration N-1
+completes. It applies the snapshot from before iteration N-1, making the target
+one completed optimizer update behind its current state. The latest snapshot is
+the current state at arming time and would therefore be a no-op.
 
 Weight, bias, and optimizer-state faults with bounded iteration lifetimes are
 retired by removing the injected finite delta from the current tensor. This
