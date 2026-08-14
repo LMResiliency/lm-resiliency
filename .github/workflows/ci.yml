@@ -78,6 +78,14 @@ jobs:
             python: "3.10"
             numpy: "1.26.4"
             torch: "2.10.0"
+          - name: python-3.11-torch-2.11
+            python: "3.11"
+            numpy: "1.26.4"
+            torch: "2.11.0"
+          - name: torch-2.12
+            python: "3.12"
+            numpy: "2.5.1"
+            torch: "2.12.0"
           - name: primary
             python: "3.12"
             numpy: "2.5.1"
@@ -105,7 +113,7 @@ jobs:
             --index-url https://download.pytorch.org/whl/cpu \
             --only-binary=:all: \
             "torch==$TORCH_VERSION"
-          python -m pip install "numpy==$NUMPY_VERSION" "setuptools>=83" pytest pytest-timeout
+          python -m pip install "numpy==$NUMPY_VERSION" pytest pytest-timeout
           python -m pip install --no-deps -e .
           python -m pip check
 
