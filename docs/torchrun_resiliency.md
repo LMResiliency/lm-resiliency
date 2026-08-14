@@ -331,6 +331,9 @@ Requirements:
 - `event_id` is idempotent.
 - `incident_id` correlates the fault with recovery and checkpoint events.
 - The coordinator rejects a stale `generation`.
+- Event admission validates the reporter's node, logical slot, local worker
+  count, rank range, and topology digest against that generation's immutable
+  `RankAssignment`; worker-supplied rank arithmetic alone is insufficient.
 - The original `SCOUTFaultReport` is preserved without upgrading its
   attribution. A direct `HealthEvent` is normalized to
   `HardwareFaultReport` without upgrading its resource granularity.
@@ -377,6 +380,7 @@ know where every logical-rank shard can be obtained.
 class CheckpointCopy(TypedDict):
     owner_global_rank: int
     checkpoint_step: int
+    inventory_event_id: str
     holder_node_id: str
     holder_kind: Literal["owner", "peer", "durable"]
     storage_kind: Literal["memory", "node_local", "shared", "remote"]
@@ -399,10 +403,12 @@ class CheckpointInventoryEvent(TypedDict):
 
 Only completed checkpoint slots may appear with `complete=True`.
 `checkpoint_step` must equal the enclosing inventory event's positive `step`;
-the coordinator validates it again when assembling the recovery manifest. A
-`CANDIDATE` inventory can be retained for diagnosis but is never selected for
-conservative recovery. Durable copies must use shared or remote storage;
-node-local and in-memory copies remain subject to holder health and quarantine.
+`inventory_event_id` binds the copy to that source event, and the coordinator
+validates the complete copy record against the referenced event when assembling
+the recovery manifest. A `CANDIDATE` inventory can be retained for diagnosis
+but is never selected for conservative recovery. Durable copies must use shared
+or remote storage; node-local and in-memory copies remain subject to holder
+health and quarantine.
 
 `location_token` is an opaque control-plane reference, not an unchecked path
 that another worker is allowed to open.
@@ -500,6 +506,8 @@ Before commit, the coordinator validates:
   reason;
 - the recovery mode is at least as conservative as the intent's minimum;
 - exactly `min_nodes` active logical slots are assigned;
+- at least one assigned node is new to the active membership, because version
+  1 uses standby admission as its healthy-group restart edge;
 - every assigned node is healthy, compatible, and not quarantined;
 - each logical slot is assigned once;
 - active size, local world size, total world size, and topology digest match the
@@ -507,6 +515,8 @@ Before commit, the coordinator validates:
 - the checkpoint is complete for every required logical rank;
 - every copy belongs to the selected positive step and selected checkpoint
   source;
+- every copy exactly matches its referenced inventory event, and the source
+  inventory trust satisfies the manifest trust;
 - the checkpoint trust satisfies the selected recovery mode;
 - the plan never selects `CANDIDATE`;
 - the target step is coherent across all selected shards;
@@ -550,6 +560,8 @@ Each worker derives its expected rank as
 `first_global_rank + LOCAL_RANK`. `lm-resiliency` rejects startup if the
 context conflicts with torchrun's `RANK`, `LOCAL_RANK`, `LOCAL_WORLD_SIZE`,
 `WORLD_SIZE`, `TORCHELASTIC_RUN_ID`, or the framework topology.
+`expected_world_size` must also be divisible by `local_world_size`, so a
+context cannot describe a partial logical node slot.
 
 The context must not contain a newer, less trusted local checkpoint merely
 because it exists on the replacement host.
@@ -890,7 +902,10 @@ class RecoveryManifest(TypedDict):
 The manifest is usable only when every required rank has at least one eligible
 copy for the manifest's exact positive step and the plan's selected source.
 GEMINI plans use owner or peer copies; durable plans use durable copies. Only
-shared or remote storage is independent of holder-node availability.
+shared or remote storage is independent of holder-node availability. The
+manifest's trust label is not self-authenticating: every selected copy must
+match its referenced inventory record, and `RECOVERY_VERIFIED` manifests may
+use only recovery-verified inventory evidence.
 
 Preferred source order:
 

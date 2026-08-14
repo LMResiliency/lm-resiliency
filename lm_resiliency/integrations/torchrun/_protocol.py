@@ -968,6 +968,7 @@ class RecoveryProposalEvent(_WireRecord):
 class CheckpointCopy:
     owner_global_rank: int
     checkpoint_step: int
+    inventory_event_id: str
     holder_node_id: str
     holder_kind: str
     storage_kind: str
@@ -978,6 +979,7 @@ class CheckpointCopy:
     def __post_init__(self) -> None:
         _integer(self.owner_global_rank, "CheckpointCopy.owner_global_rank", minimum=0)
         _integer(self.checkpoint_step, "CheckpointCopy.checkpoint_step", minimum=1)
+        _string(self.inventory_event_id, "CheckpointCopy.inventory_event_id")
         _string(self.holder_node_id, "CheckpointCopy.holder_node_id")
         _choice(
             self.holder_kind,
@@ -1004,6 +1006,7 @@ class CheckpointCopy:
         return {
             "owner_global_rank": self.owner_global_rank,
             "checkpoint_step": self.checkpoint_step,
+            "inventory_event_id": self.inventory_event_id,
             "holder_node_id": self.holder_node_id,
             "holder_kind": self.holder_kind,
             "storage_kind": self.storage_kind,
@@ -1017,6 +1020,7 @@ class CheckpointCopy:
         required = {
             "owner_global_rank",
             "checkpoint_step",
+            "inventory_event_id",
             "holder_node_id",
             "holder_kind",
             "storage_kind",
@@ -1040,6 +1044,10 @@ class CheckpointCopy:
                 value["checkpoint_step"],
                 "CheckpointCopy.checkpoint_step",
                 minimum=1,
+            ),
+            inventory_event_id=_string(
+                value["inventory_event_id"],
+                "CheckpointCopy.inventory_event_id",
             ),
             holder_node_id=_string(
                 value["holder_node_id"],
@@ -1078,6 +1086,7 @@ def _checkpoint_copies(value: object, path: str) -> tuple[CheckpointCopy, ...]:
         (
             copy.owner_global_rank,
             copy.checkpoint_step,
+            copy.inventory_event_id,
             copy.holder_node_id,
             copy.holder_kind,
             copy.storage_kind,
@@ -1138,6 +1147,13 @@ class CheckpointInventoryEvent(_WireRecord):
         if mismatched_steps:
             raise ProtocolValidationError(
                 "CheckpointInventoryEvent.copies: copy steps do not match event step"
+            )
+        mismatched_event_ids = sorted(
+            {copy.inventory_event_id for copy in copies if copy.inventory_event_id != self.event_id}
+        )
+        if mismatched_event_ids:
+            raise ProtocolValidationError(
+                "CheckpointInventoryEvent.copies: provenance does not match event ID"
             )
         object.__setattr__(self, "copies", copies)
 
@@ -1701,6 +1717,10 @@ class RestartContext(_WireRecord):
             "RestartContext.expected_world_size",
             minimum=1,
         )
+        if self.expected_world_size % self.local_world_size != 0:
+            raise ProtocolValidationError(
+                "RestartContext.expected_world_size: must contain complete local worker slots"
+            )
         if self.first_global_rank + self.local_world_size > self.expected_world_size:
             raise ProtocolValidationError(
                 "RestartContext: local rank range exceeds expected world size"
@@ -2082,11 +2102,61 @@ class RecoveryManifest(_WireRecord):
         )
 
 
+def validate_worker_identity(
+    identity: WorkerIdentity,
+    assignment: RankAssignment,
+) -> None:
+    """Bind a worker-supplied identity to one committed rank assignment."""
+    if identity.run_id != assignment.run_id:
+        raise ProtocolValidationError("WorkerIdentity.run_id: does not match committed assignment")
+    if identity.generation != assignment.generation:
+        raise ProtocolValidationError(
+            "WorkerIdentity.generation: does not match committed assignment"
+        )
+    if identity.topology_digest != assignment.topology_digest:
+        raise ProtocolValidationError(
+            "WorkerIdentity.topology_digest: does not match committed assignment"
+        )
+    expected_node_id = assignment.slot_to_node_id.get(identity.logical_node_slot)
+    if expected_node_id is None:
+        raise ProtocolValidationError(
+            "WorkerIdentity.logical_node_slot: is not active in committed assignment"
+        )
+    if identity.node_id != expected_node_id:
+        raise ProtocolValidationError("WorkerIdentity.node_id: does not match committed assignment")
+    if identity.local_world_size != assignment.local_world_size:
+        raise ProtocolValidationError(
+            "WorkerIdentity.local_world_size: does not match committed assignment"
+        )
+    first_rank, last_rank = assignment.slot_to_rank_range[identity.logical_node_slot]
+    expected_global_rank = first_rank + identity.local_rank
+    if identity.global_rank != expected_global_rank or identity.global_rank >= last_rank:
+        raise ProtocolValidationError(
+            "WorkerIdentity.global_rank: does not match committed rank range"
+        )
+
+
+def validate_event_reporter(
+    event: FaultEvent | RecoveryProposalEvent | CheckpointInventoryEvent,
+    assignment: RankAssignment,
+) -> None:
+    """Validate a report's worker identity at coordinator admission."""
+    if not isinstance(
+        event,
+        (FaultEvent, RecoveryProposalEvent, CheckpointInventoryEvent),
+    ):
+        raise ProtocolValidationError(
+            "event: expected a fault, recovery, or checkpoint inventory event"
+        )
+    validate_worker_identity(event.reporter, assignment)
+
+
 def validate_restart_plan(
     plan: RestartPlan,
     intent: RestartIntent,
     manifest: RecoveryManifest,
     *,
+    inventory_events: Sequence[CheckpointInventoryEvent],
     current_assignment: RankAssignment,
     now_unix_ms: int,
     eligible_node_ids: Sequence[str],
@@ -2138,17 +2208,22 @@ def validate_restart_plan(
         raise ProtocolValidationError(
             "RestartPlan.topology_digest: does not match the committed topology"
         )
+    current_nodes = set(current_assignment.slot_to_node_id.values())
+    assigned_nodes = {assignment.node_id for assignment in plan.slot_assignments}
+    if assigned_nodes == current_nodes:
+        raise ProtocolValidationError(
+            "RestartPlan.slot_assignments: version 1 requires at least one replacement node"
+        )
     eligible = set(_strings(eligible_node_ids, "eligible_node_ids", unique=True))
     quarantined = set(_strings(quarantined_node_ids, "quarantined_node_ids", unique=True)) | set(
         plan.quarantined_node_ids
     )
-    assigned = {assignment.node_id for assignment in plan.slot_assignments}
-    unavailable = assigned - eligible
+    unavailable = assigned_nodes - eligible
     if unavailable:
         raise ProtocolValidationError(
             f"RestartPlan: assigned nodes are not eligible: {sorted(unavailable)!r}"
         )
-    unsafe = assigned & quarantined
+    unsafe = assigned_nodes & quarantined
     if unsafe:
         raise ProtocolValidationError(
             f"RestartPlan: assigned nodes are quarantined: {sorted(unsafe)!r}"
@@ -2171,6 +2246,17 @@ def validate_restart_plan(
         raise ProtocolValidationError(
             "RecoveryManifest.trust: verified recovery requires a verified manifest"
         )
+    inventory_by_id: dict[str, CheckpointInventoryEvent] = {}
+    for index, event in enumerate(_sequence(inventory_events, "inventory_events")):
+        if not isinstance(event, CheckpointInventoryEvent):
+            raise ProtocolValidationError(
+                f"inventory_events[{index}]: expected CheckpointInventoryEvent"
+            )
+        if event.event_id in inventory_by_id:
+            raise ProtocolValidationError(
+                f"inventory_events: duplicate event ID {event.event_id!r}"
+            )
+        inventory_by_id[event.event_id] = event
     entries = {entry.owner_global_rank: entry for entry in manifest.rank_copies}
     required_ranks = set(range(plan.expected_world_size))
     if set(entries) != required_ranks:
@@ -2189,6 +2275,11 @@ def validate_restart_plan(
             for copy in entry.copies
             if copy.complete
             and copy.checkpoint_step == manifest.step
+            and _copy_has_trusted_inventory_provenance(
+                copy,
+                manifest,
+                inventory_by_id,
+            )
             and copy.holder_kind in compatible_holder_kinds
             and (
                 copy.storage_kind in {"shared", "remote"}
@@ -2199,6 +2290,26 @@ def validate_restart_plan(
             raise ProtocolValidationError(
                 f"RecoveryManifest.rank_copies[{rank}]: no complete eligible copy"
             )
+
+
+def _copy_has_trusted_inventory_provenance(
+    copy: CheckpointCopy,
+    manifest: RecoveryManifest,
+    inventory_by_id: Mapping[str, CheckpointInventoryEvent],
+) -> bool:
+    event = inventory_by_id.get(copy.inventory_event_id)
+    if event is None:
+        return False
+    if (
+        event.run_id != manifest.run_id
+        or event.generation != manifest.source_generation
+        or event.step != manifest.step
+        or event.topology_digest != manifest.topology_digest
+        or event.trust == "candidate"
+        or (manifest.trust == "recovery_verified" and event.trust != "recovery_verified")
+    ):
+        return False
+    return copy in event.copies
 
 
 __all__ = [
@@ -2219,4 +2330,6 @@ __all__ = [
     "SlotAssignment",
     "WorkerIdentity",
     "validate_restart_plan",
+    "validate_event_reporter",
+    "validate_worker_identity",
 ]

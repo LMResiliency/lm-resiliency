@@ -24,7 +24,9 @@ from lm_resiliency.integrations.torchrun._protocol import (
     RestartPlan,
     SlotAssignment,
     WorkerIdentity,
+    validate_event_reporter,
     validate_restart_plan,
+    validate_worker_identity,
 )
 
 RUN_ID = "training-run"
@@ -121,12 +123,14 @@ def _copy(
     holder_node_id: str,
     holder_kind: str = "owner",
     checkpoint_step: int = 40,
+    inventory_event_id: str = "inventory-a",
     storage_kind: str | None = None,
     complete: bool = True,
 ) -> CheckpointCopy:
     return CheckpointCopy(
         owner_global_rank=rank,
         checkpoint_step=checkpoint_step,
+        inventory_event_id=inventory_event_id,
         holder_node_id=holder_node_id,
         holder_kind=holder_kind,
         storage_kind=storage_kind or ("remote" if holder_kind == "durable" else "memory"),
@@ -174,19 +178,44 @@ def _manifest(
     )
 
 
+def _inventory_event(
+    manifest: RecoveryManifest,
+    *,
+    trust: str | None = None,
+) -> CheckpointInventoryEvent:
+    return CheckpointInventoryEvent(
+        event_id="inventory-a",
+        run_id=manifest.run_id,
+        generation=manifest.source_generation,
+        reporter=replace(
+            _worker(),
+            generation=manifest.source_generation,
+        ),
+        step=manifest.step,
+        trust=trust or manifest.trust,
+        topology_digest=manifest.topology_digest,
+        copies=tuple(copy for rank_copies in manifest.rank_copies for copy in rank_copies.copies),
+    )
+
+
 def _validate(
     plan: RestartPlan | None = None,
     manifest: RecoveryManifest | None = None,
     *,
     intent: RestartIntent | None = None,
     current_assignment: RankAssignment | None = None,
+    inventory_events: tuple[CheckpointInventoryEvent, ...] | None = None,
     now_unix_ms: int = 1_900_000_000_000,
     eligible_node_ids: tuple[str, ...] = ("node-a", "node-spare"),
 ) -> None:
+    selected_manifest = manifest or _manifest()
     validate_restart_plan(
         plan or _plan(),
         intent or _intent(),
-        manifest or _manifest(),
+        selected_manifest,
+        inventory_events=(
+            (_inventory_event(selected_manifest),) if inventory_events is None else inventory_events
+        ),
         current_assignment=current_assignment or _current_assignment(),
         now_unix_ms=now_unix_ms,
         eligible_node_ids=eligible_node_ids,
@@ -384,6 +413,63 @@ def test_recovery_manifest_rejects_checkpoint_copies_from_another_step():
         _manifest(checkpoint_step=39)
 
 
+def test_restart_plan_rejects_uncertified_manifest_trust():
+    manifest = _manifest(trust="recovery_verified")
+
+    with pytest.raises(ProtocolValidationError, match="no complete eligible copy"):
+        _validate(
+            plan=_plan(recovery_mode="recovery_verified"),
+            intent=_intent(minimum_recovery_mode="recovery_verified"),
+            manifest=manifest,
+            inventory_events=(
+                _inventory_event(
+                    manifest,
+                    trust="candidate",
+                ),
+            ),
+        )
+
+
+def test_restart_plan_requires_inventory_provenance_for_every_copy():
+    with pytest.raises(ProtocolValidationError, match="no complete eligible copy"):
+        _validate(inventory_events=())
+
+
+def test_restart_plan_requires_exact_inventory_copy_match():
+    manifest = _manifest()
+    inventory = _inventory_event(manifest)
+    altered_copies = tuple(
+        replace(copy, location_token="altered-location") if copy.owner_global_rank == 0 else copy
+        for copy in inventory.copies
+    )
+
+    with pytest.raises(ProtocolValidationError, match="no complete eligible copy"):
+        _validate(
+            manifest=manifest,
+            inventory_events=(replace(inventory, copies=altered_copies),),
+        )
+
+
+def test_checkpoint_inventory_rejects_mismatched_provenance_id():
+    with pytest.raises(ProtocolValidationError, match="provenance does not match"):
+        CheckpointInventoryEvent(
+            event_id="inventory-b",
+            run_id=RUN_ID,
+            generation=4,
+            reporter=_worker(),
+            step=40,
+            trust="latest",
+            topology_digest=TOPOLOGY_DIGEST,
+            copies=(
+                _copy(
+                    0,
+                    holder_node_id="node-a",
+                    inventory_event_id="inventory-a",
+                ),
+            ),
+        )
+
+
 @pytest.mark.parametrize(
     ("plan", "manifest"),
     [
@@ -458,6 +544,23 @@ def test_restart_plan_rejects_expired_deadline():
         _validate(now_unix_ms=2_000_000_000_000)
 
 
+def test_restart_plan_requires_a_replacement_node():
+    unchanged_plan = replace(
+        _plan(),
+        slot_assignments=(
+            _assignments()[0],
+            replace(_assignments()[1], node_id="node-b"),
+        ),
+        quarantined_node_ids=(),
+    )
+
+    with pytest.raises(ProtocolValidationError, match="replacement node"):
+        _validate(
+            plan=unchanged_plan,
+            eligible_node_ids=("node-a", "node-b"),
+        )
+
+
 def test_restart_plan_preserves_committed_world_size():
     smaller_plan = replace(
         _plan(),
@@ -488,6 +591,38 @@ def test_restart_plan_preserves_committed_world_size():
 def test_worker_identity_rejects_inconsistent_global_rank():
     with pytest.raises(ProtocolValidationError, match="does not match logical slot"):
         replace(_worker(), global_rank=3)
+
+
+def test_event_reporter_must_match_committed_rank_assignment():
+    assignment = _current_assignment()
+    contradictory_worker = WorkerIdentity(
+        run_id=RUN_ID,
+        generation=4,
+        node_id="node-b",
+        agent_id="agent-b",
+        logical_node_slot=1,
+        global_rank=1,
+        local_rank=0,
+        local_world_size=1,
+        hostname="host-b",
+        gpu_uuid="GPU-2",
+        topology_digest=TOPOLOGY_DIGEST,
+    )
+    event = FaultEvent(
+        event_id="fault-contradictory",
+        incident_id="incident-a",
+        run_id=RUN_ID,
+        generation=4,
+        reporter=contradictory_worker,
+        optimizer_step=41,
+        report={"kind": "straggler", "failed_ranks": [1]},
+    )
+
+    with pytest.raises(ProtocolValidationError, match="local_world_size"):
+        validate_worker_identity(contradictory_worker, assignment)
+
+    with pytest.raises(ProtocolValidationError, match="local_world_size"):
+        validate_event_reporter(event, assignment)
 
 
 @pytest.mark.parametrize(
@@ -579,6 +714,13 @@ def test_restart_context_validates_worker_environment():
 
     with pytest.raises(ProtocolValidationError, match="TORCHELASTIC_RUN_ID"):
         context.validate_worker_environment({**environment, "TORCHELASTIC_RUN_ID": "stale-run"})
+
+
+def test_restart_context_rejects_partial_local_worker_slot():
+    context = RestartContext.from_plan(_plan(), "node-a")
+
+    with pytest.raises(ProtocolValidationError, match="complete local worker slots"):
+        replace(context, expected_world_size=3)
 
 
 def test_restart_context_rejects_unassigned_node():
