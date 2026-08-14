@@ -1,0 +1,61 @@
+name: Documentation
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Publish versioned docs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install documentation tools
+        run: python -m pip install -r requirements/docs.txt
+
+      - name: Configure publisher identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Publish documentation version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          git remote set-url origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+            mike deploy --push dev
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            mike deploy --push --update-aliases "$version" latest
+            mike set-default --push latest
+          else
+            echo "Unsupported documentation ref: $GITHUB_REF" >&2
+            exit 1
+          fi
