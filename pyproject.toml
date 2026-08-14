@@ -39,7 +39,7 @@ lm-resiliency-discover-moe-regimes = "lm_resiliency.cli.discover_moe_regimes:mai
 
 [project.urls]
 Homepage = "https://github.com/LMResiliency/lm-resiliency"
-Documentation = "https://github.com/LMResiliency/lm-resiliency/tree/main/docs"
+Documentation = "https://lmresiliency.github.io/lm-resiliency/"
 Source = "https://github.com/LMResiliency/lm-resiliency"
 Issues = "https://github.com/LMResiliency/lm-resiliency/issues"
 Changelog = "https://github.com/LMResiliency/lm-resiliency/blob/main/CHANGELOG.md"
