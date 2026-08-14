@@ -4089,3 +4089,243 @@ def test_optimizer_container_discovers_child_optimizers_first() -> None:
     container = OptimizerContainer()
 
     assert _base_optimizers(container) == (child,)
+
+
+def test_integer_only_input_fault_fails_without_aborting_training() -> None:
+    class EmbeddingModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.embedding = nn.Embedding(8, 4)
+
+        def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+            return self.embedding(tokens).sum()
+
+    model = EmbeddingModel()
+    optimizer = _optimizer(model)
+    fault = FaultSpec(
+        fault_id="drop-token-ids",
+        type=FailureType.DROP,
+        target=FaultTarget(
+            rank=0,
+            surface=FaultSurface.INPUT,
+            module_path="embedding",
+        ),
+        parameters={"scope": FaultScope.FULL.value},
+    )
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(_incident(at=(1,), faults=(fault,))),
+        rank=0,
+    )
+
+    optimizer.zero_grad()
+    model(torch.tensor([1, 2], dtype=torch.long)).backward()
+    optimizer.step()
+
+    assert session.records[0].status is InjectionStatus.FAILED
+    assert "no floating-point tensor" in (session.records[0].error or "")
+    session.close()
+
+
+def test_failed_model_state_load_does_not_mark_active_fault_replaced() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    baseline = model.layers[0].weight.detach().clone()
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="recovery"),
+                faults=(
+                    _corruption(
+                        target=_target(surface=FaultSurface.WEIGHT),
+                        scope=FaultScope.SINGLE,
+                    ),
+                ),
+            )
+        ),
+        rank=0,
+    )
+
+    with pytest.raises(RuntimeError, match="size mismatch"):
+        model.load_state_dict(
+            {"layers.0.weight": torch.ones(1)},
+            strict=False,
+        )
+    session.notify_recovery()
+
+    torch.testing.assert_close(model.layers[0].weight, baseline)
+    session.close()
+
+
+def test_implicit_and_explicit_optimizer_state_keys_collide() -> None:
+    model = TinyModel()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.0)
+    _step(model, optimizer)
+    state = optimizer.state[model.layers[0].weight]["exp_avg"]
+    baseline = state.detach().clone()
+    implicit = _corruption(
+        fault_id="implicit-state",
+        target=_target(surface=FaultSurface.OPTIMIZER_STATE),
+        parameter="weight",
+        state_key=None,
+    )
+    explicit = _corruption(
+        fault_id="explicit-state",
+        target=_target(surface=FaultSurface.OPTIMIZER_STATE),
+        parameter="weight",
+        state_key="exp_avg",
+    )
+
+    with pytest.raises(RuntimeError, match="same target"):
+        enable_fault_injection(
+            model,
+            optimizer,
+            campaign=_campaign(
+                _incident(
+                    at=(2,),
+                    lifetime=IncidentLifetime(until="recovery"),
+                    faults=(implicit, explicit),
+                )
+            ),
+            completed_iterations=1,
+            rank=0,
+        )
+
+    torch.testing.assert_close(state, baseline)
+
+
+def test_distributed_partial_attempt_save_restores_successful_rank_journal() -> None:
+    model = TinyModel()
+    store = MemoryCampaignStateStore()
+    session = FaultInjectionSession(
+        model,
+        _optimizer(model),
+        campaign=_campaign(_incident(at=(1,))),
+        state_store=store,
+        rank=0,
+        _defer_activation=True,
+    )
+    session._commit_journal_binding()
+    gathers = 0
+
+    def gather(values, local_value) -> None:
+        nonlocal gathers
+        gathers += 1
+        if gathers == 2:
+            values[:] = [local_value, "OSError: remote campaign state disk failed"]
+        else:
+            values[:] = [local_value, local_value]
+
+    with (
+        patch("lm_resiliency.fault_injection.injector.dist.is_available", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.is_initialized", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.get_world_size", return_value=2),
+        patch(
+            "lm_resiliency.fault_injection.injector.dist.all_gather_object",
+            side_effect=gather,
+        ),
+        pytest.raises(RuntimeError, match="attempt persistence failed"),
+    ):
+        session._start()
+
+    assert store.load(session.campaign.name).attempts == {}
+
+
+def test_remote_safe_arming_failure_rolls_back_local_record() -> None:
+    model = TinyModel()
+    baseline = model.layers[0].weight.detach().clone()
+    session = FaultInjectionSession(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="campaign_end"),
+                faults=(
+                    _corruption(
+                        target=_target(surface=FaultSurface.WEIGHT),
+                        scope=FaultScope.SINGLE,
+                    ),
+                ),
+            )
+        ),
+        rank=0,
+        _defer_activation=True,
+    )
+    session._commit_journal_binding()
+    gathers = 0
+
+    def gather(values, local_value) -> None:
+        nonlocal gathers
+        gathers += 1
+        if gathers == 3:
+            values[:] = [local_value, "RuntimeError: remote arming failed"]
+        else:
+            values[:] = [local_value, local_value]
+
+    with (
+        patch("lm_resiliency.fault_injection.injector.dist.is_available", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.is_initialized", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.get_world_size", return_value=2),
+        patch(
+            "lm_resiliency.fault_injection.injector.dist.all_gather_object",
+            side_effect=gather,
+        ),
+        pytest.raises(RuntimeError, match="remote arming failed"),
+    ):
+        session._start()
+
+    assert session.records[0].status is InjectionStatus.FAILED
+    assert not session.records[0].injection_succeeded
+    torch.testing.assert_close(model.layers[0].weight, baseline)
+
+
+@pytest.mark.parametrize(
+    ("probability", "attempts"),
+    [
+        (0.0, {}),
+        (1.0, {"incident@2": 1}),
+    ],
+)
+def test_unselected_stale_candidates_do_not_install_history(
+    probability: float,
+    attempts: dict[str, int],
+) -> None:
+    model = TinyModel()
+    fault = FaultSpec(
+        fault_id="stale-output",
+        type=FailureType.STALE_STATE,
+        target=_target(surface=FaultSurface.OUTPUT),
+        parameters={"scope": FaultScope.FULL.value},
+    )
+    campaign = _campaign(
+        _incident(
+            at=(2,),
+            probability=probability,
+            faults=(fault,),
+        )
+    )
+    store = MemoryCampaignStateStore()
+    store.save(
+        CampaignJournal(
+            campaign=campaign.name,
+            manifest_identity=campaign.manifest_identity,
+            attempts=attempts,
+        )
+    )
+    session = FaultInjectionSession(
+        model,
+        _optimizer(model),
+        campaign=campaign,
+        state_store=store,
+        rank=0,
+        _defer_activation=True,
+    )
+
+    assert session._history_faults_for(1) == ()
+    assert session._local._history == {}
+    session.close()

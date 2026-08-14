@@ -575,6 +575,7 @@ class FaultInjectionSession:
             raise boundary_error from preflight_error
 
         staged: tuple[_StagedIncident, ...] = ()
+        previous_attempts = dict(self._journal.attempts)
         persistence_error: Exception | None = None
         try:
             staged = self._stage_iteration_attempts(iteration, candidates)
@@ -582,10 +583,21 @@ class FaultInjectionSession:
             persistence_error = error
         failures = _gather_rank_errors(persistence_error)
         if failures:
+            rollback_error: Exception | None = None
+            try:
+                self._restore_journal_attempts(previous_attempts)
+            except Exception as error:
+                rollback_error = error
+            rollback_failures = _gather_rank_errors(rollback_error)
             cleanup_error = self._cleanup()
             boundary_error = RuntimeError(
                 "fault injection attempt persistence failed; " + "; ".join(failures)
             )
+            if rollback_failures:
+                _add_exception_note(
+                    boundary_error,
+                    "fault injection attempt rollback also failed; " + "; ".join(rollback_failures),
+                )
             if cleanup_error is not None:
                 _add_exception_note(
                     boundary_error,
@@ -593,6 +605,8 @@ class FaultInjectionSession:
                 )
             raise boundary_error from persistence_error
 
+        active_start = len(self._active)
+        record_start = len(self._records)
         activation_error: Exception | None = None
         try:
             self._activate_staged_iteration(iteration, staged)
@@ -605,10 +619,20 @@ class FaultInjectionSession:
 
         failures = _gather_rank_errors(activation_error)
         if failures:
-            cleanup_error = self._cleanup()
             boundary_error = RuntimeError(
                 "fault injection iteration arming failed; " + "; ".join(failures)
             )
+            rollback_error = self._rollback_new_activations(
+                active_start,
+                record_start,
+                boundary_error,
+            )
+            cleanup_error = self._cleanup()
+            if rollback_error is not None:
+                _add_exception_note(
+                    boundary_error,
+                    f"fault activation rollback also failed: {rollback_error}",
+                )
             if cleanup_error is not None:
                 _add_exception_note(
                     boundary_error,
@@ -651,12 +675,18 @@ class FaultInjectionSession:
             raise
         return tuple(staged)
 
+    def _restore_journal_attempts(self, attempts: dict[str, int]) -> None:
+        self._journal.attempts.clear()
+        self._journal.attempts.update(attempts)
+        self._state_store.save(self._journal)
+
     def _activate_staged_iteration(
         self,
         iteration: int,
         staged: tuple[_StagedIncident, ...],
     ) -> None:
         active_start = len(self._active)
+        record_start = len(self._records)
         try:
             for item in staged:
                 incident = item.incident
@@ -675,18 +705,40 @@ class FaultInjectionSession:
                     item.attempt,
                 )
         except Exception as error:
-            cleanup_error: Exception | None = None
-            for active in reversed(self._active[active_start:]):
-                if not active.done:
-                    try:
-                        active.rollback(error)
-                    except Exception as caught:
-                        if cleanup_error is None:
-                            cleanup_error = caught
-            del self._active[active_start:]
+            cleanup_error = self._rollback_new_activations(
+                active_start,
+                record_start,
+                error,
+            )
             if cleanup_error is not None:
                 _add_exception_note(error, f"fault rollback also failed: {cleanup_error}")
             raise
+
+    def _rollback_new_activations(
+        self,
+        active_start: int,
+        record_start: int,
+        error: Exception,
+    ) -> Exception | None:
+        cleanup_error: Exception | None = None
+        for active in reversed(self._active[active_start:]):
+            if not active.done:
+                try:
+                    active.rollback(error)
+                except Exception as caught:
+                    if cleanup_error is None:
+                        cleanup_error = caught
+        del self._active[active_start:]
+        for record in self._records[record_start:]:
+            if record.status in {
+                InjectionStatus.SKIPPED_PROBABILITY,
+                InjectionStatus.FAILED,
+            }:
+                continue
+            record.status = InjectionStatus.FAILED
+            record.error = f"fault activation rolled back: {error}"
+            record.completed_at_ns = time.monotonic_ns()
+        return cleanup_error
 
     def _activate_incident(
         self,
@@ -939,8 +991,8 @@ class FaultInjectionSession:
     def _history_faults_for(self, iteration: int) -> tuple[FaultSpec, ...]:
         return tuple(
             fault
-            for incident in self.campaign.incidents
-            if incident.trigger.matches(iteration) or incident.trigger.matches(iteration + 1)
+            for scheduled_iteration in (iteration, iteration + 1)
+            for incident, _attempt in self._selected_incidents_for_iteration(scheduled_iteration)
             for fault in incident.faults
             if fault.type in {FailureType.STALE_STATE, FailureType.DUPLICATE}
         )
@@ -1050,6 +1102,8 @@ def enable_fault_injection(
             )
         raise enablement_error from journal_error
     if session._has_safe_current_activation():
+        active_start = len(session._active)
+        record_start = len(session._records)
         activation_error: Exception | None = None
         try:
             session._start()
@@ -1068,14 +1122,24 @@ def enable_fault_injection(
             if summary is not None
         ]
         if activation_failures:
+            enablement_error = RuntimeError(
+                "fault injection arming failed; " + "; ".join(activation_failures)
+            )
+            rollback_error = session._rollback_new_activations(
+                active_start,
+                record_start,
+                enablement_error,
+            )
             cleanup_error: Exception | None = None
             try:
                 session.close()
             except Exception as error:
                 cleanup_error = error
-            enablement_error = RuntimeError(
-                "fault injection arming failed; " + "; ".join(activation_failures)
-            )
+            if rollback_error is not None:
+                _add_exception_note(
+                    enablement_error,
+                    f"fault activation rollback also failed: {rollback_error}",
+                )
             if cleanup_error is not None:
                 _add_exception_note(
                     enablement_error,

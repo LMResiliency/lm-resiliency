@@ -134,6 +134,21 @@ class TrainingContext:
         state_key: str | None,
     ) -> tuple[torch.Tensor, int]:
         """Resolve optimizer state and the optimizer whose load replaces it."""
+        tensor, owner_identity, _resolved_key = self.resolve_optimizer_state_with_identity(
+            target,
+            parameter_name=parameter_name,
+            state_key=state_key,
+        )
+        return tensor, owner_identity
+
+    def resolve_optimizer_state_with_identity(
+        self,
+        target: FaultTarget,
+        *,
+        parameter_name: str | None,
+        state_key: str | None,
+    ) -> tuple[torch.Tensor, int, str]:
+        """Resolve optimizer state, its owner, and the selected state key."""
         parameter = self._resolve_model_parameter(target, parameter_name=parameter_name)
         if self.framework == "deepspeed":
             resolved = _resolve_deepspeed_optimizer_state(
@@ -148,12 +163,12 @@ class TrainingContext:
             if state_key is not None:
                 value = state.get(state_key)
                 if isinstance(value, torch.Tensor):
-                    return value, id(optimizer)
+                    return value, id(optimizer), state_key
                 continue
             for key in sorted(state):
                 value = state[key]
                 if isinstance(value, torch.Tensor) and value.numel() > 1:
-                    return value, id(optimizer)
+                    return value, id(optimizer), str(key)
         suffix = "" if state_key is None else f" {state_key!r}"
         raise LookupError(f"optimizer state tensor{suffix} is unavailable")
 
@@ -241,39 +256,39 @@ class TrainingContext:
                 if id(candidate) in seen:
                     continue
                 seen.add(id(candidate))
-                register_pre = getattr(candidate, "register_load_state_dict_pre_hook", None)
-                register_post = getattr(candidate, "register_load_state_dict_post_hook", None)
-                if callable(register_pre) and callable(register_post):
-                    pending: dict[str, frozenset[int]] = {"identities": frozenset()}
+                original = getattr(candidate, "load_state_dict", None)
+                if callable(original):
 
-                    def capture_loaded_parameters(
-                        module: nn.Module,
+                    def wrapped_load_state_dict(
                         state_dict: dict[str, Any],
-                        prefix: str,
-                        *_args: Any,
-                        _pending: dict[str, frozenset[int]] = pending,
-                        **_kwargs: Any,
-                    ) -> None:
-                        _pending["identities"] = frozenset(
+                        *args: Any,
+                        _candidate: nn.Module = candidate,
+                        _original: Callable[..., Any] = original,
+                        **kwargs: Any,
+                    ) -> Any:
+                        result = _original(state_dict, *args, **kwargs)
+                        identities = frozenset(
                             id(parameter)
-                            for name, parameter in module.named_parameters(
+                            for name, parameter in _candidate.named_parameters(
                                 recurse=True,
                                 remove_duplicate=False,
                             )
-                            if f"{prefix}{name}" in state_dict
+                            if name in state_dict
                         )
+                        callback("model", identities)
+                        return result
 
-                    def report_loaded_parameters(
-                        *_args: Any,
-                        _pending: dict[str, frozenset[int]] = pending,
-                        **_kwargs: Any,
+                    setattr(candidate, "load_state_dict", wrapped_load_state_dict)
+
+                    def restore_load_state_dict(
+                        _candidate: nn.Module = candidate,
+                        _original: Callable[..., Any] = original,
+                        _wrapped: Callable[..., Any] = wrapped_load_state_dict,
                     ) -> None:
-                        callback("model", _pending["identities"])
-                        _pending["identities"] = frozenset()
+                        if getattr(_candidate, "load_state_dict", None) is _wrapped:
+                            setattr(_candidate, "load_state_dict", _original)
 
-                    pre_handle = register_pre(capture_loaded_parameters)
-                    post_handle = register_post(report_loaded_parameters)
-                    self._cleanups.extend((post_handle.remove, pre_handle.remove))
+                    self._cleanups.append(restore_load_state_dict)
         for optimizer in _base_optimizers(self.optimizer):
             if id(optimizer) in seen:
                 continue
@@ -653,7 +668,7 @@ def _resolve_deepspeed_optimizer_state(
     parameter: torch.Tensor,
     *,
     state_key: str | None,
-) -> tuple[torch.Tensor, int] | None:
+) -> tuple[torch.Tensor, int, str] | None:
     base_optimizers = _base_optimizers(optimizer)
     default_owner = id(base_optimizers[0]) if base_optimizers else id(optimizer)
     mapping = getattr(parameter, "_hp_mapping", None)
@@ -673,7 +688,7 @@ def _resolve_deepspeed_optimizer_state(
             except (KeyError, ValueError):
                 continue
             if isinstance(value, torch.Tensor) and value.numel() > 1:
-                return value, default_owner
+                return value, default_owner, str(key)
         return None
 
     zero_optimizer = getattr(parameter, "_z3_optimizer", None)
@@ -703,7 +718,7 @@ def _resolve_deepspeed_optimizer_state(
             optim_state_key=key,
         )
         if isinstance(partition, torch.Tensor) and partition.numel() > 1:
-            return partition, id(base_optimizer)
+            return partition, id(base_optimizer), str(key)
     return None
 
 

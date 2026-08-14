@@ -82,6 +82,10 @@ class _UnavailableHistoryError(RuntimeError):
     """A stale or duplicate fault has no earlier observed value."""
 
 
+class _UnsupportedTargetTensorError(TypeError):
+    """A runtime hook value exposes no supported tensor to transform."""
+
+
 @dataclass(slots=True)
 class _History:
     previous: torch.Tensor | None = None
@@ -461,7 +465,14 @@ class LocalFaultExecutor:
                 except Exception as error:
                     if not effect.done:
                         effect.fail(error)
-                    if isinstance(error, (_NoOpFaultError, _UnavailableHistoryError)):
+                    if isinstance(
+                        error,
+                        (
+                            _NoOpFaultError,
+                            _UnavailableHistoryError,
+                            _UnsupportedTargetTensorError,
+                        ),
+                    ):
                         return args, kwargs
                     raise
 
@@ -484,7 +495,14 @@ class LocalFaultExecutor:
             except Exception as error:
                 if not effect.done:
                     effect.fail(error)
-                if isinstance(error, (_NoOpFaultError, _UnavailableHistoryError)):
+                if isinstance(
+                    error,
+                    (
+                        _NoOpFaultError,
+                        _UnavailableHistoryError,
+                        _UnsupportedTargetTensorError,
+                    ),
+                ):
                     return output
                 raise
 
@@ -577,21 +595,23 @@ class LocalFaultExecutor:
                 fault.target,
                 parameter_name=parameter_name,
             )
-            _tensor, owner_identity = self._context.resolve_optimizer_state_with_owner(
-                fault.target,
-                parameter_name=parameter_name,
-                state_key=(
-                    None
-                    if fault.parameters.get("state_key") is None
-                    else str(fault.parameters["state_key"])
-                ),
+            _tensor, owner_identity, resolved_state_key = (
+                self._context.resolve_optimizer_state_with_identity(
+                    fault.target,
+                    parameter_name=parameter_name,
+                    state_key=(
+                        None
+                        if fault.parameters.get("state_key") is None
+                        else str(fault.parameters["state_key"])
+                    ),
+                )
             )
             return (
                 fault.target.execution_rank,
                 surface.value,
                 id(parameter),
                 owner_identity,
-                fault.parameters.get("state_key"),
+                resolved_state_key,
             )
         else:
             target = self._context.resolve_module(fault.target)
@@ -724,7 +744,7 @@ def _transform_tree(
         transformed, affected = _transform_tensor(leaf, request, history)
         leaves[index] = transformed
         return tree_unflatten(leaves, spec), affected
-    raise TypeError("target value contains no floating-point tensor")
+    raise _UnsupportedTargetTensorError("target value contains no floating-point tensor")
 
 
 def _prepare_state_values(
