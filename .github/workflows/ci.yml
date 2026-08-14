@@ -113,7 +113,7 @@ jobs:
             --index-url https://download.pytorch.org/whl/cpu \
             --only-binary=:all: \
             "torch==$TORCH_VERSION"
-          python -m pip install "numpy==$NUMPY_VERSION" "setuptools>=83" pytest pytest-timeout
+          python -m pip install "numpy==$NUMPY_VERSION" pytest pytest-timeout
           python -m pip install --no-deps -e .
           python -m pip check
 
