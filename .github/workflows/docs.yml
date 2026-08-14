@@ -4,15 +4,16 @@ on:
   push:
     branches:
       - main
-    tags:
-      - "v*"
+  release:
+    types:
+      - published
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: docs-${{ github.ref }}
+  group: docs-publish
   cancel-in-progress: false
 
 jobs:
@@ -27,6 +28,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -43,19 +45,44 @@ jobs:
 
       - name: Publish documentation version
         env:
+          EVENT_NAME: ${{ github.event_name }}
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
         shell: bash
         run: |
+          set -euo pipefail
           git remote set-url origin \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
-          if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+          if [[ "$EVENT_NAME" == "push" || "$EVENT_NAME" == "workflow_dispatch" ]]; then
             mike deploy --push dev
-          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            version="${GITHUB_REF_NAME#v}"
+            exit 0
+          fi
+
+          if [[ "$EVENT_NAME" != "release" || "$RELEASE_TAG" != v* ]]; then
+            echo "Unsupported documentation event: $EVENT_NAME / $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          version="${RELEASE_TAG#v}"
+          if [[ "$RELEASE_PRERELEASE" == "true" ]]; then
+            mike deploy --push "$version"
+            exit 0
+          fi
+
+          latest_tag=$(
+            gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' |
+              grep -E '^v[0-9]+([.][0-9]+){1,2}([.-].*)?$' |
+              sort -V |
+              tail -n 1
+          )
+          test -n "$latest_tag"
+
+          if [[ "$RELEASE_TAG" == "$latest_tag" ]]; then
             mike deploy --push --update-aliases "$version" latest
             mike set-default --push latest
           else
-            echo "Unsupported documentation ref: $GITHUB_REF" >&2
-            exit 1
+            mike deploy --push "$version"
           fi
