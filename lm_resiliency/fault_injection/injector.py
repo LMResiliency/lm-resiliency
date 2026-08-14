@@ -1654,11 +1654,22 @@ def _evaluate_occurrence(
     reported_components = {
         component for result in detected_results for component in result.components
     }
-    component_matches = (
-        None
-        if not reported_components
-        else bool(expected_components) and expected_components == reported_components
-    )
+    if not reported_components:
+        component_matches: bool | None = None
+    else:
+        expected_targets_by_component = {
+            component: _expected_targets_for_component(incident, component)
+            for component in expected_components
+        }
+        reported_targets_by_component = {
+            component: _reported_targets_for_component(detected_results, component)
+            for component in reported_components
+        }
+        component_matches = (
+            bool(expected_components)
+            and reported_components == expected_components
+            and reported_targets_by_component == expected_targets_by_component
+        )
     localized = (
         injection_succeeded
         and detected
@@ -1715,6 +1726,36 @@ def _reported_targets_for_kind(
     kind: str,
 ) -> tuple[frozenset[int], frozenset[str]]:
     matching = tuple(result for result in results if result.kind == kind)
+    return (
+        frozenset(rank for result in matching for rank in result.failed_ranks),
+        frozenset(resource for result in matching for resource in result.failed_resources),
+    )
+
+
+def _expected_targets_for_component(
+    incident: FaultIncident,
+    component: str,
+) -> tuple[frozenset[int], frozenset[str]]:
+    faults = tuple(
+        fault
+        for fault in incident.faults
+        if (fault.target.component or fault.target.module_path) == component
+    )
+    return (
+        frozenset(
+            expected_rank
+            for fault in faults
+            if (expected_rank := _expected_rank(fault)) is not None
+        ),
+        frozenset(fault.target.resource for fault in faults if fault.target.resource is not None),
+    )
+
+
+def _reported_targets_for_component(
+    results: tuple[LocalizationResult, ...],
+    component: str,
+) -> tuple[frozenset[int], frozenset[str]]:
+    matching = tuple(result for result in results if component in result.components)
     return (
         frozenset(rank for result in matching for rank in result.failed_ranks),
         frozenset(resource for result in matching for resource in result.failed_resources),

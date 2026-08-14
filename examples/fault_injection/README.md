@@ -45,8 +45,11 @@ effect-expiration boundary. The clean snapshot is frozen throughout a bounded
 fault window, so contaminated intermediate iterations cannot become the next
 reset point. Reset and hold windows use the campaign's deterministic
 probability selection, so an explicitly skipped occurrence never restores or
-holds evaluation state. This isolates each case; it is not a replacement for
-production checkpoint recovery. The example rejects `campaign_end` lifetimes for
+holds evaluation state. If one incident expires while another state-affecting
+window remains active, the hold window takes precedence and defers the full
+model/optimizer reset until the later window also expires. This isolates each
+case; it is not a replacement for production checkpoint recovery. The example
+rejects `campaign_end` lifetimes for
 gradient-affecting incidents because they cannot produce a clean certification
 iteration before shutdown. It also requires `matching_calls=1` for those
 incidents because framework call multiplicity cannot be converted portably into

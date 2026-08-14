@@ -261,6 +261,35 @@ def test_evaluation_state_reset_freezes_snapshot_during_bounded_window() -> None
     reset.close()
 
 
+def test_evaluation_state_reset_defers_reset_through_another_active_window() -> None:
+    model = torch.nn.Linear(2, 1, bias=False)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    reset = EvaluationStateReset(
+        SimpleNamespace(module=model),
+        optimizer,
+        {2, 3},
+        {1, 2},
+    )
+    clean = model.weight.detach().clone()
+
+    def step() -> None:
+        optimizer.zero_grad()
+        model(torch.ones(1, 2)).sum().backward()
+        optimizer.step()
+
+    step()
+    step()
+
+    assert not torch.equal(model.weight, clean)
+    assert reset.restored_iterations == []
+
+    step()
+
+    torch.testing.assert_close(model.weight, clean)
+    assert reset.restored_iterations == [3]
+    reset.close()
+
+
 def test_teardown_attempts_every_cleanup_and_preserves_active_error() -> None:
     events: list[str] = []
 

@@ -268,6 +268,12 @@ rejected during enablement. Probability-zero incidents are ignored; for other
 probabilistic incidents the validator conservatively treats a candidate as
 potentially selected. Large ranged schedules are checked without materializing
 every candidate.
+For built-in local effects, a `matching_calls` lifetime greater than one may
+span optimizer iterations because framework call multiplicity is not portable.
+Such an incident must have one trigger candidate, and a later incident on the
+same resolved target is treated as potentially overlapping. Repeated
+`matching_calls=1` candidates retain the established one-call contract for
+each scheduled iteration.
 Closing a session normally completes a verified `campaign_end` effect. Closing
 before a `matching_calls` or `iterations` lifetime finishes cancels that effect,
 so a partial-duration injection cannot be certified as successful. Error-path
@@ -393,6 +399,10 @@ retired by removing the injected finite delta from the current tensor. This
 preserves optimizer updates made during the active window. A bounded state fault
 whose injected delta is non-finite is rejected before mutation; represent such
 corruption with an `until` lifetime and recover the workload afterward.
+If the target still equals the injected value at retirement, the executor
+copies the original selected values exactly instead of subtracting a rounded
+low-precision delta. Delta subtraction is reserved for values changed by
+training while the effect was active.
 FSDP2/HSDP `DTensor` state is mutated and verified through the rank-local shard.
 Model `load_state_dict()` marks only active weight and bias state as externally
 replaced; optimizer `load_state_dict()` marks only optimizer-state effects.
@@ -699,7 +709,10 @@ overclaim and fails attribution.
 `failed_resources` and `components` must be arrays of non-empty strings; scalar
 strings and coercible non-string values are rejected.
 When component evidence is supplied, it must exactly match the expected
-component set; extra components are attribution errors.
+component set; extra components are attribution errors. Component evidence is
+also correlated with the rank and resource targets in each localization result.
+Swapping correct component names between two failed targets is therefore an
+attribution failure even when the aggregate component and target sets match.
 Example detection counts also require a report with the expected failure kind;
 an unrelated report at the same iteration is retained as evidence but does not
 count as detecting the injected occurrence. For correlated incidents containing

@@ -297,9 +297,22 @@ class LocalFaultExecutor:
         for incident in incidents:
             if incident.trigger.probability <= 0.0:
                 continue
-            for fault in incident.faults:
-                if fault.target.execution_rank != self._rank or not self.supports(fault):
-                    continue
+            local_faults = tuple(
+                fault
+                for fault in incident.faults
+                if fault.target.execution_rank == self._rank and self.supports(fault)
+            )
+            if (
+                local_faults
+                and incident.lifetime.matching_calls is not None
+                and incident.lifetime.matching_calls > 1
+                and _trigger_candidate_count(incident) > 1
+            ):
+                raise ValueError(
+                    "local matching_calls incidents require a single trigger candidate "
+                    "because matching operations may span training iterations"
+                )
+            for fault in local_faults:
                 key = self._schedule_target_key(fault)
                 for other_key, other_incident, other_fault in scheduled:
                     if other_incident is incident:
@@ -794,10 +807,13 @@ class LocalFaultExecutor:
                 preserve = (
                     ~still_injected if preserve_replaced_state else torch.zeros_like(still_injected)
                 )
-                retire_finite = finite & ~already_restored & ~preserve
+                restore_exact = still_injected & ~already_restored & ~preserve
+                if bool(torch.any(restore_exact).item()):
+                    current[restore_exact] = original[restore_exact]
+                retire_finite = finite & ~already_restored & ~still_injected & ~preserve
                 if bool(torch.any(retire_finite).item()):
                     current[retire_finite] -= retirement_delta[retire_finite]
-                restore_nonfinite = ~finite & ~already_restored & ~preserve
+                restore_nonfinite = ~finite & ~already_restored & ~still_injected & ~preserve
                 if bool(torch.any(restore_nonfinite).item()):
                     current[restore_nonfinite] = original[restore_nonfinite]
                 _write_linear(tensor, changed_indices, current)
@@ -1269,7 +1285,7 @@ def _incident_iteration_duration(incident: FaultIncident) -> int | None:
     if incident.lifetime.iterations is not None:
         return incident.lifetime.iterations
     if incident.lifetime.matching_calls is not None:
-        return 1
+        return None if incident.lifetime.matching_calls > 1 else 1
     return None
 
 

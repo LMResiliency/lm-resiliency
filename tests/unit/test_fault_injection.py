@@ -1867,6 +1867,40 @@ def test_bounded_state_fault_retirement_preserves_optimizer_update() -> None:
     session.close()
 
 
+def test_bounded_float16_state_restores_unchanged_injected_value_exactly() -> None:
+    model = TinyModel().half()
+    with torch.no_grad():
+        model.layers[0].weight.fill_(0.1)
+    optimizer = _optimizer(model)
+    baseline = model.layers[0].weight.detach().clone()
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(iterations=1),
+                faults=(
+                    _corruption(
+                        target=_target(surface=FaultSurface.WEIGHT),
+                        operation=CorruptionOperation.SET_VALUE,
+                        scope=FaultScope.SINGLE,
+                        value=60_000.0,
+                    ),
+                ),
+            )
+        ),
+        rank=0,
+    )
+
+    assert not torch.equal(model.layers[0].weight, baseline)
+    optimizer.step()
+
+    assert torch.equal(model.layers[0].weight, baseline)
+    assert session.records[0].status is InjectionStatus.COMPLETED
+    session.close()
+
+
 def test_bounded_state_fault_retires_noncontiguous_parameter() -> None:
     model = TinyModel()
     parameter = nn.Parameter(model.layers[0].weight.detach().clone().transpose(0, 1))
@@ -5010,6 +5044,23 @@ def test_cross_incident_target_overlap_is_rejected_before_training() -> None:
     torch.testing.assert_close(model.layers[0].weight, baseline)
 
 
+def test_repeated_local_matching_call_candidates_are_rejected() -> None:
+    model = TinyModel()
+
+    with pytest.raises(ValueError, match="matching_calls incidents require a single"):
+        enable_fault_injection(
+            model,
+            _optimizer(model),
+            campaign=_campaign(
+                _incident(
+                    at=(1, 2),
+                    lifetime=IncidentLifetime(matching_calls=2),
+                )
+            ),
+            rank=0,
+        )
+
+
 def test_equivalent_target_selectors_collide_by_resolved_parameter() -> None:
     model = TinyModel()
     baseline = model.layers[0].weight.detach().clone()
@@ -5414,6 +5465,88 @@ def test_mixed_kind_correlated_faults_require_per_kind_target_evidence() -> None
     assert complete.kind_matches
     assert not overclaimed.localized
     assert overclaimed.kind_matches is False
+    session.close()
+
+
+def test_correlated_components_require_per_target_evidence() -> None:
+    events: list[tuple[str, str]] = []
+    executor = _recording_executor({FailureType.RESOURCE_UNAVAILABLE}, events)
+    faults = (
+        FaultSpec(
+            fault_id="layer-resource",
+            type=FailureType.RESOURCE_UNAVAILABLE,
+            target=FaultTarget(
+                rank=0,
+                surface=FaultSurface.RESOURCE,
+                resource="gpu-layer",
+                component="layers.0",
+            ),
+        ),
+        FaultSpec(
+            fault_id="embedding-resource",
+            type=FailureType.RESOURCE_UNAVAILABLE,
+            target=FaultTarget(
+                rank=0,
+                surface=FaultSurface.RESOURCE,
+                resource="gpu-embedding",
+                component="embedding",
+            ),
+        ),
+    )
+    model = TinyModel()
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(_incident(at=(1,), faults=faults)),
+        executors=(executor,),
+        rank=0,
+    )
+
+    complete = session.evaluate(
+        [
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_ranks=(0,),
+                failed_resources=("gpu-layer",),
+                kind="process_failure",
+                components=("layers.0",),
+            ),
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_ranks=(0,),
+                failed_resources=("gpu-embedding",),
+                kind="process_failure",
+                components=("embedding",),
+            ),
+        ]
+    ).evaluations[0]
+    swapped = session.evaluate(
+        [
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_ranks=(0,),
+                failed_resources=("gpu-layer",),
+                kind="process_failure",
+                components=("embedding",),
+            ),
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_ranks=(0,),
+                failed_resources=("gpu-embedding",),
+                kind="process_failure",
+                components=("layers.0",),
+            ),
+        ]
+    ).evaluations[0]
+
+    assert complete.localized
+    assert complete.component_matches
+    assert not swapped.localized
+    assert swapped.component_matches is False
     session.close()
 
 

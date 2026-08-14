@@ -73,6 +73,8 @@ class EvaluationStateReset:
 
     def _after_step(self, *_args: Any, **_kwargs: Any) -> None:
         self._completed_iterations += 1
+        if self._completed_iterations in self._hold_iterations:
+            return
         if self._completed_iterations in self._reset_iterations:
             device = next(self._model.parameters()).device
             if device.type == "cuda":
@@ -80,8 +82,6 @@ class EvaluationStateReset:
             self._model.load_state_dict(copy.deepcopy(self._model_state))
             self._optimizer.load_state_dict(copy.deepcopy(self._optimizer_state))
             self.restored_iterations.append(self._completed_iterations)
-            return
-        if self._completed_iterations in self._hold_iterations:
             return
         self._capture()
 
