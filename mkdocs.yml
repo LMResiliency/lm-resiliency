@@ -2,6 +2,7 @@ site_name: LM Resiliency
 site_url: https://lmresiliency.github.io/lm-resiliency/
 repo_url: https://github.com/LMResiliency/lm-resiliency
 repo_name: LMResiliency/lm-resiliency
+edit_uri: edit/main/docs/
 docs_dir: docs
 site_dir: site
 
