@@ -411,7 +411,14 @@ class InMemoryCheckpointManager:
     def _memory_slot_by_step(self, step: int) -> Any | None:
         if self._metadata is None or not self._buffer_pool.allocated:
             return None
-        return self._buffer_pool.get_slot_by_step(step)
+        return next(
+            (
+                slot
+                for slot in self._buffer_pool.own_slots
+                if slot.step == step and slot.state in (SlotState.READY, SlotState.REPLICATING)
+            ),
+            None,
+        )
 
     def find_latest(self, mode: RecoveryMode | str | None = None) -> int:
         """Collective: latest step recoverable across all ranks from memory or disk.
