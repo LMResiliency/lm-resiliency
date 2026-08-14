@@ -147,6 +147,7 @@ class LocalizationResult:
     failed_resources: tuple[str, ...] = ()
     kind: str | None = None
     components: tuple[str, ...] = ()
+    scope: str | None = None
     latency_ms: float | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
@@ -185,6 +186,11 @@ class LocalizationResult:
                 raise TypeError("localization kind must be a string")
             if not self.kind.strip():
                 raise ValueError("localization kind must be non-empty")
+        if self.scope is not None:
+            if not isinstance(self.scope, str):
+                raise TypeError("localization scope must be a string")
+            if not self.scope.strip():
+                raise ValueError("localization scope must be non-empty")
         if any(rank < 0 for rank in self.failed_ranks):
             raise ValueError("localization failed_ranks must be non-negative")
         if not self.detected and (self.failed_ranks or self.failed_resources or self.components):
@@ -206,6 +212,7 @@ class LocalizationResult:
             failed_resources=value.get("failed_resources", ()),
             kind=value.get("kind"),
             components=value.get("components", ()),
+            scope=value.get("scope"),
             latency_ms=value.get("latency_ms"),
             metadata=value.get("metadata", {}),
         )
@@ -218,6 +225,7 @@ class LocalizationResult:
             "failed_resources": list(self.failed_resources),
             "kind": self.kind,
             "components": list(self.components),
+            "scope": self.scope,
             "latency_ms": self.latency_ms,
             "metadata": thaw_json(self.metadata),
         }

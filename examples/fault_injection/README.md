@@ -39,24 +39,25 @@ lifetime, then adds one clean iteration; it never treats a still-active
 multi-iteration effect as the post-fault certification step.
 
 Weight, bias, gradient, and optimizer-state faults can contaminate later cases.
-For those cases, an evaluation-only optimizer hook restores the last clean
-model and optimizer snapshot after SCOUT reports the fault and at the configured
-effect-expiration boundary. The clean snapshot is frozen throughout a bounded
-fault window, so contaminated intermediate iterations cannot become the next
-reset point. Reset and hold windows use the campaign's deterministic
-probability selection, so an explicitly skipped occurrence never restores or
-holds evaluation state. If one incident expires while another state-affecting
-window remains active, the hold window takes precedence and defers the full
-model/optimizer reset until the later window also expires. This isolates each
-case; it is not a replacement for production checkpoint recovery. The example
-rejects `campaign_end` lifetimes for gradient-affecting incidents because they
-cannot produce a clean certification iteration before shutdown. It requires
-`matching_calls=1` for every incident because framework call multiplicity
-cannot be converted portably into optimizer-iteration run length or
-certification boundaries. These reset-policy constraints are validated before
-the example initializes distributed process groups, GEMINI, or SCOUT, so an
-unsupported manifest cannot leave runtime resources outside the teardown
-boundary.
+For those cases, an evaluation-only post-step hook captures the last clean
+model and optimizer snapshot before the injector arms the next iteration. An
+outer optimizer-step wrapper restores that snapshot only after SCOUT reports
+the current fault and the injector completes its optimizer boundary. The clean
+snapshot is frozen throughout a bounded fault window, so contaminated
+intermediate iterations cannot become the next reset point. Reset and hold
+windows use the campaign's deterministic probability selection, so an
+explicitly skipped occurrence never restores or holds evaluation state. If one
+incident expires while another state-affecting window remains active, the hold
+window takes precedence and defers the full model/optimizer reset until the
+later window also expires. This isolates each case; it is not a replacement for
+production checkpoint recovery. The example rejects `campaign_end` lifetimes
+for gradient-affecting incidents because they cannot produce a clean
+certification iteration before shutdown. It requires `matching_calls=1` for
+every incident because framework call multiplicity cannot be converted
+portably into optimizer-iteration run length or certification boundaries.
+These reset-policy constraints are validated before the example initializes
+distributed process groups, GEMINI, or SCOUT, so an unsupported manifest cannot
+leave runtime resources outside the teardown boundary.
 
 Teardown attempts fault-injection cleanup, evaluation-state cleanup, resiliency
 cleanup, and process-group destruction independently. A cleanup failure is
@@ -95,6 +96,9 @@ detected occurrence, while `injected_actions`, `detected_actions`, and
 `localized_actions` account for every successful rank-local fault action inside
 those incidents. An unsuccessful injection record never contributes to
 `detected_actions`, even when a localization report names the same target.
+When an action specifies both rank and resource, detection credit also requires
+that exact pair within the expected failure kind; independently matching rank
+and resource projections are insufficient.
 Dense catalog reports use `layer_id: -1` when several replay recipes are
 aggregated; in that case the comparison uses the reported `hidden.*`,
 `embedding.*`, or `output.*` source as component-localization evidence.
@@ -104,6 +108,10 @@ Explicit module paths containing `lm_head` or `output_layer` map to
 `output.*`; token-embedding paths such as `embed_tokens`, `word_embeddings`, or
 `wte` map to `embedding.*`. Other explicit paths should also include a logical
 `component` so the comparator can derive the expected SCOUT source family.
+Layer components are normalized across `layer`, `transformer_layer`, and
+hyphenated or case variants. Explicit paths containing `layers.<index>`
+contribute the same positive-layer expectation, so a wrong SCOUT `layer_id`
+cannot pass through source evidence alone.
 Aggregate straggler reports are tied to the configured replay catalog.
 Re-run the comparison independently with:
 

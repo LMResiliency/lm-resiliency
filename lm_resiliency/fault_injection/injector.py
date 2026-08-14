@@ -962,7 +962,7 @@ class FaultInjectionSession:
     ) -> list[str]:
         try:
             return _gather_rank_errors(error)
-        except Exception as collective_error:
+        except BaseException as collective_error:
             cleanup_error = self._cleanup()
             _add_exception_note(
                 collective_error,
@@ -1353,7 +1353,7 @@ class FaultInjectionSession:
                     lifetime = active.incident.lifetime
                     if (
                         lifetime.iterations is not None
-                        and self._current_iteration
+                        and self._completed_iterations
                         < active.start_iteration + lifetime.iterations - 1
                     ):
                         active.effect.fail(
@@ -1726,12 +1726,15 @@ def _evaluate_occurrence(
         and all(record.injection_succeeded for record in records)
     )
     detected_results = tuple(result for result in results if result.detected)
+    localizing_results = tuple(
+        result for result in detected_results if result.scope != "peer_group"
+    )
     detected = bool(detected_results)
     reported_ranks = tuple(
-        sorted({rank for result in detected_results for rank in result.failed_ranks})
+        sorted({rank for result in localizing_results for rank in result.failed_ranks})
     )
     reported_resources = tuple(
-        sorted({resource for result in detected_results for resource in result.failed_resources})
+        sorted({resource for result in localizing_results for resource in result.failed_resources})
     )
     expected_rank_resource_pairs = {
         (fault.target.rank, fault.target.resource)
@@ -1740,7 +1743,7 @@ def _evaluate_occurrence(
     }
     reported_rank_resource_pairs = {
         (rank, resource)
-        for result in detected_results
+        for result in localizing_results
         for rank in result.failed_ranks
         for resource in result.failed_resources
     }
@@ -1755,7 +1758,7 @@ def _evaluate_occurrence(
         resource for resource in reported_resources if resource not in expected_resources
     )
     expected_kinds = {fault.expected_kind for fault in incident.faults}
-    reported_kinds = {result.kind for result in detected_results if result.kind is not None}
+    reported_kinds = {result.kind for result in localizing_results if result.kind is not None}
     if not reported_kinds and len(expected_kinds) == 1:
         kind_matches: bool | None = None
     else:
@@ -1763,14 +1766,14 @@ def _evaluate_occurrence(
             kind: _expected_targets_for_kind(incident, kind) for kind in expected_kinds
         }
         reported_targets_by_kind = {
-            kind: _reported_targets_for_kind(detected_results, kind) for kind in reported_kinds
+            kind: _reported_targets_for_kind(localizing_results, kind) for kind in reported_kinds
         }
         kind_matches = (
             reported_kinds == expected_kinds
             and reported_targets_by_kind == expected_targets_by_kind
         )
     reported_components = {
-        component for result in detected_results for component in result.components
+        component for result in localizing_results for component in result.components
     }
     if not reported_components:
         component_matches: bool | None = None
@@ -1780,7 +1783,7 @@ def _evaluate_occurrence(
             for component in expected_components
         }
         reported_targets_by_component = {
-            component: _reported_targets_for_component(detected_results, component)
+            component: _reported_targets_for_component(localizing_results, component)
             for component in reported_components
         }
         expected_targets_by_kind_component = {
@@ -1799,7 +1802,7 @@ def _evaluate_occurrence(
         }
         reported_targets_by_kind_component = {
             (kind, component): _reported_targets_for_kind_component(
-                detected_results,
+                localizing_results,
                 kind,
                 component,
             )
@@ -1807,7 +1810,7 @@ def _evaluate_occurrence(
             for component in reported_components
             if any(
                 result.kind == kind and component in result.components
-                for result in detected_results
+                for result in localizing_results
             )
         }
         component_matches = (

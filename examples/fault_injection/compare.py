@@ -300,27 +300,11 @@ def _evaluate_occurrence(
     )
     detected_action_count = sum(
         _record_injection_succeeded(record)
-        and (
-            (expected_rank := _expected_action_rank(expected_by_fault_id[str(record["fault_id"])]))
-            is None
-            or expected_rank
-            in observed_ranks_by_kind.get(
-                _expected_action_kind(expected_by_fault_id[str(record["fault_id"])]),
-                (),
-            )
-        )
-        and (
-            (
-                expected_resource := _expected_action_resource(
-                    expected_by_fault_id[str(record["fault_id"])]
-                )
-            )
-            is None
-            or expected_resource
-            in observed_resources_by_kind.get(
-                _expected_action_kind(expected_by_fault_id[str(record["fault_id"])]),
-                (),
-            )
+        and _action_target_detected(
+            expected_by_fault_id[str(record["fault_id"])],
+            observed_ranks_by_kind,
+            observed_resources_by_kind,
+            observed_rank_resource_pairs_by_kind,
         )
         for record in records
     )
@@ -925,14 +909,47 @@ def _reported_targets_for_layer(
 
 def _expected_action_layer(action: Mapping[str, Any]) -> int | None:
     target = _action_target(action)
-    if target.get("component") not in {
+    component = target.get("component")
+    if isinstance(component, str) and component.lower().replace("-", "_") in {
         "transformer_block",
         "transformer_layer",
         "layer",
     }:
-        return None
-    index = target.get("index")
-    return None if index is None else _required_integer(index, "manifest target index")
+        index = target.get("index")
+        return None if index is None else _required_integer(index, "manifest target index")
+    module_path = target.get("module_path")
+    if isinstance(module_path, str):
+        pieces = tuple(piece for piece in module_path.split(".") if piece)
+        for position, piece in enumerate(pieces[:-1]):
+            if piece.lower() == "layers" and pieces[position + 1].isdigit():
+                return int(pieces[position + 1])
+    return None
+
+
+def _action_target_detected(
+    action: Mapping[str, Any],
+    observed_ranks_by_kind: Mapping[str, Sequence[int]],
+    observed_resources_by_kind: Mapping[str, Sequence[str]],
+    observed_rank_resource_pairs_by_kind: Mapping[
+        str,
+        Sequence[Sequence[int | str]],
+    ],
+) -> bool:
+    kind = _expected_action_kind(action)
+    expected_rank = _expected_action_rank(action)
+    expected_resource = _expected_action_resource(action)
+    if expected_rank is not None and expected_resource is not None:
+        return [expected_rank, expected_resource] in observed_rank_resource_pairs_by_kind.get(
+            kind,
+            (),
+        )
+    if expected_rank is not None and expected_rank not in observed_ranks_by_kind.get(kind, ()):
+        return False
+    if expected_resource is not None and expected_resource not in observed_resources_by_kind.get(
+        kind, ()
+    ):
+        return False
+    return expected_rank is not None or expected_resource is not None
 
 
 def _targets_for_actions(

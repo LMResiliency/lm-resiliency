@@ -6392,6 +6392,35 @@ def test_localization_rejects_coerced_numeric_fields() -> None:
         )
 
 
+def test_peer_group_localization_is_detection_without_attribution_credit() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(_incident(at=(1,))),
+        rank=0,
+    )
+    _step(model, optimizer)
+
+    evaluation = session.evaluate(
+        [
+            {
+                "occurrence_id": "incident@1",
+                "detected": True,
+                "failed_ranks": [0],
+                "kind": "sdc",
+                "scope": "peer_group",
+            }
+        ]
+    ).evaluations[0]
+
+    assert evaluation.detected
+    assert not evaluation.localized
+    assert evaluation.reported_ranks == ()
+    session.close()
+
+
 def test_close_restores_active_faults_and_optimizer_hook() -> None:
     model = TinyModel()
     optimizer = _optimizer(model)
@@ -7260,6 +7289,37 @@ def test_bounded_state_replacement_before_expiration_fails_occurrence() -> None:
     session.close()
 
 
+def test_one_iteration_state_replacement_before_optimizer_boundary_fails_occurrence() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    replacement = torch.full_like(model.layers[0].weight, 7.0)
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(iterations=1),
+                faults=(
+                    _corruption(
+                        target=_target(surface=FaultSurface.WEIGHT),
+                        scope=FaultScope.SINGLE,
+                    ),
+                ),
+            )
+        ),
+        rank=0,
+    )
+
+    model.load_state_dict({"layers.0.weight": replacement}, strict=False)
+
+    record = session.records[0]
+    assert record.status is InjectionStatus.FAILED
+    assert "replaced before its configured lifetime completed" in (record.error or "")
+    torch.testing.assert_close(model.layers[0].weight, replacement)
+    session.close()
+
+
 def test_implicit_and_explicit_optimizer_state_keys_collide() -> None:
     model = TinyModel()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.0)
@@ -7526,6 +7586,51 @@ def test_runtime_consensus_exception_cleans_active_effects() -> None:
             side_effect=RuntimeError("collective timed out"),
         ),
         pytest.raises(RuntimeError, match="collective timed out") as caught,
+    ):
+        session._on_step_complete()
+
+    assert session._closed
+    assert session.records[0].status is InjectionStatus.CANCELLED
+    assert any("iteration preparation consensus failed" in note for note in caught.value.__notes__)
+    torch.testing.assert_close(model.layers[0].weight, baseline)
+
+
+def test_runtime_consensus_interrupt_cleans_active_effects() -> None:
+    model = TinyModel()
+    baseline = model.layers[0].weight.detach().clone()
+    session = FaultInjectionSession(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="campaign_end"),
+                faults=(
+                    _corruption(
+                        target=_target(surface=FaultSurface.WEIGHT),
+                        scope=FaultScope.SINGLE,
+                    ),
+                ),
+            )
+        ),
+        rank=0,
+        _defer_activation=True,
+    )
+    session._commit_journal_binding()
+    session._start()
+    assert not torch.equal(model.layers[0].weight, baseline)
+
+    with (
+        patch.object(session, "_requires_boundary_consensus", return_value=True),
+        patch(
+            "lm_resiliency.fault_injection.injector._distributed_world_size",
+            return_value=2,
+        ),
+        patch(
+            "lm_resiliency.fault_injection.injector._gather_rank_errors",
+            side_effect=KeyboardInterrupt("collective interrupted"),
+        ),
+        pytest.raises(KeyboardInterrupt, match="collective interrupted") as caught,
     ):
         session._on_step_complete()
 

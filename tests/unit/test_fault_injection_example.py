@@ -20,7 +20,7 @@ from examples.fault_injection.pytorch import (
     _validate_run,
     _validate_target_ranks,
 )
-from lm_resiliency import FaultCampaign
+from lm_resiliency import FaultCampaign, InjectionStatus, enable_fault_injection
 
 CAMPAIGN_PATH = Path("examples/fault_injection/campaign.json")
 BASE_MANIFEST = {
@@ -219,6 +219,7 @@ def test_evaluation_state_reset_restores_the_last_clean_optimizer_boundary() -> 
         optimizer,
         {2},
     )
+    reset.start()
 
     def step() -> None:
         optimizer.zero_grad()
@@ -243,6 +244,7 @@ def test_evaluation_state_reset_freezes_snapshot_during_bounded_window() -> None
         {3},
         {1, 2},
     )
+    reset.start()
     clean = model.weight.detach().clone()
 
     def step() -> None:
@@ -272,6 +274,7 @@ def test_evaluation_state_reset_defers_reset_through_another_active_window() -> 
         {2, 3},
         {1, 2},
     )
+    reset.start()
     clean = model.weight.detach().clone()
 
     def step() -> None:
@@ -290,6 +293,112 @@ def test_evaluation_state_reset_defers_reset_through_another_active_window() -> 
     torch.testing.assert_close(model.weight, clean)
     assert reset.restored_iterations == [3]
     reset.close()
+
+
+def test_evaluation_state_reset_runs_after_fault_boundary_completion() -> None:
+    model = torch.nn.Sequential(torch.nn.Linear(2, 1, bias=False))
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.0)
+    baseline = model[0].weight.detach().clone()
+    reset = EvaluationStateReset(
+        SimpleNamespace(module=model),
+        optimizer,
+        {1},
+    )
+    campaign = FaultCampaign.from_dict(
+        {
+            "schema_version": 1,
+            "name": "state-reset-order",
+            "incidents": [
+                {
+                    "id": "weight-fault",
+                    "trigger": {"at": [1]},
+                    "lifetime": {"iterations": 1},
+                    "faults": [
+                        {
+                            "id": "weight",
+                            "type": "tensor_corruption",
+                            "target": {
+                                "rank": 0,
+                                "module_path": "0",
+                                "surface": "weight",
+                            },
+                            "parameters": {
+                                "operation": "sign_flip",
+                                "scope": "single",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    faults = enable_fault_injection(model, optimizer, campaign=campaign, rank=0)
+    reset.start()
+
+    optimizer.zero_grad()
+    model(torch.ones(1, 2)).sum().backward()
+    optimizer.step()
+
+    assert faults.records[0].status is InjectionStatus.COMPLETED
+    assert reset.restored_iterations == [1]
+    torch.testing.assert_close(model[0].weight, baseline)
+    reset.close()
+    faults.close()
+
+
+def test_evaluation_state_reset_captures_before_next_fault_is_armed() -> None:
+    model = torch.nn.Sequential(torch.nn.Linear(2, 1, bias=False))
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    reset = EvaluationStateReset(
+        SimpleNamespace(module=model),
+        optimizer,
+        {2},
+    )
+    campaign = FaultCampaign.from_dict(
+        {
+            "schema_version": 1,
+            "name": "state-reset-capture-order",
+            "incidents": [
+                {
+                    "id": "weight-fault",
+                    "trigger": {"at": [2]},
+                    "lifetime": {"iterations": 1},
+                    "faults": [
+                        {
+                            "id": "weight",
+                            "type": "tensor_corruption",
+                            "target": {
+                                "rank": 0,
+                                "module_path": "0",
+                                "surface": "weight",
+                            },
+                            "parameters": {
+                                "operation": "sign_flip",
+                                "scope": "single",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    faults = enable_fault_injection(model, optimizer, campaign=campaign, rank=0)
+    reset.start()
+
+    optimizer.zero_grad()
+    model(torch.ones(1, 2)).sum().backward()
+    optimizer.step()
+    clean_after_step_one = reset._model_state["0.weight"].detach().clone()
+    assert not torch.equal(model[0].weight, clean_after_step_one)
+
+    optimizer.zero_grad()
+    model(torch.ones(1, 2)).sum().backward()
+    optimizer.step()
+
+    assert faults.records[0].status is InjectionStatus.COMPLETED
+    torch.testing.assert_close(model[0].weight, clean_after_step_one)
+    reset.close()
+    faults.close()
 
 
 def test_teardown_attempts_every_cleanup_and_preserves_active_error() -> None:
@@ -314,10 +423,10 @@ def test_teardown_attempts_every_cleanup_and_preserves_active_error() -> None:
         destroy_process_group=lambda: events.append("process-group"),
     )
 
-    assert events == ["faults", "state-reset", "resiliency", "process-group"]
+    assert events == ["state-reset", "faults", "resiliency", "process-group"]
     assert getattr(active_error, "__notes__", []) == [
-        "example teardown also failed: fault cleanup failed",
         "example teardown also failed: state cleanup failed",
+        "example teardown also failed: fault cleanup failed",
     ]
 
 
@@ -805,7 +914,54 @@ def test_comparison_preserves_rank_resource_pairs() -> None:
     assert occurrence["rank_match"]
     assert occurrence["resource_match"]
     assert not occurrence["rank_resource_pair_match"]
+    assert occurrence["detected_action_count"] == 0
     assert not occurrence["localized"]
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        {
+            "rank": 0,
+            "model_part": 0,
+            "component": "Layer",
+            "index": 12,
+            "surface": "output",
+        },
+        {
+            "rank": 0,
+            "model_part": 0,
+            "component": "transformer-layer",
+            "index": 12,
+            "surface": "output",
+        },
+        {
+            "rank": 0,
+            "model_part": 0,
+            "module_path": "model.layers.12.mlp",
+            "surface": "output",
+        },
+    ],
+)
+def test_comparison_authenticates_all_supported_layer_selectors(
+    target: dict[str, object],
+) -> None:
+    injection = _injection_payload()
+    injection["manifest"]["incidents"][0]["faults"][0]["target"] = copy.deepcopy(target)
+    injection["injections"][0]["target"] = copy.deepcopy(target)
+    localization = _localization_payload(layer_id=13)
+    _refresh_manifest_identity(injection, localization)
+
+    wrong = compare_payloads(injection, localization)["evaluations"][0]
+
+    assert not wrong["layer_match"]
+    assert not wrong["localized"]
+
+    localization["reports"][0]["layer_id"] = 12
+    correct = compare_payloads(injection, localization)["evaluations"][0]
+
+    assert correct["layer_match"]
+    assert correct["localized"]
 
 
 def test_comparison_correlates_positive_layers_with_failed_targets() -> None:

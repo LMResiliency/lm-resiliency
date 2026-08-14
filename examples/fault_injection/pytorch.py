@@ -56,34 +56,74 @@ class EvaluationStateReset:
         optimizer: torch.optim.Optimizer,
         reset_iterations: Container[int],
         hold_iterations: Container[int] = (),
+        *,
+        synchronize: Callable[[], None] | None = None,
     ) -> None:
         self._model = model.module
         self._optimizer = optimizer
         self._reset_iterations = reset_iterations
         self._hold_iterations = hold_iterations
+        self._synchronize = synchronize
         self._model_state: dict[str, Any]
         self._optimizer_state: dict[str, Any]
         self._completed_iterations = 0
+        self._original_step: Callable[..., Any] | None = None
+        self._wrapped_step: Callable[..., Any] | None = None
+        self._capture_handle: Any | None = None
         self.restored_iterations: list[int] = []
         self._capture()
-        self._handle = optimizer.register_step_post_hook(self._after_step)
+
+    def start(self) -> None:
+        if self._wrapped_step is not None:
+            return
+        capture_handle = self._optimizer.register_step_post_hook(self._capture_after_step)
+        original_step = self._optimizer.step
+
+        def wrapped_step(*args: Any, **kwargs: Any) -> Any:
+            result = original_step(*args, **kwargs)
+            self._after_step()
+            return result
+
+        self._capture_handle = capture_handle
+        self._original_step = original_step
+        self._wrapped_step = wrapped_step
+        self._optimizer.step = wrapped_step
 
     def close(self) -> None:
-        self._handle.remove()
+        wrapped_step = self._wrapped_step
+        original_step = self._original_step
+        if wrapped_step is not None and self._optimizer.step is wrapped_step:
+            if original_step is None:
+                raise RuntimeError("evaluation state reset lost its original optimizer step")
+            self._optimizer.step = original_step
+        capture_handle = self._capture_handle
+        if capture_handle is not None:
+            capture_handle.remove()
+        self._capture_handle = None
+        self._wrapped_step = None
+        self._original_step = None
 
-    def _after_step(self, *_args: Any, **_kwargs: Any) -> None:
+    def _capture_after_step(self, *_args: Any, **_kwargs: Any) -> None:
+        iteration = self._completed_iterations + 1
+        if iteration in self._hold_iterations or iteration in self._reset_iterations:
+            return
+        self._capture()
+
+    def _after_step(self) -> None:
         self._completed_iterations += 1
         if self._completed_iterations in self._hold_iterations:
             return
         if self._completed_iterations in self._reset_iterations:
+            if self._synchronize is not None:
+                self._synchronize()
             device = next(self._model.parameters()).device
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             self._model.load_state_dict(copy.deepcopy(self._model_state))
             self._optimizer.load_state_dict(copy.deepcopy(self._optimizer_state))
             self.restored_iterations.append(self._completed_iterations)
-            return
-        self._capture()
+            if self._synchronize is not None:
+                self._synchronize()
 
     def _capture(self) -> None:
         self._model_state = copy.deepcopy(self._model.state_dict())
@@ -157,6 +197,7 @@ def main() -> None:
         optimizer,
         reset_iterations,
         hold_iterations,
+        synchronize=dist.barrier,
     )
     try:
         faults = enable_fault_injection(
@@ -164,6 +205,7 @@ def main() -> None:
             optimizer,
             campaign=campaign,
         )
+        state_reset.start()
         for step in range(1, steps + 1):
             localizations.training_iteration = step
             tokens, labels = _tokens(rank, step - 1, device)
@@ -461,7 +503,7 @@ def _incident_selected(
 
 def _teardown(
     faults: FaultInjectionSession | None,
-    state_reset: EvaluationStateReset,
+    state_reset: EvaluationStateReset | None,
     resiliency: Any,
     *,
     active_error: BaseException | None,
@@ -469,8 +511,8 @@ def _teardown(
 ) -> None:
     cleanup_errors: list[BaseException] = []
     actions = (
+        None if state_reset is None else state_reset.close,
         None if faults is None else faults.close,
-        state_reset.close,
         resiliency.close,
         destroy_process_group,
     )

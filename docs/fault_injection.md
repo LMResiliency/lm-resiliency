@@ -443,7 +443,10 @@ active state faults, so a recovered value equal to the injected value is not
 mistaken for a still-live fault and overwritten with pre-fault state.
 A bounded state effect replaced before its configured expiration is recorded as
 failed because the requested lifetime was not executed. Replacement at the
-normal expiration boundary remains successful and preserves the restored state.
+normal post-update expiration boundary remains successful and preserves the
+restored state. Replacement is compared with the last completed optimizer
+iteration, so loading clean state after activation but before that iteration's
+optimizer boundary fails even a one-iteration occurrence.
 
 Custom executors receive the full `target` and `parameters` objects unchanged.
 They may define additional fields, but should validate those fields before the
@@ -626,6 +629,9 @@ consensus for the same reason.
 If any runtime preparation, preflight, persistence, rollback, or safe-activation
 collective itself raises, the surviving rank performs bounded local cleanup
 before propagating the collective failure.
+This includes interrupt-class failures raised by the collective operation
+itself: active effects and framework callbacks are cleaned before the original
+interrupt is re-raised.
 An interrupt-class failure raised during safe activation participates in that
 same all-rank failure consensus. Newly armed effects are rolled back on every
 rank before the interrupted rank re-raises its original exception.
@@ -749,6 +755,9 @@ matching only the aggregate sets is insufficient.
 When a kind contains actions that specify both rank and resource, the exact
 `(rank, resource)` pairs must also match within that kind. Correct rank and
 resource projections with the pairs swapped are not successful attribution.
+Neutral localization results may include `scope`. A `peer_group` result counts
+as detection evidence but is inconclusive for rank or resource localization, so
+its targets, kind, and components receive no attribution credit.
 
 Reports contain:
 
