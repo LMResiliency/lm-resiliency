@@ -17,4 +17,4 @@ def test_quickstart_keeps_source_and_example_on_same_revision():
     assert "git clone https://github.com/LMResiliency/lm-resiliency.git" in quickstart
     assert "python -m pip install -e ." in quickstart
     assert "python examples/quickstart.py" in quickstart
-    assert "--branch \"v${LM_RESILIENCY_VERSION}\"" not in quickstart
+    assert '--branch "v${LM_RESILIENCY_VERSION}"' not in quickstart
