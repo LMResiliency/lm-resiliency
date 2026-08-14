@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from collections.abc import Mapping, Sequence
@@ -1252,7 +1253,7 @@ class CheckpointCertification(_WireRecord):
     checkpoint_id: str | None
     expected_world_size: int
     certification_kind: str
-    inventory_event_ids: tuple[str, ...]
+    inventory_event_digests: Mapping[str, str]
 
     def __post_init__(self) -> None:
         _string(self.certification_id, "CheckpointCertification.certification_id")
@@ -1288,16 +1289,29 @@ class CheckpointCertification(_WireRecord):
             "CheckpointCertification.certification_kind",
             {"dense_consensus", "dynamic_candidate_promotion"},
         )
-        event_ids = _strings(
-            self.inventory_event_ids,
-            "CheckpointCertification.inventory_event_ids",
-            unique=True,
-        )
-        if not event_ids:
+        if not isinstance(self.inventory_event_digests, Mapping):
             raise ProtocolValidationError(
-                "CheckpointCertification.inventory_event_ids: at least one event is required"
+                "CheckpointCertification.inventory_event_digests: expected an object"
             )
-        object.__setattr__(self, "inventory_event_ids", event_ids)
+        event_digests = {
+            _string(
+                event_id,
+                "CheckpointCertification.inventory_event_digests.key",
+            ): _sha256_digest(
+                digest,
+                f"CheckpointCertification.inventory_event_digests[{event_id!r}]",
+            )
+            for event_id, digest in self.inventory_event_digests.items()
+        }
+        if not event_digests:
+            raise ProtocolValidationError(
+                "CheckpointCertification.inventory_event_digests: at least one event is required"
+            )
+        object.__setattr__(
+            self,
+            "inventory_event_digests",
+            MappingProxyType(dict(sorted(event_digests.items()))),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1311,7 +1325,7 @@ class CheckpointCertification(_WireRecord):
             "checkpoint_id": self.checkpoint_id,
             "expected_world_size": self.expected_world_size,
             "certification_kind": self.certification_kind,
-            "inventory_event_ids": list(self.inventory_event_ids),
+            "inventory_event_digests": dict(self.inventory_event_digests),
         }
 
     @classmethod
@@ -1329,7 +1343,7 @@ class CheckpointCertification(_WireRecord):
                 "checkpoint_id",
                 "expected_world_size",
                 "certification_kind",
-                "inventory_event_ids",
+                "inventory_event_digests",
             },
         )
         return cls(
@@ -1371,12 +1385,27 @@ class CheckpointCertification(_WireRecord):
                 "CheckpointCertification.certification_kind",
                 {"dense_consensus", "dynamic_candidate_promotion"},
             ),
-            inventory_event_ids=_strings(
-                value["inventory_event_ids"],
-                "CheckpointCertification.inventory_event_ids",
-                unique=True,
+            inventory_event_digests=_require_mapping(
+                value["inventory_event_digests"],
+                "CheckpointCertification.inventory_event_digests",
             ),
         )
+
+
+def _sha256_digest(value: object, path: str) -> str:
+    digest = _string(value, path)
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise ProtocolValidationError(f"{path}: expected a lowercase SHA-256 digest")
+    return digest
+
+
+def checkpoint_inventory_digest(event: CheckpointInventoryEvent) -> str:
+    """Return the canonical digest stored by trusted checkpoint certification."""
+    if not isinstance(event, CheckpointInventoryEvent):
+        raise ProtocolValidationError(
+            "checkpoint_inventory_digest.event: expected CheckpointInventoryEvent"
+        )
+    return hashlib.sha256(event.to_json().encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -2568,7 +2597,7 @@ def validate_restart_plan(
             )
         inventory_by_id[event.event_id] = event
     certification_ids: set[str] = set()
-    certified_inventory_event_ids: set[str] = set()
+    certified_inventory_event_digests: dict[str, str] = {}
     for index, certification in enumerate(
         _sequence(trusted_certifications, "trusted_certifications")
     ):
@@ -2591,7 +2620,14 @@ def validate_restart_plan(
             and certification.checkpoint_id == plan.checkpoint_id
             and certification.expected_world_size == plan.expected_world_size
         ):
-            certified_inventory_event_ids.update(certification.inventory_event_ids)
+            for event_id, digest in certification.inventory_event_digests.items():
+                previous_digest = certified_inventory_event_digests.get(event_id)
+                if previous_digest is not None and previous_digest != digest:
+                    raise ProtocolValidationError(
+                        "trusted_certifications: conflicting digests for inventory event "
+                        f"{event_id!r}"
+                    )
+                certified_inventory_event_digests[event_id] = digest
     if not isinstance(authenticated_ack_agent_ids, Mapping):
         raise ProtocolValidationError("authenticated_ack_agent_ids: expected an object")
     authenticated_ack_agents = {
@@ -2679,7 +2715,7 @@ def validate_restart_plan(
                 manifest,
                 inventory_by_id,
                 ack_by_node,
-                certified_inventory_event_ids,
+                certified_inventory_event_digests,
             )
             and copy.holder_kind in compatible_holder_kinds
             and (
@@ -2706,7 +2742,7 @@ def _copy_has_trusted_inventory_provenance(
     manifest: RecoveryManifest,
     inventory_by_id: Mapping[str, CheckpointInventoryEvent],
     ack_by_node: Mapping[str, RestartAck],
-    certified_inventory_event_ids: set[str],
+    certified_inventory_event_digests: Mapping[str, str],
 ) -> bool:
     event = inventory_by_id.get(copy.inventory_event_id)
     if event is None:
@@ -2728,7 +2764,9 @@ def _copy_has_trusted_inventory_provenance(
     ):
         return False
     if manifest.trust != "latest":
-        return event.event_id in certified_inventory_event_ids
+        return certified_inventory_event_digests.get(event.event_id) == checkpoint_inventory_digest(
+            event
+        )
     ack = ack_by_node.get(event.reporter.node_id)
     return (
         ack is not None
@@ -2757,6 +2795,7 @@ __all__ = [
     "RestartPlan",
     "SlotAssignment",
     "WorkerIdentity",
+    "checkpoint_inventory_digest",
     "validate_restart_plan",
     "validate_event_reporter",
     "validate_worker_identity",

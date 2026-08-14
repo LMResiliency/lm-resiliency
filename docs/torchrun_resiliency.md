@@ -439,14 +439,16 @@ class CheckpointCertification(TypedDict):
         "dense_consensus",
         "dynamic_candidate_promotion",
     ]
-    inventory_event_ids: list[str]
+    inventory_event_digests: dict[str, str]  # event ID to canonical SHA-256
 ```
 
 This record is written only after job-wide dense acceptance or the documented
 two-cycle dynamic-catalog promotion. It is not accepted through the worker
 event sink. A worker-declared `recovery_verified` inventory is eligible only
 when a trusted certification matches its run, generation, step, topology,
-source, durable checkpoint ID, world size, and inventory event ID.
+source, durable checkpoint ID, world size, and canonical inventory-event
+digest. Reusing an event ID with different copy contents therefore cannot reuse
+the earlier certification.
 
 ### Local client protocol
 

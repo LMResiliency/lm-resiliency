@@ -25,6 +25,7 @@ from lm_resiliency.integrations.torchrun._protocol import (
     RestartPlan,
     SlotAssignment,
     WorkerIdentity,
+    checkpoint_inventory_digest,
     validate_event_reporter,
     validate_restart_plan,
     validate_worker_identity,
@@ -261,6 +262,7 @@ def _inventory_event(
 def _certification(
     plan: RestartPlan,
     manifest: RecoveryManifest,
+    inventory_events: tuple[CheckpointInventoryEvent, ...],
 ) -> CheckpointCertification:
     return CheckpointCertification(
         certification_id=f"certification-{manifest.step}",
@@ -272,13 +274,9 @@ def _certification(
         checkpoint_id=plan.checkpoint_id,
         expected_world_size=plan.expected_world_size,
         certification_kind="dense_consensus",
-        inventory_event_ids=tuple(
-            dict.fromkeys(
-                copy.inventory_event_id
-                for rank_copies in manifest.rank_copies
-                for copy in rank_copies.copies
-            )
-        ),
+        inventory_event_digests={
+            event.event_id: checkpoint_inventory_digest(event) for event in inventory_events
+        },
     )
 
 
@@ -301,15 +299,22 @@ def _validate(
     selected_intent = intent or _intent()
     selected_manifest = manifest or _manifest()
     selected_acks = (_ack(),) if restart_acks is None else restart_acks
+    selected_inventory_events = (
+        (_inventory_event(selected_manifest),) if inventory_events is None else inventory_events
+    )
     validate_restart_plan(
         selected_plan,
         selected_intent,
         selected_manifest,
-        inventory_events=(
-            (_inventory_event(selected_manifest),) if inventory_events is None else inventory_events
-        ),
+        inventory_events=selected_inventory_events,
         trusted_certifications=(
-            (_certification(selected_plan, selected_manifest),)
+            (
+                _certification(
+                    selected_plan,
+                    selected_manifest,
+                    selected_inventory_events,
+                ),
+            )
             if trusted_certifications is None and selected_manifest.trust == "recovery_verified"
             else (() if trusted_certifications is None else trusted_certifications)
         ),
@@ -392,6 +397,7 @@ def _records():
         _certification(
             _plan(recovery_mode="recovery_verified"),
             _manifest(trust="recovery_verified"),
+            (_inventory_event(_manifest(trust="recovery_verified")),),
         ),
         _intent(),
         _ack(),
@@ -534,6 +540,41 @@ def test_verified_inventory_requires_trusted_catalog_certification():
             intent=_intent(minimum_recovery_mode="recovery_verified"),
             manifest=manifest,
             trusted_certifications=(),
+        )
+
+
+def test_certification_binds_immutable_inventory_contents():
+    plan = _plan(recovery_mode="recovery_verified")
+    original_manifest = _manifest(trust="recovery_verified")
+    original_event = _inventory_event(original_manifest)
+    certification = _certification(
+        plan,
+        original_manifest,
+        (original_event,),
+    )
+    altered_manifest = replace(
+        original_manifest,
+        rank_copies=tuple(
+            replace(
+                rank_copies,
+                copies=tuple(
+                    replace(copy, location_token="substituted-location")
+                    if copy.owner_global_rank == 0
+                    else copy
+                    for copy in rank_copies.copies
+                ),
+            )
+            for rank_copies in original_manifest.rank_copies
+        ),
+    )
+
+    with pytest.raises(ProtocolValidationError, match="no complete eligible copy"):
+        _validate(
+            plan=plan,
+            intent=_intent(minimum_recovery_mode="recovery_verified"),
+            manifest=altered_manifest,
+            inventory_events=(_inventory_event(altered_manifest),),
+            trusted_certifications=(certification,),
         )
 
 
