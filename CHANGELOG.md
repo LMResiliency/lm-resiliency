@@ -8,6 +8,7 @@ The project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 ### Added
 
 - A runnable CPU quick-start example with a complete native PyTorch training loop and GEMINI checkpoint resume.
+- A scheduled and maintainer-dispatched two-GPU qualification workflow with machine-readable revision, environment, topology, command, log, and checksum evidence.
 
 ### Changed
 

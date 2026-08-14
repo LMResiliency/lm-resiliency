@@ -19,3 +19,19 @@ python -m pytest -q
 Distributed programs document their required `torchrun` command in the module docstring.
 Production-loop integration is exercised directly through `examples/production_loops/` with `--inject-fault`.
 MoE validation is manual because it depends on specific GPU, Triton, Megatron Core, and Transformer Engine environments.
+
+## Automated GPU Qualification
+
+The scheduled and maintainer-dispatched [GPU Qualification workflow](../.github/workflows/gpu-qualification.yml) runs a two-GPU, one-host trusted tier on a self-hosted runner. It covers trajectory-equivalent checkpoint recovery, Gloo/NCCL replay, synchronized dropout RNG, structured invocation replay, FSDP2 local-shard checkpoint recovery, and automatic exit cleanup.
+
+The runner must be an isolated Linux x64 host with at least two visible CUDA GPUs and the labels `self-hosted`, `linux`, `x64`, `gpu`, and `lm-resiliency`. The workflow is deliberately not triggered by pull requests, so untrusted fork code cannot execute on the privileged runner. Prefer an ephemeral runner image and do not attach production credentials or writable production storage.
+
+Every run uploads `environment.json`, `commands.txt`, per-command logs, `summary.json`, `summary.md`, and SHA-256 checksums under an artifact named for the exact commit. Run the same tier manually with:
+
+```bash
+python tests/validation/run_gpu_qualification.py \
+  --artifact-dir /tmp/lm-resiliency-gpu-qualification \
+  --minimum-gpus 2
+```
+
+Eight/sixteen-GPU, multi-node, optional-framework, and MoE campaigns remain release qualification rather than part of this frequent tier.

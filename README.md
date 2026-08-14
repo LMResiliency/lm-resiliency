@@ -5,6 +5,7 @@
 ### Fast checkpoint recovery and fault localization for distributed LLM pre-training
 
 [![16 GPU Feature Tests](https://img.shields.io/badge/16_GPU_Feature_Tests-passing-brightgreen.svg)](docs/validation.md#release-baseline)
+[![GPU Qualification](https://github.com/LMResiliency/lm-resiliency/actions/workflows/gpu-qualification.yml/badge.svg?branch=main)](https://github.com/LMResiliency/lm-resiliency/actions/workflows/gpu-qualification.yml)
 [![pip](https://img.shields.io/pypi/v/lm-resiliency?color=blue)](https://pypi.org/project/lm-resiliency/)
 [![PyTorch 2.10–2.13](https://img.shields.io/badge/PyTorch-2.10--2.13-EE4C2C.svg)](https://pytorch.org/)
 [![TorchTitan 0.2.2](https://img.shields.io/badge/TorchTitan-0.2.2-EE4C2C.svg)](https://github.com/pytorch/torchtitan)
