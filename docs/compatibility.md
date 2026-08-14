@@ -50,8 +50,9 @@ The exact stable exports are listed in the [API guide](api.md#public-api-stabili
 ## Static Typing
 
 Published wheels include the PEP 561 `py.typed` marker, so downstream type checkers may consume the package's inline annotations.
-CI runs mypy over the stable package root, manager API, orchestration/recovery records, and a downstream public-import fixture.
-Framework-specific implementation modules remain outside the initial static-typing gate because their optional dependencies and framework internals require narrower per-integration typing work.
+CI follows normal imports and checks the stable package root, manager API, orchestration/recovery records, and a downstream fixture that asserts concrete exported types.
+Known pre-existing errors in internal checkpointing, detection, framework-integration, and feature-wiring modules are scoped with explicit mypy overrides; their annotations remain visible to the checked public dependency closure instead of being replaced with `Any` by skipped imports.
+The static gate is therefore a checked public-contract baseline, not a claim that every internal module is already mypy-clean.
 Runtime contract tests and distributed validation remain authoritative for behavior that static typing cannot prove.
 
 ## Manager Compatibility
