@@ -1,0 +1,29 @@
+name: Trigger Codex re-review
+
+on:
+  pull_request_target:
+    types:
+      - synchronize
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  request_codex_review:
+    name: Request Codex review
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Comment Codex review trigger
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          gh api \
+            --method POST \
+            "repos/$REPOSITORY/issues/$PR_NUMBER/comments" \
+            -f body='@codex review'
