@@ -161,6 +161,18 @@ def test_disk_safe_format_round_trips_schema_constrained_metadata(tmp_path):
     assert restored["bytes"] == state["bytes"]
 
 
+def test_disk_safe_format_round_trips_tensor_valued_extra(tmp_path):
+    rng_state = torch.get_rng_state()
+    metadata = FlatStateDictMetadata(non_tensor_data={"extra": {"rng": rng_state}})
+    serializer = DiskSerializer(str(tmp_path), rank=0)
+
+    serializer.save_sync(metadata, [], step=7)
+    loaded_metadata, loaded_tensors = serializer.load(7)
+
+    assert loaded_tensors == []
+    assert torch.equal(loaded_metadata.non_tensor_data["extra"]["rng"], rng_state)
+
+
 def test_disk_load_rejects_pickle_payload_without_executing_it(tmp_path):
     marker = tmp_path / "pickle-executed"
     path = tmp_path / "step-8" / "rank-0.pt"

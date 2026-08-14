@@ -205,6 +205,22 @@ def _encode_value(value: Any, *, depth: int) -> dict[str, Any]:
         return {"kind": "torch_dtype", "value": _encode_dtype(value)}
     if isinstance(value, torch.device):
         return {"kind": "torch_device", "value": str(value)}
+    if isinstance(value, torch.Tensor):
+        if value.device.type != "cpu":
+            raise TypeError("only CPU tensors are supported in checkpoint metadata")
+        if value.layout is not torch.strided or value.is_quantized:
+            raise TypeError(
+                "only dense, non-quantized tensors are supported in checkpoint metadata"
+            )
+        contiguous = value.detach().contiguous()
+        return {
+            "kind": "torch_tensor",
+            "dtype": _encode_dtype(contiguous.dtype),
+            "shape": list(contiguous.shape),
+            "data": base64.b64encode(
+                contiguous.flatten().view(torch.uint8).numpy().tobytes()
+            ).decode("ascii"),
+        }
     if isinstance(value, np.ndarray):
         if value.dtype.hasobject:
             raise TypeError("object-dtype NumPy arrays are not supported in checkpoint metadata")
@@ -301,6 +317,31 @@ def _decode_value(value: object, *, depth: int) -> Any:
             raise CheckpointFormatError(
                 "checkpoint metadata torch_device has an invalid value"
             ) from error
+    if kind == "torch_tensor":
+        _require_exact_keys(
+            value,
+            {"kind", "dtype", "shape", "data"},
+            "checkpoint metadata torch_tensor",
+        )
+        dtype = _decode_dtype(value["dtype"], "checkpoint metadata torch_tensor dtype")
+        shape = value["shape"]
+        if not isinstance(shape, list) or any(
+            type(dimension) is not int or dimension < 0 for dimension in shape
+        ):
+            raise CheckpointFormatError("checkpoint metadata torch_tensor shape is invalid")
+        data = _decode_base64(value["data"], "checkpoint metadata torch_tensor")
+        try:
+            element_size = torch.empty((), dtype=dtype).element_size()
+        except RuntimeError as error:
+            raise CheckpointFormatError(
+                "checkpoint metadata torch_tensor dtype is unsupported"
+            ) from error
+        element_count = math.prod(shape)
+        if len(data) != element_count * element_size:
+            raise CheckpointFormatError("checkpoint metadata torch_tensor byte length is invalid")
+        if not data:
+            return torch.empty(shape, dtype=dtype)
+        return torch.frombuffer(bytearray(data), dtype=dtype).clone().reshape(shape)
     if kind in {"numpy_array", "numpy_scalar"}:
         required = {"kind", "dtype", "data"}
         if kind == "numpy_array":
