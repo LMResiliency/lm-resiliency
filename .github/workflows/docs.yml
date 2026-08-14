@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - main
-  release:
+  workflow_run:
+    workflows:
+      - Release
     types:
-      - published
+      - completed
   workflow_dispatch:
 
 permissions:
@@ -19,16 +21,19 @@ concurrency:
 jobs:
   deploy:
     name: Publish versioned docs
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
 
     steps:
-      - name: Check out repository
+      - name: Check out documentation source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.sha }}
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || 'main' }}
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -47,8 +52,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+          RELEASE_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -57,16 +61,36 @@ jobs:
 
           if [[ "$EVENT_NAME" == "push" || "$EVENT_NAME" == "workflow_dispatch" ]]; then
             mike deploy --push dev
+            if ! mike list | grep -Eq '(^|[[:space:]])latest([[:space:]]|$)'; then
+              mike set-default --push dev
+            fi
             exit 0
           fi
 
-          if [[ "$EVENT_NAME" != "release" || "$RELEASE_TAG" != v* ]]; then
-            echo "Unsupported documentation event: $EVENT_NAME / $RELEASE_TAG" >&2
+          if [[ "$EVENT_NAME" != "workflow_run" ]]; then
+            echo "Unsupported documentation event: $EVENT_NAME" >&2
             exit 1
           fi
 
-          version="${RELEASE_TAG#v}"
-          if [[ "$RELEASE_PRERELEASE" == "true" ]]; then
+          mapfile -t release_tags < <(
+            git tag --points-at "$RELEASE_HEAD_SHA" |
+              grep -E '^v[0-9]+([.][0-9]+){1,2}([.-].*)?$' || true
+          )
+          if [[ "${#release_tags[@]}" -ne 1 ]]; then
+            echo "Expected exactly one release tag at $RELEASE_HEAD_SHA, found ${#release_tags[@]}" >&2
+            exit 1
+          fi
+
+          release_tag="${release_tags[0]}"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$release_tag" \
+            --jq 'select(.draft == false) | .tag_name' |
+            grep -Fx "$release_tag" >/dev/null
+
+          version="${release_tag#v}"
+          prerelease=$(
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$release_tag" --jq '.prerelease'
+          )
+          if [[ "$prerelease" == "true" ]]; then
             mike deploy --push "$version"
             exit 0
           fi
@@ -80,7 +104,7 @@ jobs:
           )
           test -n "$latest_tag"
 
-          if [[ "$RELEASE_TAG" == "$latest_tag" ]]; then
+          if [[ "$release_tag" == "$latest_tag" ]]; then
             mike deploy --push --update-aliases "$version" latest
             mike set-default --push latest
           else
