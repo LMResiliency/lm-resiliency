@@ -665,9 +665,18 @@ class FaultInjectionSession:
             return
         requires_activation_consensus = self._has_safe_activation(iteration)
         if _distributed_world_size() <= 1:
-            self._preflight_iteration(iteration)
-            staged = self._stage_iteration_attempts(iteration, candidates)
-            self._activate_staged_iteration(iteration, staged)
+            try:
+                self._preflight_iteration(iteration)
+                staged = self._stage_iteration_attempts(iteration, candidates)
+                self._activate_staged_iteration(iteration, staged)
+            except Exception as error:
+                cleanup_error = self._cleanup()
+                if cleanup_error is not None:
+                    _add_exception_note(
+                        error,
+                        f"fault injection cleanup also failed: {cleanup_error}",
+                    )
+                raise
             return
 
         preflight_error: Exception | None = None
@@ -1418,7 +1427,15 @@ def _evaluate_occurrence(
     results: tuple[LocalizationResult, ...],
     incident: FaultIncident,
 ) -> FaultEvaluation:
-    expected_ranks = tuple(sorted({fault.target.execution_rank for fault in incident.faults}))
+    expected_ranks = tuple(
+        sorted(
+            {
+                fault.target.execution_rank
+                for fault in incident.faults
+                if fault.target.resource is None
+            }
+        )
+    )
     expected_resources = tuple(
         sorted(
             {
@@ -1522,7 +1539,7 @@ def _expected_targets_for_kind(
 ) -> tuple[frozenset[int], frozenset[str]]:
     faults = tuple(fault for fault in incident.faults if fault.expected_kind == kind)
     return (
-        frozenset(fault.target.execution_rank for fault in faults),
+        frozenset(fault.target.execution_rank for fault in faults if fault.target.resource is None),
         frozenset(fault.target.resource for fault in faults if fault.target.resource is not None),
     )
 

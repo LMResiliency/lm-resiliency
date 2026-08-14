@@ -1131,7 +1131,57 @@ def test_single_rank_future_preflight_failure_does_not_consume_attempt() -> None
         _step(model, optimizer)
 
     assert store.load(campaign.name).attempts == {}
-    session.close()
+    assert session._closed
+
+
+def test_single_rank_future_preflight_failure_restores_active_faults() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    baseline = model.layers[0].weight.detach().clone()
+
+    def validate(_request) -> None:
+        raise RuntimeError("future executor unavailable")
+
+    executor = CallbackFaultExecutor(
+        name="future-failure",
+        supported_types={FailureType.EXCEPTION},
+        activate=lambda _request: FaultExecutionResult(verified=True, active=False),
+        validate=validate,
+        one_shot=True,
+        max_safety=SafetyClass.ISOLATED_DESTRUCTIVE,
+    )
+    persistent = _corruption(
+        target=_target(surface=FaultSurface.WEIGHT),
+        scope=FaultScope.SINGLE,
+    )
+    future = _external_fault(FailureType.EXCEPTION)
+    campaign = _campaign(
+        _incident(
+            incident_id="persistent",
+            at=(1,),
+            lifetime=IncidentLifetime(until="campaign_end"),
+            faults=(persistent,),
+        ),
+        _incident(
+            incident_id="future",
+            at=(2,),
+            faults=(future,),
+        ),
+    )
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=campaign,
+        executors=(executor,),
+        rank=0,
+    )
+
+    assert not torch.equal(model.layers[0].weight, baseline)
+    with pytest.raises(RuntimeError, match="future executor unavailable"):
+        _step(model, optimizer)
+
+    assert session._closed
+    torch.testing.assert_close(model.layers[0].weight, baseline)
 
 
 def test_future_boundary_preparation_failure_is_propagated_to_all_ranks() -> None:
@@ -3609,6 +3659,47 @@ def test_evaluation_snapshots_record_transitions_atomically() -> None:
     session.close()
 
 
+def test_live_record_serialization_waits_for_atomic_transition() -> None:
+    model = TinyModel()
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(_incident(at=(1,))),
+        rank=0,
+    )
+    record = session.records[0]
+    transition_started = threading.Event()
+    release_transition = threading.Event()
+    serialization_done = threading.Event()
+    payloads: list[dict[str, object]] = []
+
+    def transition() -> None:
+        with record._lock:
+            record.verified = True
+            transition_started.set()
+            release_transition.wait(timeout=5)
+            record.status = InjectionStatus.ACTIVE
+
+    def serialize() -> None:
+        payloads.append(record.to_dict())
+        serialization_done.set()
+
+    transition_thread = threading.Thread(target=transition)
+    transition_thread.start()
+    assert transition_started.wait(timeout=5)
+    serialization_thread = threading.Thread(target=serialize)
+    serialization_thread.start()
+    assert not serialization_done.wait(timeout=0.05)
+    release_transition.set()
+    transition_thread.join(timeout=5)
+    serialization_thread.join(timeout=5)
+
+    assert payloads[0]["verified"] is True
+    assert payloads[0]["status"] == InjectionStatus.ACTIVE.value
+    assert payloads[0]["injection_succeeded"] is True
+    session.close()
+
+
 def test_bit_flip_on_unsupported_float_dtype_fails_without_escaping_hook() -> None:
     if not hasattr(torch, "float8_e4m3fn"):
         pytest.skip("PyTorch does not expose float8")
@@ -3645,6 +3736,43 @@ def test_bit_flip_on_unsupported_float_dtype_fails_without_escaping_hook() -> No
     assert output.dtype is torch.float8_e4m3fn
     assert session.records[0].status is InjectionStatus.FAILED
     assert "bit flips do not support dtype" in str(session.records[0].error)
+    session.close()
+
+
+def test_set_value_overflow_fails_without_escaping_output_hook() -> None:
+    class HalfOutputModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.layers = nn.ModuleList([nn.Identity()])
+            self.anchor = nn.Parameter(torch.ones(()))
+
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            return self.layers[0](value)
+
+    model = HalfOutputModel()
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                faults=(
+                    _corruption(
+                        operation=CorruptionOperation.SET_VALUE,
+                        scope=FaultScope.SINGLE,
+                        value=1e100,
+                    ),
+                ),
+            )
+        ),
+        rank=0,
+    )
+
+    output = model(torch.ones(2, 4, dtype=torch.float16))
+
+    assert output.dtype is torch.float16
+    assert session.records[0].status is InjectionStatus.FAILED
+    assert "outside dtype torch.float16 range" in str(session.records[0].error)
     session.close()
 
 
@@ -4525,7 +4653,6 @@ def test_correlated_faults_share_one_occurrence_and_evaluation() -> None:
             LocalizationResult(
                 occurrence_id="incident@1",
                 detected=True,
-                failed_ranks=(0,),
                 failed_resources=("gpu-3", "process-3"),
                 kind="process_failure",
             )
@@ -4535,6 +4662,21 @@ def test_correlated_faults_share_one_occurrence_and_evaluation() -> None:
     assert {record.occurrence_id for record in session.records} == {"incident@1"}
     assert report.evaluations[0].localized
     assert report.evaluations[0].kind_matches
+    assert report.evaluations[0].expected_ranks == ()
+    assert report.evaluations[0].reported_ranks == ()
+    overclaimed = session.evaluate(
+        [
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_ranks=(0,),
+                failed_resources=("gpu-3", "process-3"),
+                kind="process_failure",
+            )
+        ]
+    ).evaluations[0]
+    assert not overclaimed.localized
+    assert overclaimed.unexpected_ranks == (0,)
     session.close()
 
 
@@ -4606,7 +4748,6 @@ def test_mixed_kind_correlated_faults_require_per_kind_target_evidence() -> None
             LocalizationResult(
                 occurrence_id="incident@1",
                 detected=True,
-                failed_ranks=(0,),
                 failed_resources=("process-0", "worker-0"),
                 kind="process_failure",
             )
@@ -4617,14 +4758,12 @@ def test_mixed_kind_correlated_faults_require_per_kind_target_evidence() -> None
             LocalizationResult(
                 occurrence_id="incident@1",
                 detected=True,
-                failed_ranks=(0,),
                 failed_resources=("process-0",),
                 kind="process_failure",
             ),
             LocalizationResult(
                 occurrence_id="incident@1",
                 detected=True,
-                failed_ranks=(0,),
                 failed_resources=("worker-0",),
                 kind="straggler",
             ),
@@ -4635,14 +4774,12 @@ def test_mixed_kind_correlated_faults_require_per_kind_target_evidence() -> None
             LocalizationResult(
                 occurrence_id="incident@1",
                 detected=True,
-                failed_ranks=(0,),
                 failed_resources=("process-0", "worker-0"),
                 kind="process_failure",
             ),
             LocalizationResult(
                 occurrence_id="incident@1",
                 detected=True,
-                failed_ranks=(0,),
                 failed_resources=("process-0", "worker-0"),
                 kind="straggler",
             ),

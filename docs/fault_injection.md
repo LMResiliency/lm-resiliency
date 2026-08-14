@@ -342,7 +342,9 @@ for example, `factor` is valid only for `scale` and `std` only for `noise`.
 `factor` and `std` must be finite numbers, `std` must be positive, `set_value`
 accepts only a number or `nan`/`inf` sentinel, and state-flow `scope` values
 must be one of the documented selectors. Invalid values never survive until a
-model hook executes.
+model hook executes. A finite `set_value` must also fit the dtype observed at
+runtime; otherwise the action is recorded as failed and the hook returns the
+unmodified tensor.
 
 Stale and duplicate faults retain two observed values only during their
 scheduled collection window. Module and gradient observation starts one
@@ -449,6 +451,10 @@ Use `module_path` as an explicit escape hatch:
 
 Other target fields identify an operation, resource, or storage path.
 The execution rank applies the action and records rank-local ground truth.
+For a resource-only action, that execution rank is not automatically an
+expected failed rank. Localization should report the resource through
+`failed_resources` and include a failed rank only when the campaign also
+targets that rank directly.
 
 ## Destructive and Environment-Specific Failures
 
@@ -532,6 +538,8 @@ a failed cable is represented as delay, message loss, or network partition.
 Each candidate occurrence is preflighted and then journaled before activation.
 This ordering applies to both distributed and single-rank future iterations, so
 an invalid target or executor does not consume a retry attempt.
+If a later single-rank preflight fails, the session closes and restores every
+effect already active from an earlier iteration before propagating the error.
 The default `retrigger: "once"` prevents the same occurrence from firing again
 after rollback when a persistent state store is used.
 
@@ -636,7 +644,8 @@ ranks; matching only the aggregate rank and kind sets is insufficient.
 `evaluate()` coordinates incident record creation with per-record lifecycle
 updates before taking snapshots. A returned `CampaignReport` therefore remains
 internally consistent even if another thread is activating or completing a
-hook.
+hook. Direct `FaultInjectionRecord.to_dict()` serialization uses the same
+record lock and cannot expose a partially updated lifecycle transition.
 Optimizer-boundary callbacks, recovery/replacement notifications, and session
 cleanup share one lifecycle lock. `close()` waits for an in-flight boundary and
 removes any effect or observer armed there before marking the session closed.

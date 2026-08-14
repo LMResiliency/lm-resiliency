@@ -6,6 +6,7 @@ import argparse
 import copy
 import json
 import os
+from collections.abc import Container
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -51,11 +52,11 @@ class EvaluationStateReset:
         self,
         model: DistributedDataParallel,
         optimizer: torch.optim.Optimizer,
-        reset_iterations: set[int],
+        reset_iterations: Container[int],
     ) -> None:
         self._model = model.module
         self._optimizer = optimizer
-        self._reset_iterations = frozenset(reset_iterations)
+        self._reset_iterations = reset_iterations
         self._model_state: dict[str, Any]
         self._optimizer_state: dict[str, Any]
         self._completed_iterations = 0
@@ -256,29 +257,34 @@ def _validate_target_ranks(campaign: FaultCampaign, world_size: int) -> None:
 
 
 def _last_scheduled_iteration(campaign: FaultCampaign) -> int:
-    return max(
-        iteration
-        for incident in campaign.incidents
-        for iteration in _scheduled_iterations(incident)
-    )
+    latest: list[int] = []
+    for incident in campaign.incidents:
+        if incident.trigger.at:
+            latest.append(incident.trigger.at[-1])
+            continue
+        trigger_range = incident.trigger.range
+        if trigger_range is None:
+            raise AssertionError("validated incident has no trigger schedule")
+        steps = (trigger_range.end - trigger_range.start) // trigger_range.every
+        latest.append(trigger_range.start + steps * trigger_range.every)
+    return max(latest)
 
 
-def _scheduled_iterations(incident: FaultIncident) -> tuple[int, ...]:
-    if incident.trigger.at:
-        return incident.trigger.at
-    trigger_range = incident.trigger.range
-    if trigger_range is None:
-        raise AssertionError("validated incident has no trigger schedule")
-    return tuple(
-        range(
-            trigger_range.start,
-            trigger_range.end + 1,
-            trigger_range.every,
+@dataclass(frozen=True)
+class _ResetIterationSchedule:
+    exact: frozenset[int]
+    ranged: tuple[FaultIncident, ...]
+
+    def __contains__(self, iteration: object) -> bool:
+        if not isinstance(iteration, int):
+            return False
+        return iteration in self.exact or any(
+            incident.trigger.range is not None and incident.trigger.range.matches(iteration)
+            for incident in self.ranged
         )
-    )
 
 
-def _state_reset_iterations(campaign: FaultCampaign) -> set[int]:
+def _state_reset_iterations(campaign: FaultCampaign) -> Container[int]:
     gradient_affecting_surfaces = {
         "input",
         "output",
@@ -287,16 +293,25 @@ def _state_reset_iterations(campaign: FaultCampaign) -> set[int]:
         "gradient",
         "optimizer_state",
     }
-    return {
-        iteration
+    eligible = tuple(
+        incident
         for incident in campaign.incidents
         if any(
             fault.type.value != "delay"
             and fault.target.surface.value in gradient_affecting_surfaces
             for fault in incident.faults
         )
-        for iteration in _scheduled_iterations(incident)
-    }
+    )
+    ranged = tuple(incident for incident in eligible if incident.trigger.range is not None)
+    exact = frozenset(
+        iteration
+        for incident in eligible
+        if incident.trigger.at
+        for iteration in incident.trigger.at
+    )
+    if not ranged:
+        return set(exact)
+    return _ResetIterationSchedule(exact=exact, ranged=ranged)
 
 
 def _complete_permanent_incidents(
@@ -307,7 +322,7 @@ def _complete_permanent_incidents(
     boundaries = {
         incident.lifetime.until
         for incident in campaign.incidents
-        if iteration in _scheduled_iterations(incident) and incident.lifetime.permanent
+        if incident.trigger.matches(iteration) and incident.lifetime.permanent
     }
     if "recovery" in boundaries:
         faults.notify_recovery()

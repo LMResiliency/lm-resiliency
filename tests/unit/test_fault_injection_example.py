@@ -101,6 +101,51 @@ def test_checked_in_campaign_targets_the_scout_replay_layer() -> None:
     )
 
 
+def test_range_schedule_helpers_remain_lazy_for_large_campaigns() -> None:
+    campaign = FaultCampaign.from_dict(
+        {
+            "schema_version": 1,
+            "name": "large-range",
+            "incidents": [
+                {
+                    "id": "range",
+                    "trigger": {
+                        "range": {
+                            "start": 1,
+                            "end": 1_000_000_000,
+                            "every": 3,
+                        }
+                    },
+                    "lifetime": {"matching_calls": 1},
+                    "faults": [
+                        {
+                            "id": "output",
+                            "type": "tensor_corruption",
+                            "target": {
+                                "rank": 0,
+                                "module_path": "layers.0",
+                                "surface": "output",
+                            },
+                            "parameters": {
+                                "operation": "sign_flip",
+                                "scope": "single",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    reset_iterations = _state_reset_iterations(campaign)
+
+    assert _last_scheduled_iteration(campaign) == 1_000_000_000
+    assert 1 in reset_iterations
+    assert 4 in reset_iterations
+    assert 2 not in reset_iterations
+    assert 1_000_000_000 in reset_iterations
+
+
 def test_evaluation_state_reset_restores_the_last_clean_optimizer_boundary() -> None:
     model = torch.nn.Linear(2, 1, bias=False)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)

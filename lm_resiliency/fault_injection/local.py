@@ -940,6 +940,12 @@ def _apply_corruption(
         _flip_bits(tensor, indices, magnitude, count=4)
     elif operation is CorruptionOperation.SET_VALUE:
         value = _numeric_value(fault.parameters["value"])
+        if math.isfinite(value):
+            limits = torch.finfo(tensor.dtype)
+            if value < limits.min or value > limits.max:
+                raise _UnsupportedTargetTensorError(
+                    f"set_value {value} is outside dtype {tensor.dtype} range"
+                )
         flat.index_fill_(0, indices, value)
     elif operation is CorruptionOperation.SCALE:
         factor = float(fault.parameters.get("factor", _SCALE_UP[magnitude]))

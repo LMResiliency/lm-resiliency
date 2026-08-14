@@ -108,30 +108,31 @@ class FaultInjectionRecord:
             )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "injection_id": self.injection_id,
-            "occurrence_id": self.occurrence_id,
-            "incident_id": self.incident_id,
-            "fault_id": self.fault_id,
-            "iteration": self.iteration,
-            "attempt": self.attempt,
-            "temporal_behavior": self.temporal_behavior,
-            "failure_type": self.failure_type,
-            "expected_kind": self.expected_kind,
-            "safety": self.safety,
-            "framework": self.framework,
-            "executor": self.executor,
-            "execution_rank": self.execution_rank,
-            "target": thaw_json(self.target),
-            "parameters": thaw_json(self.parameters),
-            "status": self.status.value,
-            "verified": self.verified,
-            "injection_succeeded": self.injection_succeeded,
-            "activated_at_ns": self.activated_at_ns,
-            "completed_at_ns": self.completed_at_ns,
-            "evidence": thaw_json(self.evidence),
-            "error": self.error,
-        }
+        with self._lock:
+            return {
+                "injection_id": self.injection_id,
+                "occurrence_id": self.occurrence_id,
+                "incident_id": self.incident_id,
+                "fault_id": self.fault_id,
+                "iteration": self.iteration,
+                "attempt": self.attempt,
+                "temporal_behavior": self.temporal_behavior,
+                "failure_type": self.failure_type,
+                "expected_kind": self.expected_kind,
+                "safety": self.safety,
+                "framework": self.framework,
+                "executor": self.executor,
+                "execution_rank": self.execution_rank,
+                "target": thaw_json(self.target),
+                "parameters": thaw_json(self.parameters),
+                "status": self.status.value,
+                "verified": self.verified,
+                "injection_succeeded": self.injection_succeeded,
+                "activated_at_ns": self.activated_at_ns,
+                "completed_at_ns": self.completed_at_ns,
+                "evidence": thaw_json(self.evidence),
+                "error": self.error,
+            }
 
 
 @dataclass(frozen=True, slots=True)
