@@ -109,6 +109,7 @@ class FaultInjectionSession:
         state_store: CampaignStateStore | None = None,
         executors: Sequence[FaultExecutor] = (),
         rank: int | None = None,
+        _defer_activation: bool = False,
     ) -> None:
         if not isinstance(campaign, FaultCampaign):
             raise TypeError("campaign must be a FaultCampaign")
@@ -135,6 +136,7 @@ class FaultInjectionSession:
         self._records: list[FaultInjectionRecord] = []
         self._active: list[_ActiveFault] = []
         self._closed = False
+        self._started = False
         self._faults = tuple(fault for incident in campaign.incidents for fault in incident.faults)
 
         try:
@@ -142,11 +144,13 @@ class FaultInjectionSession:
             self._local.prepare_history(self._faults)
             self._local.refresh_state_history(self._faults)
             self._context.register_step_callback(self._on_step_complete)
-            self._enter_iteration(self._current_iteration)
             register_automatic_cleanup(self)
-        except Exception:
-            self._local.close()
-            self._context.close()
+            if not _defer_activation:
+                self._start()
+        except Exception as error:
+            cleanup_error = self._cleanup()
+            if cleanup_error is not None:
+                error.add_note(f"fault injection cleanup also failed: {cleanup_error}")
             raise
 
     @property
@@ -223,6 +227,23 @@ class FaultInjectionSession:
     def close(self) -> None:
         if self._closed:
             return
+        first_error = self._cleanup()
+        if first_error is not None:
+            raise RuntimeError("fault injection cleanup failed") from first_error
+
+    def _start(self) -> None:
+        """Arm the current iteration after preparation has succeeded."""
+        if self._closed:
+            raise RuntimeError("cannot start a closed fault injection session")
+        if self._started:
+            return
+        self._enter_iteration(self._current_iteration)
+        self._started = True
+
+    def _cleanup(self) -> Exception | None:
+        """Best-effort cleanup shared by failed construction and close()."""
+        if self._closed:
+            return None
         unregister_automatic_cleanup(self)
         first_error: Exception | None = None
         for active in reversed(self._active):
@@ -244,8 +265,7 @@ class FaultInjectionSession:
             if first_error is None:
                 first_error = error
         self._closed = True
-        if first_error is not None:
-            raise RuntimeError("fault injection cleanup failed") from first_error
+        return first_error
 
     def __enter__(self) -> "FaultInjectionSession":
         return self
@@ -290,41 +310,56 @@ class FaultInjectionSession:
         self._enter_iteration(self._current_iteration)
 
     def _enter_iteration(self, iteration: int) -> None:
-        for incident in self.campaign.incidents:
-            if not incident.trigger.matches(iteration):
-                continue
-            attempt_count = self._journal.attempt_count(
-                incident.incident_id,
-                iteration,
-            )
-            if incident.retrigger is RetriggerPolicy.ONCE and attempt_count >= 1:
-                continue
-            if incident.retrigger is RetriggerPolicy.MAX_OCCURRENCES and attempt_count >= int(
-                incident.max_occurrences or 0
-            ):
-                continue
-            attempt = self._journal.record_attempt(incident.incident_id, iteration)
-            self._state_store.save(self._journal)
-            occurrence_id = _occurrence_id(incident, iteration, attempt)
-            if not _probability_selected(
-                self.campaign.seed,
-                incident.incident_id,
-                iteration,
-                incident.trigger.probability,
-            ):
-                self._record_probability_skip(
+        active_start = len(self._active)
+        try:
+            for incident in self.campaign.incidents:
+                if not incident.trigger.matches(iteration):
+                    continue
+                attempt_count = self._journal.attempt_count(
+                    incident.incident_id,
+                    iteration,
+                )
+                if incident.retrigger is RetriggerPolicy.ONCE and attempt_count >= 1:
+                    continue
+                if incident.retrigger is RetriggerPolicy.MAX_OCCURRENCES and attempt_count >= int(
+                    incident.max_occurrences or 0
+                ):
+                    continue
+                attempt = self._journal.record_attempt(incident.incident_id, iteration)
+                self._state_store.save(self._journal)
+                occurrence_id = _occurrence_id(incident, iteration, attempt)
+                if not _probability_selected(
+                    self.campaign.seed,
+                    incident.incident_id,
+                    iteration,
+                    incident.trigger.probability,
+                ):
+                    self._record_probability_skip(
+                        incident,
+                        occurrence_id,
+                        iteration,
+                        attempt,
+                    )
+                    continue
+                self._activate_incident(
                     incident,
                     occurrence_id,
                     iteration,
                     attempt,
                 )
-                continue
-            self._activate_incident(
-                incident,
-                occurrence_id,
-                iteration,
-                attempt,
-            )
+        except Exception as error:
+            cleanup_error: Exception | None = None
+            for active in reversed(self._active[active_start:]):
+                if not active.done:
+                    try:
+                        active.complete()
+                    except Exception as caught:
+                        if cleanup_error is None:
+                            cleanup_error = caught
+            del self._active[active_start:]
+            if cleanup_error is not None:
+                error.add_note(f"fault rollback also failed: {cleanup_error}")
+            raise
 
     def _activate_incident(
         self,
@@ -367,11 +402,18 @@ class FaultInjectionSession:
                 activated.append(active)
                 if not active.done:
                     self._active.append(active)
-        except Exception:
+        except Exception as error:
+            cleanup_error: Exception | None = None
             for active in reversed(activated):
                 if not active.done:
-                    active.complete()
+                    try:
+                        active.complete()
+                    except Exception as caught:
+                        if cleanup_error is None:
+                            cleanup_error = caught
             self._discard_completed()
+            if cleanup_error is not None:
+                error.add_note(f"fault rollback also failed: {cleanup_error}")
             raise
 
     def _activate_external(
@@ -529,6 +571,7 @@ def enable_fault_injection(
     if not dist.is_available() or not dist.is_initialized() or dist.get_world_size() <= 1:
         return FaultInjectionSession(target, optimizer, **arguments)
 
+    arguments["_defer_activation"] = True
     session: FaultInjectionSession | None = None
     local_error: Exception | None = None
     try:
@@ -545,12 +588,27 @@ def enable_fault_injection(
         if error is not None
     ]
     if failures:
+        cleanup_error: Exception | None = None
         if session is not None:
-            session.close()
+            try:
+                session.close()
+            except Exception as error:
+                cleanup_error = error
         message = "fault injection enablement failed; " + "; ".join(failures)
-        raise RuntimeError(message) from local_error
+        enablement_error = RuntimeError(message)
+        if cleanup_error is not None:
+            enablement_error.add_note(f"fault injection cleanup also failed: {cleanup_error}")
+        raise enablement_error from local_error
     if session is None:
         raise AssertionError("distributed fault injection enablement returned no session")
+    try:
+        session._start()
+    except Exception as error:
+        try:
+            session.close()
+        except Exception as cleanup_error:
+            error.add_note(f"fault injection cleanup also failed: {cleanup_error}")
+        raise
     return session
 
 
@@ -633,7 +691,6 @@ def _evaluate_occurrence(
     reported_resources = () if result is None else result.failed_resources
     ranks_match = not expected_ranks or set(expected_ranks).issubset(reported_ranks)
     resources_match = not expected_resources or set(expected_resources).issubset(reported_resources)
-    localized = injection_succeeded and detected and ranks_match and resources_match
     unexpected_ranks = tuple(rank for rank in reported_ranks if rank not in expected_ranks)
     unexpected_resources = tuple(
         resource for resource in reported_resources if resource not in expected_resources
@@ -644,6 +701,14 @@ def _evaluate_occurrence(
         None
         if result is None or not result.components
         else expected_components.issubset(result.components)
+    )
+    localized = (
+        injection_succeeded
+        and detected
+        and ranks_match
+        and resources_match
+        and kind_matches is not False
+        and component_matches is not False
     )
     return FaultEvaluation(
         occurrence_id=occurrence_id,

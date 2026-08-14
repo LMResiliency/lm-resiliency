@@ -504,6 +504,13 @@ class FaultIncident:
             )
         if self.lifetime.permanent and self.trigger.has_multiple_candidates:
             raise ValueError("permanent incidents require a single trigger candidate")
+        if self.lifetime.matching_calls is not None and any(
+            fault.target.surface is FaultSurface.OPTIMIZER_STATE for fault in self.faults
+        ):
+            raise ValueError(
+                "optimizer_state faults do not support matching_calls; "
+                "use an iterations or until lifetime"
+            )
 
     @property
     def temporal_behavior(self) -> str:

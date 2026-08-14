@@ -30,6 +30,10 @@ train()
 No per-iteration trigger is required.
 The integration observes framework optimizer boundaries and arms incidents at the
 arbitrary training iterations specified by the campaign.
+In a distributed job, every rank completes campaign preparation and capability
+validation before any current-iteration incident is armed. This prevents an
+iteration-one process, communication, or cluster fault from interrupting
+enablement consensus.
 
 The first arguments match the framework lifecycle:
 
@@ -228,7 +232,7 @@ Use exactly one lifetime field:
 
 | Field | Value | Meaning |
 |---|---|---|
-| `matching_calls` | Positive integer | Apply the fault to that many matching target operations, then remove it. |
+| `matching_calls` | Positive integer | Apply the fault to that many matching target operations, then remove it. Not valid for `optimizer_state`; use `iterations` or `until` so the state remains modified when the optimizer consumes it. |
 | `iterations` | Positive integer | Keep the fault active for that many training iterations, including its trigger iteration. |
 | `until` | `recovery` | Keep it active until `FaultInjectionSession.notify_recovery()`. |
 | `until` | `replacement` | Keep it active until `FaultInjectionSession.notify_replacement()`. |
@@ -490,6 +494,11 @@ Reports contain:
 - expected ranks, resources, and components;
 - submitted neutral localization results; and
 - attribution accuracy and latency.
+
+An occurrence is `localized` only when injection succeeded, detection was
+reported, and the expected ranks and resources match. If a localization result
+also supplies `kind` or `components`, that evidence must match the injected
+fault; omit optional evidence when the resiliency system does not report it.
 
 Reports are rank-local.
 A distributed campaign runner or training manager should collect reports from all

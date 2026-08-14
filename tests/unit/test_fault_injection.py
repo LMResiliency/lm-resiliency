@@ -302,6 +302,17 @@ def test_invalid_schedule_contracts_are_rejected() -> None:
         )
     with pytest.raises(ValueError, match="signed 128-bit"):
         _campaign(seed=2**127)
+    with pytest.raises(ValueError, match="optimizer_state faults do not support matching_calls"):
+        _incident(
+            lifetime=IncidentLifetime(matching_calls=1),
+            faults=(
+                _corruption(
+                    target=_target(surface=FaultSurface.OPTIMIZER_STATE),
+                    parameter="weight",
+                    state_key="exp_avg",
+                ),
+            ),
+        )
 
 
 def test_fault_parameter_contracts_are_rejected() -> None:
@@ -358,6 +369,78 @@ def test_distributed_enablement_propagates_remote_rank_failure() -> None:
             )
 
     session.close.assert_called_once()
+    session._start.assert_not_called()
+
+
+def test_distributed_enablement_preserves_rank_failure_when_cleanup_fails() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    session = MagicMock()
+    session.close.side_effect = RuntimeError("backend cleanup failed")
+
+    def gather(errors, local_error) -> None:
+        errors[:] = [local_error, "LookupError: invalid gradient target"]
+
+    with (
+        patch(
+            "lm_resiliency.fault_injection.injector.FaultInjectionSession",
+            return_value=session,
+        ),
+        patch("lm_resiliency.fault_injection.injector.dist.is_available", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.is_initialized", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.get_world_size", return_value=2),
+        patch(
+            "lm_resiliency.fault_injection.injector.dist.all_gather_object",
+            side_effect=gather,
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="rank 1: LookupError") as caught:
+            enable_fault_injection(
+                model,
+                optimizer,
+                campaign=_campaign(),
+            )
+
+    assert any("cleanup also failed" in note for note in caught.value.__notes__)
+    session._start.assert_not_called()
+
+
+def test_distributed_enablement_arms_iteration_one_after_consensus() -> None:
+    events: list[tuple[str, str]] = []
+    executor = _recording_executor({FailureType.PROCESS_TERMINATION}, events)
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    campaign = _campaign(
+        _incident(
+            at=(1,),
+            faults=(_external_fault(FailureType.PROCESS_TERMINATION),),
+        )
+    )
+
+    def gather(errors, local_error) -> None:
+        assert local_error is None
+        assert events == []
+        errors[:] = [None, None]
+
+    with (
+        patch("lm_resiliency.fault_injection.injector.dist.is_available", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.is_initialized", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.get_world_size", return_value=2),
+        patch(
+            "lm_resiliency.fault_injection.injector.dist.all_gather_object",
+            side_effect=gather,
+        ),
+    ):
+        session = enable_fault_injection(
+            model,
+            optimizer,
+            campaign=campaign,
+            executors=(executor,),
+            rank=0,
+        )
+
+    assert events == [("activate", "process_termination")]
+    session.close()
 
 
 def test_exact_iterations_activate_automatically() -> None:
@@ -1223,6 +1306,46 @@ def test_overlapping_local_faults_roll_back_partial_activation() -> None:
     _step(model, optimizer)
 
 
+def test_failed_later_incident_rolls_back_earlier_active_incidents() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    baseline = model.layers[0].weight.detach().clone()
+    campaign = _campaign(
+        _incident(
+            incident_id="active-state",
+            at=(1,),
+            lifetime=IncidentLifetime(until="campaign_end"),
+            faults=(
+                _corruption(
+                    target=_target(surface=FaultSurface.WEIGHT),
+                    scope=FaultScope.SINGLE,
+                ),
+            ),
+        ),
+        _incident(
+            incident_id="invalid-target",
+            at=(1,),
+            faults=(
+                _corruption(
+                    target=_target(module_path="missing.layer"),
+                    scope=FaultScope.SINGLE,
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(LookupError, match="missing.layer"):
+        enable_fault_injection(
+            model,
+            optimizer,
+            campaign=campaign,
+            rank=0,
+        )
+
+    torch.testing.assert_close(model.layers[0].weight, baseline)
+    _step(model, optimizer)
+
+
 def test_correlated_faults_share_one_occurrence_and_evaluation() -> None:
     events: list[tuple[str, str]] = []
     executor = _recording_executor(
@@ -1265,6 +1388,43 @@ def test_correlated_faults_share_one_occurrence_and_evaluation() -> None:
     assert {record.occurrence_id for record in session.records} == {"incident@1"}
     assert report.evaluations[0].localized
     assert report.evaluations[0].kind_matches
+    session.close()
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        LocalizationResult(
+            occurrence_id="incident@1",
+            detected=True,
+            failed_ranks=(0,),
+            kind="straggler",
+        ),
+        LocalizationResult(
+            occurrence_id="incident@1",
+            detected=True,
+            failed_ranks=(0,),
+            components=("layers.1",),
+        ),
+    ],
+)
+def test_supplied_kind_and_component_mismatches_are_not_localized(
+    result: LocalizationResult,
+) -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(_incident(at=(1,))),
+        rank=0,
+    )
+    _step(model, optimizer)
+
+    evaluation = session.evaluate([result]).evaluations[0]
+
+    assert not evaluation.localized
+    assert evaluation.kind_matches is False or evaluation.component_matches is False
     session.close()
 
 
