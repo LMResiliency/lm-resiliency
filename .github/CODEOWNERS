@@ -1,0 +1,28 @@
+# Repository-wide fallback ownership.
+* @zhuangwang93 @lmresiliencydev
+
+# Core resiliency subsystems.
+/lm_resiliency/checkpointing/ @zhuangwang93 @lmresiliencydev
+/lm_resiliency/detection/ @zhuangwang93 @lmresiliencydev
+/lm_resiliency/integrations/ @zhuangwang93 @lmresiliencydev
+/lm_resiliency/orchestration.py @zhuangwang93 @lmresiliencydev
+/lm_resiliency/recovery.py @zhuangwang93 @lmresiliencydev
+/lm_resiliency/handle.py @zhuangwang93 @lmresiliencydev
+/lm_resiliency/__init__.py @zhuangwang93 @lmresiliencydev
+
+# Tests and validation contracts.
+/tests/ @zhuangwang93 @lmresiliencydev
+
+# Public documentation and compatibility contracts.
+/docs/ @zhuangwang93 @lmresiliencydev
+/README.md @zhuangwang93 @lmresiliencydev
+/ROADMAP.md @zhuangwang93 @lmresiliencydev
+/CHANGELOG.md @zhuangwang93 @lmresiliencydev
+/pyproject.toml @zhuangwang93 @lmresiliencydev
+
+# Repository governance, CI, release, and security surfaces.
+/.github/ @zhuangwang93 @lmresiliencydev
+/SECURITY.md @zhuangwang93 @lmresiliencydev
+/CODE_OF_CONDUCT.md @zhuangwang93 @lmresiliencydev
+/CONTRIBUTING.md @zhuangwang93 @lmresiliencydev
+/MAINTAINERS.md @zhuangwang93 @lmresiliencydev
