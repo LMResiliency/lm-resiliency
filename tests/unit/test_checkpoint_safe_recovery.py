@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -14,6 +15,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from lm_resiliency.checkpointing._disk_format import CheckpointFormatError
+from lm_resiliency.checkpointing.buffer import SlotState
 from lm_resiliency.checkpointing.disk import DiskSerializer
 from lm_resiliency.checkpointing.manager import InMemoryCheckpointManager
 from lm_resiliency.checkpointing.state_dict import FlatStateDictMetadata, flatten
@@ -55,6 +57,21 @@ def test_disk_load_rejects_sparse_payload_tensor(tmp_path):
 
     with pytest.raises(CheckpointFormatError, match="dense, strided, and non-quantized"):
         serializer.load(22)
+
+
+def test_memory_lookup_never_uses_peer_replica_as_local_state():
+    manager = object.__new__(InMemoryCheckpointManager)
+    manager._metadata = FlatStateDictMetadata()
+    own_slot = SimpleNamespace(step=24, state=SlotState.READY)
+    peer_slot = SimpleNamespace(step=23, state=SlotState.READY)
+    manager._buffer_pool = SimpleNamespace(
+        allocated=True,
+        own_slots=(own_slot,),
+        get_slot_by_step=lambda step: peer_slot if step == 23 else None,
+    )
+
+    assert manager._memory_slot_by_step(23) is None
+    assert manager._memory_slot_by_step(24) is own_slot
 
 
 def _gloo_recovery_worker(
