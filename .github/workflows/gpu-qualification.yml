@@ -1,0 +1,67 @@
+name: GPU Qualification
+
+on:
+  schedule:
+    - cron: "17 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpu-qualification-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  core-gpu:
+    name: Core GPU qualification
+    runs-on: [self-hosted, linux, x64, gpu, lm-resiliency]
+    timeout-minutes: 60
+
+    env:
+      NUMPY_VERSION: "2.5.1"
+      TORCH_INDEX_URL: https://download.pytorch.org/whl/cu130
+      TORCH_VERSION: "2.13.0"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install qualified runtime
+        run: |
+          python -m pip install \
+            --index-url "$TORCH_INDEX_URL" \
+            --only-binary=:all: \
+            "torch==$TORCH_VERSION"
+          python -m pip install "numpy==$NUMPY_VERSION" "setuptools>=83"
+          python -m pip install --no-deps -e .
+          python -m pip check
+
+      - name: Run two-GPU qualification
+        run: |
+          python tests/validation/run_gpu_qualification.py \
+            --artifact-dir "$RUNNER_TEMP/gpu-qualification" \
+            --minimum-gpus 2
+
+      - name: Publish job summary
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/gpu-qualification/summary.md"; then
+            cat "$RUNNER_TEMP/gpu-qualification/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gpu-qualification-${{ github.sha }}
+          path: ${{ runner.temp }}/gpu-qualification
+          if-no-files-found: error
+          retention-days: 30

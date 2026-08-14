@@ -5,6 +5,12 @@ Date: 2026-08-13 UTC.
 This report summarizes the release-candidate validation evidence for GEMINI and SCOUT.
 Focused integration programs use deterministic training workloads and fault injection to verify checkpoint equivalence, exact fault localization, candidate exclusion, and framework topology handling.
 
+## Automated Qualification Status
+
+The [GPU Qualification workflow](https://github.com/LMResiliency/lm-resiliency/actions/workflows/gpu-qualification.yml) runs weekly and on trusted maintainer dispatch using a two-GPU self-hosted runner. The workflow badge in the README links to the last run, including its exact revision and completion date. Each run also uploads a machine-readable summary, environment and topology inventory, exact commands, per-command logs, and SHA-256 checksums.
+
+This frequent tier exercises single-GPU trajectory-equivalent recovery plus two-rank Gloo/NCCL replay, synchronized RNG, FSDP2 checkpoint recovery, and process-exit cleanup. It does not replace the larger release-qualification campaigns documented below. Self-hosted runner provisioning and isolation requirements are documented in the [test guide](../tests/README.md#automated-gpu-qualification).
+
 ## Release Baseline
 
 | Check | Result |
