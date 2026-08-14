@@ -1208,6 +1208,37 @@ def test_noop_flow_fault_fails_record_without_aborting_training(
     session.close()
 
 
+def test_invalid_reorder_shape_fails_record_without_aborting_training() -> None:
+    model = nn.Sequential(nn.Linear(4, 4))
+    optimizer = _optimizer(model)
+    fault = FaultSpec(
+        fault_id="reorder-output",
+        type=FailureType.REORDER,
+        target=FaultTarget(
+            rank=0,
+            surface=FaultSurface.OUTPUT,
+            module_path="0",
+        ),
+        parameters={"scope": FaultScope.FULL.value},
+    )
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(_incident(at=(1,), faults=(fault,))),
+        rank=0,
+    )
+
+    optimizer.zero_grad()
+    output = model(torch.ones(1, 4))
+    output.sum().backward()
+    optimizer.step()
+
+    assert output.shape == (1, 4)
+    assert session.records[0].status is InjectionStatus.FAILED
+    assert "leading dimension of at least two" in (session.records[0].error or "")
+    session.close()
+
+
 def test_campaign_start_origin_ignores_framework_progress() -> None:
     engine = FakeDeepSpeedEngine(TinyModel(), global_steps=40)
     campaign = _campaign(
@@ -2331,6 +2362,45 @@ def test_logical_output_prefers_terminal_head_over_nested_output(
     session.close()
 
 
+def test_logical_output_bypasses_root_module_with_generic_output_name() -> None:
+    class RootOutputModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.output = nn.Linear(4, 4)
+            self.lm_head = nn.Linear(4, 4)
+
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            return self.lm_head(value)
+
+    model = RootOutputModel()
+    generic_output = model.output.weight.detach().clone()
+    head = model.lm_head.weight.detach().clone()
+    fault = _corruption(
+        target=_target(
+            surface=FaultSurface.WEIGHT,
+            module_path=None,
+            component="output",
+        ),
+        scope=FaultScope.SINGLE,
+    )
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="recovery"),
+                faults=(fault,),
+            )
+        ),
+        rank=0,
+    )
+
+    torch.testing.assert_close(model.output.weight, generic_output)
+    assert not torch.equal(model.lm_head.weight, head)
+    session.close()
+
+
 def test_explicit_module_path_precedes_logical_fallback_across_wrappers() -> None:
     model = TinyModel()
     wrapped = Wrapper(model)
@@ -3178,6 +3248,65 @@ def test_external_permanent_fault_deactivates_on_replacement() -> None:
     session.close()
 
 
+def test_replacement_attempts_all_matching_effect_cleanup_after_failure() -> None:
+    events: list[tuple[str, str]] = []
+
+    def activate(request):
+        events.append(("activate", request.fault.fault_id))
+        return FaultExecutionResult(verified=True, active=True)
+
+    def deactivate(request, _result):
+        events.append(("deactivate", request.fault.fault_id))
+        if request.fault.fault_id == "first":
+            raise RuntimeError("first cleanup failed")
+        return None
+
+    executor = CallbackFaultExecutor(
+        name="partial-cleanup-failure",
+        supported_types={
+            FailureType.RESOURCE_UNAVAILABLE,
+            FailureType.PROCESS_TERMINATION,
+        },
+        activate=activate,
+        deactivate=deactivate,
+        max_safety=SafetyClass.CLUSTER_DESTRUCTIVE,
+    )
+    faults = (
+        _external_fault(
+            FailureType.RESOURCE_UNAVAILABLE,
+            fault_id="first",
+            resource="gpu-0",
+        ),
+        _external_fault(
+            FailureType.PROCESS_TERMINATION,
+            fault_id="second",
+            resource="process-0",
+        ),
+    )
+    model = TinyModel()
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="replacement"),
+                faults=faults,
+            )
+        ),
+        executors=(executor,),
+        rank=0,
+    )
+
+    with pytest.raises(RuntimeError, match="replacement cleanup failed"):
+        session.notify_replacement()
+
+    assert events[-2:] == [("deactivate", "first"), ("deactivate", "second")]
+    assert session.records[0].status is InjectionStatus.FAILED
+    assert session.records[1].status is InjectionStatus.COMPLETED
+    session.close()
+
+
 def test_close_cleans_optimizer_hook_when_external_deactivation_fails() -> None:
     def activate(_request):
         return FaultExecutionResult(verified=True, active=True)
@@ -3577,11 +3706,31 @@ def test_mixed_kind_correlated_faults_require_per_kind_target_evidence() -> None
             ),
         ]
     ).evaluations[0]
+    overclaimed = session.evaluate(
+        [
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_ranks=(0,),
+                failed_resources=("process-0", "worker-0"),
+                kind="process_failure",
+            ),
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_ranks=(0,),
+                failed_resources=("process-0", "worker-0"),
+                kind="straggler",
+            ),
+        ]
+    ).evaluations[0]
 
     assert not partial.localized
     assert partial.kind_matches is False
     assert complete.localized
     assert complete.kind_matches
+    assert not overclaimed.localized
+    assert overclaimed.kind_matches is False
     session.close()
 
 

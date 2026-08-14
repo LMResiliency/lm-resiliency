@@ -451,8 +451,6 @@ def _resolve_logical_module(
     if component is None:
         return None
     index = target.index
-    if component in modules and index is None:
-        return modules[component]
     normalized = component.lower().replace("-", "_")
     if _is_layer_component(normalized):
         if index is None:
@@ -485,6 +483,8 @@ def _resolve_logical_module(
         if index is None:
             raise ValueError("logical component 'expert' requires index")
         return _resolve_global_expert(modules, index, target)
+    if component in modules and index is None:
+        return modules[component]
     return None
 
 

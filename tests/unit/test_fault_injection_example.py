@@ -300,6 +300,17 @@ def test_wrong_kind_at_the_injected_iteration_is_not_counted_as_detection() -> N
     assert evaluation["summary"]["detected_actions"] == 0
 
 
+@pytest.mark.parametrize("training_iteration", [4.5, True, "4"])
+def test_comparison_rejects_coerced_localization_iteration(
+    training_iteration: object,
+) -> None:
+    localization = _localization_payload()
+    localization["reports"][0]["training_iteration"] = training_iteration
+
+    with pytest.raises(TypeError, match="training_iteration must be an integer"):
+        compare_payloads(_injection_payload(), localization)
+
+
 def test_example_rejects_missing_post_fault_iteration_and_rank() -> None:
     campaign = FaultCampaign.from_json(CAMPAIGN_PATH)
 

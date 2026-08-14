@@ -965,10 +965,17 @@ class FaultInjectionSession:
             self._records.append(record)
 
     def _complete_until(self, boundary: str) -> None:
+        first_error: Exception | None = None
         for active in self._active:
             if not active.done and active.incident.lifetime.until == boundary:
-                active.complete(preserve_replaced_state=boundary == "recovery")
+                try:
+                    active.complete(preserve_replaced_state=boundary == "recovery")
+                except Exception as error:
+                    if first_error is None:
+                        first_error = error
         self._discard_completed()
+        if first_error is not None:
+            raise RuntimeError(f"fault {boundary} cleanup failed") from first_error
 
     def _discard_completed(self) -> None:
         self._active = [active for active in self._active if not active.done]
@@ -1328,9 +1335,15 @@ def _evaluate_occurrence(
     if not reported_kinds and len(expected_kinds) == 1:
         kind_matches: bool | None = None
     else:
-        kind_matches = reported_kinds == expected_kinds and all(
-            any(_result_correlates_with_fault(result, fault) for result in detected_results)
-            for fault in incident.faults
+        expected_targets_by_kind = {
+            kind: _expected_targets_for_kind(incident, kind) for kind in expected_kinds
+        }
+        reported_targets_by_kind = {
+            kind: _reported_targets_for_kind(detected_results, kind) for kind in reported_kinds
+        }
+        kind_matches = (
+            reported_kinds == expected_kinds
+            and reported_targets_by_kind == expected_targets_by_kind
         )
     reported_components = {
         component for result in detected_results for component in result.components
@@ -1368,20 +1381,25 @@ def _evaluate_occurrence(
     )
 
 
-def _result_correlates_with_fault(
-    result: LocalizationResult,
-    fault: FaultSpec,
-) -> bool:
-    if not result.detected or result.kind != fault.expected_kind:
-        return False
-    if fault.target.execution_rank not in result.failed_ranks:
-        return False
-    expected_resource = fault.target.resource
-    if expected_resource is not None and expected_resource not in result.failed_resources:
-        return False
-    expected_component = fault.target.component or fault.target.module_path
-    return not result.components or (
-        expected_component is not None and expected_component in result.components
+def _expected_targets_for_kind(
+    incident: FaultIncident,
+    kind: str,
+) -> tuple[frozenset[int], frozenset[str]]:
+    faults = tuple(fault for fault in incident.faults if fault.expected_kind == kind)
+    return (
+        frozenset(fault.target.execution_rank for fault in faults),
+        frozenset(fault.target.resource for fault in faults if fault.target.resource is not None),
+    )
+
+
+def _reported_targets_for_kind(
+    results: tuple[LocalizationResult, ...],
+    kind: str,
+) -> tuple[frozenset[int], frozenset[str]]:
+    matching = tuple(result for result in results if result.kind == kind)
+    return (
+        frozenset(rank for result in matching for rank in result.failed_ranks),
+        frozenset(resource for result in matching for resource in result.failed_resources),
     )
 
 

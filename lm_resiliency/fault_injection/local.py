@@ -817,7 +817,9 @@ def _transform_tensor(
             )
         previous = history.previous.to(device=transformed.device, dtype=transformed.dtype)
         if previous.shape != transformed.shape:
-            raise RuntimeError("prior observed value shape does not match the target")
+            raise _UnsupportedTargetTensorError(
+                "prior observed value shape does not match the target"
+            )
         with torch.no_grad():
             transformed.view(-1).index_copy_(
                 0,
@@ -829,7 +831,9 @@ def _transform_tensor(
             transformed.view(-1).index_fill_(0, indices, 0.0)
     elif fault.type is FailureType.REORDER:
         if transformed.shape[0] < 2:
-            raise RuntimeError("reorder requires a leading dimension of at least two")
+            raise _UnsupportedTargetTensorError(
+                "reorder requires a leading dimension of at least two"
+            )
         transformed = torch.flip(transformed, dims=(0,))
         indices = torch.arange(
             transformed.numel(),

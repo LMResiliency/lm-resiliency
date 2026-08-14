@@ -125,7 +125,13 @@ def _evaluate_occurrence(
         {prefix for record in records if (prefix := _expected_source_prefix(record)) is not None}
     )
     at_iteration = [
-        dict(report) for report in reports if int(report.get("training_iteration", -1)) == iteration
+        dict(report)
+        for report in reports
+        if _required_integer(
+            report.get("training_iteration"),
+            "localization training_iteration",
+        )
+        == iteration
     ]
     matching = [report for report in at_iteration if str(report.get("kind")) in expected_kinds]
     observed_kinds = sorted({str(report.get("kind")) for report in at_iteration})
@@ -236,6 +242,12 @@ def _expected_source_prefix(record: Mapping[str, Any]) -> str | None:
     if ".layers." in f".{module_path}.":
         return "hidden."
     return None
+
+
+def _required_integer(value: object, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{label} must be an integer")
+    return value
 
 
 def _load_object(path: str | Path) -> dict[str, Any]:
