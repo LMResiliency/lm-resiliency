@@ -511,8 +511,9 @@ class LocalFaultExecutor:
 
         def restore() -> None:
             with torch.no_grad():
-                flat = tensor.view(-1)
-                original_flat = original.view(-1)
+                current_tensor = tensor.detach().clone().contiguous()
+                flat = current_tensor.view(-1)
+                original_flat = original.contiguous().view(-1)
                 finite = torch.isfinite(retirement_delta)
                 current = flat.index_select(0, changed_indices)
                 expected = original_flat.index_select(0, changed_indices)
@@ -547,6 +548,7 @@ class LocalFaultExecutor:
                         nonfinite_indices,
                         original_flat.index_select(0, nonfinite_indices),
                     )
+                tensor.copy_(current_tensor)
 
         return restore, affected
 

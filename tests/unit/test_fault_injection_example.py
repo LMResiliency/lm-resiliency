@@ -17,11 +17,13 @@ from examples.fault_injection.pytorch import (
 from lm_resiliency import FaultCampaign
 
 CAMPAIGN_PATH = Path("examples/fault_injection/campaign.json")
+MANIFEST_IDENTITY = "0123456789abcdef"
 
 
 def _injection_payload() -> dict:
     return {
         "campaign": "pytorch-production-loop-sdc",
+        "manifest_identity": MANIFEST_IDENTITY,
         "injections": [
             {
                 "occurrence_id": "hidden-output-sdc@4",
@@ -43,6 +45,7 @@ def _injection_payload() -> dict:
 def _localization_payload(*, failed_rank: int = 0, layer_id: int = -1) -> dict:
     return {
         "campaign": "pytorch-production-loop-sdc",
+        "manifest_identity": MANIFEST_IDENTITY,
         "reports": [
             {
                 "training_iteration": 4,
@@ -122,6 +125,7 @@ def test_evaluation_state_reset_restores_the_last_clean_optimizer_boundary() -> 
 def test_comparison_accepts_matching_scout_localization() -> None:
     evaluation = compare_payloads(_injection_payload(), _localization_payload())
 
+    assert evaluation["manifest_identity"] == MANIFEST_IDENTITY
     assert evaluation["summary"] == {
         "injected_occurrences": 1,
         "detected_occurrences": 1,
@@ -273,4 +277,16 @@ def test_comparison_rejects_mismatched_campaigns() -> None:
     localization["campaign"] = "another-campaign"
 
     with pytest.raises(ValueError, match="different campaigns"):
+        compare_payloads(_injection_payload(), localization)
+
+
+def test_comparison_requires_matching_manifest_identity() -> None:
+    localization = _localization_payload()
+    localization["manifest_identity"] = "different-manifest"
+
+    with pytest.raises(ValueError, match="different campaign manifests"):
+        compare_payloads(_injection_payload(), localization)
+
+    del localization["manifest_identity"]
+    with pytest.raises(ValueError, match="requires a non-empty manifest_identity"):
         compare_payloads(_injection_payload(), localization)

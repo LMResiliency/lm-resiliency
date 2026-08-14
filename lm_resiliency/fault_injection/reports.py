@@ -129,6 +129,8 @@ class LocalizationResult:
         object.__setattr__(self, "metadata", dict(self.metadata))
         if not self.occurrence_id:
             raise ValueError("localization occurrence_id must be non-empty")
+        if not isinstance(self.detected, bool):
+            raise TypeError("localization detected must be a boolean")
         if any(rank < 0 for rank in self.failed_ranks):
             raise ValueError("localization failed_ranks must be non-negative")
         if not self.detected and (self.failed_ranks or self.failed_resources or self.components):
@@ -140,7 +142,7 @@ class LocalizationResult:
     def from_dict(cls, value: Mapping[str, Any]) -> "LocalizationResult":
         return cls(
             occurrence_id=str(value.get("occurrence_id", value.get("injection_id", ""))),
-            detected=bool(value["detected"]),
+            detected=value["detected"],
             failed_ranks=tuple(value.get("failed_ranks", ())),
             failed_resources=tuple(value.get("failed_resources", ())),
             kind=value.get("kind"),
@@ -203,6 +205,7 @@ class CampaignReport:
     """Machine-readable result for one rank-local campaign session."""
 
     campaign: str
+    manifest_identity: str
     manifest: Mapping[str, Any]
     framework: str
     rank: int
@@ -215,6 +218,7 @@ class CampaignReport:
     def to_dict(self) -> dict[str, Any]:
         return {
             "campaign": self.campaign,
+            "manifest_identity": self.manifest_identity,
             "manifest": dict(self.manifest),
             "framework": self.framework,
             "rank": self.rank,
@@ -227,7 +231,7 @@ class CampaignReport:
 
     def to_json(self, path: str | Path) -> None:
         with Path(path).open("w", encoding="utf-8") as stream:
-            json.dump(self.to_dict(), stream, indent=2, sort_keys=True)
+            json.dump(self.to_dict(), stream, allow_nan=False, indent=2, sort_keys=True)
             stream.write("\n")
 
 

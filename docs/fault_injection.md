@@ -36,6 +36,11 @@ target ranks outside the process-group world size and requires every rank to
 report the same canonical manifest and `current_iteration`. This prevents an
 iteration-one process, communication, or cluster fault from interrupting
 enablement consensus or running with divergent schedules.
+Later scheduled safe incidents use the same rank-consistent preflight and arming
+consensus at their optimizer boundary. Iterations without a scheduled campaign
+candidate add no distributed synchronization. The optional `rank=` override is
+reserved for non-distributed testing; in an initialized distributed job it must
+match the process's global rank.
 
 The first arguments match the framework lifecycle:
 
@@ -452,6 +457,8 @@ Unsupported effects are never silently skipped.
 At execution time, the selected executor must return verified evidence.
 An unverifiable activation is marked failed, deactivated when necessary, and is
 not accepted as campaign ground truth.
+Activation and deactivation evidence must be strictly JSON-serializable; invalid
+evidence fails the action immediately and active effects are deactivated.
 An executor that returns an active effect must provide a deactivation callback;
 callback-free executors are valid only for one-shot `active=false` results.
 
@@ -485,6 +492,8 @@ Supported policies are:
 The state file must survive worker replacement for restart-stable behavior.
 Use one JSON state file per rank, or provide a manager-backed
 `CampaignStateStore` that serializes concurrent updates across workers.
+For a distributed enablement, the initial manifest binding is persisted only
+after every rank agrees on the manifest and training iteration.
 The journal stores the canonical manifest identity. Reusing a campaign name with
 changed triggers, targets, parameters, or metadata requires a new state file;
 stale attempts are never applied to an edited manifest.
@@ -515,6 +524,7 @@ report.to_json("campaign-report.json")
 
 Reports contain:
 
+- the canonical manifest identity;
 - the complete versioned manifest;
 - actual iteration and attempt numbers;
 - temporal behavior and safety class;

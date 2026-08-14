@@ -66,7 +66,7 @@ def main() -> None:
             incidents=(
                 FaultIncident(
                     incident_id="dtensor-weight-corruption",
-                    trigger=IncidentTrigger(at=(1,)),
+                    trigger=IncidentTrigger(at=(2,)),
                     lifetime=IncidentLifetime(until="recovery"),
                     faults=(fault,),
                 ),
@@ -78,6 +78,9 @@ def main() -> None:
             optimizer,
             campaign=campaign,
         )
+        if not torch.equal(parameter.to_local(), baseline):
+            raise AssertionError("future DTensor fault activated before its scheduled iteration")
+        optimizer.step()
         changed = not torch.equal(parameter.to_local(), baseline)
         expected_change = rank == target_rank
         record_ok = (

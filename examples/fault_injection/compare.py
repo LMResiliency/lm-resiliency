@@ -15,6 +15,12 @@ def compare_payloads(
     """Return a JSON-ready evaluation of injection and localization artifacts."""
     if injection.get("campaign") != localization.get("campaign"):
         raise ValueError("injection and localization artifacts belong to different campaigns")
+    injection_identity = _required_manifest_identity(injection, "injection")
+    localization_identity = _required_manifest_identity(localization, "localization")
+    if injection_identity != localization_identity:
+        raise ValueError(
+            "injection and localization artifacts belong to different campaign manifests"
+        )
     records = [
         dict(record)
         for record in injection.get("injections", ())
@@ -50,6 +56,7 @@ def compare_payloads(
     return {
         "schema_version": 1,
         "campaign": injection.get("campaign"),
+        "manifest_identity": injection_identity,
         "summary": summary,
         "evaluations": evaluations,
     }
@@ -206,6 +213,13 @@ def _load_object(path: str | Path) -> dict[str, Any]:
         value = json.load(stream)
     if not isinstance(value, dict):
         raise ValueError(f"{path} must contain a JSON object")
+    return value
+
+
+def _required_manifest_identity(payload: Mapping[str, Any], label: str) -> str:
+    value = payload.get("manifest_identity")
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label} artifact requires a non-empty manifest_identity")
     return value
 
 

@@ -197,6 +197,7 @@ def main() -> None:
                 {
                     "schema_version": 1,
                     "campaign": campaign.name,
+                    "manifest_identity": campaign.manifest_identity,
                     "manifest": campaign.to_dict(),
                     "framework": faults.framework,
                     "world_size": world_size,
@@ -210,6 +211,7 @@ def main() -> None:
                 {
                     "schema_version": 1,
                     "campaign": campaign.name,
+                    "manifest_identity": campaign.manifest_identity,
                     "framework": "pytorch",
                     "reports": localizations.reports,
                 },

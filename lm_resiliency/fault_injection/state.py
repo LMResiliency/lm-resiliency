@@ -82,8 +82,7 @@ class MemoryCampaignStateStore:
         with self._lock:
             journal = self._journals.get(campaign)
             if journal is None:
-                journal = CampaignJournal(campaign)
-                self._journals[campaign] = journal
+                return CampaignJournal(campaign)
             return CampaignJournal.from_dict(journal.to_dict())
 
     def save(self, journal: CampaignJournal) -> None:

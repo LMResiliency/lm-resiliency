@@ -49,6 +49,10 @@ The example writes:
 | `localization.json` | JSON-ready failures reported by `enable_resiliency()` |
 | `evaluation.json` | Occurrence- and action-level detection/localization counts plus rank, failure-kind, and SCOUT component-source comparison |
 
+All three artifacts carry the same canonical `manifest_identity`. The comparator
+rejects missing or mismatched identities so localization output from an earlier
+campaign revision cannot satisfy new injection ground truth with the same name.
+
 The process exits unsuccessfully unless every selected action is injected
 successfully and every resulting occurrence is detected and localized.
 Explicit probability skips are excluded; pending, failed, or cancelled records

@@ -516,14 +516,18 @@ def test_distributed_enablement_arms_iteration_one_after_consensus() -> None:
     )
 
     def gather(preparations, local_preparation) -> None:
-        assert local_preparation["error"] is None
         assert events == []
-        preparations[:] = [local_preparation, dict(local_preparation)]
+        if isinstance(local_preparation, dict):
+            assert local_preparation["error"] is None
+            preparations[:] = [local_preparation, dict(local_preparation)]
+        else:
+            preparations[:] = [local_preparation, local_preparation]
 
     with (
         patch("lm_resiliency.fault_injection.injector.dist.is_available", return_value=True),
         patch("lm_resiliency.fault_injection.injector.dist.is_initialized", return_value=True),
         patch("lm_resiliency.fault_injection.injector.dist.get_world_size", return_value=2),
+        patch("lm_resiliency.fault_injection.injector.dist.get_rank", return_value=0),
         patch(
             "lm_resiliency.fault_injection.injector.dist.all_gather_object",
             side_effect=gather,
@@ -554,6 +558,8 @@ def test_distributed_safe_arming_failure_is_propagated_before_return() -> None:
         gathers += 1
         if gathers == 1:
             values[:] = [local_value, dict(local_value)]
+        elif gathers == 2:
+            values[:] = [local_value, local_value]
         else:
             values[:] = [local_value, "LookupError: optimizer state is unavailable"]
 
@@ -595,6 +601,101 @@ def test_safe_arming_consensus_decision_includes_remote_rank_faults() -> None:
     assert session._has_safe_current_activation()
     assert session.records == ()
     session.close()
+
+
+def test_distributed_rank_override_must_match_process_rank() -> None:
+    model = TinyModel()
+
+    with (
+        patch("lm_resiliency.fault_injection.injector.dist.is_available", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.is_initialized", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.get_world_size", return_value=2),
+        patch("lm_resiliency.fault_injection.injector.dist.get_rank", return_value=1),
+    ):
+        with pytest.raises(ValueError, match="does not match distributed rank 1"):
+            FaultInjectionSession(
+                model,
+                _optimizer(model),
+                campaign=_campaign(),
+                rank=0,
+            )
+
+
+def test_future_iteration_preflight_failure_is_propagated_to_all_ranks() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    fault = _corruption(
+        target=_target(surface=FaultSurface.OPTIMIZER_STATE),
+        parameter="weight",
+        state_key="missing",
+    )
+    campaign = _campaign(
+        _incident(
+            at=(2,),
+            lifetime=IncidentLifetime(iterations=1),
+            faults=(fault,),
+        )
+    )
+
+    def gather(values, local_value) -> None:
+        if isinstance(local_value, dict):
+            values[:] = [local_value, dict(local_value)]
+        else:
+            values[:] = [local_value, None]
+
+    with (
+        patch("lm_resiliency.fault_injection.injector.dist.is_available", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.is_initialized", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.get_world_size", return_value=2),
+        patch("lm_resiliency.fault_injection.injector.dist.get_rank", return_value=0),
+        patch(
+            "lm_resiliency.fault_injection.injector.dist.all_gather_object",
+            side_effect=gather,
+        ),
+    ):
+        session = enable_fault_injection(
+            model,
+            optimizer,
+            campaign=campaign,
+        )
+        with pytest.raises(RuntimeError, match="iteration preflight failed.*rank 0"):
+            _step(model, optimizer)
+
+    assert session._closed
+
+
+def test_future_boundary_preparation_failure_is_propagated_to_all_ranks() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+
+    def gather(values, local_value) -> None:
+        if isinstance(local_value, dict):
+            values[:] = [local_value, dict(local_value)]
+        else:
+            values[:] = [local_value, None]
+
+    with (
+        patch("lm_resiliency.fault_injection.injector.dist.is_available", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.is_initialized", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.get_world_size", return_value=2),
+        patch("lm_resiliency.fault_injection.injector.dist.get_rank", return_value=0),
+        patch(
+            "lm_resiliency.fault_injection.injector.dist.all_gather_object",
+            side_effect=gather,
+        ),
+    ):
+        session = enable_fault_injection(
+            model,
+            optimizer,
+            campaign=_campaign(_incident(at=(2,))),
+        )
+        session._local.sync_history = MagicMock(
+            side_effect=RuntimeError("history observer setup failed")
+        )
+        with pytest.raises(RuntimeError, match="iteration preparation failed.*rank 0"):
+            _step(model, optimizer)
+
+    assert session._closed
 
 
 @pytest.mark.parametrize(
@@ -641,6 +742,38 @@ def test_distributed_enablement_requires_consistent_campaign_state(
 
     session.close.assert_called_once()
     session._start.assert_not_called()
+
+
+def test_failed_distributed_preparation_does_not_persist_manifest_binding() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    store = MemoryCampaignStateStore()
+    campaign = _campaign(_incident(at=(2,)), name="distributed-transaction")
+
+    def gather(preparations, local_preparation) -> None:
+        remote = dict(local_preparation)
+        remote["campaign_identity"] = "different-manifest"
+        preparations[:] = [local_preparation, remote]
+
+    with (
+        patch("lm_resiliency.fault_injection.injector.dist.is_available", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.is_initialized", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.get_world_size", return_value=2),
+        patch("lm_resiliency.fault_injection.injector.dist.get_rank", return_value=0),
+        patch(
+            "lm_resiliency.fault_injection.injector.dist.all_gather_object",
+            side_effect=gather,
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="campaign manifest differs"):
+            enable_fault_injection(
+                model,
+                optimizer,
+                campaign=campaign,
+                state_store=store,
+            )
+
+    assert store.load(campaign.name).manifest_identity is None
 
 
 def test_distributed_enablement_rejects_targets_outside_world_size() -> None:
@@ -853,6 +986,38 @@ def test_bounded_state_fault_retirement_preserves_optimizer_update() -> None:
     optimizer.step()
 
     torch.testing.assert_close(model.layers[0].weight, baseline - 0.1)
+    assert session.records[0].status is InjectionStatus.COMPLETED
+    session.close()
+
+
+def test_bounded_state_fault_retires_noncontiguous_parameter() -> None:
+    model = TinyModel()
+    parameter = nn.Parameter(model.layers[0].weight.detach().clone().transpose(0, 1))
+    assert not parameter.is_contiguous()
+    model.layers[0].weight = parameter
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    baseline = parameter.detach().clone()
+    campaign = _campaign(
+        _incident(
+            at=(1,),
+            lifetime=IncidentLifetime(iterations=1),
+            faults=(
+                _corruption(
+                    target=_target(surface=FaultSurface.WEIGHT),
+                    operation=CorruptionOperation.SCALE,
+                    scope=FaultScope.FULL,
+                    factor=2.0,
+                ),
+            ),
+        )
+    )
+    session = enable_fault_injection(model, optimizer, campaign=campaign, rank=0)
+
+    for current in model.parameters():
+        current.grad = torch.ones_like(current)
+    optimizer.step()
+
+    torch.testing.assert_close(parameter, baseline - 0.1)
     assert session.records[0].status is InjectionStatus.COMPLETED
     session.close()
 
@@ -1834,6 +1999,48 @@ def test_active_external_effect_requires_deactivation_callback() -> None:
     session.close()
 
 
+def test_external_executor_evidence_must_be_json_serializable() -> None:
+    events: list[str] = []
+
+    def activate(_request):
+        events.append("activate")
+        return FaultExecutionResult(
+            verified=True,
+            active=True,
+            evidence={"tensor": torch.tensor(1.0)},
+        )
+
+    def deactivate(_request, _result):
+        events.append("deactivate")
+        return None
+
+    executor = CallbackFaultExecutor(
+        name="invalid-evidence",
+        supported_types={FailureType.PROCESS_TERMINATION},
+        activate=activate,
+        deactivate=deactivate,
+        max_safety=SafetyClass.ISOLATED_DESTRUCTIVE,
+    )
+    model = TinyModel()
+
+    with pytest.raises(ValueError, match="strictly JSON-serializable"):
+        enable_fault_injection(
+            model,
+            _optimizer(model),
+            campaign=_campaign(
+                _incident(
+                    at=(1,),
+                    lifetime=IncidentLifetime(until="campaign_end"),
+                    faults=(_external_fault(FailureType.PROCESS_TERMINATION),),
+                )
+            ),
+            executors=(executor,),
+            rank=0,
+        )
+
+    assert events == ["activate", "deactivate"]
+
+
 def test_external_permanent_fault_deactivates_on_replacement() -> None:
     events: list[tuple[str, str]] = []
     executor = _recording_executor(
@@ -2136,6 +2343,7 @@ def test_report_json_contains_manifest_ground_truth_and_scoring(tmp_path) -> Non
     report.to_json(path)
     value = json.loads(path.read_text())
 
+    assert value["manifest_identity"] == campaign.manifest_identity
     assert value["manifest"] == campaign.to_dict()
     assert value["completed_iterations"] == 1
     assert value["injections"][0]["injection_succeeded"]
@@ -2162,6 +2370,13 @@ def test_evaluation_rejects_unknown_and_inconsistent_results() -> None:
             occurrence_id="incident@1",
             detected=False,
             failed_ranks=(0,),
+        )
+    with pytest.raises(TypeError, match="detected must be a boolean"):
+        LocalizationResult.from_dict(
+            {
+                "occurrence_id": "incident@1",
+                "detected": "false",
+            }
         )
     session.close()
 
