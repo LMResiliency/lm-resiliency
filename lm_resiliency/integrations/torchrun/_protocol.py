@@ -826,7 +826,19 @@ def _recovery_decision(value: object, path: str) -> Mapping[str, Any]:
     if unknown:
         raise ProtocolValidationError(f"{path}: unknown fields {sorted(unknown)!r}")
     normalized = {
-        "failure_kind": _string(mapping["failure_kind"], f"{path}.failure_kind"),
+        "failure_kind": _choice(
+            mapping["failure_kind"],
+            f"{path}.failure_kind",
+            {
+                "checkpoint_stall",
+                "data_stall",
+                "hang",
+                "machine_unavailable",
+                "sdc",
+                "straggler",
+                "uncertain",
+            },
+        ),
         "recovery_mode": _choice(
             mapping["recovery_mode"],
             f"{path}.recovery_mode",
@@ -1525,7 +1537,7 @@ class RestartAck(_WireRecord):
     agent_id: str
     generation: int
     flushed_step: int
-    inventory_event_ids: tuple[str, ...]
+    inventory_event_digests: Mapping[str, str]
     transferred_owner_ranks: tuple[int, ...]
     transferred_peer_ranks: tuple[int, ...]
     success: bool
@@ -1538,13 +1550,24 @@ class RestartAck(_WireRecord):
         _string(self.agent_id, "RestartAck.agent_id")
         _integer(self.generation, "RestartAck.generation", minimum=0)
         _integer(self.flushed_step, "RestartAck.flushed_step", minimum=-1)
+        if not isinstance(self.inventory_event_digests, Mapping):
+            raise ProtocolValidationError("RestartAck.inventory_event_digests: expected an object")
         object.__setattr__(
             self,
-            "inventory_event_ids",
-            _strings(
-                self.inventory_event_ids,
-                "RestartAck.inventory_event_ids",
-                unique=True,
+            "inventory_event_digests",
+            MappingProxyType(
+                dict(
+                    sorted(
+                        (
+                            _string(event_id, "RestartAck.inventory_event_digests.key"),
+                            _sha256_digest(
+                                digest,
+                                f"RestartAck.inventory_event_digests[{event_id!r}]",
+                            ),
+                        )
+                        for event_id, digest in self.inventory_event_digests.items()
+                    )
+                )
             ),
         )
         object.__setattr__(
@@ -1583,7 +1606,7 @@ class RestartAck(_WireRecord):
             "agent_id": self.agent_id,
             "generation": self.generation,
             "flushed_step": self.flushed_step,
-            "inventory_event_ids": list(self.inventory_event_ids),
+            "inventory_event_digests": dict(self.inventory_event_digests),
             "transferred_owner_ranks": list(self.transferred_owner_ranks),
             "transferred_peer_ranks": list(self.transferred_peer_ranks),
             "success": self.success,
@@ -1602,7 +1625,7 @@ class RestartAck(_WireRecord):
                 "agent_id",
                 "generation",
                 "flushed_step",
-                "inventory_event_ids",
+                "inventory_event_digests",
                 "transferred_owner_ranks",
                 "transferred_peer_ranks",
                 "success",
@@ -1624,10 +1647,9 @@ class RestartAck(_WireRecord):
                 "RestartAck.flushed_step",
                 minimum=-1,
             ),
-            inventory_event_ids=_strings(
-                value["inventory_event_ids"],
-                "RestartAck.inventory_event_ids",
-                unique=True,
+            inventory_event_digests=_require_mapping(
+                value["inventory_event_digests"],
+                "RestartAck.inventory_event_digests",
             ),
             transferred_owner_ranks=_integers(
                 value["transferred_owner_ranks"],
@@ -2391,24 +2413,97 @@ def validate_event_reporter(
             raise ProtocolValidationError(
                 "WorkerIdentity.gpu_uuid: trusted resource owner does not match reporter"
             )
-    if isinstance(event, FaultEvent) and "failed_ranks" in event.report:
-        reported_ranks = _integers(
-            event.report["failed_ranks"],
-            "FaultEvent.report.failed_ranks",
-            minimum=0,
-            unique=True,
-        )
-        assigned_ranks = {
-            rank
-            for first_rank, last_rank in assignment.slot_to_rank_range.values()
+    if isinstance(event, FaultEvent):
+        rank_to_node = {
+            rank: assignment.slot_to_node_id[slot]
+            for slot, (first_rank, last_rank) in assignment.slot_to_rank_range.items()
             for rank in range(first_rank, last_rank)
         }
-        unknown_ranks = sorted(set(reported_ranks) - assigned_ranks)
-        if unknown_ranks:
-            raise ProtocolValidationError(
-                "FaultEvent.report.failed_ranks: ranks are not active in the committed "
-                f"assignment: {unknown_ranks!r}"
+        failed_ranks = (
+            _integers(
+                event.report["failed_ranks"],
+                "FaultEvent.report.failed_ranks",
+                minimum=0,
+                unique=True,
             )
+            if "failed_ranks" in event.report
+            else ()
+        )
+
+        def validate_attributed_ranks(field: str) -> tuple[int, ...]:
+            ranks = _integers(
+                event.report[field],
+                f"FaultEvent.report.{field}",
+                minimum=0,
+                unique=True,
+            )
+            unknown_ranks = sorted(set(ranks) - set(rank_to_node))
+            if unknown_ranks:
+                raise ProtocolValidationError(
+                    f"FaultEvent.report.{field}: ranks are not active in the committed "
+                    f"assignment: {unknown_ranks!r}"
+                )
+            outside_failed = sorted(set(ranks) - set(failed_ranks))
+            if outside_failed:
+                raise ProtocolValidationError(
+                    f"FaultEvent.report.{field}: ranks are not present in failed_ranks: "
+                    f"{outside_failed!r}"
+                )
+            return ranks
+
+        if failed_ranks:
+            validate_attributed_ranks("failed_ranks")
+        for field in ("dataloader_culprit_ranks", "stage_culprit_ranks"):
+            if field in event.report:
+                validate_attributed_ranks(field)
+        endpoint_fields = {
+            field
+            for field in ("endpoint_kind", "endpoint_id", "endpoint_rank")
+            if field in event.report
+        }
+        if endpoint_fields and endpoint_fields != {
+            "endpoint_kind",
+            "endpoint_id",
+            "endpoint_rank",
+        }:
+            raise ProtocolValidationError(
+                "FaultEvent.report: endpoint_kind, endpoint_id, and endpoint_rank "
+                "must be provided together"
+            )
+        if endpoint_fields:
+            endpoint_rank = _integer(
+                event.report["endpoint_rank"],
+                "FaultEvent.report.endpoint_rank",
+                minimum=0,
+            )
+            if endpoint_rank not in rank_to_node:
+                raise ProtocolValidationError(
+                    "FaultEvent.report.endpoint_rank: rank is not active in the "
+                    "committed assignment"
+                )
+            if endpoint_rank not in failed_ranks:
+                raise ProtocolValidationError(
+                    "FaultEvent.report.endpoint_rank: rank is not present in failed_ranks"
+                )
+            endpoint_kind = _string(
+                event.report["endpoint_kind"],
+                "FaultEvent.report.endpoint_kind",
+            )
+            endpoint_id = _string(
+                event.report["endpoint_id"],
+                "FaultEvent.report.endpoint_id",
+            )
+            endpoint_node_id = rank_to_node[endpoint_rank]
+            if endpoint_kind == "node":
+                if endpoint_id != endpoint_node_id:
+                    raise ProtocolValidationError(
+                        "FaultEvent.report.endpoint_id: does not match endpoint rank's node"
+                    )
+            elif resource_owners.get(endpoint_id) != endpoint_node_id:
+                raise ProtocolValidationError(
+                    "FaultEvent.report.endpoint_id: trusted resource owner does not match "
+                    "endpoint rank"
+                )
     if not isinstance(event, FaultEvent) or event.report.get("kind") != "hardware":
         return
     resource_kind = _choice(
@@ -2568,6 +2663,13 @@ def validate_restart_plan(
     if source_assignment.topology_digest != manifest.topology_digest:
         raise ProtocolValidationError(
             "source_assignment.topology_digest: does not match recovery manifest"
+        )
+    if (
+        source_assignment.generation == current_assignment.generation
+        and source_assignment != current_assignment
+    ):
+        raise ProtocolValidationError(
+            "source_assignment: conflicts with the committed assignment for this generation"
         )
     source_world_size = source_assignment.active_nodes * source_assignment.local_world_size
     if source_world_size != plan.expected_world_size:
@@ -2774,7 +2876,7 @@ def _copy_has_trusted_inventory_provenance(
         and ack.success
         and ack.agent_id == event.reporter.agent_id
         and ack.flushed_step == manifest.step
-        and event.event_id in ack.inventory_event_ids
+        and ack.inventory_event_digests.get(event.event_id) == checkpoint_inventory_digest(event)
     )
 
 

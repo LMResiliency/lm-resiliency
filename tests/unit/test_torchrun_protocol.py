@@ -169,9 +169,14 @@ def _ack(
     node_id: str = "node-a",
     agent_id: str = "agent-a",
     flushed_step: int = 40,
-    inventory_event_ids: tuple[str, ...] = ("inventory-a",),
+    inventory_event_digests: dict[str, str] | None = None,
     success: bool = True,
 ) -> RestartAck:
+    if inventory_event_digests is None:
+        event = _inventory_event(_manifest())
+        inventory_event_digests = {
+            event.event_id: checkpoint_inventory_digest(event),
+        }
     return RestartAck(
         intent_id="intent-4",
         run_id=RUN_ID,
@@ -179,7 +184,7 @@ def _ack(
         agent_id=agent_id,
         generation=4,
         flushed_step=flushed_step if success else -1,
-        inventory_event_ids=inventory_event_ids,
+        inventory_event_digests=inventory_event_digests,
         transferred_owner_ranks=(0, 1),
         transferred_peer_ranks=(2, 3),
         success=success,
@@ -583,6 +588,39 @@ def test_certification_binds_immutable_inventory_contents():
         )
 
 
+def test_restart_ack_binds_immutable_inventory_contents():
+    original_manifest = _manifest()
+    original_event = _inventory_event(original_manifest)
+    altered_manifest = replace(
+        original_manifest,
+        rank_copies=tuple(
+            replace(
+                rank_copies,
+                copies=tuple(
+                    replace(copy, location_token="substituted-location")
+                    if copy.owner_global_rank == 0
+                    else copy
+                    for copy in rank_copies.copies
+                ),
+            )
+            for rank_copies in original_manifest.rank_copies
+        ),
+    )
+
+    with pytest.raises(ProtocolValidationError, match="no complete eligible copy"):
+        _validate(
+            manifest=altered_manifest,
+            inventory_events=(_inventory_event(altered_manifest),),
+            restart_acks=(
+                _ack(
+                    inventory_event_digests={
+                        original_event.event_id: checkpoint_inventory_digest(original_event),
+                    }
+                ),
+            ),
+        )
+
+
 def test_restart_plan_requires_inventory_provenance_for_every_copy():
     with pytest.raises(ProtocolValidationError, match="no complete eligible copy"):
         _validate(inventory_events=())
@@ -636,21 +674,23 @@ def test_restart_plan_rejects_local_copy_on_departing_holder():
             3: "owner",
         },
     )
+    departing_event = _inventory_event(
+        manifest,
+        reporter=departing_worker,
+    )
 
     with pytest.raises(ProtocolValidationError, match="no complete eligible copy"):
         _validate(
             plan=replace(_plan(), quarantined_node_ids=()),
             manifest=manifest,
-            inventory_events=(
-                _inventory_event(
-                    manifest,
-                    reporter=departing_worker,
-                ),
-            ),
+            inventory_events=(departing_event,),
             restart_acks=(
                 _ack(
                     node_id="node-b",
                     agent_id="agent-b",
+                    inventory_event_digests={
+                        departing_event.event_id: checkpoint_inventory_digest(departing_event),
+                    },
                 ),
             ),
             authenticated_ack_agent_ids={"node-b": "agent-b"},
@@ -897,6 +937,31 @@ def test_restart_plan_preserves_committed_world_size():
         )
 
 
+def test_source_assignment_cannot_conflict_with_current_generation():
+    conflicting_source = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=4,
+        assignments=(
+            SlotAssignment(
+                logical_node_slot=0,
+                node_id="node-spare",
+                first_global_rank=0,
+                local_world_size=2,
+            ),
+            SlotAssignment(
+                logical_node_slot=1,
+                node_id="node-b",
+                first_global_rank=2,
+                local_world_size=2,
+            ),
+        ),
+        topology_digest=TOPOLOGY_DIGEST,
+    )
+
+    with pytest.raises(ProtocolValidationError, match="conflicts with the committed assignment"):
+        _validate(source_assignment=conflicting_source)
+
+
 def test_worker_identity_rejects_inconsistent_global_rank():
     with pytest.raises(ProtocolValidationError, match="does not match logical slot"):
         replace(_worker(), global_rank=3)
@@ -1021,6 +1086,63 @@ def test_fault_report_rejects_rank_outside_committed_assignment():
 
 
 @pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("dataloader_culprit_ranks", [3], "not present in failed_ranks"),
+        ("stage_culprit_ranks", [999], "not active"),
+    ],
+)
+def test_fault_report_validates_all_rank_attribution_fields(field, value, message):
+    event = FaultEvent(
+        event_id="fault-attribution",
+        incident_id="incident-a",
+        run_id=RUN_ID,
+        generation=4,
+        reporter=_worker(),
+        optimizer_step=41,
+        report={
+            "kind": "data_stall",
+            "failed_ranks": [0],
+            field: value,
+        },
+    )
+
+    with pytest.raises(ProtocolValidationError, match=message):
+        validate_event_reporter(
+            event,
+            _current_assignment(),
+            agent_identity=_agent(),
+            resource_to_node_id={"GPU-0": "node-a"},
+        )
+
+
+def test_fault_report_endpoint_must_match_failed_rank_and_node():
+    event = FaultEvent(
+        event_id="fault-endpoint",
+        incident_id="incident-a",
+        run_id=RUN_ID,
+        generation=4,
+        reporter=_worker(),
+        optimizer_step=41,
+        report={
+            "kind": "straggler",
+            "failed_ranks": [0],
+            "endpoint_kind": "node",
+            "endpoint_id": "node-b",
+            "endpoint_rank": 0,
+        },
+    )
+
+    with pytest.raises(ProtocolValidationError, match="endpoint rank's node"):
+        validate_event_reporter(
+            event,
+            _current_assignment(),
+            agent_identity=_agent(),
+            resource_to_node_id={"GPU-0": "node-a"},
+        )
+
+
+@pytest.mark.parametrize(
     ("failure_kind", "all_ranks_accessible"),
     [("sdc", True), ("machine_unavailable", True), ("hang", False)],
 )
@@ -1044,6 +1166,27 @@ def test_recovery_proposal_rejects_latest_for_unsafe_failures(
                 "all_ranks_accessible": all_ranks_accessible,
                 "available": True,
                 "reason": "unsafe",
+            },
+        )
+
+
+def test_recovery_proposal_rejects_unknown_failure_kind():
+    with pytest.raises(ProtocolValidationError, match="unsupported value"):
+        RecoveryProposalEvent(
+            event_id="recovery-unknown",
+            incident_id="incident-a",
+            run_id=RUN_ID,
+            generation=4,
+            reporter=_worker(),
+            decision={
+                "failure_kind": "stragler",
+                "recovery_mode": "latest",
+                "checkpoint_source": "gemini",
+                "checkpoint_step": 40,
+                "checkpoint_id": None,
+                "all_ranks_accessible": True,
+                "available": True,
+                "reason": "unknown failure kind",
             },
         )
 
@@ -1110,7 +1253,7 @@ def test_durable_recovery_rejects_latest_manifest_even_in_latest_mode():
         (),
         (_ack(success=False),),
         (_ack(flushed_step=39),),
-        (_ack(inventory_event_ids=("inventory-other",)),),
+        (_ack(inventory_event_digests={"inventory-other": "0" * 64}),),
     ],
 )
 def test_latest_recovery_requires_successful_preparation_ack(restart_acks):

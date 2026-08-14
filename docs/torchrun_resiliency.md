@@ -342,6 +342,10 @@ Requirements:
   `HardwareFaultReport` without upgrading its resource granularity.
 - The coordinator resolves reported ranks through that generation's
   `RankAssignment` and rejects any reported rank outside its committed ranges.
+- `failed_ranks`, `endpoint_rank`, `dataloader_culprit_ranks`, and
+  `stage_culprit_ranks` are validated together. Culprit and endpoint ranks must
+  be included in `failed_ranks`; node or resource endpoint IDs must resolve to
+  the endpoint rank through the trusted assignment and resource map.
 - The orchestration dispatcher allocates `incident_id` once and uses it for
   both the recovery and fault callbacks. The client must not infer correlation
   from callback timing.
@@ -369,6 +373,11 @@ RECOVERY_VERIFIED dominates LATEST_GEMINI
 unavailable required shard dominates locally available state
 missing or stale evidence blocks promotion to a less conservative mode
 ```
+
+A schema-v1 proposal accepts only the known failure kinds `straggler`,
+`data_stall`, `checkpoint_stall`, `hang`, `uncertain`, `sdc`, and
+`machine_unavailable`. Unknown or newly introduced kinds are rejected until a
+new schema defines their recovery semantics.
 
 A worker must never interpret its local `checkpoint_step` as the final global
 step. The coordinator selects one step from the complete job-wide inventory,
@@ -667,7 +676,7 @@ class RestartAck(TypedDict):
     agent_id: str
     generation: int
     flushed_step: int
-    inventory_event_ids: list[str]
+    inventory_event_digests: dict[str, str]  # event ID to canonical SHA-256
     transferred_owner_ranks: list[int]
     transferred_peer_ranks: list[int]
     success: bool
@@ -695,7 +704,9 @@ against that authenticated identity and requires the agent to match the
 inventory reporter. The coordinator also records receipt time outside the
 worker payload and rejects acknowledgements received after
 `prepare_deadline_unix_ms`. Payload identity fields and timestamps alone are
-not authentication.
+not authentication. For latest recovery, the acknowledgement's canonical
+inventory digest must match the exact event used by the manifest; event-ID
+reuse cannot substitute different copies after preparation.
 
 For a crashed or unreachable node, no preparation is assumed.
 
@@ -989,7 +1000,8 @@ The coordinator resolves every rank through the immutable `RankAssignment` for
 the manifest's `source_generation`. An `owner` copy must be held by the node
 that owned that rank in that generation; a `peer` copy must be held elsewhere.
 The source assignment's run, generation, topology digest, and world size must
-match the manifest and plan.
+match the manifest and plan. When source and current generations are equal,
+their assignments must be identical rather than merely share metadata.
 
 Preferred source order:
 
