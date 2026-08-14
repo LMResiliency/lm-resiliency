@@ -585,6 +585,33 @@ def test_comparison_ignores_explicit_probability_skips() -> None:
     assert len(evaluation["evaluations"]) == 1
 
 
+def test_comparison_rejects_skip_for_selected_probability_occurrence() -> None:
+    injection = _injection_payload()
+    injection["completed_iterations"] = 5
+    selected = copy.deepcopy(injection["manifest"]["incidents"][0])
+    selected["incident_id"] = "selected"
+    selected["trigger"] = {"at": [5], "probability": 1.0}
+    selected["faults"][0]["fault_id"] = "selected-output"
+    injection["manifest"]["incidents"].append(selected)
+    injection["injections"].append(
+        {
+            **injection["injections"][0],
+            "occurrence_id": "selected@5",
+            "incident_id": "selected",
+            "fault_id": "selected-output",
+            "iteration": 5,
+            "status": "skipped_probability",
+            "verified": False,
+            "injection_succeeded": False,
+        }
+    )
+    localization = _localization_payload()
+    _refresh_manifest_identity(injection, localization)
+
+    with pytest.raises(ValueError, match="probability status disagrees"):
+        compare_payloads(injection, localization)
+
+
 def test_comparison_rejects_a_wholly_missing_scheduled_occurrence() -> None:
     injection = _injection_payload()
     injection["completed_iterations"] = 5
@@ -626,6 +653,55 @@ def test_comparison_rejects_wrong_failure_evidence(
 
     assert not evaluation["summary"]["passed"]
     assert not evaluation["evaluations"][0][mismatch]
+
+
+def test_comparison_correlates_source_prefixes_with_failed_targets() -> None:
+    injection = _injection_payload()
+    second_action = copy.deepcopy(injection["manifest"]["incidents"][0]["faults"][0])
+    second_action["fault_id"] = "rank-one-output"
+    second_action["target"] = {
+        **second_action["target"],
+        "rank": 1,
+        "component": "output",
+    }
+    second_action["target"].pop("index")
+    injection["manifest"]["incidents"][0]["faults"].append(second_action)
+    second_record = copy.deepcopy(injection["injections"][0])
+    second_record.update(
+        {
+            "fault_id": "rank-one-output",
+            "execution_rank": 1,
+            "target": copy.deepcopy(second_action["target"]),
+        }
+    )
+    injection["injections"].append(second_record)
+    localization = _localization_payload()
+    localization["reports"] = [
+        {
+            "training_iteration": 4,
+            "failed_ranks": [0],
+            "kind": "sdc",
+            "scope": "rank",
+            "layer_id": -1,
+            "sources": ["output.output"],
+        },
+        {
+            "training_iteration": 4,
+            "failed_ranks": [1],
+            "kind": "sdc",
+            "scope": "rank",
+            "layer_id": -1,
+            "sources": ["hidden.output"],
+        },
+    ]
+    _refresh_manifest_identity(injection, localization)
+
+    occurrence = compare_payloads(injection, localization)["evaluations"][0]
+
+    assert occurrence["rank_match"]
+    assert occurrence["source_match"]
+    assert not occurrence["source_target_match"]
+    assert not occurrence["localized"]
 
 
 def test_comparison_rejects_non_string_resource_evidence() -> None:
@@ -983,6 +1059,37 @@ def test_example_rejects_multi_call_gradient_affecting_reset() -> None:
 
     with pytest.raises(ValueError, match="supports matching_calls=1"):
         _state_reset_iterations(campaign)
+
+
+def test_example_rejects_multi_call_non_state_fault_run_length() -> None:
+    campaign = FaultCampaign.from_dict(
+        {
+            "schema_version": 1,
+            "name": "multi-call-delay",
+            "incidents": [
+                {
+                    "id": "delay",
+                    "trigger": {"at": [5]},
+                    "lifetime": {"matching_calls": 3},
+                    "faults": [
+                        {
+                            "id": "delay-output",
+                            "type": "delay",
+                            "target": {
+                                "rank": 0,
+                                "module_path": "layers.0",
+                                "surface": "output",
+                            },
+                            "parameters": {"delay_ms": 10.0},
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(ValueError, match="supports matching_calls=1 only"):
+        _last_scheduled_iteration(campaign)
 
 
 def test_comparison_rejects_mismatched_campaigns() -> None:

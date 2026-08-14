@@ -6096,6 +6096,79 @@ def test_staged_activation_rollback_marks_verified_records_failed() -> None:
     session.close()
 
 
+def test_safe_activation_interrupt_rolls_back_and_reaches_consensus() -> None:
+    def activate(request):
+        if request.fault.fault_id == "first":
+            return FaultExecutionResult(verified=True, active=False)
+        raise KeyboardInterrupt("stop activation")
+
+    executor = CallbackFaultExecutor(
+        name="interrupting-safe-executor",
+        supported_types={FailureType.DELAY},
+        activate=activate,
+        one_shot=True,
+        max_safety=SafetyClass.SAFE_IN_PROCESS,
+    )
+    faults = (
+        FaultSpec(
+            fault_id="first",
+            type=FailureType.DELAY,
+            target=FaultTarget(
+                rank=0,
+                surface=FaultSurface.RESOURCE,
+                resource="first",
+            ),
+            parameters={"delay_ms": 1.0},
+        ),
+        FaultSpec(
+            fault_id="interrupt",
+            type=FailureType.DELAY,
+            target=FaultTarget(
+                rank=0,
+                surface=FaultSurface.RESOURCE,
+                resource="interrupt",
+            ),
+            parameters={"delay_ms": 1.0},
+        ),
+    )
+    model = TinyModel()
+    session = FaultInjectionSession(
+        model,
+        _optimizer(model),
+        campaign=_campaign(_incident(at=(1,), faults=faults)),
+        executors=(executor,),
+        rank=0,
+        _defer_activation=True,
+    )
+    session._commit_journal_binding()
+    stages: list[tuple[str, BaseException | None]] = []
+
+    def gather(error: BaseException | None, stage: str) -> list[str]:
+        stages.append((stage, error))
+        if stage == "iteration arming":
+            return ["rank 0: KeyboardInterrupt: stop activation"]
+        return []
+
+    with (
+        patch(
+            "lm_resiliency.fault_injection.injector._distributed_world_size",
+            return_value=2,
+        ),
+        patch.object(session, "_gather_runtime_rank_errors", side_effect=gather),
+        pytest.raises(KeyboardInterrupt, match="stop activation"),
+    ):
+        session._enter_iteration_consistently(1)
+
+    assert [stage for stage, _error in stages] == [
+        "iteration preflight",
+        "attempt persistence",
+        "iteration arming",
+    ]
+    assert isinstance(stages[-1][1], KeyboardInterrupt)
+    assert all(record.status is InjectionStatus.FAILED for record in session.records)
+    assert all(not record.injection_succeeded for record in session.records)
+
+
 def test_local_activation_rollback_propagates_cleanup_failure() -> None:
     record = MagicMock()
     effect = LocalFaultEffect(

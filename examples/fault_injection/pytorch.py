@@ -248,6 +248,7 @@ def main() -> None:
 
 
 def _validate_run(campaign: FaultCampaign, steps: int) -> None:
+    _validate_call_bounded_lifetimes(campaign)
     if steps <= 0:
         raise ValueError("--steps must be positive")
     latest = _last_scheduled_iteration(campaign)
@@ -269,6 +270,7 @@ def _validate_target_ranks(campaign: FaultCampaign, world_size: int) -> None:
 
 
 def _last_scheduled_iteration(campaign: FaultCampaign) -> int:
+    _validate_call_bounded_lifetimes(campaign)
     latest: list[int] = []
     for incident in campaign.incidents:
         if incident.trigger.at:
@@ -281,10 +283,19 @@ def _last_scheduled_iteration(campaign: FaultCampaign) -> int:
             last_trigger = trigger_range.start + steps * trigger_range.every
         if incident.lifetime.iterations is not None:
             last_trigger += incident.lifetime.iterations - 1
-        elif incident.lifetime.matching_calls is not None:
-            last_trigger += incident.lifetime.matching_calls - 1
         latest.append(last_trigger)
     return max(latest)
+
+
+def _validate_call_bounded_lifetimes(campaign: FaultCampaign) -> None:
+    if any(
+        incident.lifetime.matching_calls is not None and incident.lifetime.matching_calls != 1
+        for incident in campaign.incidents
+    ):
+        raise ValueError(
+            "the evaluation example supports matching_calls=1 only because "
+            "framework call multiplicity cannot be inferred from optimizer iterations"
+        )
 
 
 @dataclass(frozen=True)

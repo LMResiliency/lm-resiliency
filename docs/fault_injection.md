@@ -274,6 +274,9 @@ Such an incident must have one trigger candidate, and a later incident on the
 same resolved target is treated as potentially overlapping. Repeated
 `matching_calls=1` candidates retain the established one-call contract for
 each scheduled iteration.
+The eight-GPU evaluation example accepts only `matching_calls=1`, even for
+non-state faults. Framework call multiplicity is not portable enough to infer a
+multi-call effect's expiration or its required post-fault optimizer iteration.
 Closing a session normally completes a verified `campaign_end` effect. Closing
 before a `matching_calls` or `iterations` lifetime finishes cancels that effect,
 so a partial-duration injection cannot be certified as successful. Error-path
@@ -590,6 +593,9 @@ consensus for the same reason.
 If any runtime preparation, preflight, persistence, rollback, or safe-activation
 collective itself raises, the surviving rank performs bounded local cleanup
 before propagating the collective failure.
+An interrupt-class failure raised during safe activation participates in that
+same all-rank failure consensus. Newly armed effects are rolled back on every
+rank before the interrupted rank re-raises its original exception.
 Single-rank and intentionally non-consensus preparation failures follow the
 same cleanup rule.
 
@@ -653,6 +659,9 @@ normalized.
 Deterministic probability skips are reported as `skipped_probability` but are
 not persisted as attempts. Reaching a dense range with unselected candidates
 therefore does not grow or repeatedly copy the restart journal.
+Artifact evaluation recomputes selection from the authenticated manifest seed,
+incident ID, and iteration. A skipped occurrence must include every manifest
+action, and a selected occurrence cannot claim a skipped status.
 The journal object requires exactly `campaign`, `manifest_identity`, and
 `attempts`; missing or unknown fields are rejected.
 
@@ -713,6 +722,9 @@ component set; extra components are attribution errors. Component evidence is
 also correlated with the rank and resource targets in each localization result.
 Swapping correct component names between two failed targets is therefore an
 attribution failure even when the aggregate component and target sets match.
+The standalone SCOUT comparator applies the same rule to replay source prefixes:
+each `hidden.*`, `embedding.*`, or `output.*` source remains associated with the
+failed ranks or resources in the report that supplied it.
 Example detection counts also require a report with the expected failure kind;
 an unrelated report at the same iteration is retained as evidence but does not
 count as detecting the injected occurrence. For correlated incidents containing

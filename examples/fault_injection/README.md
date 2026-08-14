@@ -49,11 +49,11 @@ holds evaluation state. If one incident expires while another state-affecting
 window remains active, the hold window takes precedence and defers the full
 model/optimizer reset until the later window also expires. This isolates each
 case; it is not a replacement for production checkpoint recovery. The example
-rejects `campaign_end` lifetimes for
-gradient-affecting incidents because they cannot produce a clean certification
-iteration before shutdown. It also requires `matching_calls=1` for those
-incidents because framework call multiplicity cannot be converted portably into
-a later optimizer-iteration reset.
+rejects `campaign_end` lifetimes for gradient-affecting incidents because they
+cannot produce a clean certification iteration before shutdown. It requires
+`matching_calls=1` for every incident because framework call multiplicity
+cannot be converted portably into optimizer-iteration run length or
+certification boundaries.
 
 Teardown attempts fault-injection cleanup, evaluation-state cleanup, resiliency
 cleanup, and process-group destruction independently. A cleanup failure is
@@ -77,6 +77,9 @@ Expected fault kinds, ranks, resources, layers, components, and parameters are
 derived from that authenticated manifest rather than trusted from individual
 injection records. Record targets and lifecycle fields must match the manifest
 and use strict JSON types before they can contribute to a passing result.
+Probability selection is recomputed from the manifest seed, incident ID, and
+iteration. A skipped occurrence must contain every manifest action and match
+the deterministic selection result.
 SCOUT reports currently carry a training iteration but no campaign occurrence
 ID, so this example also rejects two distinct occurrences scheduled at the same
 iteration instead of crediting one report to both.
@@ -91,6 +94,8 @@ those incidents.
 Dense catalog reports use `layer_id: -1` when several replay recipes are
 aggregated; in that case the comparison uses the reported `hidden.*`,
 `embedding.*`, or `output.*` source as component-localization evidence.
+That evidence remains associated with the ranks or resources in the individual
+SCOUT report, so valid source names swapped between targets fail localization.
 Aggregate straggler reports are tied to the configured replay catalog.
 Re-run the comparison independently with:
 

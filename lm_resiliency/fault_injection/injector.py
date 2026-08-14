@@ -181,7 +181,7 @@ class _ExternalEffect:
                 self.record.completed_at_ns = time.monotonic_ns()
             self.done = True
 
-    def rollback(self, error: Exception) -> None:
+    def rollback(self, error: BaseException) -> None:
         with self.lock:
             if self.done:
                 return
@@ -228,7 +228,7 @@ class _ActiveFault:
         else:
             self.effect.complete(cancelled=cancelled)
 
-    def rollback(self, error: Exception) -> None:
+    def rollback(self, error: BaseException) -> None:
         if isinstance(self.effect, LocalFaultEffect):
             self.effect.fail(
                 RuntimeError(f"fault activation rolled back: {error}"),
@@ -721,7 +721,7 @@ class FaultInjectionSession:
                 self._preflight_iteration(iteration)
                 staged = self._stage_iteration_attempts(iteration, candidates)
                 self._activate_staged_iteration(iteration, staged)
-            except Exception as error:
+            except BaseException as error:
                 cleanup_error = self._cleanup()
                 if cleanup_error is not None:
                     _add_exception_note(
@@ -791,10 +791,10 @@ class FaultInjectionSession:
 
         active_start = len(self._active)
         record_start = len(self._records)
-        activation_error: Exception | None = None
+        activation_error: BaseException | None = None
         try:
             self._activate_staged_iteration(iteration, staged)
-        except Exception as error:
+        except BaseException as error:
             activation_error = error
 
         failures = (
@@ -825,6 +825,19 @@ class FaultInjectionSession:
                     boundary_error,
                     f"fault injection cleanup also failed: {cleanup_error}",
                 )
+            if activation_error is not None and not isinstance(activation_error, Exception):
+                _add_exception_note(activation_error, str(boundary_error))
+                if rollback_error is not None:
+                    _add_exception_note(
+                        activation_error,
+                        f"fault activation rollback also failed: {rollback_error}",
+                    )
+                if cleanup_error is not None:
+                    _add_exception_note(
+                        activation_error,
+                        f"fault injection cleanup also failed: {cleanup_error}",
+                    )
+                raise activation_error
             raise boundary_error from activation_error
         if activation_error is not None:
             cleanup_error = self._cleanup()
@@ -896,7 +909,7 @@ class FaultInjectionSession:
 
     def _gather_runtime_rank_errors(
         self,
-        error: Exception | None,
+        error: BaseException | None,
         stage: str,
     ) -> list[str]:
         try:
@@ -947,7 +960,7 @@ class FaultInjectionSession:
                     iteration,
                     item.attempt,
                 )
-        except Exception as error:
+        except BaseException as error:
             cleanup_error = self._rollback_new_activations(
                 active_start,
                 record_start,
@@ -961,7 +974,7 @@ class FaultInjectionSession:
         self,
         active_start: int,
         record_start: int,
-        error: Exception,
+        error: BaseException,
     ) -> Exception | None:
         cleanup_error: Exception | None = None
         for active in reversed(self._active[active_start:]):
@@ -1018,7 +1031,7 @@ class FaultInjectionSession:
                     activated.append(active)
                     if not active.done:
                         self._active.append(active)
-        except Exception as error:
+        except BaseException as error:
             cleanup_error: Exception | None = None
             for active in reversed(activated):
                 if not active.done:
@@ -1427,7 +1440,7 @@ def enable_fault_injection(
     return session
 
 
-def _add_exception_note(error: Exception, note: str) -> None:
+def _add_exception_note(error: BaseException, note: str) -> None:
     """Attach cleanup context while supporting the Python 3.10 runtime floor."""
     add_note = getattr(error, "add_note", None)
     if callable(add_note):
@@ -1444,7 +1457,7 @@ def _campaign_identity(campaign: FaultCampaign) -> str:
     return campaign.manifest_identity
 
 
-def _gather_rank_errors(error: Exception | None) -> list[str]:
+def _gather_rank_errors(error: BaseException | None) -> list[str]:
     summary = None if error is None else f"{type(error).__name__}: {error}"
     world_size = dist.get_world_size()
     gathered: list[str | None] = [None] * world_size

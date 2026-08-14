@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from lm_resiliency.fault_injection.config import FailureType, expected_failure_kind
+from lm_resiliency.fault_injection.injector import _probability_selected
 
 
 def compare_payloads(
@@ -28,11 +29,12 @@ def compare_payloads(
     all_records = [dict(record) for record in injection.get("injections", ())]
     for record in all_records:
         _record_injection_succeeded(record)
+    expected_actions = _manifest_actions(injection)
+    _validate_probability_records(injection, all_records, expected_actions)
     _validate_scheduled_occurrence_coverage(injection, all_records)
     records = [
         dict(record) for record in all_records if record.get("status") != "skipped_probability"
     ]
-    expected_actions = _manifest_actions(injection)
     reports = [dict(report) for report in localization.get("reports", ())]
     grouped: dict[str, list[dict[str, Any]]] = {}
     for record in records:
@@ -256,7 +258,14 @@ def _evaluate_occurrence(
     observed_layers = sorted(layer_id for layer_id in reported_layer_ids if layer_id >= 0)
     aggregate_layer_report = -1 in reported_layer_ids
     observed_sources = sorted(
-        {str(source) for report in matching for source in report.get("sources", ())}
+        {
+            source
+            for report in matching
+            for source in _required_string_sequence(
+                report.get("sources", ()),
+                "localization sources",
+            )
+        }
     )
     kind_match = set(expected_kinds).issubset(observed_kinds)
     rank_match = observed_ranks == expected_ranks
@@ -292,6 +301,20 @@ def _evaluate_occurrence(
         any(source.startswith(prefix) for source in observed_sources)
         for prefix in expected_source_prefixes
     )
+    expected_targets_by_source = {
+        prefix: _expected_targets_for_source(
+            tuple(expected_by_fault_id.values()),
+            prefix,
+        )
+        for prefix in expected_source_prefixes
+    }
+    observed_targets_by_source = {
+        prefix: _reported_targets_for_source(matching, prefix)
+        for prefix in expected_source_prefixes
+    }
+    source_target_match = (
+        not expected_source_prefixes or observed_targets_by_source == expected_targets_by_source
+    )
     if not expected_layers:
         layer_match = True
         layer_evidence = "not_required"
@@ -318,6 +341,7 @@ def _evaluate_occurrence(
         and kind_resource_match
         and layer_match
         and source_match
+        and source_target_match
     )
     return {
         "occurrence_id": occurrence_id,
@@ -336,6 +360,7 @@ def _evaluate_occurrence(
             "resources_by_kind": expected_resources_by_kind,
             "layers": expected_layers,
             "source_prefixes": expected_source_prefixes,
+            "targets_by_source": expected_targets_by_source,
         },
         "observed": {
             "ranks": observed_ranks,
@@ -346,6 +371,7 @@ def _evaluate_occurrence(
             "layers": observed_layers,
             "aggregate_layer_report": aggregate_layer_report,
             "sources": observed_sources,
+            "targets_by_source": observed_targets_by_source,
         },
         "kind_match": kind_match,
         "rank_match": rank_match,
@@ -355,6 +381,7 @@ def _evaluate_occurrence(
         "layer_match": layer_match,
         "layer_evidence": layer_evidence,
         "source_match": source_match,
+        "source_target_match": source_target_match,
         "matched_reports": matching,
     }
 
@@ -536,6 +563,94 @@ def _validate_scheduled_occurrence_coverage(
         raise ValueError(f"injection records reference unknown incidents: {unknown}")
 
 
+def _validate_probability_records(
+    injection: Mapping[str, Any],
+    records: Sequence[Mapping[str, Any]],
+    manifest_actions: Mapping[str, Mapping[str, Mapping[str, Any]]],
+) -> None:
+    manifest = injection.get("manifest")
+    if not isinstance(manifest, Mapping):
+        raise ValueError("injection artifact requires an embedded manifest")
+    campaign_seed = _required_integer(manifest.get("seed", 0), "injection manifest seed")
+    incidents = manifest.get("incidents")
+    if isinstance(incidents, (str, bytes)) or not isinstance(incidents, Sequence):
+        raise TypeError("injection manifest incidents must be an array")
+    incident_definitions: dict[str, Mapping[str, Any]] = {}
+    for incident in incidents:
+        if not isinstance(incident, Mapping):
+            raise TypeError("injection manifest incidents must contain objects")
+        incident_id = _required_string(
+            incident.get("incident_id", incident.get("id")),
+            "injection manifest incident_id",
+        )
+        incident_definitions[incident_id] = incident
+
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for record in records:
+        occurrence_id = _required_string(record.get("occurrence_id"), "injection occurrence_id")
+        grouped.setdefault(occurrence_id, []).append(record)
+
+    for occurrence_id, occurrence_records in grouped.items():
+        incident_ids = {
+            _required_string(record.get("incident_id"), "injection incident_id")
+            for record in occurrence_records
+        }
+        iterations = {
+            _required_integer(record.get("iteration"), "injection iteration")
+            for record in occurrence_records
+        }
+        if len(incident_ids) != 1 or len(iterations) != 1:
+            raise ValueError(f"occurrence {occurrence_id!r} must have one incident and iteration")
+        incident_id = incident_ids.pop()
+        iteration = iterations.pop()
+        incident = incident_definitions.get(incident_id)
+        expected = manifest_actions.get(incident_id)
+        if incident is None or expected is None:
+            raise ValueError(f"occurrence {occurrence_id!r} references an unknown incident")
+        trigger = incident.get("trigger")
+        if not isinstance(trigger, Mapping):
+            raise TypeError("injection manifest trigger must be an object")
+        probability = trigger.get("probability", 1.0)
+        if isinstance(probability, bool) or not isinstance(probability, (int, float)):
+            raise TypeError("injection manifest probability must be a number")
+        if not 0.0 <= float(probability) <= 1.0:
+            raise ValueError("injection manifest probability must be between zero and one")
+        selected = _probability_selected(
+            campaign_seed,
+            incident_id,
+            iteration,
+            float(probability),
+        )
+        statuses = {
+            _required_string(record.get("status"), "injection status")
+            for record in occurrence_records
+        }
+        skipped = statuses == {"skipped_probability"}
+        if "skipped_probability" in statuses and not skipped:
+            raise ValueError(
+                f"occurrence {occurrence_id!r} mixes skipped and selected action records"
+            )
+        if skipped == selected:
+            raise ValueError(
+                f"occurrence {occurrence_id!r} probability status disagrees with the manifest"
+            )
+        if skipped:
+            recorded_fault_ids = [
+                _required_string(record.get("fault_id"), "injection fault_id")
+                for record in occurrence_records
+            ]
+            if len(recorded_fault_ids) != len(expected) or set(recorded_fault_ids) != set(expected):
+                raise ValueError(
+                    f"skipped occurrence {occurrence_id!r} does not contain every manifest action"
+                )
+            for record, fault_id in zip(
+                occurrence_records,
+                recorded_fault_ids,
+                strict=True,
+            ):
+                _validate_record_against_manifest(record, expected[fault_id])
+
+
 def _validate_record_against_manifest(
     record: Mapping[str, Any],
     action: Mapping[str, Any],
@@ -610,6 +725,63 @@ def _expected_action_source_prefix(action: Mapping[str, Any]) -> str | None:
     if ".layers." in f".{module_path}.":
         return "hidden."
     return None
+
+
+def _expected_targets_for_source(
+    actions: Sequence[Mapping[str, Any]],
+    prefix: str,
+) -> dict[str, list[int] | list[str]]:
+    matching = tuple(
+        action for action in actions if _expected_action_source_prefix(action) == prefix
+    )
+    return {
+        "ranks": sorted(
+            expected_rank
+            for action in matching
+            if (expected_rank := _expected_action_rank(action)) is not None
+        ),
+        "resources": sorted(
+            resource
+            for action in matching
+            if (resource := _expected_action_resource(action)) is not None
+        ),
+    }
+
+
+def _reported_targets_for_source(
+    reports: Sequence[Mapping[str, Any]],
+    prefix: str,
+) -> dict[str, list[int] | list[str]]:
+    matching = tuple(
+        report
+        for report in reports
+        if any(
+            source.startswith(prefix)
+            for source in _required_string_sequence(
+                report.get("sources", ()),
+                "localization sources",
+            )
+        )
+    )
+    return {
+        "ranks": sorted(
+            {
+                _required_integer(rank, "localization failed rank")
+                for report in matching
+                for rank in report.get("failed_ranks", ())
+            }
+        ),
+        "resources": sorted(
+            {
+                resource
+                for report in matching
+                for resource in _required_string_sequence(
+                    report.get("failed_resources", ()),
+                    "localization failed_resources",
+                )
+            }
+        ),
+    }
 
 
 def _required_string(value: object, label: str) -> str:

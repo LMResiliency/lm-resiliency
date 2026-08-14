@@ -198,7 +198,7 @@ class LocalFaultEffect:
 
     def fail(
         self,
-        error: Exception,
+        error: BaseException,
         *,
         propagate_cleanup_error: bool = False,
     ) -> None:
