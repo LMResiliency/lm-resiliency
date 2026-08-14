@@ -54,6 +54,7 @@ An optional subsystem tag may follow the type, such as `[Bugfix][SCOUT] Reject a
 Describe the problem, implementation, compatibility impact, and validation performed.
 Update public documentation and contract tests when changing supported behavior or import paths.
 Preserve backward compatibility for stable interfaces as defined in [Compatibility](docs/compatibility.md).
+Use [MAINTAINERS.md](MAINTAINERS.md) and `.github/CODEOWNERS` to identify the current owners for affected contracts and review surfaces.
 Identify copied or adapted code and include its license, copyright notice, source URL, and source revision.
 Do not commit credentials, private keys, customer data, model data, generated environments, build products, or local validation artifacts.
 
