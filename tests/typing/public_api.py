@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from typing_extensions import assert_type
 
 from lm_resiliency import (
     InMemoryCkptConfig,
@@ -9,27 +9,38 @@ from lm_resiliency import (
     SCOUTFaultReport,
     enable_resiliency,
 )
+from lm_resiliency.manager_api import (
+    OrchestrationHooks as ManagerOrchestrationHooks,
+)
+from lm_resiliency.manager_api import (
+    RecoveryDecision as ManagerRecoveryDecision,
+)
 
 
-def accept_config(config: InMemoryCkptConfig) -> InMemoryCkptConfig:
-    return config
+def check_entrypoint(model: object) -> None:
+    assert_type(enable_resiliency(model), ResiliencyHandle)
 
 
-def accept_handle(handle: ResiliencyHandle) -> ResiliencyHandle:
-    return handle
+def check_config(config: InMemoryCkptConfig) -> None:
+    assert_type(config.interval, int)
+    assert_type(config.disk_folder, str)
 
 
-def accept_hooks(hooks: OrchestrationHooks) -> OrchestrationHooks:
-    return hooks
+def check_hooks(hooks: OrchestrationHooks) -> None:
+    assert_type(hooks, OrchestrationHooks)
+    assert_type(hooks, ManagerOrchestrationHooks)
 
 
-def accept_recovery(decision: RecoveryDecision) -> RecoveryDecision:
-    return decision
+def check_recovery(
+    decision: RecoveryDecision,
+    callback: RecoveryDecisionCallback,
+) -> None:
+    assert_type(decision, RecoveryDecision)
+    assert_type(decision, ManagerRecoveryDecision)
+    assert_type(decision["checkpoint_step"], int)
+    callback(decision)
 
 
-def accept_report(report: SCOUTFaultReport) -> SCOUTFaultReport:
-    return report
-
-
-recovery_callback: RecoveryDecisionCallback
-resiliency_entrypoint: Callable[..., ResiliencyHandle] = enable_resiliency
+def check_report(report: SCOUTFaultReport) -> None:
+    assert_type(report["failed_ranks"], list[int])
+    assert_type(report["confidence"], float)
