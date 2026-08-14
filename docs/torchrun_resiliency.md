@@ -334,6 +334,9 @@ Requirements:
 - Event admission validates the reporter's node, logical slot, local worker
   count, rank range, and topology digest against that generation's immutable
   `RankAssignment`; worker-supplied rank arithmetic alone is insufficient.
+- Event admission also binds the worker to its registered `AgentIdentity`.
+  Hardware reports are accepted only when the reported node or resource belongs
+  to that agent in the trusted scheduler or infrastructure resource map.
 - The original `SCOUTFaultReport` is preserved without upgrading its
   attribution. A direct `HealthEvent` is normalized to
   `HardwareFaultReport` without upgrading its resource granularity.
@@ -381,6 +384,7 @@ class CheckpointCopy(TypedDict):
     owner_global_rank: int
     checkpoint_step: int
     inventory_event_id: str
+    checkpoint_id: str | None
     holder_node_id: str
     holder_kind: Literal["owner", "peer", "durable"]
     storage_kind: Literal["memory", "node_local", "shared", "remote"]
@@ -407,8 +411,10 @@ Only completed checkpoint slots may appear with `complete=True`.
 validates the complete copy record against the referenced event when assembling
 the recovery manifest. A `CANDIDATE` inventory can be retained for diagnosis
 but is never selected for conservative recovery. Durable copies must use shared
-or remote storage; node-local and in-memory copies remain subject to holder
-health and quarantine.
+or remote storage and carry the opaque durable `checkpoint_id`; that ID must
+match the committed plan. Owner and peer copies do not carry a durable
+checkpoint ID. Node-local and in-memory copies remain subject to holder health
+and quarantine.
 
 `location_token` is an opaque control-plane reference, not an unchecked path
 that another worker is allowed to open.
@@ -508,6 +514,7 @@ Before commit, the coordinator validates:
 - exactly `min_nodes` active logical slots are assigned;
 - at least one assigned node is new to the active membership, because version
   1 uses standby admission as its healthy-group restart edge;
+- every surviving node retains its committed logical slot and rank range;
 - every assigned node is healthy, compatible, and not quarantined;
 - each logical slot is assigned once;
 - active size, local world size, total world size, and topology digest match the
@@ -628,8 +635,13 @@ bounded main-thread path performs the flush and writes the acknowledgement,
 after which the worker remains quiesced.
 
 The coordinator waits only until the intent deadline. Missing or failed
-preparation cannot promote `LATEST_GEMINI`; the coordinator must commit a plan
-using a complete recovery-verified source or fail the restart.
+acknowledgements make the associated latest inventory unavailable. A latest
+manifest may use an inventory event only when the reporting node returned a
+successful acknowledgement for the selected step and included that event ID.
+Previously certified recovery-verified inventory remains eligible without
+promoting unprepared latest state. Missing or failed preparation cannot promote
+`LATEST_GEMINI`; the coordinator must commit a plan using a complete
+recovery-verified source or fail the restart.
 
 For a crashed or unreachable node, no preparation is assumed.
 
@@ -905,7 +917,9 @@ GEMINI plans use owner or peer copies; durable plans use durable copies. Only
 shared or remote storage is independent of holder-node availability. The
 manifest's trust label is not self-authenticating: every selected copy must
 match its referenced inventory record, and `RECOVERY_VERIFIED` manifests may
-use only recovery-verified inventory evidence.
+use only recovery-verified inventory evidence. Durable recovery always requires
+a recovery-verified manifest and recovery-verified inventory, even if the
+originating intent allowed latest recovery.
 
 Preferred source order:
 

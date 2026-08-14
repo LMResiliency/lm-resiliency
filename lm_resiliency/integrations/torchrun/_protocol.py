@@ -969,6 +969,7 @@ class CheckpointCopy:
     owner_global_rank: int
     checkpoint_step: int
     inventory_event_id: str
+    checkpoint_id: str | None
     holder_node_id: str
     holder_kind: str
     storage_kind: str
@@ -980,6 +981,7 @@ class CheckpointCopy:
         _integer(self.owner_global_rank, "CheckpointCopy.owner_global_rank", minimum=0)
         _integer(self.checkpoint_step, "CheckpointCopy.checkpoint_step", minimum=1)
         _string(self.inventory_event_id, "CheckpointCopy.inventory_event_id")
+        _optional_string(self.checkpoint_id, "CheckpointCopy.checkpoint_id")
         _string(self.holder_node_id, "CheckpointCopy.holder_node_id")
         _choice(
             self.holder_kind,
@@ -998,6 +1000,14 @@ class CheckpointCopy:
             raise ProtocolValidationError(
                 "CheckpointCopy.storage_kind: durable copies must use shared or remote storage"
             )
+        if self.holder_kind == "durable" and self.checkpoint_id is None:
+            raise ProtocolValidationError(
+                "CheckpointCopy.checkpoint_id: durable copies require a checkpoint ID"
+            )
+        if self.holder_kind != "durable" and self.checkpoint_id is not None:
+            raise ProtocolValidationError(
+                "CheckpointCopy.checkpoint_id: only durable copies may carry a checkpoint ID"
+            )
         _string(self.location_token, "CheckpointCopy.location_token")
         _boolean(self.complete, "CheckpointCopy.complete")
         _boolean(self.checksums_available, "CheckpointCopy.checksums_available")
@@ -1007,6 +1017,7 @@ class CheckpointCopy:
             "owner_global_rank": self.owner_global_rank,
             "checkpoint_step": self.checkpoint_step,
             "inventory_event_id": self.inventory_event_id,
+            "checkpoint_id": self.checkpoint_id,
             "holder_node_id": self.holder_node_id,
             "holder_kind": self.holder_kind,
             "storage_kind": self.storage_kind,
@@ -1021,6 +1032,7 @@ class CheckpointCopy:
             "owner_global_rank",
             "checkpoint_step",
             "inventory_event_id",
+            "checkpoint_id",
             "holder_node_id",
             "holder_kind",
             "storage_kind",
@@ -1048,6 +1060,10 @@ class CheckpointCopy:
             inventory_event_id=_string(
                 value["inventory_event_id"],
                 "CheckpointCopy.inventory_event_id",
+            ),
+            checkpoint_id=_optional_string(
+                value["checkpoint_id"],
+                "CheckpointCopy.checkpoint_id",
             ),
             holder_node_id=_string(
                 value["holder_node_id"],
@@ -1087,6 +1103,7 @@ def _checkpoint_copies(value: object, path: str) -> tuple[CheckpointCopy, ...]:
             copy.owner_global_rank,
             copy.checkpoint_step,
             copy.inventory_event_id,
+            copy.checkpoint_id,
             copy.holder_node_id,
             copy.holder_kind,
             copy.storage_kind,
@@ -2139,8 +2156,11 @@ def validate_worker_identity(
 def validate_event_reporter(
     event: FaultEvent | RecoveryProposalEvent | CheckpointInventoryEvent,
     assignment: RankAssignment,
+    *,
+    agent_identity: AgentIdentity,
+    resource_to_node_id: Mapping[str, str],
 ) -> None:
-    """Validate a report's worker identity at coordinator admission."""
+    """Validate a report against committed rank and infrastructure identities."""
     if not isinstance(
         event,
         (FaultEvent, RecoveryProposalEvent, CheckpointInventoryEvent),
@@ -2149,6 +2169,63 @@ def validate_event_reporter(
             "event: expected a fault, recovery, or checkpoint inventory event"
         )
     validate_worker_identity(event.reporter, assignment)
+    if not isinstance(agent_identity, AgentIdentity):
+        raise ProtocolValidationError("agent_identity: expected AgentIdentity")
+    reporter = event.reporter
+    if agent_identity.run_id != reporter.run_id:
+        raise ProtocolValidationError("AgentIdentity.run_id: does not match event reporter")
+    if agent_identity.node_id != reporter.node_id:
+        raise ProtocolValidationError("AgentIdentity.node_id: does not match event reporter")
+    if agent_identity.agent_id != reporter.agent_id:
+        raise ProtocolValidationError("AgentIdentity.agent_id: does not match event reporter")
+    if agent_identity.hostname != reporter.hostname:
+        raise ProtocolValidationError("AgentIdentity.hostname: does not match event reporter")
+    if agent_identity.local_world_size != reporter.local_world_size:
+        raise ProtocolValidationError(
+            "AgentIdentity.local_world_size: does not match event reporter"
+        )
+    if not isinstance(resource_to_node_id, Mapping):
+        raise ProtocolValidationError("resource_to_node_id: expected an object")
+    resource_owners = {
+        _string(resource_id, "resource_to_node_id.key"): _string(
+            node_id,
+            f"resource_to_node_id[{resource_id!r}]",
+        )
+        for resource_id, node_id in resource_to_node_id.items()
+    }
+    if reporter.gpu_uuid is not None:
+        if reporter.gpu_uuid not in agent_identity.resource_ids:
+            raise ProtocolValidationError(
+                "WorkerIdentity.gpu_uuid: is not registered to the reporting agent"
+            )
+        if resource_owners.get(reporter.gpu_uuid) != reporter.node_id:
+            raise ProtocolValidationError(
+                "WorkerIdentity.gpu_uuid: trusted resource owner does not match reporter"
+            )
+    if not isinstance(event, FaultEvent) or event.report.get("kind") != "hardware":
+        return
+    resource_kind = _choice(
+        event.report.get("resource_kind"),
+        "FaultEvent.report.resource_kind",
+        {"gpu", "node", "nic", "hca", "link"},
+    )
+    resource_id = _string(
+        event.report.get("resource_id"),
+        "FaultEvent.report.resource_id",
+    )
+    if resource_kind == "node":
+        if resource_id != reporter.node_id:
+            raise ProtocolValidationError(
+                "FaultEvent.report.resource_id: node fault does not identify the reporter's node"
+            )
+    elif resource_id not in agent_identity.resource_ids:
+        raise ProtocolValidationError(
+            "FaultEvent.report.resource_id: resource is not registered to the reporting agent"
+        )
+    if resource_owners.get(resource_id) != reporter.node_id:
+        raise ProtocolValidationError(
+            "FaultEvent.report.resource_id: trusted resource owner does not match reporter"
+        )
 
 
 def validate_restart_plan(
@@ -2157,6 +2234,7 @@ def validate_restart_plan(
     manifest: RecoveryManifest,
     *,
     inventory_events: Sequence[CheckpointInventoryEvent],
+    restart_acks: Sequence[RestartAck],
     current_assignment: RankAssignment,
     now_unix_ms: int,
     eligible_node_ids: Sequence[str],
@@ -2210,6 +2288,22 @@ def validate_restart_plan(
         )
     current_nodes = set(current_assignment.slot_to_node_id.values())
     assigned_nodes = {assignment.node_id for assignment in plan.slot_assignments}
+    current_slots_by_node = {
+        node_id: slot for slot, node_id in current_assignment.slot_to_node_id.items()
+    }
+    planned_slots_by_node = {
+        assignment.node_id: assignment.logical_node_slot for assignment in plan.slot_assignments
+    }
+    moved_survivors = sorted(
+        node_id
+        for node_id in current_nodes & assigned_nodes
+        if current_slots_by_node[node_id] != planned_slots_by_node[node_id]
+    )
+    if moved_survivors:
+        raise ProtocolValidationError(
+            "RestartPlan.slot_assignments: surviving nodes changed logical slots: "
+            f"{moved_survivors!r}"
+        )
     if assigned_nodes == current_nodes:
         raise ProtocolValidationError(
             "RestartPlan.slot_assignments: version 1 requires at least one replacement node"
@@ -2246,6 +2340,10 @@ def validate_restart_plan(
         raise ProtocolValidationError(
             "RecoveryManifest.trust: verified recovery requires a verified manifest"
         )
+    if plan.checkpoint_source == "durable" and manifest.trust != "recovery_verified":
+        raise ProtocolValidationError(
+            "RecoveryManifest.trust: durable recovery requires a verified manifest"
+        )
     inventory_by_id: dict[str, CheckpointInventoryEvent] = {}
     for index, event in enumerate(_sequence(inventory_events, "inventory_events")):
         if not isinstance(event, CheckpointInventoryEvent):
@@ -2257,6 +2355,25 @@ def validate_restart_plan(
                 f"inventory_events: duplicate event ID {event.event_id!r}"
             )
         inventory_by_id[event.event_id] = event
+    ack_by_node: dict[str, RestartAck] = {}
+    for index, ack in enumerate(_sequence(restart_acks, "restart_acks")):
+        if not isinstance(ack, RestartAck):
+            raise ProtocolValidationError(f"restart_acks[{index}]: expected RestartAck")
+        if ack.node_id in ack_by_node:
+            raise ProtocolValidationError(f"restart_acks: duplicate node ID {ack.node_id!r}")
+        if ack.intent_id != intent.intent_id:
+            raise ProtocolValidationError(
+                f"restart_acks[{index}].intent_id: does not match restart intent"
+            )
+        if ack.generation != intent.generation:
+            raise ProtocolValidationError(
+                f"restart_acks[{index}].generation: does not match restart intent"
+            )
+        if ack.node_id not in current_nodes:
+            raise ProtocolValidationError(
+                f"restart_acks[{index}].node_id: is not active in the committed generation"
+            )
+        ack_by_node[ack.node_id] = ack
     entries = {entry.owner_global_rank: entry for entry in manifest.rank_copies}
     required_ranks = set(range(plan.expected_world_size))
     if set(entries) != required_ranks:
@@ -2279,8 +2396,10 @@ def validate_restart_plan(
                 copy,
                 manifest,
                 inventory_by_id,
+                ack_by_node,
             )
             and copy.holder_kind in compatible_holder_kinds
+            and copy.checkpoint_id == plan.checkpoint_id
             and (
                 copy.storage_kind in {"shared", "remote"}
                 or (copy.holder_node_id in eligible and copy.holder_node_id not in quarantined)
@@ -2296,6 +2415,7 @@ def _copy_has_trusted_inventory_provenance(
     copy: CheckpointCopy,
     manifest: RecoveryManifest,
     inventory_by_id: Mapping[str, CheckpointInventoryEvent],
+    ack_by_node: Mapping[str, RestartAck],
 ) -> bool:
     event = inventory_by_id.get(copy.inventory_event_id)
     if event is None:
@@ -2309,7 +2429,17 @@ def _copy_has_trusted_inventory_provenance(
         or (manifest.trust == "recovery_verified" and event.trust != "recovery_verified")
     ):
         return False
-    return copy in event.copies
+    if copy not in event.copies:
+        return False
+    if manifest.trust != "latest":
+        return True
+    ack = ack_by_node.get(event.reporter.node_id)
+    return (
+        ack is not None
+        and ack.success
+        and ack.flushed_step == manifest.step
+        and event.event_id in ack.inventory_event_ids
+    )
 
 
 __all__ = [

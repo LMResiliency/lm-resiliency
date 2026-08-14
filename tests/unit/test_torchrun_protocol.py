@@ -66,6 +66,18 @@ def _worker() -> WorkerIdentity:
     )
 
 
+def _agent() -> AgentIdentity:
+    return AgentIdentity(
+        run_id=RUN_ID,
+        node_id="node-a",
+        agent_id="agent-a",
+        hostname="host-a",
+        local_world_size=2,
+        resource_ids=("GPU-0", "GPU-1"),
+        environment_digest="environment-sha256",
+    )
+
+
 def _intent(*, minimum_recovery_mode: str = "latest") -> RestartIntent:
     return RestartIntent(
         intent_id="intent-4",
@@ -125,18 +137,44 @@ def _copy(
     checkpoint_step: int = 40,
     inventory_event_id: str = "inventory-a",
     storage_kind: str | None = None,
+    checkpoint_id: str | None = None,
     complete: bool = True,
 ) -> CheckpointCopy:
     return CheckpointCopy(
         owner_global_rank=rank,
         checkpoint_step=checkpoint_step,
         inventory_event_id=inventory_event_id,
+        checkpoint_id=(
+            checkpoint_id
+            if checkpoint_id is not None
+            else ("durable-40" if holder_kind == "durable" else None)
+        ),
         holder_node_id=holder_node_id,
         holder_kind=holder_kind,
         storage_kind=storage_kind or ("remote" if holder_kind == "durable" else "memory"),
         location_token=f"copy-{rank}-{holder_node_id}",
         complete=complete,
         checksums_available=True,
+    )
+
+
+def _ack(
+    *,
+    node_id: str = "node-a",
+    flushed_step: int = 40,
+    inventory_event_ids: tuple[str, ...] = ("inventory-a",),
+    success: bool = True,
+) -> RestartAck:
+    return RestartAck(
+        intent_id="intent-4",
+        node_id=node_id,
+        generation=4,
+        flushed_step=flushed_step if success else -1,
+        inventory_event_ids=inventory_event_ids,
+        transferred_owner_ranks=(0, 1),
+        transferred_peer_ranks=(2, 3),
+        success=success,
+        reason="prepared" if success else "preparation failed",
     )
 
 
@@ -148,6 +186,7 @@ def _manifest(
     ranks: tuple[int, ...] = (0, 1, 2, 3),
     incomplete_rank: int | None = None,
     holder_overrides: dict[int, str] | None = None,
+    durable_checkpoint_id: str = "durable-40",
 ) -> RecoveryManifest:
     holder_overrides = holder_overrides or {}
     return RecoveryManifest(
@@ -169,6 +208,7 @@ def _manifest(
                         ),
                         holder_kind=holder_kind,
                         checkpoint_step=checkpoint_step,
+                        checkpoint_id=(durable_checkpoint_id if holder_kind == "durable" else None),
                         complete=rank != incomplete_rank,
                     ),
                 ),
@@ -205,6 +245,7 @@ def _validate(
     intent: RestartIntent | None = None,
     current_assignment: RankAssignment | None = None,
     inventory_events: tuple[CheckpointInventoryEvent, ...] | None = None,
+    restart_acks: tuple[RestartAck, ...] | None = None,
     now_unix_ms: int = 1_900_000_000_000,
     eligible_node_ids: tuple[str, ...] = ("node-a", "node-spare"),
 ) -> None:
@@ -216,6 +257,7 @@ def _validate(
         inventory_events=(
             (_inventory_event(selected_manifest),) if inventory_events is None else inventory_events
         ),
+        restart_acks=(_ack(),) if restart_acks is None else restart_acks,
         current_assignment=current_assignment or _current_assignment(),
         now_unix_ms=now_unix_ms,
         eligible_node_ids=eligible_node_ids,
@@ -236,15 +278,7 @@ def _records():
         message="fatal ECC",
     )
     return (
-        AgentIdentity(
-            run_id=RUN_ID,
-            node_id="node-a",
-            agent_id="agent-a",
-            hostname="host-a",
-            local_world_size=2,
-            resource_ids=("GPU-0", "GPU-1"),
-            environment_digest="environment-sha256",
-        ),
+        _agent(),
         worker,
         RankAssignment.from_assignments(
             run_id=RUN_ID,
@@ -289,17 +323,7 @@ def _records():
             copies=(_copy(0, holder_node_id="node-a"),),
         ),
         _intent(),
-        RestartAck(
-            intent_id="intent-4",
-            node_id="node-a",
-            generation=4,
-            flushed_step=40,
-            inventory_event_ids=("inventory-a",),
-            transferred_owner_ranks=(0, 1),
-            transferred_peer_ranks=(2, 3),
-            success=True,
-            reason="prepared",
-        ),
+        _ack(),
         plan,
         RestartContext.from_plan(plan, "node-spare"),
         _manifest(),
@@ -473,7 +497,10 @@ def test_checkpoint_inventory_rejects_mismatched_provenance_id():
 @pytest.mark.parametrize(
     ("plan", "manifest"),
     [
-        (_plan(checkpoint_source="durable"), _manifest(holder_kind="owner")),
+        (
+            _plan(checkpoint_source="durable"),
+            _manifest(trust="recovery_verified", holder_kind="owner"),
+        ),
         (_plan(checkpoint_source="gemini"), _manifest(holder_kind="durable")),
     ],
 )
@@ -499,6 +526,39 @@ def test_restart_plan_accepts_remote_durable_copies():
             },
         ),
     )
+
+
+def test_restart_plan_binds_durable_copies_to_checkpoint_id():
+    with pytest.raises(ProtocolValidationError, match="no complete eligible copy"):
+        _validate(
+            plan=_plan(
+                recovery_mode="recovery_verified",
+                checkpoint_source="durable",
+            ),
+            manifest=_manifest(
+                trust="recovery_verified",
+                holder_kind="durable",
+                durable_checkpoint_id="durable-other",
+                holder_overrides={
+                    0: "durable-store",
+                    1: "durable-store",
+                    2: "durable-store",
+                    3: "durable-store",
+                },
+            ),
+        )
+
+
+def test_durable_checkpoint_copy_requires_checkpoint_id():
+    with pytest.raises(ProtocolValidationError, match="require a checkpoint ID"):
+        replace(
+            _copy(
+                0,
+                holder_node_id="durable-store",
+                holder_kind="durable",
+            ),
+            checkpoint_id=None,
+        )
 
 
 def test_restart_plan_requires_complete_remote_or_shared_durable_copies():
@@ -559,6 +619,29 @@ def test_restart_plan_requires_a_replacement_node():
             plan=unchanged_plan,
             eligible_node_ids=("node-a", "node-b"),
         )
+
+
+def test_restart_plan_preserves_surviving_nodes_logical_slots():
+    shifted_plan = replace(
+        _plan(),
+        slot_assignments=(
+            SlotAssignment(
+                logical_node_slot=0,
+                node_id="node-spare",
+                first_global_rank=0,
+                local_world_size=2,
+            ),
+            SlotAssignment(
+                logical_node_slot=1,
+                node_id="node-a",
+                first_global_rank=2,
+                local_world_size=2,
+            ),
+        ),
+    )
+
+    with pytest.raises(ProtocolValidationError, match="changed logical slots"):
+        _validate(plan=shifted_plan)
 
 
 def test_restart_plan_preserves_committed_world_size():
@@ -622,7 +705,73 @@ def test_event_reporter_must_match_committed_rank_assignment():
         validate_worker_identity(contradictory_worker, assignment)
 
     with pytest.raises(ProtocolValidationError, match="local_world_size"):
-        validate_event_reporter(event, assignment)
+        validate_event_reporter(
+            event,
+            assignment,
+            agent_identity=_agent(),
+            resource_to_node_id={"GPU-0": "node-a"},
+        )
+
+
+def test_hardware_report_resource_must_match_registered_owner():
+    event = FaultEvent(
+        event_id="fault-resource",
+        incident_id="incident-a",
+        run_id=RUN_ID,
+        generation=4,
+        reporter=_worker(),
+        optimizer_step=41,
+        report=HardwareFaultReport(
+            kind="hardware",
+            resource_kind="gpu",
+            resource_id="GPU-1",
+            metric="uncorrectable_ecc",
+            value=1.0,
+            severity="fatal",
+            message="fatal ECC",
+        ),
+    )
+
+    with pytest.raises(ProtocolValidationError, match="trusted resource owner"):
+        validate_event_reporter(
+            event,
+            _current_assignment(),
+            agent_identity=_agent(),
+            resource_to_node_id={
+                "GPU-0": "node-a",
+                "GPU-1": "node-b",
+            },
+        )
+
+
+def test_hardware_report_accepts_registered_resource_on_reporter_node():
+    event = FaultEvent(
+        event_id="fault-resource",
+        incident_id="incident-a",
+        run_id=RUN_ID,
+        generation=4,
+        reporter=_worker(),
+        optimizer_step=41,
+        report=HardwareFaultReport(
+            kind="hardware",
+            resource_kind="gpu",
+            resource_id="GPU-1",
+            metric="uncorrectable_ecc",
+            value=1.0,
+            severity="fatal",
+            message="fatal ECC",
+        ),
+    )
+
+    validate_event_reporter(
+        event,
+        _current_assignment(),
+        agent_identity=_agent(),
+        resource_to_node_id={
+            "GPU-0": "node-a",
+            "GPU-1": "node-a",
+        },
+    )
 
 
 @pytest.mark.parametrize(
@@ -690,6 +839,37 @@ def test_verified_recovery_rejects_latest_manifest():
             plan=_plan(recovery_mode="recovery_verified"),
             manifest=_manifest(trust="latest"),
         )
+
+
+def test_durable_recovery_rejects_latest_manifest_even_in_latest_mode():
+    with pytest.raises(ProtocolValidationError, match="durable recovery requires"):
+        _validate(
+            plan=_plan(checkpoint_source="durable"),
+            manifest=_manifest(
+                trust="latest",
+                holder_kind="durable",
+                holder_overrides={
+                    0: "durable-store",
+                    1: "durable-store",
+                    2: "durable-store",
+                    3: "durable-store",
+                },
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "restart_acks",
+    [
+        (),
+        (_ack(success=False),),
+        (_ack(flushed_step=39),),
+        (_ack(inventory_event_ids=("inventory-other",)),),
+    ],
+)
+def test_latest_recovery_requires_successful_preparation_ack(restart_acks):
+    with pytest.raises(ProtocolValidationError, match="no complete eligible copy"):
+        _validate(restart_acks=restart_acks)
 
 
 def test_candidate_cannot_become_recovery_manifest():
