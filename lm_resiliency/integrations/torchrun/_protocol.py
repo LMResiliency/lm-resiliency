@@ -2718,6 +2718,7 @@ def validate_restart_plan(
                 certified_inventory_event_digests,
             )
             and copy.holder_kind in compatible_holder_kinds
+            and copy.storage_kind in {"node_local", "shared", "remote"}
             and (
                 copy.holder_kind == "durable"
                 or (

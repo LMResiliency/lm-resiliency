@@ -976,7 +976,10 @@ a recovery-verified manifest and recovery-verified inventory, even if the
 originating intent allowed latest recovery.
 
 An in-memory or node-local copy is selectable only when its holder remains in
-the next assignment. A departing node's transfer counters in `RestartAck` do
+the next assignment. Process-memory copies are never selectable because stock
+elastic restart destroys every worker address space, including workers on
+retained nodes. Successful preparation must publish new node-local inventory
+for the flushed bytes. A departing node's transfer counters in `RestartAck` do
 not by themselves prove that a destination has the bytes. Version 1 requires
 such transfers to materialize as authenticated shared or remote copy
 provenance before plan commit; a future local-destination transfer record may

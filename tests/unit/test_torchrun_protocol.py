@@ -196,6 +196,7 @@ def _manifest(
     incomplete_rank: int | None = None,
     holder_overrides: dict[int, str] | None = None,
     holder_kind_overrides: dict[int, str] | None = None,
+    storage_kind: str | None = None,
     durable_checkpoint_id: str = "durable-40",
 ) -> RecoveryManifest:
     holder_overrides = holder_overrides or {}
@@ -226,6 +227,10 @@ def _manifest(
                         ),
                         holder_kind=rank_holder_kind(rank),
                         checkpoint_step=checkpoint_step,
+                        storage_kind=(
+                            storage_kind
+                            or ("remote" if rank_holder_kind(rank) == "durable" else "node_local")
+                        ),
                         checkpoint_id=(
                             durable_checkpoint_id if rank_holder_kind(rank) == "durable" else None
                         ),
@@ -650,6 +655,13 @@ def test_restart_plan_rejects_local_copy_on_departing_holder():
             ),
             authenticated_ack_agent_ids={"node-b": "agent-b"},
             eligible_node_ids=("node-a", "node-b", "node-spare"),
+        )
+
+
+def test_restart_plan_rejects_process_memory_copies():
+    with pytest.raises(ProtocolValidationError, match="no complete eligible copy"):
+        _validate(
+            manifest=_manifest(storage_kind="memory"),
         )
 
 
