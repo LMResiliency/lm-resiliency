@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import threading
 import time
+from bisect import bisect_left
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -105,19 +107,21 @@ class _ExternalEffect:
                 "fault executor deactivation evidence",
             )
         except Exception as error:
-            self.record.status = InjectionStatus.FAILED
-            self.record.error = f"fault deactivation failed: {error}"
-            self.record.completed_at_ns = time.monotonic_ns()
+            with self.record._lock:
+                self.record.status = InjectionStatus.FAILED
+                self.record.error = f"fault deactivation failed: {error}"
+                self.record.completed_at_ns = time.monotonic_ns()
             self.done = True
             raise
-        if normalized_evidence:
-            merged = dict(self.record.evidence)
-            merged.update(normalized_evidence)
-            self.record.evidence = merged
-        self.record.status = (
-            InjectionStatus.COMPLETED if self.record.verified else InjectionStatus.CANCELLED
-        )
-        self.record.completed_at_ns = time.monotonic_ns()
+        with self.record._lock:
+            if normalized_evidence:
+                merged = dict(self.record.evidence)
+                merged.update(normalized_evidence)
+                self.record.evidence = merged
+            self.record.status = (
+                InjectionStatus.COMPLETED if self.record.verified else InjectionStatus.CANCELLED
+            )
+            self.record.completed_at_ns = time.monotonic_ns()
         self.done = True
 
     def rollback(self, error: Exception) -> None:
@@ -129,11 +133,12 @@ class _ExternalEffect:
                 self.executor.deactivate(self.request, self.result)
             except Exception as caught:
                 cleanup_error = caught
-        self.record.status = InjectionStatus.FAILED
-        self.record.error = f"fault activation rolled back: {error}"
-        if cleanup_error is not None:
-            self.record.error += f"; rollback cleanup also failed: {cleanup_error}"
-        self.record.completed_at_ns = time.monotonic_ns()
+        with self.record._lock:
+            self.record.status = InjectionStatus.FAILED
+            self.record.error = f"fault activation rolled back: {error}"
+            if cleanup_error is not None:
+                self.record.error += f"; rollback cleanup also failed: {cleanup_error}"
+            self.record.completed_at_ns = time.monotonic_ns()
         self.done = True
         if cleanup_error is not None:
             raise RuntimeError(f"fault rollback cleanup failed: {cleanup_error}") from cleanup_error
@@ -210,12 +215,15 @@ class FaultInjectionSession:
         self._completed_iterations = completed
         self._current_iteration = completed + 1
         self._state_store = state_store or MemoryCampaignStateStore()
-        self._journal: CampaignJournal = self._state_store.load(campaign.name)
+        loaded_journal = self._state_store.load(campaign.name)
+        self._journal_base = CampaignJournal.from_dict(loaded_journal.to_dict())
+        self._journal = CampaignJournal.from_dict(loaded_journal.to_dict())
         self._journal.bind_manifest(campaign.manifest_identity)
         self._journal_committed = False
         self._executors = tuple(executors)
         self._local = LocalFaultExecutor(self._context, self.rank)
         self._records: list[FaultInjectionRecord] = []
+        self._records_lock = threading.RLock()
         self._active: list[_ActiveFault] = []
         self._closed = False
         self._started = False
@@ -252,7 +260,8 @@ class FaultInjectionSession:
 
     @property
     def records(self) -> tuple[FaultInjectionRecord, ...]:
-        return tuple(self._records)
+        with self._records_lock:
+            return tuple(self._records)
 
     @property
     def journal_attempts_identity(self) -> str:
@@ -301,7 +310,8 @@ class FaultInjectionSession:
         by_occurrence: dict[str, list[LocalizationResult]] = {}
         for result in normalized:
             by_occurrence.setdefault(result.occurrence_id, []).append(result)
-        records = tuple(record.snapshot() for record in self._records)
+        with self._records_lock:
+            records = tuple(record.snapshot() for record in self._records)
         grouped = _group_records(records)
         unknown = sorted(set(by_occurrence) - set(grouped))
         if unknown:
@@ -354,7 +364,11 @@ class FaultInjectionSession:
     def _commit_journal_binding(self) -> None:
         if self._journal_committed:
             return
-        self._state_store.save(self._journal)
+        if not self._state_store.compare_and_swap(self._journal_base, self._journal):
+            current = self._state_store.load(self.campaign.name)
+            if current.to_dict() != self._journal.to_dict():
+                raise RuntimeError("campaign state changed concurrently during manifest binding")
+        self._journal_base = CampaignJournal.from_dict(self._journal.to_dict())
         self._journal_committed = True
 
     def _cleanup(self) -> Exception | None:
@@ -681,40 +695,42 @@ class FaultInjectionSession:
         iteration: int,
         candidates: tuple[tuple[FaultIncident, int], ...],
     ) -> tuple[_StagedIncident, ...]:
-        previous_attempts = dict(self._journal.attempts)
+        previous = CampaignJournal.from_dict(self._journal.to_dict())
+        updated = CampaignJournal.from_dict(self._journal.to_dict())
         staged: list[_StagedIncident] = []
-        try:
-            for incident, expected_attempt in candidates:
-                attempt = self._journal.record_attempt(incident.incident_id, iteration)
-                if attempt != expected_attempt:
-                    raise RuntimeError(
-                        f"campaign journal attempt for {incident.incident_id!r} changed "
-                        f"from {expected_attempt} to {attempt} during staging"
-                    )
-                staged.append(
-                    _StagedIncident(
-                        incident=incident,
-                        attempt=attempt,
-                        occurrence_id=_occurrence_id(incident, iteration, attempt),
-                        selected=_probability_selected(
-                            self.campaign.seed,
-                            incident.incident_id,
-                            iteration,
-                            incident.trigger.probability,
-                        ),
-                    )
+        for incident, expected_attempt in candidates:
+            attempt = updated.record_attempt(incident.incident_id, iteration)
+            if attempt != expected_attempt:
+                raise RuntimeError(
+                    f"campaign journal attempt for {incident.incident_id!r} changed "
+                    f"from {expected_attempt} to {attempt} during staging"
                 )
-            self._state_store.save(self._journal)
-        except Exception:
-            self._journal.attempts.clear()
-            self._journal.attempts.update(previous_attempts)
-            raise
+            staged.append(
+                _StagedIncident(
+                    incident=incident,
+                    attempt=attempt,
+                    occurrence_id=_occurrence_id(incident, iteration, attempt),
+                    selected=_probability_selected(
+                        self.campaign.seed,
+                        incident.incident_id,
+                        iteration,
+                        incident.trigger.probability,
+                    ),
+                )
+            )
+        if not self._state_store.compare_and_swap(previous, updated):
+            raise RuntimeError("campaign state changed concurrently while claiming occurrences")
+        self._journal = updated
         return tuple(staged)
 
     def _restore_journal_attempts(self, attempts: dict[str, int]) -> None:
-        self._journal.attempts.clear()
-        self._journal.attempts.update(attempts)
-        self._state_store.save(self._journal)
+        current = CampaignJournal.from_dict(self._journal.to_dict())
+        restored = CampaignJournal.from_dict(self._journal.to_dict())
+        restored.attempts.clear()
+        restored.attempts.update(attempts)
+        if not self._state_store.compare_and_swap(current, restored):
+            raise RuntimeError("campaign state changed concurrently during attempt rollback")
+        self._journal = restored
 
     def _activate_staged_iteration(
         self,
@@ -765,15 +781,17 @@ class FaultInjectionSession:
                     if cleanup_error is None:
                         cleanup_error = caught
         del self._active[active_start:]
-        for record in self._records[record_start:]:
-            if record.status in {
-                InjectionStatus.SKIPPED_PROBABILITY,
-                InjectionStatus.FAILED,
-            }:
-                continue
-            record.status = InjectionStatus.FAILED
-            record.error = f"fault activation rolled back: {error}"
-            record.completed_at_ns = time.monotonic_ns()
+        with self._records_lock:
+            for record in self._records[record_start:]:
+                with record._lock:
+                    if record.status in {
+                        InjectionStatus.SKIPPED_PROBABILITY,
+                        InjectionStatus.FAILED,
+                    }:
+                        continue
+                    record.status = InjectionStatus.FAILED
+                    record.error = f"fault activation rolled back: {error}"
+                    record.completed_at_ns = time.monotonic_ns()
         return cleanup_error
 
     def _activate_incident(
@@ -785,29 +803,30 @@ class FaultInjectionSession:
     ) -> None:
         activated: list[_ActiveFault] = []
         try:
-            for fault in incident.faults:
-                if fault.target.execution_rank != self.rank:
-                    continue
-                request = self._build_request(
-                    incident,
-                    fault,
-                    occurrence_id,
-                    iteration,
-                    attempt,
-                )
-                record = self._new_record(request, incident)
-                self._records.append(record)
-                if self._local.supports(fault):
-                    effect: LocalFaultEffect | _ExternalEffect = self._local.activate(
-                        request,
-                        record,
+            with self._records_lock:
+                for fault in incident.faults:
+                    if fault.target.execution_rank != self.rank:
+                        continue
+                    request = self._build_request(
+                        incident,
+                        fault,
+                        occurrence_id,
+                        iteration,
+                        attempt,
                     )
-                else:
-                    effect = self._activate_external(request, record)
-                active = _ActiveFault(incident, iteration, effect)
-                activated.append(active)
-                if not active.done:
-                    self._active.append(active)
+                    record = self._new_record(request, incident)
+                    self._records.append(record)
+                    if self._local.supports(fault):
+                        effect: LocalFaultEffect | _ExternalEffect = self._local.activate(
+                            request,
+                            record,
+                        )
+                    else:
+                        effect = self._activate_external(request, record)
+                    active = _ActiveFault(incident, iteration, effect)
+                    activated.append(active)
+                    if not active.done:
+                        self._active.append(active)
         except Exception as error:
             cleanup_error: Exception | None = None
             for active in reversed(activated):
@@ -828,28 +847,32 @@ class FaultInjectionSession:
         record: FaultInjectionRecord,
     ) -> _ExternalEffect:
         executor = self._executor_for(request.fault)
-        record.executor = executor.name
+        with record._lock:
+            record.executor = executor.name
         self._validate_executor_lifecycle(executor)
         try:
             result = executor.activate(request)
         except Exception as error:
-            record.status = InjectionStatus.FAILED
-            record.error = str(error)
-            record.completed_at_ns = time.monotonic_ns()
+            with record._lock:
+                record.status = InjectionStatus.FAILED
+                record.error = str(error)
+                record.completed_at_ns = time.monotonic_ns()
             raise
         if not isinstance(result, FaultExecutionResult):
-            record.status = InjectionStatus.FAILED
-            record.error = "fault executor activate must return FaultExecutionResult"
-            record.completed_at_ns = time.monotonic_ns()
+            with record._lock:
+                record.status = InjectionStatus.FAILED
+                record.error = "fault executor activate must return FaultExecutionResult"
+                record.completed_at_ns = time.monotonic_ns()
             raise TypeError(record.error)
         if result.active and getattr(executor, "can_deactivate", True) is False:
-            record.verified = result.verified
-            record.status = InjectionStatus.FAILED
-            record.error = (
-                "fault executor returned an active effect without a deactivation callback"
-            )
-            record.activated_at_ns = time.monotonic_ns()
-            record.completed_at_ns = time.monotonic_ns()
+            with record._lock:
+                record.verified = result.verified
+                record.status = InjectionStatus.FAILED
+                record.error = (
+                    "fault executor returned an active effect without a deactivation callback"
+                )
+                record.activated_at_ns = time.monotonic_ns()
+                record.completed_at_ns = time.monotonic_ns()
             raise ValueError(record.error)
         try:
             evidence = _json_mapping(result.evidence, "fault executor activation evidence")
@@ -860,15 +883,17 @@ class FaultInjectionSession:
                     executor.deactivate(request, result)
                 except Exception as caught:
                     deactivation_error = caught
-            record.status = InjectionStatus.FAILED
-            record.error = str(error)
-            if deactivation_error is not None:
-                record.error += f"; deactivation also failed: {deactivation_error}"
-            record.completed_at_ns = time.monotonic_ns()
+            with record._lock:
+                record.status = InjectionStatus.FAILED
+                record.error = str(error)
+                if deactivation_error is not None:
+                    record.error += f"; deactivation also failed: {deactivation_error}"
+                record.completed_at_ns = time.monotonic_ns()
             raise ValueError(record.error) from error
-        record.verified = result.verified
-        record.evidence = evidence
-        record.activated_at_ns = time.monotonic_ns()
+        with record._lock:
+            record.verified = result.verified
+            record.evidence = evidence
+            record.activated_at_ns = time.monotonic_ns()
         if not result.verified:
             deactivation_error: Exception | None = None
             if result.active:
@@ -876,34 +901,38 @@ class FaultInjectionSession:
                     executor.deactivate(request, result)
                 except Exception as error:
                     deactivation_error = error
-            record.status = InjectionStatus.FAILED
-            record.error = "fault executor could not verify activation"
-            if deactivation_error is not None:
-                record.error += f"; deactivation also failed: {deactivation_error}"
-            record.completed_at_ns = time.monotonic_ns()
+            with record._lock:
+                record.status = InjectionStatus.FAILED
+                record.error = "fault executor could not verify activation"
+                if deactivation_error is not None:
+                    record.error += f"; deactivation also failed: {deactivation_error}"
+                record.completed_at_ns = time.monotonic_ns()
             raise RuntimeError(record.error)
         if request.lifetime.matching_calls is not None and result.active:
             try:
                 executor.deactivate(request, result)
             except Exception as error:
+                with record._lock:
+                    record.status = InjectionStatus.FAILED
+                    record.error = (
+                        "external executor returned an active matching_calls fault "
+                        f"and deactivation failed: {error}"
+                    )
+                    record.completed_at_ns = time.monotonic_ns()
+                raise RuntimeError(record.error) from error
+            with record._lock:
                 record.status = InjectionStatus.FAILED
                 record.error = (
-                    "external executor returned an active matching_calls fault "
-                    f"and deactivation failed: {error}"
+                    "external executors must complete matching_calls faults during activation"
                 )
                 record.completed_at_ns = time.monotonic_ns()
-                raise RuntimeError(record.error) from error
-            record.status = InjectionStatus.FAILED
-            record.error = (
-                "external executors must complete matching_calls faults during activation"
-            )
-            record.completed_at_ns = time.monotonic_ns()
             raise ValueError(
                 "external executors must complete matching_calls faults during activation"
             )
-        record.status = InjectionStatus.ACTIVE if result.active else InjectionStatus.COMPLETED
-        if not result.active:
-            record.completed_at_ns = time.monotonic_ns()
+        with record._lock:
+            record.status = InjectionStatus.ACTIVE if result.active else InjectionStatus.COMPLETED
+            if not result.active:
+                record.completed_at_ns = time.monotonic_ns()
         return _ExternalEffect(
             request=request,
             record=record,
@@ -976,29 +1005,30 @@ class FaultInjectionSession:
         iteration: int,
         attempt: int,
     ) -> None:
-        for fault in incident.faults:
-            if fault.target.execution_rank != self.rank:
-                continue
-            record = FaultInjectionRecord(
-                injection_id=f"{occurrence_id}/{fault.fault_id}",
-                occurrence_id=occurrence_id,
-                incident_id=incident.incident_id,
-                fault_id=fault.fault_id,
-                iteration=iteration,
-                attempt=attempt,
-                temporal_behavior=incident.temporal_behavior,
-                failure_type=fault.type.value,
-                expected_kind=fault.expected_kind,
-                safety=fault.safety.value,
-                framework=self.framework,
-                executor="none",
-                execution_rank=fault.target.execution_rank,
-                target=fault.target.to_dict(),
-                parameters=fault.parameters,
-                status=InjectionStatus.SKIPPED_PROBABILITY,
-                completed_at_ns=time.monotonic_ns(),
-            )
-            self._records.append(record)
+        with self._records_lock:
+            for fault in incident.faults:
+                if fault.target.execution_rank != self.rank:
+                    continue
+                record = FaultInjectionRecord(
+                    injection_id=f"{occurrence_id}/{fault.fault_id}",
+                    occurrence_id=occurrence_id,
+                    incident_id=incident.incident_id,
+                    fault_id=fault.fault_id,
+                    iteration=iteration,
+                    attempt=attempt,
+                    temporal_behavior=incident.temporal_behavior,
+                    failure_type=fault.type.value,
+                    expected_kind=fault.expected_kind,
+                    safety=fault.safety.value,
+                    framework=self.framework,
+                    executor="none",
+                    execution_rank=fault.target.execution_rank,
+                    target=fault.target.to_dict(),
+                    parameters=fault.parameters,
+                    status=InjectionStatus.SKIPPED_PROBABILITY,
+                    completed_at_ns=time.monotonic_ns(),
+                )
+                self._records.append(record)
 
     def _complete_until(self, boundary: str) -> None:
         first_error: Exception | None = None
@@ -1257,12 +1287,10 @@ def _stable_seed(campaign_seed: int, *parts: str) -> int:
 
 def _trigger_contains_iteration(incident: FaultIncident, iteration: int) -> bool:
     trigger = incident.trigger
-    if trigger.range is None:
-        return iteration in trigger.at
-    return (
-        trigger.range.start <= iteration <= trigger.range.end
-        and (iteration - trigger.range.start) % trigger.range.every == 0
-    )
+    if trigger.range is not None:
+        return trigger.range.matches(iteration)
+    position = bisect_left(trigger.at, iteration)
+    return position < len(trigger.at) and trigger.at[position] == iteration
 
 
 def _occurrence_id(

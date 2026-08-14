@@ -46,7 +46,7 @@ from lm_resiliency.fault_injection.frameworks import (
     resolve_training_context,
 )
 from lm_resiliency.fault_injection.injector import _ActiveFault, _CampaignSchedule
-from lm_resiliency.fault_injection.local import LocalFaultEffect
+from lm_resiliency.fault_injection.local import LocalFaultEffect, LocalFaultExecutor
 from lm_resiliency.fault_injection.state import CampaignJournal
 
 
@@ -3369,7 +3369,10 @@ def test_campaign_journal_rejects_non_integer_attempt_counts(count: object) -> N
         )
 
 
-@pytest.mark.parametrize("key", ["incident", "@1", "incident@0", "incident@-1"])
+@pytest.mark.parametrize(
+    "key",
+    ["incident", "@1", "incident@0", "incident@-1", "incident@01"],
+)
 def test_campaign_journal_rejects_invalid_attempt_keys(key: str) -> None:
     with pytest.raises(ValueError, match="attempt keys"):
         CampaignJournal.from_dict(
@@ -3379,6 +3382,213 @@ def test_campaign_journal_rejects_invalid_attempt_keys(key: str) -> None:
                 "attempts": {key: 1},
             }
         )
+
+
+def test_overlapping_sessions_cannot_claim_the_same_once_occurrence(tmp_path: Path) -> None:
+    path = tmp_path / "campaign-state.json"
+    campaign = _campaign(_incident(at=(1,)))
+    first_model = TinyModel()
+    second_model = TinyModel()
+    first = FaultInjectionSession(
+        first_model,
+        _optimizer(first_model),
+        campaign=campaign,
+        state_store=JsonCampaignStateStore(path),
+        rank=0,
+        _defer_activation=True,
+    )
+    second = FaultInjectionSession(
+        second_model,
+        _optimizer(second_model),
+        campaign=campaign,
+        state_store=JsonCampaignStateStore(path),
+        rank=0,
+        _defer_activation=True,
+    )
+    first._commit_journal_binding()
+    second._commit_journal_binding()
+
+    first._start()
+    with pytest.raises(RuntimeError, match="changed concurrently"):
+        second._start()
+
+    assert len(first.records) == 1
+    assert second.records == ()
+    first.close()
+    second.close()
+
+
+def test_exact_trigger_lookup_uses_binary_search() -> None:
+    incident = _incident(at=tuple(range(1, 100_001)))
+    schedule = _CampaignSchedule((incident,))
+
+    with patch(
+        "lm_resiliency.fault_injection.injector.bisect_left",
+        wraps=__import__("bisect").bisect_left,
+    ) as lookup:
+        assert schedule.candidates(99_999) == (incident,)
+        assert schedule.candidates(100_001) == ()
+
+    assert lookup.call_count == 2
+
+
+def test_evaluation_snapshots_record_transitions_atomically() -> None:
+    model = TinyModel()
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(_incident(at=(1,))),
+        rank=0,
+    )
+    record = session.records[0]
+    transition_started = threading.Event()
+    release_transition = threading.Event()
+    evaluation_done = threading.Event()
+    reports = []
+
+    def transition() -> None:
+        with record._lock:
+            record.verified = True
+            transition_started.set()
+            release_transition.wait(timeout=5)
+            record.status = InjectionStatus.ACTIVE
+
+    def evaluate() -> None:
+        reports.append(session.evaluate())
+        evaluation_done.set()
+
+    transition_thread = threading.Thread(target=transition)
+    transition_thread.start()
+    assert transition_started.wait(timeout=5)
+    evaluation_thread = threading.Thread(target=evaluate)
+    evaluation_thread.start()
+    assert not evaluation_done.wait(timeout=0.05)
+    release_transition.set()
+    transition_thread.join(timeout=5)
+    evaluation_thread.join(timeout=5)
+
+    assert reports[0].injections[0].injection_succeeded
+    assert reports[0].injections[0].status is InjectionStatus.ACTIVE
+    session.close()
+
+
+def test_bit_flip_on_unsupported_float_dtype_fails_without_escaping_hook() -> None:
+    if not hasattr(torch, "float8_e4m3fn"):
+        pytest.skip("PyTorch does not expose float8")
+
+    class Float8OutputModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.layers = nn.ModuleList([nn.Identity()])
+            self.anchor = nn.Parameter(torch.ones(()))
+
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            return self.layers[0](value)
+
+    model = Float8OutputModel()
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                faults=(
+                    _corruption(
+                        operation=CorruptionOperation.SINGLE_BITFLIP,
+                        scope=FaultScope.SINGLE,
+                    ),
+                ),
+            )
+        ),
+        rank=0,
+    )
+
+    output = model(torch.ones(2, 4, dtype=torch.float8_e4m3fn))
+
+    assert output.dtype is torch.float8_e4m3fn
+    assert session.records[0].status is InjectionStatus.FAILED
+    assert "bit flips do not support dtype" in str(session.records[0].error)
+    session.close()
+
+
+def test_history_observer_cleanup_attempts_every_handle() -> None:
+    removed: list[str] = []
+
+    class Handle:
+        def __init__(self, name: str, *, fail: bool = False) -> None:
+            self.name = name
+            self.fail = fail
+
+        def remove(self) -> None:
+            removed.append(self.name)
+            if self.fail:
+                raise RuntimeError(f"{self.name} failed")
+
+    executor = LocalFaultExecutor(MagicMock(), rank=0)
+    executor._observer_handles = {
+        ("first",): [Handle("first", fail=True), Handle("second")],
+        ("third",): [Handle("third")],
+    }
+
+    with pytest.raises(RuntimeError, match="first failed"):
+        executor.close()
+
+    assert removed == ["first", "second", "third"]
+    assert executor._observer_handles == {}
+
+
+@pytest.mark.parametrize(
+    "surface",
+    [FaultSurface.INPUT, FaultSurface.OUTPUT, FaultSurface.GRADIENT],
+)
+def test_flow_history_stores_only_the_selected_scope(surface: FaultSurface) -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    fault = FaultSpec(
+        fault_id=f"stale-{surface.value}",
+        type=FailureType.STALE_STATE,
+        target=_target(surface=surface),
+        parameters={"scope": FaultScope.SINGLE.value},
+    )
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(_incident(at=(2,), faults=(fault,))),
+        rank=0,
+    )
+
+    optimizer.zero_grad()
+    model(torch.ones(64, 4)).sum().backward()
+    history = next(iter(session._local._history.values()))
+
+    assert history.latest is not None
+    assert history.latest.numel() == 1
+    assert history.latest_shape is not None
+    assert history.latest_shape.numel() > history.latest.numel()
+    session.close()
+
+
+def test_global_expert_resolution_ignores_numeric_descendants() -> None:
+    class ExpertModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.experts = nn.ModuleList([nn.Sequential(nn.Linear(4, 4), nn.Linear(4, 4))])
+
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            return self.experts[0](value)
+
+    model = ExpertModel()
+    context = resolve_training_context(model, _optimizer(model))
+    target = FaultTarget(
+        rank=0,
+        surface=FaultSurface.OUTPUT,
+        component="expert",
+        index=0,
+        metadata={"expert_parallel_rank": 0, "num_local_experts": 1},
+    )
+
+    assert context.resolve_module(target) is model.experts[0]
+    context.close()
 
 
 def test_all_canonical_failure_types_can_use_capability_executor() -> None:

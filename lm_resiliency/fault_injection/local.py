@@ -91,6 +91,8 @@ class _UnsupportedTargetTensorError(TypeError):
 class _History:
     previous: torch.Tensor | None = None
     latest: torch.Tensor | None = None
+    previous_shape: torch.Size | None = None
+    latest_shape: torch.Size | None = None
 
     def observe(
         self,
@@ -98,7 +100,9 @@ class _History:
         indices: torch.Tensor | None = None,
     ) -> None:
         self.previous = self.latest
+        self.previous_shape = self.latest_shape
         local = _local_shard(tensor)
+        self.latest_shape = local.shape
         self.latest = local.detach().clone() if indices is None else _read_linear(local, indices)
 
 
@@ -121,10 +125,11 @@ class LocalFaultEffect:
         with self.lock:
             if self.done or self.record.verified:
                 return
-            self.record.verified = True
-            self.record.status = InjectionStatus.ACTIVE
-            self.record.activated_at_ns = time.monotonic_ns()
-            self.record.evidence = dict(evidence)
+            with self.record._lock:
+                self.record.verified = True
+                self.record.status = InjectionStatus.ACTIVE
+                self.record.activated_at_ns = time.monotonic_ns()
+                self.record.evidence = dict(evidence)
 
     def matched(self) -> None:
         with self.lock:
@@ -149,21 +154,23 @@ class LocalFaultEffect:
                     replacement_confirmed=self.state_replaced,
                 )
             except Exception as error:
-                self.record.status = InjectionStatus.FAILED
-                self.record.error = f"fault cleanup failed: {error}"
-                self.record.completed_at_ns = time.monotonic_ns()
+                with self.record._lock:
+                    self.record.status = InjectionStatus.FAILED
+                    self.record.error = f"fault cleanup failed: {error}"
+                    self.record.completed_at_ns = time.monotonic_ns()
                 self.done = True
                 self.on_done(self.target_key)
                 raise
-            if evidence:
-                merged = dict(self.record.evidence)
-                merged.update(evidence)
-                self.record.evidence = merged
-            if self.record.verified:
-                self.record.status = InjectionStatus.COMPLETED
-            elif self.record.status is InjectionStatus.PENDING:
-                self.record.status = InjectionStatus.CANCELLED
-            self.record.completed_at_ns = time.monotonic_ns()
+            with self.record._lock:
+                if evidence:
+                    merged = dict(self.record.evidence)
+                    merged.update(evidence)
+                    self.record.evidence = merged
+                if self.record.verified:
+                    self.record.status = InjectionStatus.COMPLETED
+                elif self.record.status is InjectionStatus.PENDING:
+                    self.record.status = InjectionStatus.CANCELLED
+                self.record.completed_at_ns = time.monotonic_ns()
             self.done = True
             self.on_done(self.target_key)
 
@@ -187,11 +194,12 @@ class LocalFaultEffect:
                 self._cleanup()
             except Exception as caught:
                 cleanup_error = caught
-            self.record.status = InjectionStatus.FAILED
-            self.record.error = str(error)
-            if cleanup_error is not None:
-                self.record.error += f"; cleanup also failed: {cleanup_error}"
-            self.record.completed_at_ns = time.monotonic_ns()
+            with self.record._lock:
+                self.record.status = InjectionStatus.FAILED
+                self.record.error = str(error)
+                if cleanup_error is not None:
+                    self.record.error += f"; cleanup also failed: {cleanup_error}"
+                self.record.completed_at_ns = time.monotonic_ns()
             self.done = True
             self.on_done(self.target_key)
             if cleanup_error is not None and propagate_cleanup_error:
@@ -308,10 +316,17 @@ class LocalFaultExecutor:
             key = self._history_key(fault)
             desired.setdefault(key, fault)
 
+        removal_error: Exception | None = None
         for key in set(self._history) - set(desired):
             for handle in self._observer_handles.pop(key, ()):
-                handle.remove()
+                try:
+                    handle.remove()
+                except Exception as error:
+                    if removal_error is None:
+                        removal_error = error
             self._history.pop(key, None)
+        if removal_error is not None:
+            raise removal_error
 
         for key, fault in desired.items():
             if key in self._history:
@@ -377,12 +392,19 @@ class LocalFaultExecutor:
         return effect
 
     def close(self) -> None:
+        first_error: Exception | None = None
         for handles in self._observer_handles.values():
             for handle in handles:
-                handle.remove()
+                try:
+                    handle.remove()
+                except Exception as error:
+                    if first_error is None:
+                        first_error = error
         self._observer_handles.clear()
         self._history.clear()
         self._active_keys.clear()
+        if first_error is not None:
+            raise first_error
 
     def _activate_delay(
         self,
@@ -716,6 +738,7 @@ class LocalFaultExecutor:
     ) -> None:
         history = self._history[key]
         surface = fault.target.surface
+        scope = FaultScope(fault.parameters.get("scope", FaultScope.SINGLE.value))
         if surface in {
             FaultSurface.WEIGHT,
             FaultSurface.BIAS,
@@ -732,7 +755,8 @@ class LocalFaultExecutor:
             ) -> None:
                 tensor = _first_float_tensor((args, kwargs))
                 if tensor is not None:
-                    history.observe(tensor)
+                    local = _local_shard(tensor)
+                    history.observe(local, _target_indices(local, scope))
                 return None
 
             self._observer_handles.setdefault(key, []).append(
@@ -749,7 +773,8 @@ class LocalFaultExecutor:
             ) -> None:
                 tensor = _first_float_tensor(output)
                 if tensor is not None:
-                    history.observe(tensor)
+                    local = _local_shard(tensor)
+                    history.observe(local, _target_indices(local, scope))
                 return None
 
             self._observer_handles.setdefault(key, []).append(
@@ -767,7 +792,8 @@ class LocalFaultExecutor:
             )
 
             def observe_gradient(gradient: torch.Tensor) -> None:
-                history.observe(gradient)
+                local = _local_shard(gradient)
+                history.observe(local, _target_indices(local, scope))
                 return None
 
             self._observer_handles.setdefault(key, []).append(
@@ -817,6 +843,8 @@ def _prepare_state_values(
             raise _UnavailableHistoryError(
                 "stale or duplicate injection has no prior observed value"
             )
+        if history.previous_shape != tensor.shape:
+            raise RuntimeError("prior observed value shape does not match the target")
         previous = _local_shard(history.previous).to(
             device=tensor.device,
             dtype=tensor.dtype,
@@ -858,16 +886,20 @@ def _transform_tensor(
             raise _UnavailableHistoryError(
                 "stale or duplicate injection has no prior observed value"
             )
-        previous = history.previous.to(device=transformed.device, dtype=transformed.dtype)
-        if previous.shape != transformed.shape:
+        if history.previous_shape != transformed.shape:
             raise _UnsupportedTargetTensorError(
                 "prior observed value shape does not match the target"
+            )
+        previous = history.previous.to(device=transformed.device, dtype=transformed.dtype)
+        if previous.numel() != indices.numel():
+            raise _UnsupportedTargetTensorError(
+                "prior observed value scope does not match the target"
             )
         with torch.no_grad():
             transformed.view(-1).index_copy_(
                 0,
                 indices,
-                previous.contiguous().view(-1).index_select(0, indices),
+                previous.contiguous().view(-1),
             )
     elif fault.type is FailureType.DROP:
         with torch.no_grad():
@@ -937,7 +969,9 @@ def _flip_bits(
     try:
         integer_dtype, width = _INTEGER_VIEW[tensor.dtype]
     except KeyError as error:
-        raise TypeError(f"bit flips do not support dtype {tensor.dtype}") from error
+        raise _UnsupportedTargetTensorError(
+            f"bit flips do not support dtype {tensor.dtype}"
+        ) from error
     base = {
         FaultMagnitude.NEAR_INVISIBLE: 0,
         FaultMagnitude.SUBTLE: width // 4,

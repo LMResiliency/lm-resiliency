@@ -635,7 +635,7 @@ def _resolve_global_expert(
             if isinstance(value, int) and not isinstance(value, bool) and value == index:
                 direct.append(module)
         pieces = name.split(".")
-        if not pieces or not pieces[-1].isdigit() or "expert" not in name.lower():
+        if len(pieces) < 2 or not pieces[-1].isdigit() or "expert" not in pieces[-2].lower():
             continue
         local_candidates.append((int(pieces[-1]), module))
     match = _unique_module(direct, index)

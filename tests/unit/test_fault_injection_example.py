@@ -288,6 +288,29 @@ def test_comparison_rejects_wrong_failure_evidence(
     assert not evaluation["evaluations"][0][mismatch]
 
 
+def test_comparison_rejects_extra_positive_layer_attribution() -> None:
+    injection = _injection_payload()
+    injection["injections"][0]["target"]["index"] = 0
+    localization = _localization_payload()
+    localization["reports"].extend(
+        [
+            {
+                **localization["reports"][0],
+                "layer_id": 0,
+            },
+            {
+                **localization["reports"][0],
+                "layer_id": 1,
+            },
+        ]
+    )
+
+    evaluation = compare_payloads(injection, localization)
+
+    assert not evaluation["evaluations"][0]["layer_match"]
+    assert not evaluation["summary"]["passed"]
+
+
 def test_wrong_kind_at_the_injected_iteration_is_not_counted_as_detection() -> None:
     injection = _injection_payload()
     localization = _localization_payload()

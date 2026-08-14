@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from bisect import bisect_left
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -308,7 +309,8 @@ class IncidentTrigger:
     def matches(self, iteration: int) -> bool:
         if self.range is not None:
             return self.range.matches(iteration)
-        return iteration in self.at
+        position = bisect_left(self.at, iteration)
+        return position < len(self.at) and self.at[position] == iteration
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "IncidentTrigger":

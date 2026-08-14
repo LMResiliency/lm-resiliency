@@ -179,13 +179,13 @@ def _evaluate_occurrence(
     if not expected_layers:
         layer_match = True
         layer_evidence = "not_required"
-    elif set(expected_layers).issubset(observed_layers):
+    elif set(expected_layers) == set(observed_layers):
         layer_match = True
         layer_evidence = "layer_id"
-    elif aggregate_layer_report and not expected_source_prefixes:
+    elif not observed_layers and aggregate_layer_report and not expected_source_prefixes:
         layer_match = True
         layer_evidence = "aggregate_replay_catalog"
-    elif aggregate_layer_report and source_match:
+    elif not observed_layers and aggregate_layer_report and source_match:
         layer_match = True
         layer_evidence = "aggregate_component_source"
     else:

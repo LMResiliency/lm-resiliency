@@ -176,6 +176,10 @@ automatically; the training loop remains unchanged.
 The injector records verified ground truth independently of SCOUT and GEMINI,
 then `faults.evaluate(...)` compares neutral localization results with expected
 ranks, resources, and components.
+Custom `CampaignStateStore` implementations must provide atomic
+`compare_and_swap(expected, updated)` in addition to `load()` and `save()`, so
+overlapping old and replacement workers cannot both claim a restart-stable
+occurrence.
 See [Fault injection evaluation](fault_injection.md) for manifests, framework
 targets, permanent and intermittent schedules, destructive executors, scoring,
 and safety boundaries.

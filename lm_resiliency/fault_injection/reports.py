@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -48,6 +49,12 @@ class FaultInjectionRecord:
     completed_at_ns: int | None = None
     evidence: Mapping[str, Any] = field(default_factory=dict)
     error: str | None = None
+    _lock: threading.RLock = field(
+        default_factory=threading.RLock,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     @property
     def injection_succeeded(self) -> bool:
@@ -75,29 +82,30 @@ class FaultInjectionRecord:
 
     def snapshot(self) -> "FaultInjectionRecord":
         """Return an evaluation-stable copy of this mutable runtime record."""
-        return FaultInjectionRecord(
-            injection_id=self.injection_id,
-            occurrence_id=self.occurrence_id,
-            incident_id=self.incident_id,
-            fault_id=self.fault_id,
-            iteration=self.iteration,
-            attempt=self.attempt,
-            temporal_behavior=self.temporal_behavior,
-            failure_type=self.failure_type,
-            expected_kind=self.expected_kind,
-            safety=self.safety,
-            framework=self.framework,
-            executor=self.executor,
-            execution_rank=self.execution_rank,
-            target=freeze_json_mapping(self.target, "injection target"),
-            parameters=freeze_json_mapping(self.parameters, "injection parameters"),
-            status=self.status,
-            verified=self.verified,
-            activated_at_ns=self.activated_at_ns,
-            completed_at_ns=self.completed_at_ns,
-            evidence=freeze_json_mapping(self.evidence, "injection evidence"),
-            error=self.error,
-        )
+        with self._lock:
+            return FaultInjectionRecord(
+                injection_id=self.injection_id,
+                occurrence_id=self.occurrence_id,
+                incident_id=self.incident_id,
+                fault_id=self.fault_id,
+                iteration=self.iteration,
+                attempt=self.attempt,
+                temporal_behavior=self.temporal_behavior,
+                failure_type=self.failure_type,
+                expected_kind=self.expected_kind,
+                safety=self.safety,
+                framework=self.framework,
+                executor=self.executor,
+                execution_rank=self.execution_rank,
+                target=freeze_json_mapping(self.target, "injection target"),
+                parameters=freeze_json_mapping(self.parameters, "injection parameters"),
+                status=self.status,
+                verified=self.verified,
+                activated_at_ns=self.activated_at_ns,
+                completed_at_ns=self.completed_at_ns,
+                evidence=freeze_json_mapping(self.evidence, "injection evidence"),
+                error=self.error,
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {

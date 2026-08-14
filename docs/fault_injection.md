@@ -235,7 +235,7 @@ Use exactly one of `at` or `range`.
 
 | Field | Required | Default | Meaning |
 |---|---:|---|---|
-| `at` | One of `at`/`range` | - | Sorted, unique array of positive iteration numbers. |
+| `at` | One of `at`/`range` | - | Sorted, unique array of positive iteration numbers. Exact candidates use binary lookup, so healthy-step work remains bounded for large lists. |
 | `range.start` | For `range` | - | First candidate iteration; must be positive. |
 | `range.end` | For `range` | - | Last candidate iteration, inclusive. Range schedules are evaluated lazily and do not allocate one entry per candidate. |
 | `range.every` | No | `1` | Positive spacing between range candidates. |
@@ -347,9 +347,10 @@ model hook executes.
 Stale and duplicate faults retain two observed values only during their
 scheduled collection window. Module and gradient observation starts one
 training iteration before a candidate and is removed at the optimizer boundary
-after the occurrence. State surfaces retain only the selected values over the
-equivalent two-boundary window. A stale or duplicate incident scheduled for the
-first iteration fails verification because no prior value exists.
+after the occurrence. Input, output, gradient, and state histories retain only
+the values selected by `scope`, rather than cloning the complete tensor for a
+narrow fault. A stale or duplicate incident scheduled for the first iteration
+fails verification because no prior value exists.
 For state surfaces, an incident at iteration N is armed after iteration N-1
 completes. It applies the snapshot from before iteration N-1, making the target
 one completed optimizer update behind its current state. The latest snapshot is
@@ -553,7 +554,12 @@ Supported policies are:
 
 The state file must survive worker replacement for restart-stable behavior.
 Use one JSON state file per rank, or provide a manager-backed
-`CampaignStateStore` that serializes concurrent updates across workers.
+`CampaignStateStore` implementing atomic `compare_and_swap(expected, updated)`
+claims across workers. A plain load-modify-save sequence is insufficient when
+old and replacement workers overlap: only one worker may claim a
+`retrigger: "once"` occurrence. `JsonCampaignStateStore` uses an interprocess
+file lock and atomic replacement; `MemoryCampaignStateStore` provides the same
+contract within one process.
 For a distributed enablement, the initial manifest binding is persisted only
 after every rank agrees on the manifest, training iteration, and persisted
 attempt journal. Divergent per-rank attempt histories fail enablement before any
@@ -561,9 +567,10 @@ new occurrence is armed.
 The journal stores the canonical manifest identity. Reusing a campaign name with
 changed triggers, targets, parameters, or metadata requires a new state file;
 stale attempts are never applied to an edited manifest.
-Attempt entries use `<incident_id>@<positive_iteration>` keys and strictly
-positive integer counts. Malformed, boolean, fractional, zero, or negative
-restart evidence is rejected rather than normalized.
+Attempt entries use canonical `<incident_id>@<positive_iteration>` keys and
+strictly positive integer counts. Iterations have no leading zeroes. Malformed,
+boolean, fractional, zero, or negative restart evidence is rejected rather than
+normalized.
 The journal object requires exactly `campaign`, `manifest_identity`, and
 `attempts`; missing or unknown fields are rejected.
 
@@ -626,9 +633,10 @@ an unrelated report at the same iteration is retained as evidence but does not
 count as detecting the injected occurrence. For correlated incidents containing
 multiple failure kinds, each kind must identify its corresponding expected
 ranks; matching only the aggregate rank and kind sets is insufficient.
-`evaluate()` snapshots every mutable injection record before scoring. A returned
-`CampaignReport` therefore remains internally consistent even if the training
-session later activates or completes another hook.
+`evaluate()` coordinates incident record creation with per-record lifecycle
+updates before taking snapshots. A returned `CampaignReport` therefore remains
+internally consistent even if another thread is activating or completing a
+hook.
 
 Reports are rank-local.
 A distributed campaign runner or training manager should collect reports from all
