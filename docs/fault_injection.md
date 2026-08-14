@@ -299,8 +299,12 @@ injection IDs but the same occurrence ID.
 
 Module surfaces (`input`, `output`, `weight`, `bias`, `gradient`,
 `optimizer_state`, and `compute`) require either `module_path` or `component`.
-Supplying both is useful when the exact framework path is known but a logical
-component should remain available as a fallback and for localization comparison.
+Only layer and expert logical components accept `index`; non-indexed selectors
+such as `embedding` and `output` reject it.
+Supplying both is useful when the exact framework path refines a logical
+component for localization comparison. The explicit module must be the logical
+module itself or one of its descendants; contradictory selectors are rejected
+before injection.
 For pipeline-sharded Megatron, TorchTitan, or DeepSpeed models, logical
 transformer-layer indices are resolved through global module metadata such as
 `layer_number` or `global_layer_index`. The injector rejects ambiguous
@@ -323,7 +327,7 @@ fails and the campaign must specify an exact `module_path`.
 | Parameter | Applies to | Default | Meaning |
 |---|---|---|---|
 | `operation` | `tensor_corruption` | Required | `single_bitflip`, `multi_bitflip`, `set_value`, `scale`, `noise`, or `sign_flip`. |
-| `scope` | Local tensor and state-flow faults | `single` | Elements selected by the effect: `single`, `row`, `1%`, `10%`, or `100%`. `reorder` always reorders the full leading dimension. |
+| `scope` | Local tensor and state-flow faults except `reorder` | `single` | Elements selected by the effect: `single`, `row`, `1%`, `10%`, or `100%`. `reorder` accepts no scope and always reorders the full leading dimension. |
 | `magnitude` | Bit flip, scale, or noise corruption | `medium` | `catastrophic`, `large`, `medium`, `subtle`, or `near_invisible`; selects bit position or the default scale/noise strength. |
 | `value` | `set_value` | Required | Numeric value, or `nan`, `inf`, or `-inf`. |
 | `factor` | `scale` | Derived from `magnitude` | Explicit multiplication factor. |

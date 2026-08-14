@@ -48,6 +48,12 @@ _INCIDENT_KEYS = {
     "retrigger",
     "max_occurrences",
 }
+_INDEXED_LOGICAL_COMPONENTS = {
+    "expert",
+    "layer",
+    "transformer_block",
+    "transformer_layer",
+}
 
 
 class ClockType(str, Enum):
@@ -419,6 +425,16 @@ class FaultTarget:
             raise ValueError("fault target model_part must be non-negative")
         if self.index is not None and self.index < 0:
             raise ValueError("fault target index must be non-negative")
+        if self.index is not None:
+            normalized_component = (
+                self.component.lower().replace("-", "_")
+                if isinstance(self.component, str)
+                else None
+            )
+            if normalized_component not in _INDEXED_LOGICAL_COMPONENTS:
+                raise ValueError(
+                    "fault target index is supported only for layer or expert logical components"
+                )
         if self.module_path is not None and not self.module_path:
             raise ValueError("fault target module_path must be non-empty")
         module_surfaces = {
@@ -619,7 +635,8 @@ def _validate_builtin_local_parameters(fault: FaultSpec) -> None:
     if fault.type is FailureType.DELAY:
         allowed.add("delay_ms")
     else:
-        allowed.add("scope")
+        if fault.type is not FailureType.REORDER:
+            allowed.add("scope")
         if surface in {
             FaultSurface.WEIGHT,
             FaultSurface.BIAS,

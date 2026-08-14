@@ -112,6 +112,8 @@ class _ExternalEffect:
             self.record.error += f"; rollback cleanup also failed: {cleanup_error}"
         self.record.completed_at_ns = time.monotonic_ns()
         self.done = True
+        if cleanup_error is not None:
+            raise RuntimeError(f"fault rollback cleanup failed: {cleanup_error}") from cleanup_error
 
 
 @dataclass(slots=True)

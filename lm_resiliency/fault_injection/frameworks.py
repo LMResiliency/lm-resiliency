@@ -47,10 +47,13 @@ class TrainingContext:
         model = self.models[target.model_part]
         candidates = _module_namespace_candidates(model)
         candidate_modules = [dict(candidate.named_modules()) for candidate in candidates]
+        explicit_module: nn.Module | None = None
         if target.module_path is not None:
             for modules in candidate_modules:
                 if target.module_path in modules:
-                    return modules[target.module_path]
+                    explicit_module = modules[target.module_path]
+                    break
+        logical_module: nn.Module | None = None
         if target.component is not None:
             for modules in candidate_modules:
                 resolved = _resolve_logical_module(
@@ -64,7 +67,29 @@ class TrainingContext:
                     ),
                 )
                 if resolved is not None:
-                    return resolved
+                    logical_module = resolved
+                    break
+        if target.module_path is not None and target.component is not None:
+            if explicit_module is None or logical_module is None:
+                unresolved = (
+                    f"module_path {target.module_path!r}"
+                    if explicit_module is None
+                    else f"logical target {target.component}[{target.index}]"
+                )
+                raise LookupError(
+                    f"combined fault target requires both selectors to resolve; "
+                    f"{unresolved} was not found"
+                )
+            if any(module is explicit_module for module in logical_module.modules()):
+                return explicit_module
+            raise ValueError(
+                f"explicit module_path {target.module_path!r} does not match or refine "
+                f"logical target {target.component}[{target.index}]"
+            )
+        if explicit_module is not None:
+            return explicit_module
+        if logical_module is not None:
+            return logical_module
         available = sorted(candidate_modules[0])
         sample = ", ".join(repr(name) for name in available[:10])
         selector = target.module_path or (

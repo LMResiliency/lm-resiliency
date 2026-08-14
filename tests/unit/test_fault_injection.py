@@ -570,7 +570,6 @@ def test_tensor_corruption_rejects_malformed_operation_parameters(
         FailureType.STALE_STATE,
         FailureType.DROP,
         FailureType.DUPLICATE,
-        FailureType.REORDER,
     ],
 )
 def test_state_flow_faults_validate_scope_during_manifest_construction(
@@ -582,6 +581,28 @@ def test_state_flow_faults_validate_scope_during_manifest_construction(
             type=failure_type,
             target=_target(),
             parameters={"scope": "invalid"},
+        )
+
+
+def test_reorder_rejects_ignored_scope_during_manifest_construction() -> None:
+    with pytest.raises(ValueError, match="unsupported built-in local parameters.*scope"):
+        FaultSpec(
+            fault_id="reorder",
+            type=FailureType.REORDER,
+            target=_target(),
+            parameters={"scope": FaultScope.FULL.value},
+        )
+
+
+@pytest.mark.parametrize("component", [None, "embedding", "output"])
+def test_non_indexed_logical_targets_reject_index(component: str | None) -> None:
+    with pytest.raises(ValueError, match="index is supported only for layer or expert"):
+        FaultTarget(
+            rank=0,
+            surface=FaultSurface.OUTPUT,
+            module_path="layers.0" if component is None else None,
+            component=component,
+            index=1,
         )
 
 
@@ -1224,7 +1245,6 @@ def test_invalid_reorder_shape_fails_record_without_aborting_training() -> None:
             surface=FaultSurface.OUTPUT,
             module_path="0",
         ),
-        parameters={"scope": FaultScope.FULL.value},
     )
     session = enable_fault_injection(
         model,
@@ -2505,18 +2525,17 @@ def test_logical_output_bypasses_root_module_with_generic_output_name() -> None:
     session.close()
 
 
-def test_explicit_module_path_precedes_logical_fallback_across_wrappers() -> None:
+def test_explicit_module_path_must_match_logical_target_across_wrappers() -> None:
     model = TinyModel()
     wrapped = Wrapper(model)
     optimizer = _optimizer(wrapped)
-    first = model.layers[0].weight.detach().clone()
     second = model.layers[1].weight.detach().clone()
     fault = _corruption(
         target=_target(
             surface=FaultSurface.WEIGHT,
             module_path="layers.1",
             component="transformer_block",
-            index=0,
+            index=1,
         ),
         scope=FaultScope.SINGLE,
     )
@@ -2533,10 +2552,61 @@ def test_explicit_module_path_precedes_logical_fallback_across_wrappers() -> Non
         rank=0,
     )
 
-    torch.testing.assert_close(model.layers[0].weight, first)
     assert not torch.equal(model.layers[1].weight, second)
     session.close()
     torch.testing.assert_close(model.layers[1].weight, second)
+
+
+def test_explicit_module_path_rejects_contradictory_logical_target() -> None:
+    model = TinyModel()
+    fault = _corruption(
+        target=_target(
+            surface=FaultSurface.WEIGHT,
+            module_path="layers.1",
+            component="transformer_block",
+            index=0,
+        ),
+        scope=FaultScope.SINGLE,
+    )
+
+    with pytest.raises(ValueError, match="does not match or refine logical target"):
+        enable_fault_injection(
+            Wrapper(model),
+            _optimizer(model),
+            campaign=_campaign(
+                _incident(
+                    at=(1,),
+                    lifetime=IncidentLifetime(until="recovery"),
+                    faults=(fault,),
+                )
+            ),
+            rank=0,
+        )
+
+
+def test_combined_target_requires_both_selectors_to_resolve() -> None:
+    model = TinyModel()
+    fault = _corruption(
+        target=_target(
+            surface=FaultSurface.WEIGHT,
+            module_path="layers.0",
+            component="missing-component",
+        ),
+    )
+
+    with pytest.raises(LookupError, match="requires both selectors to resolve"):
+        enable_fault_injection(
+            model,
+            _optimizer(model),
+            campaign=_campaign(
+                _incident(
+                    at=(1,),
+                    lifetime=IncidentLifetime(until="recovery"),
+                    faults=(fault,),
+                )
+            ),
+            rank=0,
+        )
 
 
 def test_explicit_path_is_resolved_in_wrapped_user_model_namespace() -> None:
@@ -4359,6 +4429,66 @@ def test_staged_activation_rollback_marks_verified_records_failed() -> None:
     assert "rolled back" in (local_record.error or "")
     torch.testing.assert_close(model.layers[0].weight, baseline)
     session.close()
+
+
+def test_staged_activation_surfaces_external_rollback_cleanup_failure() -> None:
+    events: list[tuple[str, str]] = []
+
+    def activate(request):
+        events.append(("activate", request.fault.fault_id))
+        if request.fault.fault_id == "second":
+            raise RuntimeError("later activation failed")
+        return FaultExecutionResult(verified=True, active=True)
+
+    def deactivate(request, _result):
+        events.append(("deactivate", request.fault.fault_id))
+        raise RuntimeError("rollback cleanup failed")
+
+    executor = CallbackFaultExecutor(
+        name="rollback-cleanup-failure",
+        supported_types={
+            FailureType.PROCESS_TERMINATION,
+            FailureType.RESOURCE_UNAVAILABLE,
+        },
+        activate=activate,
+        deactivate=deactivate,
+        max_safety=SafetyClass.CLUSTER_DESTRUCTIVE,
+    )
+    faults = (
+        _external_fault(
+            FailureType.RESOURCE_UNAVAILABLE,
+            fault_id="first",
+            resource="gpu-0",
+        ),
+        _external_fault(
+            FailureType.PROCESS_TERMINATION,
+            fault_id="second",
+            resource="process-0",
+        ),
+    )
+    model = TinyModel()
+
+    with pytest.raises(RuntimeError, match="later activation failed") as caught:
+        enable_fault_injection(
+            model,
+            _optimizer(model),
+            campaign=_campaign(
+                _incident(
+                    at=(1,),
+                    lifetime=IncidentLifetime(until="campaign_end"),
+                    faults=faults,
+                )
+            ),
+            executors=(executor,),
+            rank=0,
+        )
+
+    assert events == [
+        ("activate", "first"),
+        ("activate", "second"),
+        ("deactivate", "first"),
+    ]
+    assert any("rollback cleanup failed" in note for note in caught.value.__notes__)
 
 
 def test_probability_skip_does_not_require_expiration_consensus() -> None:

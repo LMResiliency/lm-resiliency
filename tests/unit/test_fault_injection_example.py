@@ -320,6 +320,15 @@ def test_comparison_rejects_coerced_localization_rank(failed_rank: object) -> No
         compare_payloads(_injection_payload(), localization)
 
 
+@pytest.mark.parametrize("layer_id", [True, 0.9, "0"])
+def test_comparison_rejects_coerced_localization_layer_id(layer_id: object) -> None:
+    localization = _localization_payload()
+    localization["reports"][0]["layer_id"] = layer_id
+
+    with pytest.raises(TypeError, match="layer_id must be an integer"):
+        compare_payloads(_injection_payload(), localization)
+
+
 def test_comparison_rejects_ambiguous_same_iteration_occurrences() -> None:
     injection = _injection_payload()
     injection["injections"].append(

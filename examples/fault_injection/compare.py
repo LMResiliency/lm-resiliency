@@ -155,7 +155,9 @@ def _evaluate_occurrence(
         for kind in expected_kinds
     }
     reported_layer_ids = {
-        int(report["layer_id"]) for report in matching if report.get("layer_id") is not None
+        _required_integer(report["layer_id"], "localization layer_id")
+        for report in matching
+        if report.get("layer_id") is not None
     }
     observed_layers = sorted(layer_id for layer_id in reported_layer_ids if layer_id >= 0)
     aggregate_layer_report = -1 in reported_layer_ids
