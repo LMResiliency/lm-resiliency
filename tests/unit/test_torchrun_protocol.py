@@ -204,7 +204,7 @@ def _manifest(
                         rank,
                         holder_node_id=holder_overrides.get(
                             rank,
-                            "node-a" if rank < 2 else "node-spare",
+                            "node-a",
                         ),
                         holder_kind=holder_kind,
                         checkpoint_step=checkpoint_step,
@@ -471,6 +471,15 @@ def test_restart_plan_requires_exact_inventory_copy_match():
         _validate(
             manifest=manifest,
             inventory_events=(replace(inventory, copies=altered_copies),),
+        )
+
+
+def test_restart_plan_rejects_local_copy_reported_by_another_node():
+    with pytest.raises(ProtocolValidationError, match="no complete eligible copy"):
+        _validate(
+            manifest=_manifest(
+                holder_overrides={0: "node-spare"},
+            ),
         )
 
 
@@ -774,6 +783,26 @@ def test_hardware_report_accepts_registered_resource_on_reporter_node():
     )
 
 
+def test_fault_report_rejects_rank_outside_committed_assignment():
+    event = FaultEvent(
+        event_id="fault-rank",
+        incident_id="incident-a",
+        run_id=RUN_ID,
+        generation=4,
+        reporter=_worker(),
+        optimizer_step=41,
+        report={"kind": "straggler", "failed_ranks": [999]},
+    )
+
+    with pytest.raises(ProtocolValidationError, match="not active"):
+        validate_event_reporter(
+            event,
+            _current_assignment(),
+            agent_identity=_agent(),
+            resource_to_node_id={"GPU-0": "node-a"},
+        )
+
+
 @pytest.mark.parametrize(
     ("failure_kind", "all_ranks_accessible"),
     [("sdc", True), ("machine_unavailable", True), ("hang", False)],
@@ -887,13 +916,43 @@ def test_restart_context_validates_worker_environment():
         "TORCHELASTIC_RUN_ID": RUN_ID,
     }
 
-    context.validate_worker_environment(environment)
+    context.validate_worker_environment(environment, committed_plan=_plan())
 
     with pytest.raises(ProtocolValidationError, match="RANK=2"):
-        context.validate_worker_environment({**environment, "RANK": "2"})
+        context.validate_worker_environment(
+            {**environment, "RANK": "2"},
+            committed_plan=_plan(),
+        )
 
     with pytest.raises(ProtocolValidationError, match="TORCHELASTIC_RUN_ID"):
-        context.validate_worker_environment({**environment, "TORCHELASTIC_RUN_ID": "stale-run"})
+        context.validate_worker_environment(
+            {**environment, "TORCHELASTIC_RUN_ID": "stale-run"},
+            committed_plan=_plan(),
+        )
+
+
+def test_restart_context_must_match_current_committed_plan():
+    stale_context = RestartContext.from_plan(_plan(), "node-spare")
+    current_plan = replace(
+        _plan(),
+        plan_id="plan-6",
+        from_generation=5,
+        to_generation=6,
+        recovery_mode="recovery_verified",
+    )
+    environment = {
+        "RANK": "3",
+        "LOCAL_RANK": "1",
+        "LOCAL_WORLD_SIZE": "2",
+        "WORLD_SIZE": "4",
+        "TORCHELASTIC_RUN_ID": RUN_ID,
+    }
+
+    with pytest.raises(ProtocolValidationError, match="currently committed"):
+        stale_context.validate_worker_environment(
+            environment,
+            committed_plan=current_plan,
+        )
 
 
 def test_restart_context_rejects_partial_local_worker_slot():

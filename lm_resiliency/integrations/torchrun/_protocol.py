@@ -1797,7 +1797,19 @@ class RestartContext(_WireRecord):
             reason_code=plan.reason_code,
         )
 
-    def validate_worker_environment(self, environment: Mapping[str, str]) -> None:
+    def validate_worker_environment(
+        self,
+        environment: Mapping[str, str],
+        *,
+        committed_plan: RestartPlan,
+    ) -> None:
+        if not isinstance(committed_plan, RestartPlan):
+            raise ProtocolValidationError("committed_plan: expected RestartPlan")
+        expected_context = RestartContext.from_plan(committed_plan, self.node_id)
+        if self != expected_context:
+            raise ProtocolValidationError(
+                "RestartContext: does not match the currently committed restart plan"
+            )
         required = {
             "RANK",
             "LOCAL_RANK",
@@ -2202,6 +2214,24 @@ def validate_event_reporter(
             raise ProtocolValidationError(
                 "WorkerIdentity.gpu_uuid: trusted resource owner does not match reporter"
             )
+    if isinstance(event, FaultEvent) and "failed_ranks" in event.report:
+        reported_ranks = _integers(
+            event.report["failed_ranks"],
+            "FaultEvent.report.failed_ranks",
+            minimum=0,
+            unique=True,
+        )
+        assigned_ranks = {
+            rank
+            for first_rank, last_rank in assignment.slot_to_rank_range.values()
+            for rank in range(first_rank, last_rank)
+        }
+        unknown_ranks = sorted(set(reported_ranks) - assigned_ranks)
+        if unknown_ranks:
+            raise ProtocolValidationError(
+                "FaultEvent.report.failed_ranks: ranks are not active in the committed "
+                f"assignment: {unknown_ranks!r}"
+            )
     if not isinstance(event, FaultEvent) or event.report.get("kind") != "hardware":
         return
     resource_kind = _choice(
@@ -2430,6 +2460,11 @@ def _copy_has_trusted_inventory_provenance(
     ):
         return False
     if copy not in event.copies:
+        return False
+    if (
+        copy.storage_kind in {"memory", "node_local"}
+        and copy.holder_node_id != event.reporter.node_id
+    ):
         return False
     if manifest.trust != "latest":
         return True

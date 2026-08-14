@@ -341,7 +341,7 @@ Requirements:
   attribution. A direct `HealthEvent` is normalized to
   `HardwareFaultReport` without upgrading its resource granularity.
 - The coordinator resolves reported ranks through that generation's
-  `RankAssignment`.
+  `RankAssignment` and rejects any reported rank outside its committed ranges.
 - The orchestration dispatcher allocates `incident_id` once and uses it for
   both the recovery and fault callbacks. The client must not infer correlation
   from callback timing.
@@ -414,7 +414,9 @@ but is never selected for conservative recovery. Durable copies must use shared
 or remote storage and carry the opaque durable `checkpoint_id`; that ID must
 match the committed plan. Owner and peer copies do not carry a durable
 checkpoint ID. Node-local and in-memory copies remain subject to holder health
-and quarantine.
+and quarantine, and are eligible only when the inventory event was reported by
+that holder. Shared or remote copies may instead be referenced by an
+authenticated control-plane inventory.
 
 `location_token` is an opaque control-plane reference, not an unchecked path
 that another worker is allowed to open.
@@ -569,6 +571,12 @@ context conflicts with torchrun's `RANK`, `LOCAL_RANK`, `LOCAL_WORLD_SIZE`,
 `WORLD_SIZE`, `TORCHELASTIC_RUN_ID`, or the framework topology.
 `expected_world_size` must also be divisible by `local_world_size`, so a
 context cannot describe a partial logical node slot.
+
+Before inspecting checkpoint fields, the worker validates the complete context
+against the currently committed `RestartPlan` for its node. The plan ID,
+successor generation, assignment, topology, recovery mode, checkpoint pin, and
+reason must match exactly. A leftover context from an earlier plan is rejected
+even when stable ranks make every torchrun environment value identical.
 
 The context must not contain a newer, less trusted local checkpoint merely
 because it exists on the replacement host.
