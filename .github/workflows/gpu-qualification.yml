@@ -40,7 +40,8 @@ jobs:
             --index-url "$TORCH_INDEX_URL" \
             --only-binary=:all: \
             "torch==$TORCH_VERSION"
-          python -m pip install "numpy==$NUMPY_VERSION" "setuptools>=83"
+          python -m pip install -c requirements/tool-versions.txt \
+            "numpy==$NUMPY_VERSION" setuptools
           python -m pip install --no-deps -e .
           python -m pip check
 
