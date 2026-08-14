@@ -9,6 +9,7 @@ import pytest
 
 from lm_resiliency.integrations.torchrun._protocol import (
     AgentIdentity,
+    CheckpointCertification,
     CheckpointCopy,
     CheckpointInventoryEvent,
     FaultEvent,
@@ -165,13 +166,16 @@ def _copy(
 def _ack(
     *,
     node_id: str = "node-a",
+    agent_id: str = "agent-a",
     flushed_step: int = 40,
     inventory_event_ids: tuple[str, ...] = ("inventory-a",),
     success: bool = True,
 ) -> RestartAck:
     return RestartAck(
         intent_id="intent-4",
+        run_id=RUN_ID,
         node_id=node_id,
+        agent_id=agent_id,
         generation=4,
         flushed_step=flushed_step if success else -1,
         inventory_event_ids=inventory_event_ids,
@@ -226,19 +230,44 @@ def _inventory_event(
     manifest: RecoveryManifest,
     *,
     trust: str | None = None,
+    reporter: WorkerIdentity | None = None,
 ) -> CheckpointInventoryEvent:
     return CheckpointInventoryEvent(
         event_id="inventory-a",
         run_id=manifest.run_id,
         generation=manifest.source_generation,
         reporter=replace(
-            _worker(),
+            reporter or _worker(),
             generation=manifest.source_generation,
         ),
         step=manifest.step,
         trust=trust or manifest.trust,
         topology_digest=manifest.topology_digest,
         copies=tuple(copy for rank_copies in manifest.rank_copies for copy in rank_copies.copies),
+    )
+
+
+def _certification(
+    plan: RestartPlan,
+    manifest: RecoveryManifest,
+) -> CheckpointCertification:
+    return CheckpointCertification(
+        certification_id=f"certification-{manifest.step}",
+        run_id=manifest.run_id,
+        source_generation=manifest.source_generation,
+        step=manifest.step,
+        topology_digest=manifest.topology_digest,
+        checkpoint_source=plan.checkpoint_source,
+        checkpoint_id=plan.checkpoint_id,
+        expected_world_size=plan.expected_world_size,
+        certification_kind="dense_consensus",
+        inventory_event_ids=tuple(
+            dict.fromkeys(
+                copy.inventory_event_id
+                for rank_copies in manifest.rank_copies
+                for copy in rank_copies.copies
+            )
+        ),
     )
 
 
@@ -249,19 +278,33 @@ def _validate(
     intent: RestartIntent | None = None,
     current_assignment: RankAssignment | None = None,
     inventory_events: tuple[CheckpointInventoryEvent, ...] | None = None,
+    trusted_certifications: tuple[CheckpointCertification, ...] | None = None,
     restart_acks: tuple[RestartAck, ...] | None = None,
+    authenticated_ack_agent_ids: dict[str, str] | None = None,
     now_unix_ms: int = 1_900_000_000_000,
     eligible_node_ids: tuple[str, ...] = ("node-a", "node-spare"),
 ) -> None:
+    selected_plan = plan or _plan()
     selected_manifest = manifest or _manifest()
+    selected_acks = (_ack(),) if restart_acks is None else restart_acks
     validate_restart_plan(
-        plan or _plan(),
+        selected_plan,
         intent or _intent(),
         selected_manifest,
         inventory_events=(
             (_inventory_event(selected_manifest),) if inventory_events is None else inventory_events
         ),
-        restart_acks=(_ack(),) if restart_acks is None else restart_acks,
+        trusted_certifications=(
+            (_certification(selected_plan, selected_manifest),)
+            if trusted_certifications is None and selected_manifest.trust == "recovery_verified"
+            else (() if trusted_certifications is None else trusted_certifications)
+        ),
+        restart_acks=selected_acks,
+        authenticated_ack_agent_ids=(
+            {ack.node_id: ack.agent_id for ack in selected_acks}
+            if authenticated_ack_agent_ids is None
+            else authenticated_ack_agent_ids
+        ),
         current_assignment=current_assignment or _current_assignment(),
         now_unix_ms=now_unix_ms,
         eligible_node_ids=eligible_node_ids,
@@ -325,6 +368,10 @@ def _records():
             trust="latest",
             topology_digest=TOPOLOGY_DIGEST,
             copies=(_copy(0, holder_node_id="node-a"),),
+        ),
+        _certification(
+            _plan(recovery_mode="recovery_verified"),
+            _manifest(trust="recovery_verified"),
         ),
         _intent(),
         _ack(),
@@ -458,6 +505,18 @@ def test_restart_plan_rejects_uncertified_manifest_trust():
         )
 
 
+def test_verified_inventory_requires_trusted_catalog_certification():
+    manifest = _manifest(trust="recovery_verified")
+
+    with pytest.raises(ProtocolValidationError, match="no complete eligible copy"):
+        _validate(
+            plan=_plan(recovery_mode="recovery_verified"),
+            intent=_intent(minimum_recovery_mode="recovery_verified"),
+            manifest=manifest,
+            trusted_certifications=(),
+        )
+
+
 def test_restart_plan_requires_inventory_provenance_for_every_copy():
     with pytest.raises(ProtocolValidationError, match="no complete eligible copy"):
         _validate(inventory_events=())
@@ -484,6 +543,46 @@ def test_restart_plan_rejects_local_copy_reported_by_another_node():
             manifest=_manifest(
                 holder_overrides={0: "node-spare"},
             ),
+        )
+
+
+def test_restart_plan_rejects_local_copy_on_departing_holder():
+    departing_worker = replace(
+        _worker(),
+        node_id="node-b",
+        agent_id="agent-b",
+        logical_node_slot=1,
+        global_rank=2,
+        hostname="host-b",
+        gpu_uuid="GPU-2",
+    )
+    manifest = _manifest(
+        holder_overrides={
+            0: "node-b",
+            1: "node-b",
+            2: "node-b",
+            3: "node-b",
+        },
+    )
+
+    with pytest.raises(ProtocolValidationError, match="no complete eligible copy"):
+        _validate(
+            plan=replace(_plan(), quarantined_node_ids=()),
+            manifest=manifest,
+            inventory_events=(
+                _inventory_event(
+                    manifest,
+                    reporter=departing_worker,
+                ),
+            ),
+            restart_acks=(
+                _ack(
+                    node_id="node-b",
+                    agent_id="agent-b",
+                ),
+            ),
+            authenticated_ack_agent_ids={"node-b": "agent-b"},
+            eligible_node_ids=("node-a", "node-b", "node-spare"),
         )
 
 
@@ -931,6 +1030,13 @@ def test_durable_recovery_rejects_latest_manifest_even_in_latest_mode():
 def test_latest_recovery_requires_successful_preparation_ack(restart_acks):
     with pytest.raises(ProtocolValidationError, match="no complete eligible copy"):
         _validate(restart_acks=restart_acks)
+
+
+def test_restart_ack_must_match_authenticated_agent():
+    with pytest.raises(ProtocolValidationError, match="authenticated transport sender"):
+        _validate(
+            authenticated_ack_agent_ids={"node-a": "agent-other"},
+        )
 
 
 def test_candidate_cannot_become_recovery_manifest():

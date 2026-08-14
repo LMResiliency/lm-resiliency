@@ -1242,6 +1242,144 @@ class CheckpointInventoryEvent(_WireRecord):
 
 
 @dataclass(frozen=True, slots=True)
+class CheckpointCertification(_WireRecord):
+    certification_id: str
+    run_id: str
+    source_generation: int
+    step: int
+    topology_digest: str
+    checkpoint_source: str
+    checkpoint_id: str | None
+    expected_world_size: int
+    certification_kind: str
+    inventory_event_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _string(self.certification_id, "CheckpointCertification.certification_id")
+        _string(self.run_id, "CheckpointCertification.run_id")
+        _integer(
+            self.source_generation,
+            "CheckpointCertification.source_generation",
+            minimum=0,
+        )
+        _integer(self.step, "CheckpointCertification.step", minimum=1)
+        _string(self.topology_digest, "CheckpointCertification.topology_digest")
+        _choice(
+            self.checkpoint_source,
+            "CheckpointCertification.checkpoint_source",
+            {"gemini", "durable"},
+        )
+        _optional_string(self.checkpoint_id, "CheckpointCertification.checkpoint_id")
+        if self.checkpoint_source == "durable" and self.checkpoint_id is None:
+            raise ProtocolValidationError(
+                "CheckpointCertification.checkpoint_id: durable certification requires an ID"
+            )
+        if self.checkpoint_source == "gemini" and self.checkpoint_id is not None:
+            raise ProtocolValidationError(
+                "CheckpointCertification.checkpoint_id: GEMINI certification must not set an ID"
+            )
+        _integer(
+            self.expected_world_size,
+            "CheckpointCertification.expected_world_size",
+            minimum=1,
+        )
+        _choice(
+            self.certification_kind,
+            "CheckpointCertification.certification_kind",
+            {"dense_consensus", "dynamic_candidate_promotion"},
+        )
+        event_ids = _strings(
+            self.inventory_event_ids,
+            "CheckpointCertification.inventory_event_ids",
+            unique=True,
+        )
+        if not event_ids:
+            raise ProtocolValidationError(
+                "CheckpointCertification.inventory_event_ids: at least one event is required"
+            )
+        object.__setattr__(self, "inventory_event_ids", event_ids)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.SCHEMA_VERSION,
+            "certification_id": self.certification_id,
+            "run_id": self.run_id,
+            "source_generation": self.source_generation,
+            "step": self.step,
+            "topology_digest": self.topology_digest,
+            "checkpoint_source": self.checkpoint_source,
+            "checkpoint_id": self.checkpoint_id,
+            "expected_world_size": self.expected_world_size,
+            "certification_kind": self.certification_kind,
+            "inventory_event_ids": list(self.inventory_event_ids),
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> CheckpointCertification:
+        _record_fields(
+            value,
+            path=cls.__name__,
+            required={
+                "certification_id",
+                "run_id",
+                "source_generation",
+                "step",
+                "topology_digest",
+                "checkpoint_source",
+                "checkpoint_id",
+                "expected_world_size",
+                "certification_kind",
+                "inventory_event_ids",
+            },
+        )
+        return cls(
+            certification_id=_string(
+                value["certification_id"],
+                "CheckpointCertification.certification_id",
+            ),
+            run_id=_string(value["run_id"], "CheckpointCertification.run_id"),
+            source_generation=_integer(
+                value["source_generation"],
+                "CheckpointCertification.source_generation",
+                minimum=0,
+            ),
+            step=_integer(
+                value["step"],
+                "CheckpointCertification.step",
+                minimum=1,
+            ),
+            topology_digest=_string(
+                value["topology_digest"],
+                "CheckpointCertification.topology_digest",
+            ),
+            checkpoint_source=_choice(
+                value["checkpoint_source"],
+                "CheckpointCertification.checkpoint_source",
+                {"gemini", "durable"},
+            ),
+            checkpoint_id=_optional_string(
+                value["checkpoint_id"],
+                "CheckpointCertification.checkpoint_id",
+            ),
+            expected_world_size=_integer(
+                value["expected_world_size"],
+                "CheckpointCertification.expected_world_size",
+                minimum=1,
+            ),
+            certification_kind=_choice(
+                value["certification_kind"],
+                "CheckpointCertification.certification_kind",
+                {"dense_consensus", "dynamic_candidate_promotion"},
+            ),
+            inventory_event_ids=_strings(
+                value["inventory_event_ids"],
+                "CheckpointCertification.inventory_event_ids",
+                unique=True,
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class RestartIntent(_WireRecord):
     intent_id: str
     run_id: str
@@ -1353,7 +1491,9 @@ class RestartIntent(_WireRecord):
 @dataclass(frozen=True, slots=True)
 class RestartAck(_WireRecord):
     intent_id: str
+    run_id: str
     node_id: str
+    agent_id: str
     generation: int
     flushed_step: int
     inventory_event_ids: tuple[str, ...]
@@ -1364,7 +1504,9 @@ class RestartAck(_WireRecord):
 
     def __post_init__(self) -> None:
         _string(self.intent_id, "RestartAck.intent_id")
+        _string(self.run_id, "RestartAck.run_id")
         _string(self.node_id, "RestartAck.node_id")
+        _string(self.agent_id, "RestartAck.agent_id")
         _integer(self.generation, "RestartAck.generation", minimum=0)
         _integer(self.flushed_step, "RestartAck.flushed_step", minimum=-1)
         object.__setattr__(
@@ -1407,7 +1549,9 @@ class RestartAck(_WireRecord):
         return {
             "schema_version": self.SCHEMA_VERSION,
             "intent_id": self.intent_id,
+            "run_id": self.run_id,
             "node_id": self.node_id,
+            "agent_id": self.agent_id,
             "generation": self.generation,
             "flushed_step": self.flushed_step,
             "inventory_event_ids": list(self.inventory_event_ids),
@@ -1424,7 +1568,9 @@ class RestartAck(_WireRecord):
             path=cls.__name__,
             required={
                 "intent_id",
+                "run_id",
                 "node_id",
+                "agent_id",
                 "generation",
                 "flushed_step",
                 "inventory_event_ids",
@@ -1436,7 +1582,9 @@ class RestartAck(_WireRecord):
         )
         return cls(
             intent_id=_string(value["intent_id"], "RestartAck.intent_id"),
+            run_id=_string(value["run_id"], "RestartAck.run_id"),
             node_id=_string(value["node_id"], "RestartAck.node_id"),
+            agent_id=_string(value["agent_id"], "RestartAck.agent_id"),
             generation=_integer(
                 value["generation"],
                 "RestartAck.generation",
@@ -2264,7 +2412,9 @@ def validate_restart_plan(
     manifest: RecoveryManifest,
     *,
     inventory_events: Sequence[CheckpointInventoryEvent],
+    trusted_certifications: Sequence[CheckpointCertification],
     restart_acks: Sequence[RestartAck],
+    authenticated_ack_agent_ids: Mapping[str, str],
     current_assignment: RankAssignment,
     now_unix_ms: int,
     eligible_node_ids: Sequence[str],
@@ -2397,6 +2547,40 @@ def validate_restart_plan(
                 f"inventory_events: duplicate event ID {event.event_id!r}"
             )
         inventory_by_id[event.event_id] = event
+    certification_ids: set[str] = set()
+    certified_inventory_event_ids: set[str] = set()
+    for index, certification in enumerate(
+        _sequence(trusted_certifications, "trusted_certifications")
+    ):
+        if not isinstance(certification, CheckpointCertification):
+            raise ProtocolValidationError(
+                f"trusted_certifications[{index}]: expected CheckpointCertification"
+            )
+        if certification.certification_id in certification_ids:
+            raise ProtocolValidationError(
+                "trusted_certifications: duplicate certification ID "
+                f"{certification.certification_id!r}"
+            )
+        certification_ids.add(certification.certification_id)
+        if (
+            certification.run_id == manifest.run_id
+            and certification.source_generation == manifest.source_generation
+            and certification.step == manifest.step
+            and certification.topology_digest == manifest.topology_digest
+            and certification.checkpoint_source == plan.checkpoint_source
+            and certification.checkpoint_id == plan.checkpoint_id
+            and certification.expected_world_size == plan.expected_world_size
+        ):
+            certified_inventory_event_ids.update(certification.inventory_event_ids)
+    if not isinstance(authenticated_ack_agent_ids, Mapping):
+        raise ProtocolValidationError("authenticated_ack_agent_ids: expected an object")
+    authenticated_ack_agents = {
+        _string(node_id, "authenticated_ack_agent_ids.key"): _string(
+            agent_id,
+            f"authenticated_ack_agent_ids[{node_id!r}]",
+        )
+        for node_id, agent_id in authenticated_ack_agent_ids.items()
+    }
     ack_by_node: dict[str, RestartAck] = {}
     for index, ack in enumerate(_sequence(restart_acks, "restart_acks")):
         if not isinstance(ack, RestartAck):
@@ -2407,6 +2591,10 @@ def validate_restart_plan(
             raise ProtocolValidationError(
                 f"restart_acks[{index}].intent_id: does not match restart intent"
             )
+        if ack.run_id != intent.run_id:
+            raise ProtocolValidationError(
+                f"restart_acks[{index}].run_id: does not match restart intent"
+            )
         if ack.generation != intent.generation:
             raise ProtocolValidationError(
                 f"restart_acks[{index}].generation: does not match restart intent"
@@ -2415,7 +2603,15 @@ def validate_restart_plan(
             raise ProtocolValidationError(
                 f"restart_acks[{index}].node_id: is not active in the committed generation"
             )
+        if authenticated_ack_agents.get(ack.node_id) != ack.agent_id:
+            raise ProtocolValidationError(
+                f"restart_acks[{index}].agent_id: does not match authenticated transport sender"
+            )
         ack_by_node[ack.node_id] = ack
+    if set(authenticated_ack_agents) != set(ack_by_node):
+        raise ProtocolValidationError(
+            "authenticated_ack_agent_ids: bindings must exactly match submitted acknowledgements"
+        )
     entries = {entry.owner_global_rank: entry for entry in manifest.rank_copies}
     required_ranks = set(range(plan.expected_world_size))
     if set(entries) != required_ranks:
@@ -2439,13 +2635,11 @@ def validate_restart_plan(
                 manifest,
                 inventory_by_id,
                 ack_by_node,
+                certified_inventory_event_ids,
             )
             and copy.holder_kind in compatible_holder_kinds
             and copy.checkpoint_id == plan.checkpoint_id
-            and (
-                copy.storage_kind in {"shared", "remote"}
-                or (copy.holder_node_id in eligible and copy.holder_node_id not in quarantined)
-            )
+            and (copy.storage_kind in {"shared", "remote"} or copy.holder_node_id in assigned_nodes)
         ]
         if not eligible_copies:
             raise ProtocolValidationError(
@@ -2458,6 +2652,7 @@ def _copy_has_trusted_inventory_provenance(
     manifest: RecoveryManifest,
     inventory_by_id: Mapping[str, CheckpointInventoryEvent],
     ack_by_node: Mapping[str, RestartAck],
+    certified_inventory_event_ids: set[str],
 ) -> bool:
     event = inventory_by_id.get(copy.inventory_event_id)
     if event is None:
@@ -2479,11 +2674,12 @@ def _copy_has_trusted_inventory_provenance(
     ):
         return False
     if manifest.trust != "latest":
-        return True
+        return event.event_id in certified_inventory_event_ids
     ack = ack_by_node.get(event.reporter.node_id)
     return (
         ack is not None
         and ack.success
+        and ack.agent_id == event.reporter.agent_id
         and ack.flushed_step == manifest.step
         and event.event_id in ack.inventory_event_ids
     )
@@ -2491,6 +2687,7 @@ def _copy_has_trusted_inventory_provenance(
 
 __all__ = [
     "AgentIdentity",
+    "CheckpointCertification",
     "CheckpointCopy",
     "CheckpointInventoryEvent",
     "FaultEvent",

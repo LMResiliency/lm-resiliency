@@ -421,6 +421,33 @@ authenticated control-plane inventory.
 `location_token` is an opaque control-plane reference, not an unchecked path
 that another worker is allowed to open.
 
+Worker inventory is not checkpoint certification. The coordinator consumes a
+separate record from the trusted SCOUT/GEMINI catalog store:
+
+```python
+class CheckpointCertification(TypedDict):
+    schema_version: int
+    certification_id: str
+    run_id: str
+    source_generation: int
+    step: int
+    topology_digest: str
+    checkpoint_source: Literal["gemini", "durable"]
+    checkpoint_id: str | None
+    expected_world_size: int
+    certification_kind: Literal[
+        "dense_consensus",
+        "dynamic_candidate_promotion",
+    ]
+    inventory_event_ids: list[str]
+```
+
+This record is written only after job-wide dense acceptance or the documented
+two-cycle dynamic-catalog promotion. It is not accepted through the worker
+event sink. A worker-declared `recovery_verified` inventory is eligible only
+when a trusted certification matches its run, generation, step, topology,
+source, durable checkpoint ID, world size, and inventory event ID.
+
 ### Local client protocol
 
 ```python
@@ -633,7 +660,9 @@ The `lm-resiliency` client:
 ```python
 class RestartAck(TypedDict):
     intent_id: str
+    run_id: str
     node_id: str
+    agent_id: str
     generation: int
     flushed_step: int
     inventory_event_ids: list[str]
@@ -657,6 +686,11 @@ Previously certified recovery-verified inventory remains eligible without
 promoting unprepared latest state. Missing or failed preparation cannot promote
 `LATEST_GEMINI`; the coordinator must commit a plan using a complete
 recovery-verified source or fail the restart.
+
+The manager transport authenticates the acknowledgement sender. The
+coordinator checks the acknowledgement's run, node, and agent incarnation
+against that authenticated identity and requires the agent to match the
+inventory reporter. Payload identity fields alone are not authentication.
 
 For a crashed or unreachable node, no preparation is assumed.
 
@@ -935,6 +969,13 @@ match its referenced inventory record, and `RECOVERY_VERIFIED` manifests may
 use only recovery-verified inventory evidence. Durable recovery always requires
 a recovery-verified manifest and recovery-verified inventory, even if the
 originating intent allowed latest recovery.
+
+An in-memory or node-local copy is selectable only when its holder remains in
+the next assignment. A departing node's transfer counters in `RestartAck` do
+not by themselves prove that a destination has the bytes. Version 1 requires
+such transfers to materialize as authenticated shared or remote copy
+provenance before plan commit; a future local-destination transfer record may
+extend this without weakening the holder rule.
 
 Preferred source order:
 
