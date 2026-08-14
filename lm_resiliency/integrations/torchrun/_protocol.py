@@ -268,6 +268,11 @@ class WorkerIdentity(_WireRecord):
             raise ProtocolValidationError(
                 "WorkerIdentity.local_rank: must be smaller than local_world_size"
             )
+        expected_global_rank = self.logical_node_slot * self.local_world_size + self.local_rank
+        if self.global_rank != expected_global_rank:
+            raise ProtocolValidationError(
+                "WorkerIdentity.global_rank: does not match logical slot and local rank"
+            )
         _string(self.hostname, "WorkerIdentity.hostname")
         _optional_string(self.gpu_uuid, "WorkerIdentity.gpu_uuid")
         _string(self.topology_digest, "WorkerIdentity.topology_digest")
@@ -851,6 +856,15 @@ def _recovery_decision(value: object, path: str) -> Mapping[str, Any]:
     checkpoint_step = normalized["checkpoint_step"]
     checkpoint_source = normalized["checkpoint_source"]
     checkpoint_id = normalized["checkpoint_id"]
+    failure_kind = normalized["failure_kind"]
+    recovery_mode = normalized["recovery_mode"]
+    all_ranks_accessible = normalized["all_ranks_accessible"]
+    if (
+        not all_ranks_accessible or failure_kind in {"sdc", "machine_unavailable"}
+    ) and recovery_mode != "recovery_verified":
+        raise ProtocolValidationError(
+            f"{path}.recovery_mode: unsafe failures require recovery_verified"
+        )
     if available:
         if checkpoint_step <= 0 or checkpoint_source == "none":
             raise ProtocolValidationError(
@@ -953,6 +967,7 @@ class RecoveryProposalEvent(_WireRecord):
 @dataclass(frozen=True, slots=True)
 class CheckpointCopy:
     owner_global_rank: int
+    checkpoint_step: int
     holder_node_id: str
     holder_kind: str
     storage_kind: str
@@ -962,6 +977,7 @@ class CheckpointCopy:
 
     def __post_init__(self) -> None:
         _integer(self.owner_global_rank, "CheckpointCopy.owner_global_rank", minimum=0)
+        _integer(self.checkpoint_step, "CheckpointCopy.checkpoint_step", minimum=1)
         _string(self.holder_node_id, "CheckpointCopy.holder_node_id")
         _choice(
             self.holder_kind,
@@ -973,6 +989,13 @@ class CheckpointCopy:
             "CheckpointCopy.storage_kind",
             {"memory", "node_local", "shared", "remote"},
         )
+        if self.holder_kind == "durable" and self.storage_kind not in {
+            "shared",
+            "remote",
+        }:
+            raise ProtocolValidationError(
+                "CheckpointCopy.storage_kind: durable copies must use shared or remote storage"
+            )
         _string(self.location_token, "CheckpointCopy.location_token")
         _boolean(self.complete, "CheckpointCopy.complete")
         _boolean(self.checksums_available, "CheckpointCopy.checksums_available")
@@ -980,6 +1003,7 @@ class CheckpointCopy:
     def to_dict(self) -> dict[str, Any]:
         return {
             "owner_global_rank": self.owner_global_rank,
+            "checkpoint_step": self.checkpoint_step,
             "holder_node_id": self.holder_node_id,
             "holder_kind": self.holder_kind,
             "storage_kind": self.storage_kind,
@@ -992,6 +1016,7 @@ class CheckpointCopy:
     def from_dict(cls, value: Mapping[str, Any]) -> CheckpointCopy:
         required = {
             "owner_global_rank",
+            "checkpoint_step",
             "holder_node_id",
             "holder_kind",
             "storage_kind",
@@ -1010,6 +1035,11 @@ class CheckpointCopy:
                 value["owner_global_rank"],
                 "CheckpointCopy.owner_global_rank",
                 minimum=0,
+            ),
+            checkpoint_step=_integer(
+                value["checkpoint_step"],
+                "CheckpointCopy.checkpoint_step",
+                minimum=1,
             ),
             holder_node_id=_string(
                 value["holder_node_id"],
@@ -1047,6 +1077,7 @@ def _checkpoint_copies(value: object, path: str) -> tuple[CheckpointCopy, ...]:
     identities = [
         (
             copy.owner_global_rank,
+            copy.checkpoint_step,
             copy.holder_node_id,
             copy.holder_kind,
             copy.storage_kind,
@@ -1086,7 +1117,7 @@ class CheckpointInventoryEvent(_WireRecord):
             raise ProtocolValidationError(
                 "CheckpointInventoryEvent: reporter generation does not match event"
             )
-        _integer(self.step, "CheckpointInventoryEvent.step", minimum=0)
+        _integer(self.step, "CheckpointInventoryEvent.step", minimum=1)
         _choice(
             self.trust,
             "CheckpointInventoryEvent.trust",
@@ -1097,11 +1128,18 @@ class CheckpointInventoryEvent(_WireRecord):
             raise ProtocolValidationError(
                 "CheckpointInventoryEvent: reporter topology digest does not match event"
             )
-        object.__setattr__(
-            self,
-            "copies",
-            _checkpoint_copies(self.copies, "CheckpointInventoryEvent.copies"),
+        copies = _checkpoint_copies(
+            self.copies,
+            "CheckpointInventoryEvent.copies",
         )
+        mismatched_steps = sorted(
+            {copy.checkpoint_step for copy in copies if copy.checkpoint_step != self.step}
+        )
+        if mismatched_steps:
+            raise ProtocolValidationError(
+                "CheckpointInventoryEvent.copies: copy steps do not match event step"
+            )
+        object.__setattr__(self, "copies", copies)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1152,7 +1190,7 @@ class CheckpointInventoryEvent(_WireRecord):
             step=_integer(
                 value["step"],
                 "CheckpointInventoryEvent.step",
-                minimum=0,
+                minimum=1,
             ),
             trust=_choice(
                 value["trust"],
@@ -1448,7 +1486,7 @@ class RestartPlan(_WireRecord):
             "RestartPlan.checkpoint_source",
             {"gemini", "durable"},
         )
-        _integer(self.checkpoint_step, "RestartPlan.checkpoint_step", minimum=0)
+        _integer(self.checkpoint_step, "RestartPlan.checkpoint_step", minimum=1)
         _optional_string(self.checkpoint_id, "RestartPlan.checkpoint_id")
         if self.checkpoint_source == "durable" and self.checkpoint_id is None:
             raise ProtocolValidationError(
@@ -1579,7 +1617,7 @@ class RestartPlan(_WireRecord):
             checkpoint_step=_integer(
                 value["checkpoint_step"],
                 "RestartPlan.checkpoint_step",
-                minimum=0,
+                minimum=1,
             ),
             checkpoint_id=_optional_string(
                 value["checkpoint_id"],
@@ -1678,7 +1716,7 @@ class RestartContext(_WireRecord):
             "RestartContext.checkpoint_source",
             {"gemini", "durable"},
         )
-        _integer(self.checkpoint_step, "RestartContext.checkpoint_step", minimum=0)
+        _integer(self.checkpoint_step, "RestartContext.checkpoint_step", minimum=1)
         _optional_string(self.checkpoint_id, "RestartContext.checkpoint_id")
         if self.checkpoint_source == "durable" and self.checkpoint_id is None:
             raise ProtocolValidationError(
@@ -1850,7 +1888,7 @@ class RestartContext(_WireRecord):
             checkpoint_step=_integer(
                 value["checkpoint_step"],
                 "RestartContext.checkpoint_step",
-                minimum=0,
+                minimum=1,
             ),
             checkpoint_id=_optional_string(
                 value["checkpoint_id"],
@@ -1964,21 +2002,30 @@ class RecoveryManifest(_WireRecord):
             "RecoveryManifest.source_generation",
             minimum=0,
         )
-        _integer(self.step, "RecoveryManifest.step", minimum=0)
+        _integer(self.step, "RecoveryManifest.step", minimum=1)
         _choice(
             self.trust,
             "RecoveryManifest.trust",
             {"latest", "recovery_verified"},
         )
         _string(self.topology_digest, "RecoveryManifest.topology_digest")
-        object.__setattr__(
-            self,
-            "rank_copies",
-            _rank_checkpoint_copies(
-                self.rank_copies,
-                "RecoveryManifest.rank_copies",
-            ),
+        rank_copies = _rank_checkpoint_copies(
+            self.rank_copies,
+            "RecoveryManifest.rank_copies",
         )
+        mismatched_steps = sorted(
+            {
+                copy.checkpoint_step
+                for entry in rank_copies
+                for copy in entry.copies
+                if copy.checkpoint_step != self.step
+            }
+        )
+        if mismatched_steps:
+            raise ProtocolValidationError(
+                "RecoveryManifest.rank_copies: copy steps do not match manifest step"
+            )
+        object.__setattr__(self, "rank_copies", rank_copies)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -2018,7 +2065,7 @@ class RecoveryManifest(_WireRecord):
                 "RecoveryManifest.source_generation",
                 minimum=0,
             ),
-            step=_integer(value["step"], "RecoveryManifest.step", minimum=0),
+            step=_integer(value["step"], "RecoveryManifest.step", minimum=1),
             trust=_choice(
                 value["trust"],
                 "RecoveryManifest.trust",
@@ -2037,24 +2084,57 @@ class RecoveryManifest(_WireRecord):
 
 def validate_restart_plan(
     plan: RestartPlan,
+    intent: RestartIntent,
     manifest: RecoveryManifest,
     *,
-    current_generation: int,
-    expected_active_nodes: int,
-    expected_topology_digest: str,
+    current_assignment: RankAssignment,
+    now_unix_ms: int,
     eligible_node_ids: Sequence[str],
     quarantined_node_ids: Sequence[str] = (),
 ) -> None:
     """Validate that one immutable plan is safe to expose through rendezvous."""
-    if plan.from_generation != current_generation:
+    _integer(now_unix_ms, "now_unix_ms", minimum=1)
+    if plan.restart_deadline_unix_ms <= now_unix_ms:
+        raise ProtocolValidationError("RestartPlan.restart_deadline_unix_ms: deadline has elapsed")
+    if plan.intent_id != intent.intent_id:
+        raise ProtocolValidationError("RestartPlan.intent_id: does not match restart intent")
+    if plan.run_id != intent.run_id or plan.run_id != current_assignment.run_id:
         raise ProtocolValidationError(
-            "RestartPlan.from_generation: does not match the committed generation"
+            "RestartPlan.run_id: does not match intent and committed assignment"
         )
-    if len(plan.slot_assignments) != expected_active_nodes:
+    if (
+        plan.from_generation != intent.generation
+        or plan.from_generation != current_assignment.generation
+    ):
         raise ProtocolValidationError(
-            "RestartPlan.slot_assignments: active node count does not match policy"
+            "RestartPlan.from_generation: does not match intent and committed assignment"
         )
-    if plan.topology_digest != expected_topology_digest:
+    if plan.incident_ids != intent.incident_ids:
+        raise ProtocolValidationError("RestartPlan.incident_ids: do not match restart intent")
+    if plan.reason_code != intent.reason_code:
+        raise ProtocolValidationError("RestartPlan.reason_code: does not match restart intent")
+    if (
+        intent.minimum_recovery_mode == "recovery_verified"
+        and plan.recovery_mode != "recovery_verified"
+    ):
+        raise ProtocolValidationError(
+            "RestartPlan.recovery_mode: weaker than restart intent minimum"
+        )
+    if len(plan.slot_assignments) != current_assignment.active_nodes:
+        raise ProtocolValidationError(
+            "RestartPlan.slot_assignments: active node count does not match committed assignment"
+        )
+    plan_local_world_size = plan.slot_assignments[0].local_world_size
+    if plan_local_world_size != current_assignment.local_world_size:
+        raise ProtocolValidationError(
+            "RestartPlan.slot_assignments: local world size does not match committed assignment"
+        )
+    committed_world_size = current_assignment.active_nodes * current_assignment.local_world_size
+    if plan.expected_world_size != committed_world_size:
+        raise ProtocolValidationError(
+            "RestartPlan.expected_world_size: does not match committed assignment"
+        )
+    if plan.topology_digest != current_assignment.topology_digest:
         raise ProtocolValidationError(
             "RestartPlan.topology_digest: does not match the committed topology"
         )
@@ -2101,12 +2181,17 @@ def validate_restart_plan(
             f"missing={missing!r}, extra={extra!r}"
         )
     for rank, entry in entries.items():
+        compatible_holder_kinds = (
+            {"durable"} if plan.checkpoint_source == "durable" else {"owner", "peer"}
+        )
         eligible_copies = [
             copy
             for copy in entry.copies
             if copy.complete
+            and copy.checkpoint_step == manifest.step
+            and copy.holder_kind in compatible_holder_kinds
             and (
-                copy.holder_kind == "durable"
+                copy.storage_kind in {"shared", "remote"}
                 or (copy.holder_node_id in eligible and copy.holder_node_id not in quarantined)
             )
         ]

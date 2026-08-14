@@ -376,6 +376,7 @@ know where every logical-rank shard can be obtained.
 ```python
 class CheckpointCopy(TypedDict):
     owner_global_rank: int
+    checkpoint_step: int
     holder_node_id: str
     holder_kind: Literal["owner", "peer", "durable"]
     storage_kind: Literal["memory", "node_local", "shared", "remote"]
@@ -396,9 +397,12 @@ class CheckpointInventoryEvent(TypedDict):
     copies: list[CheckpointCopy]
 ```
 
-Only completed checkpoint slots may appear with `complete=True`. A
+Only completed checkpoint slots may appear with `complete=True`.
+`checkpoint_step` must equal the enclosing inventory event's positive `step`;
+the coordinator validates it again when assembling the recovery manifest. A
 `CANDIDATE` inventory can be retained for diagnosis but is never selected for
-conservative recovery.
+conservative recovery. Durable copies must use shared or remote storage;
+node-local and in-memory copies remain subject to holder health and quarantine.
 
 `location_token` is an opaque control-plane reference, not an unchecked path
 that another worker is allowed to open.
@@ -492,15 +496,24 @@ class RestartPlan(TypedDict):
 
 Before commit, the coordinator validates:
 
+- the plan is fenced to the same intent ID, run, generation, incidents, and
+  reason;
+- the recovery mode is at least as conservative as the intent's minimum;
 - exactly `min_nodes` active logical slots are assigned;
 - every assigned node is healthy, compatible, and not quarantined;
 - each logical slot is assigned once;
-- the topology digest matches the prior generation;
+- active size, local world size, total world size, and topology digest match the
+  committed generation;
 - the checkpoint is complete for every required logical rank;
+- every copy belongs to the selected positive step and selected checkpoint
+  source;
 - the checkpoint trust satisfies the selected recovery mode;
 - the plan never selects `CANDIDATE`;
-- the target step is coherent across all selected shards; and
-- the plan generation is the successor of the current committed generation.
+- the target step is coherent across all selected shards;
+- the plan generation is the successor of the current committed generation;
+  and
+- the restart deadline has not elapsed when the plan is committed or exposed
+  through rendezvous.
 
 ### Restart context passed to workers
 
@@ -875,7 +888,9 @@ class RecoveryManifest(TypedDict):
 ```
 
 The manifest is usable only when every required rank has at least one eligible
-copy.
+copy for the manifest's exact positive step and the plan's selected source.
+GEMINI plans use owner or peer copies; durable plans use durable copies. Only
+shared or remote storage is independent of holder-node availability.
 
 Preferred source order:
 
@@ -1029,8 +1044,9 @@ the built-in rendezvous backends retain their existing elastic semantics.
 - Conservative recovery lattice across missing and conflicting proposals.
 - Rank-to-node mapping through immutable generation snapshots.
 - Quarantine by stable node ID, never by rank alone.
-- Plan validation for exact active size, unique slots, topology digest, and
-  complete checkpoint manifest.
+- Plan validation for intent fencing, unexpired deadlines, exact active and
+  worker counts, unique slots, topology digest, source-compatible copies, and a
+  complete single-step checkpoint manifest.
 
 ### CPU multi-process tests
 

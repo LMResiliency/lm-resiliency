@@ -64,7 +64,36 @@ def _worker() -> WorkerIdentity:
     )
 
 
-def _plan(*, recovery_mode: str = "latest") -> RestartPlan:
+def _intent(*, minimum_recovery_mode: str = "latest") -> RestartIntent:
+    return RestartIntent(
+        intent_id="intent-4",
+        run_id=RUN_ID,
+        generation=4,
+        incident_ids=("incident-a",),
+        reason_code="replace_straggler",
+        minimum_recovery_mode=minimum_recovery_mode,
+        suspected_node_ids=("node-b",),
+        prepare_deadline_unix_ms=2_000_000_000_000,
+    )
+
+
+def _current_assignment() -> RankAssignment:
+    return RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=4,
+        assignments=(
+            _assignments()[0],
+            replace(_assignments()[1], node_id="node-b"),
+        ),
+        topology_digest=TOPOLOGY_DIGEST,
+    )
+
+
+def _plan(
+    *,
+    recovery_mode: str = "latest",
+    checkpoint_source: str = "gemini",
+) -> RestartPlan:
     return RestartPlan(
         plan_id="plan-5",
         intent_id="intent-4",
@@ -74,9 +103,9 @@ def _plan(*, recovery_mode: str = "latest") -> RestartPlan:
         incident_ids=("incident-a",),
         reason_code="replace_straggler",
         recovery_mode=recovery_mode,
-        checkpoint_source="gemini",
+        checkpoint_source=checkpoint_source,
         checkpoint_step=40,
-        checkpoint_id=None,
+        checkpoint_id="durable-40" if checkpoint_source == "durable" else None,
         checkpoint_manifest_id="manifest-40",
         slot_assignments=_assignments(),
         quarantined_node_ids=("node-b",),
@@ -91,13 +120,16 @@ def _copy(
     *,
     holder_node_id: str,
     holder_kind: str = "owner",
+    checkpoint_step: int = 40,
+    storage_kind: str | None = None,
     complete: bool = True,
 ) -> CheckpointCopy:
     return CheckpointCopy(
         owner_global_rank=rank,
+        checkpoint_step=checkpoint_step,
         holder_node_id=holder_node_id,
         holder_kind=holder_kind,
-        storage_kind="remote" if holder_kind == "durable" else "memory",
+        storage_kind=storage_kind or ("remote" if holder_kind == "durable" else "memory"),
         location_token=f"copy-{rank}-{holder_node_id}",
         complete=complete,
         checksums_available=True,
@@ -107,6 +139,8 @@ def _copy(
 def _manifest(
     *,
     trust: str = "latest",
+    holder_kind: str = "owner",
+    checkpoint_step: int = 40,
     ranks: tuple[int, ...] = (0, 1, 2, 3),
     incomplete_rank: int | None = None,
     holder_overrides: dict[int, str] | None = None,
@@ -129,12 +163,33 @@ def _manifest(
                             rank,
                             "node-a" if rank < 2 else "node-spare",
                         ),
+                        holder_kind=holder_kind,
+                        checkpoint_step=checkpoint_step,
                         complete=rank != incomplete_rank,
                     ),
                 ),
             )
             for rank in ranks
         ),
+    )
+
+
+def _validate(
+    plan: RestartPlan | None = None,
+    manifest: RecoveryManifest | None = None,
+    *,
+    intent: RestartIntent | None = None,
+    current_assignment: RankAssignment | None = None,
+    now_unix_ms: int = 1_900_000_000_000,
+    eligible_node_ids: tuple[str, ...] = ("node-a", "node-spare"),
+) -> None:
+    validate_restart_plan(
+        plan or _plan(),
+        intent or _intent(),
+        manifest or _manifest(),
+        current_assignment=current_assignment or _current_assignment(),
+        now_unix_ms=now_unix_ms,
+        eligible_node_ids=eligible_node_ids,
     )
 
 
@@ -204,16 +259,7 @@ def _records():
             topology_digest=TOPOLOGY_DIGEST,
             copies=(_copy(0, holder_node_id="node-a"),),
         ),
-        RestartIntent(
-            intent_id="intent-4",
-            run_id=RUN_ID,
-            generation=4,
-            incident_ids=("incident-a",),
-            reason_code="replace_straggler",
-            minimum_recovery_mode="latest",
-            suspected_node_ids=("node-b",),
-            prepare_deadline_unix_ms=2_000_000_000_000,
-        ),
+        _intent(),
         RestartAck(
             intent_id="intent-4",
             node_id="node-a",
@@ -311,14 +357,7 @@ def test_rank_assignment_requires_dense_slots_and_stable_rank_ranges():
 
 
 def test_restart_plan_and_complete_manifest_validate():
-    validate_restart_plan(
-        _plan(),
-        _manifest(),
-        current_generation=4,
-        expected_active_nodes=2,
-        expected_topology_digest=TOPOLOGY_DIGEST,
-        eligible_node_ids=("node-a", "node-spare"),
-    )
+    _validate()
 
 
 @pytest.mark.parametrize(
@@ -334,25 +373,187 @@ def test_restart_plan_and_complete_manifest_validate():
 )
 def test_restart_plan_rejects_incomplete_or_quarantined_manifest(manifest, message):
     with pytest.raises(ProtocolValidationError, match=message):
-        validate_restart_plan(
-            _plan(),
-            manifest,
-            current_generation=4,
-            expected_active_nodes=2,
-            expected_topology_digest=TOPOLOGY_DIGEST,
+        _validate(
+            manifest=manifest,
             eligible_node_ids=("node-a", "node-spare", "node-b"),
+        )
+
+
+def test_recovery_manifest_rejects_checkpoint_copies_from_another_step():
+    with pytest.raises(ProtocolValidationError, match="copy steps do not match"):
+        _manifest(checkpoint_step=39)
+
+
+@pytest.mark.parametrize(
+    ("plan", "manifest"),
+    [
+        (_plan(checkpoint_source="durable"), _manifest(holder_kind="owner")),
+        (_plan(checkpoint_source="gemini"), _manifest(holder_kind="durable")),
+    ],
+)
+def test_restart_plan_rejects_copies_from_the_wrong_source(plan, manifest):
+    with pytest.raises(ProtocolValidationError, match="no complete eligible copy"):
+        _validate(plan=plan, manifest=manifest)
+
+
+def test_restart_plan_accepts_remote_durable_copies():
+    _validate(
+        plan=_plan(
+            recovery_mode="recovery_verified",
+            checkpoint_source="durable",
+        ),
+        manifest=_manifest(
+            trust="recovery_verified",
+            holder_kind="durable",
+            holder_overrides={
+                0: "durable-store",
+                1: "durable-store",
+                2: "durable-store",
+                3: "durable-store",
+            },
+        ),
+    )
+
+
+def test_restart_plan_requires_complete_remote_or_shared_durable_copies():
+    with pytest.raises(ProtocolValidationError, match="shared or remote"):
+        _copy(
+            0,
+            holder_node_id="node-a",
+            holder_kind="durable",
+            storage_kind="node_local",
+        )
+
+
+def test_restart_plan_enforces_intent_fencing_and_minimum_recovery_mode():
+    intent = _intent(minimum_recovery_mode="recovery_verified")
+
+    with pytest.raises(ProtocolValidationError, match="weaker than restart intent"):
+        _validate(intent=intent)
+
+
+@pytest.mark.parametrize(
+    ("plan", "message"),
+    [
+        (replace(_plan(), intent_id="other-intent"), "intent_id"),
+        (replace(_plan(), run_id="other-run"), "run_id"),
+        (
+            replace(_plan(), from_generation=3, to_generation=4),
+            "from_generation",
+        ),
+        (
+            replace(_plan(), incident_ids=("other-incident",)),
+            "incident_ids",
+        ),
+        (replace(_plan(), reason_code="other-reason"), "reason_code"),
+    ],
+)
+def test_restart_plan_rejects_intent_fence_mismatch(plan, message):
+    with pytest.raises(ProtocolValidationError, match=message):
+        _validate(plan=plan)
+
+
+def test_restart_plan_rejects_expired_deadline():
+    with pytest.raises(ProtocolValidationError, match="deadline has elapsed"):
+        _validate(now_unix_ms=2_000_000_000_000)
+
+
+def test_restart_plan_preserves_committed_world_size():
+    smaller_plan = replace(
+        _plan(),
+        slot_assignments=(
+            SlotAssignment(
+                logical_node_slot=0,
+                node_id="node-a",
+                first_global_rank=0,
+                local_world_size=1,
+            ),
+            SlotAssignment(
+                logical_node_slot=1,
+                node_id="node-spare",
+                first_global_rank=1,
+                local_world_size=1,
+            ),
+        ),
+        expected_world_size=2,
+    )
+
+    with pytest.raises(ProtocolValidationError, match="local world size"):
+        _validate(
+            plan=smaller_plan,
+            manifest=_manifest(ranks=(0, 1)),
+        )
+
+
+def test_worker_identity_rejects_inconsistent_global_rank():
+    with pytest.raises(ProtocolValidationError, match="does not match logical slot"):
+        replace(_worker(), global_rank=3)
+
+
+@pytest.mark.parametrize(
+    ("failure_kind", "all_ranks_accessible"),
+    [("sdc", True), ("machine_unavailable", True), ("hang", False)],
+)
+def test_recovery_proposal_rejects_latest_for_unsafe_failures(
+    failure_kind,
+    all_ranks_accessible,
+):
+    with pytest.raises(ProtocolValidationError, match="require recovery_verified"):
+        RecoveryProposalEvent(
+            event_id="recovery-unsafe",
+            incident_id="incident-a",
+            run_id=RUN_ID,
+            generation=4,
+            reporter=_worker(),
+            decision={
+                "failure_kind": failure_kind,
+                "recovery_mode": "latest",
+                "checkpoint_source": "gemini",
+                "checkpoint_step": 40,
+                "checkpoint_id": None,
+                "all_ranks_accessible": all_ranks_accessible,
+                "available": True,
+                "reason": "unsafe",
+            },
+        )
+
+
+def test_checkpoint_records_reject_step_zero():
+    with pytest.raises(ProtocolValidationError, match="value >= 1"):
+        replace(_plan(), checkpoint_step=0)
+
+    with pytest.raises(ProtocolValidationError, match="value >= 1"):
+        replace(_manifest(), step=0)
+
+    with pytest.raises(ProtocolValidationError, match="value >= 1"):
+        _copy(0, holder_node_id="node-a", checkpoint_step=0)
+
+
+def test_checkpoint_inventory_rejects_copy_from_another_step():
+    with pytest.raises(ProtocolValidationError, match="copy steps do not match"):
+        CheckpointInventoryEvent(
+            event_id="inventory-mixed",
+            run_id=RUN_ID,
+            generation=4,
+            reporter=_worker(),
+            step=40,
+            trust="latest",
+            topology_digest=TOPOLOGY_DIGEST,
+            copies=(
+                _copy(
+                    0,
+                    holder_node_id="node-a",
+                    checkpoint_step=39,
+                ),
+            ),
         )
 
 
 def test_verified_recovery_rejects_latest_manifest():
     with pytest.raises(ProtocolValidationError, match="verified manifest"):
-        validate_restart_plan(
-            _plan(recovery_mode="recovery_verified"),
-            _manifest(trust="latest"),
-            current_generation=4,
-            expected_active_nodes=2,
-            expected_topology_digest=TOPOLOGY_DIGEST,
-            eligible_node_ids=("node-a", "node-spare"),
+        _validate(
+            plan=_plan(recovery_mode="recovery_verified"),
+            manifest=_manifest(trust="latest"),
         )
 
 
