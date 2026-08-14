@@ -1,0 +1,43 @@
+name: One-shot own-slot recovery repair
+
+on:
+  push:
+    branches:
+      - agent/harden-checkpoint-deserialization
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out PR branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: agent/harden-checkpoint-deserialization
+
+      - name: Restrict memory lookup to own slots
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("lm_resiliency/checkpointing/manager.py")
+          text = path.read_text()
+          old = '''    def _memory_slot_by_step(self, step: int) -> Any | None:\n        if self._metadata is None or not self._buffer_pool.allocated:\n            return None\n        return self._buffer_pool.get_slot_by_step(step)\n'''
+          new = '''    def _memory_slot_by_step(self, step: int) -> Any | None:\n        if self._metadata is None or not self._buffer_pool.allocated:\n            return None\n        return next(\n            (\n                slot\n                for slot in self._buffer_pool.own_slots\n                if slot.step == step and slot.state in (SlotState.READY, SlotState.REPLICATING)\n            ),\n            None,\n        )\n'''
+          if old not in text:
+              raise SystemExit("expected memory lookup block was not found")
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+      - name: Commit repair
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lm_resiliency/checkpointing/manager.py
+          git commit -m "Restrict memory recovery to own slots"
+          git push origin HEAD:agent/harden-checkpoint-deserialization
