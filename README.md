@@ -52,10 +52,15 @@ Install `[torchtitan]`, `[megatron]`, `[deepspeed]`, or `[all]` when integrating
 
 ### Run a tiny end-to-end loop
 
-Clone the examples and run the CPU quick start with plain Python:
+Clone the examples from the exact release tag that matches the installed PyPI package, then run the CPU quick start with plain Python:
 
 ```bash
-git clone --depth 1 https://github.com/LMResiliency/lm-resiliency.git
+LM_RESILIENCY_VERSION="$(
+  python -c 'from importlib.metadata import version; print(version("lm-resiliency"))'
+)"
+git clone --depth 1 \
+  --branch "v${LM_RESILIENCY_VERSION}" \
+  https://github.com/LMResiliency/lm-resiliency.git
 python lm-resiliency/examples/quickstart.py \
   --checkpoint-dir /tmp/lm-resiliency-quickstart/checkpoints
 ```
