@@ -8,9 +8,13 @@ ROOT = Path(__file__).parents[2]
 README = ROOT / "README.md"
 
 
-def test_release_quickstart_clones_installed_version_tag():
+def test_quickstart_keeps_source_and_example_on_same_revision():
     readme = README.read_text()
+    quickstart = readme.split("## Quick Start", maxsplit=1)[1].split(
+        "### Add resiliency to Megatron Core", maxsplit=1
+    )[0]
 
-    assert 'version("lm-resiliency")' in readme
-    assert '--branch "v${LM_RESILIENCY_VERSION}"' in readme
-    assert "git clone --depth 1 https://github.com/LMResiliency/lm-resiliency.git" not in readme
+    assert "git clone https://github.com/LMResiliency/lm-resiliency.git" in quickstart
+    assert "python -m pip install -e ." in quickstart
+    assert "python examples/quickstart.py" in quickstart
+    assert "--branch \"v${LM_RESILIENCY_VERSION}\"" not in quickstart
