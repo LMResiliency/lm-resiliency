@@ -9,14 +9,74 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  build:
-    name: Build release artifacts
+  validate-source:
+    name: Validate release source
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
+
+    env:
+      DEFAULT_BRANCH: main
+      NUMPY_VERSION: "2.5.1"
+      TORCH_VERSION: "2.13.0"
 
     steps:
-      - name: Check out repository
+      - name: Check out exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify production tag and default-branch ancestry
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          test "$GITHUB_REF_NAME" = "v$version"
+          tag_commit=$(git rev-list -n 1 "$GITHUB_REF_NAME")
+          test "$tag_commit" = "$(git rev-parse HEAD)"
+          git fetch --no-tags origin "$DEFAULT_BRANCH"
+          git merge-base --is-ancestor "$tag_commit" "origin/$DEFAULT_BRANCH"
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned supported runtime
+        run: |
+          python -m pip install \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --only-binary=:all: \
+            "torch==$TORCH_VERSION"
+          python -m pip install \
+            "numpy==$NUMPY_VERSION" \
+            "pytest==9.1.1" \
+            "pytest-timeout==2.4.0" \
+            "setuptools==84.0.0"
+          python -m pip install --no-deps -e .
+          python -m pip check
+
+      - name: Run release CPU suite
+        env:
+          CUDA_VISIBLE_DEVICES: ""
+        run: python -m pytest -q
+
+  build:
+    name: Build identified release artifacts
+    needs: validate-source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Check out exact revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -26,29 +86,114 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Verify tag matches package version
+      - name: Build with pinned toolchain
+        run: |
+          python -m pip install \
+            "build==1.5.0" \
+            "setuptools==84.0.0" \
+            "twine==6.2.0"
+          python -m build --no-isolation
+          python -m twine check dist/*.whl dist/*.tar.gz
+          python scripts/release_artifacts.py create \
+            --dist dist \
+            --repository "$GITHUB_REPOSITORY" \
+            --commit "$GITHUB_SHA" \
+            --ref "$GITHUB_REF"
+
+      - name: Attest wheel and source distribution
         if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          version=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
-          test "$GITHUB_REF_NAME" = "v$version"
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
 
-      - name: Build and check distributions
-        run: |
-          python -m pip install -c requirements/tool-versions.txt build twine
-          python -m build
-          python -m twine check dist/*
-
-      - name: Upload distributions
+      - name: Upload identified release artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-distributions
           path: dist/*
           if-no-files-found: error
 
-  publish-testpypi:
-    name: Publish to TestPyPI
-    if: github.event_name == 'workflow_dispatch'
+  validate-artifacts:
+    name: Validate exact release artifacts
     needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download identified release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-distributions
+          path: dist
+
+      - name: Verify artifact manifest and digests
+        run: |
+          python scripts/release_artifacts.py verify \
+            --dist dist \
+            --repository "$GITHUB_REPOSITORY" \
+            --commit "$GITHUB_SHA" \
+            --ref "$GITHUB_REF"
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Test clean installation of exact wheel
+        run: |
+          smoke_env="$RUNNER_TEMP/lm-resiliency-release-smoke"
+          python -m venv "$smoke_env"
+          "$smoke_env/bin/python" -m pip install \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --only-binary=:all: \
+            "torch==2.13.0"
+          "$smoke_env/bin/python" -m pip install "numpy==2.5.1" "setuptools==84.0.0"
+          "$smoke_env/bin/python" -m pip install --no-deps dist/*.whl
+          "$smoke_env/bin/python" -m pip check
+          cd "$RUNNER_TEMP"
+          "$smoke_env/bin/python" -c \
+            'import lm_resiliency, sys; optional = {"deepspeed", "megatron", "torchtitan", "triton"}; assert not optional.intersection(sys.modules); print(lm_resiliency.__file__)'
+          "$smoke_env/bin/python" "$GITHUB_WORKSPACE/examples/quickstart.py" \
+            --steps 2 \
+            --interval 1 \
+            --checkpoint-dir "$RUNNER_TEMP/release-quickstart"
+
+      - name: Audit exact wheel environment
+        run: |
+          python -m pip install "pip-audit==2.10.1"
+          smoke_env="$RUNNER_TEMP/lm-resiliency-release-smoke"
+          runtime_requirements="$RUNNER_TEMP/lm-resiliency-release-requirements.txt"
+          "$smoke_env/bin/python" -m pip freeze |
+            sed -E -e '/^lm-resiliency/d' -e 's/^(torch==[^+]+)\+cpu$/\1/' \
+              > "$runtime_requirements"
+          python -m pip_audit \
+            --requirement "$runtime_requirements" \
+            --no-deps \
+            --disable-pip \
+            --strict \
+            --progress-spinner off \
+            --desc off
+
+      - name: Verify build provenance
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for artifact in dist/*.whl dist/*.tar.gz; do
+            gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY"
+          done
+
+  publish-testpypi:
+    name: Publish exact artifacts to TestPyPI
+    if: github.event_name == 'workflow_dispatch'
+    needs: [build, validate-artifacts]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment:
@@ -58,16 +203,24 @@ jobs:
       id-token: write
 
     steps:
-      - name: Download distributions
+      - name: Download identified release artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-distributions
           path: dist
 
-      - name: Publish distributions
+      - name: Recheck artifact digests
+        run: |
+          cd dist
+          sha256sum --check SHA256SUMS
+          mkdir ../publish
+          cp -- *.whl *.tar.gz ../publish/
+
+      - name: Publish wheel and source distribution
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           repository-url: https://test.pypi.org/legacy/
+          packages-dir: publish
 
   test-testpypi:
     name: Test TestPyPI installation
@@ -77,7 +230,7 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - name: Check out repository
+      - name: Check out exact revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -87,13 +240,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install supported runtime
+      - name: Install pinned supported runtime
         run: |
           python -m pip install \
             --index-url https://download.pytorch.org/whl/cpu \
             --only-binary=:all: \
             "torch==2.13.0"
-          python -m pip install "numpy==2.5.1" "setuptools>=83"
+          python -m pip install "numpy==2.5.1" "setuptools==84.0.0"
 
       - name: Install and import staged package
         run: |
@@ -105,7 +258,7 @@ jobs:
               "lm-resiliency==$version"; then
               break
             fi
-            if [ "$attempt" -eq 12 ]; then
+            if test "$attempt" -eq 12; then
               exit 1
             fi
             sleep 10
@@ -115,9 +268,9 @@ jobs:
           python -c "import lm_resiliency; print(lm_resiliency.__file__)"
 
   publish-pypi:
-    name: Publish to PyPI
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: build
+    name: Publish exact artifacts to PyPI
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: [build, validate-artifacts]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment:
@@ -127,18 +280,40 @@ jobs:
       id-token: write
 
     steps:
-      - name: Download distributions
+      - name: Download identified release artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-distributions
           path: dist
 
-      - name: Publish distributions
+      - name: Recheck artifact digests
+        run: |
+          cd dist
+          sha256sum --check SHA256SUMS
+          mkdir ../publish
+          cp -- *.whl *.tar.gz ../publish/
+
+      - name: Recheck release tag target
+        run: |
+          tag_ref="refs/tags/$GITHUB_REF_NAME"
+          remote_commit=$(
+            git ls-remote "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" \
+              "$tag_ref" "$tag_ref^{}" |
+              awk '$2 ~ /\^\{\}$/ { peeled=$1 } $2 !~ /\^\{\}$/ { direct=$1 } END { print peeled ? peeled : direct }'
+          )
+          manifest_commit=$(jq -r '.commit_sha // empty' dist/release-manifest.json)
+          test -n "$remote_commit"
+          test "$remote_commit" = "$manifest_commit"
+          test "$manifest_commit" = "$GITHUB_SHA"
+
+      - name: Publish wheel and source distribution
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: publish
 
   github-release:
-    name: Publish GitHub release
-    if: startsWith(github.ref, 'refs/tags/')
+    name: Publish immutable GitHub release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs: publish-pypi
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -146,18 +321,43 @@ jobs:
       contents: write
 
     steps:
-      - name: Download distributions
+      - name: Download identified release artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-distributions
           path: dist
 
-      - name: Create GitHub release
+      - name: Recheck artifact digests
+        run: cd dist && sha256sum --check SHA256SUMS
+
+      - name: Recheck release tag target
+        run: |
+          tag_ref="refs/tags/$GITHUB_REF_NAME"
+          remote_commit=$(
+            git ls-remote "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" \
+              "$tag_ref" "$tag_ref^{}" |
+              awk '$2 ~ /\^\{\}$/ { peeled=$1 } $2 !~ /\^\{\}$/ { direct=$1 } END { print peeled ? peeled : direct }'
+          )
+          manifest_commit=$(jq -r '.commit_sha // empty' dist/release-manifest.json)
+          test -n "$remote_commit"
+          test "$remote_commit" = "$manifest_commit"
+          test "$manifest_commit" = "$GITHUB_SHA"
+
+      - name: Draft, populate, and publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
+            --draft \
             --title "lm-resiliency $GITHUB_REF_NAME" \
             --generate-notes
+          gh release edit "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false
+          gh release verify "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
+          for artifact in dist/*; do
+            gh release verify-asset "$GITHUB_REF_NAME" "$artifact" \
+              --repo "$GITHUB_REPOSITORY"
+          done
