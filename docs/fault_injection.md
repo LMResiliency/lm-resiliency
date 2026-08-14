@@ -260,6 +260,10 @@ Use exactly one lifetime field:
 An `until` lifetime is permanent and therefore requires a single trigger
 candidate. Multiple bounded candidates or probabilistic bounded candidates are
 classified as intermittent; one bounded candidate is transient.
+Closing a session normally completes a verified `campaign_end` effect. Closing
+before a `matching_calls` or `iterations` lifetime finishes cancels that effect,
+so a partial-duration injection cannot be certified as successful. Error-path
+cleanup cancels every still-active effect, including `campaign_end` effects.
 
 ### Retrigger Policy
 
@@ -347,6 +351,9 @@ runtime; otherwise the action is recorded as failed and the hook returns the
 unmodified tensor. Built-in hook transforms also require a strided layout.
 Sparse or otherwise non-strided tensors are returned unchanged and recorded as
 unsupported instead of raising from one distributed rank.
+History observers apply the same rule: an unsupported sparse gradient or module
+value is remembered as unavailable history, and the later stale/duplicate
+occurrence fails locally without raising from the observer hook.
 
 Stale and duplicate faults retain two observed values only during their
 scheduled collection window. Module and gradient observation starts one
@@ -532,6 +539,9 @@ rank unable to enter another training-process collective, so destructive
 executors must report activation and failures through their training manager or
 other out-of-band control plane. Their later expiration also avoids in-band
 consensus for the same reason.
+If any runtime preparation, preflight, persistence, rollback, or safe-activation
+collective itself raises, the surviving rank performs bounded local cleanup
+before propagating the collective failure.
 
 Built-in delays use an interruptible wait. Recovery or session cleanup signals
 that wait before acquiring the effect lock, so shutdown does not wait for the
@@ -576,8 +586,9 @@ Use one JSON state file per rank, or provide a manager-backed
 claims across workers. A plain load-modify-save sequence is insufficient when
 old and replacement workers overlap: only one worker may claim a
 `retrigger: "once"` occurrence. `JsonCampaignStateStore` uses an interprocess
-file lock and atomic replacement; `MemoryCampaignStateStore` provides the same
-contract within one process.
+file lock, atomic replacement, and a parent-directory `fsync` before
+acknowledging a claim; `MemoryCampaignStateStore` provides the same contract
+within one process.
 For a distributed enablement, the initial manifest binding is persisted only
 after every rank agrees on the manifest, training iteration, and persisted
 attempt journal. Divergent per-rank attempt histories fail enablement before any
@@ -589,6 +600,9 @@ Attempt entries use canonical `<incident_id>@<positive_iteration>` keys and
 strictly positive integer counts. Iterations have no leading zeroes. Malformed,
 boolean, fractional, zero, or negative restart evidence is rejected rather than
 normalized.
+Deterministic probability skips are reported as `skipped_probability` but are
+not persisted as attempts. Reaching a dense range with unselected candidates
+therefore does not grow or repeatedly copy the restart journal.
 The journal object requires exactly `campaign`, `manifest_identity`, and
 `attempts`; missing or unknown fields are rejected.
 

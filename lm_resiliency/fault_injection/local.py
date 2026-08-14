@@ -93,17 +93,22 @@ class _History:
     latest: torch.Tensor | None = None
     previous_shape: torch.Size | None = None
     latest_shape: torch.Size | None = None
+    observation_error: str | None = None
 
     def observe(
         self,
         tensor: torch.Tensor,
         indices: torch.Tensor | None = None,
     ) -> None:
+        self.observation_error = None
         self.previous = self.latest
         self.previous_shape = self.latest_shape
         local = _local_shard(tensor)
         self.latest_shape = local.shape
         self.latest = local.detach().clone() if indices is None else _read_linear(local, indices)
+
+    def reject(self, error: Exception) -> None:
+        self.observation_error = str(error)
 
 
 @dataclass(slots=True)
@@ -144,6 +149,7 @@ class LocalFaultEffect:
         self,
         evidence: dict[str, Any] | None = None,
         *,
+        cancelled: bool = False,
         preserve_replaced_state: bool = False,
     ) -> None:
         self.cancel_event.set()
@@ -168,7 +174,9 @@ class LocalFaultEffect:
                     merged = dict(self.record.evidence)
                     merged.update(evidence)
                     self.record.evidence = merged
-                if self.record.verified:
+                if cancelled:
+                    self.record.status = InjectionStatus.CANCELLED
+                elif self.record.verified:
                     self.record.status = InjectionStatus.COMPLETED
                 elif self.record.status is InjectionStatus.PENDING:
                     self.record.status = InjectionStatus.CANCELLED
@@ -350,7 +358,7 @@ class LocalFaultExecutor:
                 continue
             local = _local_shard(tensor)
             scope = FaultScope(fault.parameters.get("scope", FaultScope.SINGLE.value))
-            self._history[key].observe(local, _target_indices(local, scope))
+            _observe_history(self._history[key], local, scope)
 
     def activate(
         self,
@@ -759,8 +767,7 @@ class LocalFaultExecutor:
             ) -> None:
                 tensor = _first_float_tensor((args, kwargs))
                 if tensor is not None:
-                    local = _local_shard(tensor)
-                    history.observe(local, _target_indices(local, scope))
+                    _observe_history(history, tensor, scope)
                 return None
 
             self._observer_handles.setdefault(key, []).append(
@@ -777,8 +784,7 @@ class LocalFaultExecutor:
             ) -> None:
                 tensor = _first_float_tensor(output)
                 if tensor is not None:
-                    local = _local_shard(tensor)
-                    history.observe(local, _target_indices(local, scope))
+                    _observe_history(history, tensor, scope)
                 return None
 
             self._observer_handles.setdefault(key, []).append(
@@ -796,8 +802,7 @@ class LocalFaultExecutor:
             )
 
             def observe_gradient(gradient: torch.Tensor) -> None:
-                local = _local_shard(gradient)
-                history.observe(local, _target_indices(local, scope))
+                _observe_history(history, gradient, scope)
                 return None
 
             self._observer_handles.setdefault(key, []).append(
@@ -843,6 +848,10 @@ def _prepare_state_values(
         with torch.no_grad():
             _apply_corruption(transformed, local_indices, request)
     elif request.fault.type in {FailureType.STALE_STATE, FailureType.DUPLICATE}:
+        if history is not None and history.observation_error is not None:
+            raise _UnsupportedTargetTensorError(
+                f"history observation failed: {history.observation_error}"
+            )
         if history is None or history.previous is None:
             raise _UnavailableHistoryError(
                 "stale or duplicate injection has no prior observed value"
@@ -890,6 +899,10 @@ def _transform_tensor(
         with torch.no_grad():
             _apply_corruption(transformed, indices, request)
     elif fault.type in {FailureType.STALE_STATE, FailureType.DUPLICATE}:
+        if history is not None and history.observation_error is not None:
+            raise _UnsupportedTargetTensorError(
+                f"history observation failed: {history.observation_error}"
+            )
         if history is None or history.previous is None:
             raise _UnavailableHistoryError(
                 "stale or duplicate injection has no prior observed value"
@@ -1018,6 +1031,22 @@ def _target_indices(tensor: torch.Tensor, scope: FaultScope) -> torch.Tensor:
         return torch.arange(numel, device=device, dtype=torch.long)
     step = max(1, numel // count)
     return torch.arange(0, numel, step, device=device, dtype=torch.long)[:count]
+
+
+def _observe_history(
+    history: _History,
+    tensor: torch.Tensor,
+    scope: FaultScope,
+) -> None:
+    try:
+        local = _local_shard(tensor)
+        if local.layout is not torch.strided:
+            raise _UnsupportedTargetTensorError(
+                f"fault target tensor layout {local.layout} is not supported"
+            )
+        history.observe(local, _target_indices(local, scope))
+    except _UnsupportedTargetTensorError as error:
+        history.reject(error)
 
 
 def _linear_coordinates(

@@ -5,6 +5,8 @@ from __future__ import annotations
 import copy
 import inspect
 import json
+import os
+import stat
 import threading
 from pathlib import Path
 from types import MethodType, SimpleNamespace
@@ -1421,19 +1423,51 @@ def test_training_iteration_does_not_count_gradient_accumulation_forwards() -> N
 def test_range_schedule_and_probability_zero() -> None:
     model = TinyModel()
     optimizer = _optimizer(model)
+    store = MemoryCampaignStateStore()
     campaign = _campaign(
         _incident(
             trigger_range=IterationRange(2, 6, every=2),
             probability=0.0,
         )
     )
-    session = enable_fault_injection(model, optimizer, campaign=campaign, rank=0)
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=campaign,
+        state_store=store,
+        rank=0,
+    )
 
     for _ in range(6):
         _step(model, optimizer)
 
     assert [record.iteration for record in session.records] == [2, 4, 6]
     assert all(record.status is InjectionStatus.SKIPPED_PROBABILITY for record in session.records)
+    assert store.load(campaign.name).attempts == {}
+    session.close()
+
+
+def test_probability_skip_does_not_clone_the_attempt_journal() -> None:
+    incident = _incident(at=(2,), probability=0.0)
+    model = TinyModel()
+    session = FaultInjectionSession(
+        model,
+        _optimizer(model),
+        campaign=_campaign(incident),
+        rank=0,
+        _defer_activation=True,
+    )
+
+    with patch.object(
+        CampaignJournal,
+        "from_dict",
+        wraps=CampaignJournal.from_dict,
+    ) as from_dict:
+        staged = session._stage_iteration_attempts(2, ((incident, 1),))
+
+    assert len(staged) == 1
+    assert not staged[0].selected
+    assert from_dict.call_count == 0
     session.close()
 
 
@@ -3556,6 +3590,25 @@ def test_json_state_store_is_atomic_and_campaign_scoped(tmp_path) -> None:
         store.load("campaign-b")
 
 
+def test_json_state_store_syncs_parent_directory_before_save_returns(tmp_path) -> None:
+    path = tmp_path / "campaign-state.json"
+    store = JsonCampaignStateStore(path)
+    synced_directories: list[bool] = []
+    real_fsync = os.fsync
+
+    def track_fsync(descriptor: int) -> None:
+        synced_directories.append(stat.S_ISDIR(os.fstat(descriptor).st_mode))
+        real_fsync(descriptor)
+
+    with patch(
+        "lm_resiliency.fault_injection.state.os.fsync",
+        side_effect=track_fsync,
+    ):
+        store.save(CampaignJournal("campaign"))
+
+    assert synced_directories == [False, True]
+
+
 @pytest.mark.parametrize(
     "value",
     [
@@ -3856,6 +3909,44 @@ def test_sparse_gradient_fails_without_escaping_hook() -> None:
     session.close()
 
 
+def test_sparse_gradient_history_fails_without_escaping_hook() -> None:
+    class SparseEmbeddingModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.embedding = nn.Embedding(8, 4, sparse=True)
+
+        def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+            return self.embedding(tokens).sum()
+
+    model = SparseEmbeddingModel()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.0)
+    stale_gradient = FaultSpec(
+        fault_id="stale-gradient",
+        type=FailureType.STALE_STATE,
+        target=_target(
+            surface=FaultSurface.GRADIENT,
+            module_path="embedding",
+        ),
+        parameters={"scope": FaultScope.SINGLE.value},
+    )
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(_incident(at=(2,), faults=(stale_gradient,))),
+        rank=0,
+    )
+
+    _step(model, optimizer, value=torch.tensor([1, 3]))
+    assert session.records[0].status is InjectionStatus.PENDING
+    _step(model, optimizer, value=torch.tensor([2, 4]))
+
+    assert model.embedding.weight.grad is not None
+    assert model.embedding.weight.grad.is_sparse
+    assert session.records[0].status is InjectionStatus.FAILED
+    assert "layout torch.sparse_coo is not supported" in str(session.records[0].error)
+    session.close()
+
+
 def test_close_interrupts_in_flight_delay() -> None:
     model = TinyModel()
     session = enable_fault_injection(
@@ -3901,6 +3992,29 @@ def test_close_interrupts_in_flight_delay() -> None:
 
     assert not forward.is_alive()
     assert session.records[0].status is InjectionStatus.CANCELLED
+
+
+def test_close_cancels_verified_effect_before_matching_call_lifetime_finishes() -> None:
+    model = TinyModel()
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(matching_calls=10),
+            )
+        ),
+        rank=0,
+    )
+
+    model(torch.ones(2, 4))
+    assert session.records[0].status is InjectionStatus.ACTIVE
+
+    session.close()
+
+    assert session.records[0].status is InjectionStatus.CANCELLED
+    assert not session.records[0].injection_succeeded
 
 
 def test_history_observer_cleanup_attempts_every_handle() -> None:
@@ -5684,6 +5798,51 @@ def test_distributed_partial_attempt_save_restores_successful_rank_journal() -> 
         session._start()
 
     assert store.load(session.campaign.name).attempts == {}
+
+
+def test_runtime_consensus_exception_cleans_active_effects() -> None:
+    model = TinyModel()
+    baseline = model.layers[0].weight.detach().clone()
+    session = FaultInjectionSession(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="campaign_end"),
+                faults=(
+                    _corruption(
+                        target=_target(surface=FaultSurface.WEIGHT),
+                        scope=FaultScope.SINGLE,
+                    ),
+                ),
+            )
+        ),
+        rank=0,
+        _defer_activation=True,
+    )
+    session._commit_journal_binding()
+    session._start()
+    assert not torch.equal(model.layers[0].weight, baseline)
+
+    with (
+        patch.object(session, "_requires_boundary_consensus", return_value=True),
+        patch(
+            "lm_resiliency.fault_injection.injector._distributed_world_size",
+            return_value=2,
+        ),
+        patch(
+            "lm_resiliency.fault_injection.injector._gather_rank_errors",
+            side_effect=RuntimeError("collective timed out"),
+        ),
+        pytest.raises(RuntimeError, match="collective timed out") as caught,
+    ):
+        session._on_step_complete()
+
+    assert session._closed
+    assert session.records[0].status is InjectionStatus.CANCELLED
+    assert any("iteration preparation consensus failed" in note for note in caught.value.__notes__)
+    torch.testing.assert_close(model.layers[0].weight, baseline)
 
 
 def test_remote_safe_arming_failure_rolls_back_local_record() -> None:

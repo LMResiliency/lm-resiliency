@@ -150,7 +150,7 @@ class _ExternalEffect:
     done: bool = False
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
-    def complete(self) -> None:
+    def complete(self, *, cancelled: bool = False) -> None:
         with self.lock:
             if self.done:
                 return
@@ -173,7 +173,9 @@ class _ExternalEffect:
                     merged.update(normalized_evidence)
                     self.record.evidence = merged
                 self.record.status = (
-                    InjectionStatus.COMPLETED if self.record.verified else InjectionStatus.CANCELLED
+                    InjectionStatus.COMPLETED
+                    if self.record.verified and not cancelled
+                    else InjectionStatus.CANCELLED
                 )
                 self.record.completed_at_ns = time.monotonic_ns()
             self.done = True
@@ -211,11 +213,19 @@ class _ActiveFault:
     def done(self) -> bool:
         return self.effect.done
 
-    def complete(self, *, preserve_replaced_state: bool = False) -> None:
+    def complete(
+        self,
+        *,
+        cancelled: bool = False,
+        preserve_replaced_state: bool = False,
+    ) -> None:
         if isinstance(self.effect, LocalFaultEffect):
-            self.effect.complete(preserve_replaced_state=preserve_replaced_state)
+            self.effect.complete(
+                cancelled=cancelled,
+                preserve_replaced_state=preserve_replaced_state,
+            )
         else:
-            self.effect.complete()
+            self.effect.complete(cancelled=cancelled)
 
     def rollback(self, error: Exception) -> None:
         if isinstance(self.effect, LocalFaultEffect):
@@ -406,7 +416,7 @@ class FaultInjectionSession:
     def close(self) -> None:
         if self._closed:
             return
-        first_error = self._cleanup()
+        first_error = self._cleanup(complete_campaign_end=True)
         if first_error is not None:
             raise RuntimeError("fault injection cleanup failed") from first_error
 
@@ -431,12 +441,20 @@ class FaultInjectionSession:
         self._journal_base = CampaignJournal.from_dict(self._journal.to_dict())
         self._journal_committed = True
 
-    def _cleanup(self) -> Exception | None:
+    def _cleanup(
+        self,
+        *,
+        complete_campaign_end: bool = False,
+    ) -> Exception | None:
         """Best-effort cleanup shared by failed construction and close()."""
         with self._lifecycle_lock:
-            return self._cleanup_locked()
+            return self._cleanup_locked(complete_campaign_end=complete_campaign_end)
 
-    def _cleanup_locked(self) -> Exception | None:
+    def _cleanup_locked(
+        self,
+        *,
+        complete_campaign_end: bool,
+    ) -> Exception | None:
         if self._closed:
             return None
         unregister_automatic_cleanup(self)
@@ -444,7 +462,12 @@ class FaultInjectionSession:
         for active in reversed(self._active):
             if not active.done:
                 try:
-                    active.complete()
+                    active.complete(
+                        cancelled=(
+                            not complete_campaign_end
+                            or active.incident.lifetime.until != "campaign_end"
+                        ),
+                    )
                 except Exception as error:
                     if first_error is None:
                         first_error = error
@@ -467,7 +490,12 @@ class FaultInjectionSession:
 
     def __exit__(self, _exc_type: Any, _exc: Any, _traceback: Any) -> None:
         try:
-            self.close()
+            if _exc is None:
+                self.close()
+            else:
+                cleanup_error = self._cleanup()
+                if cleanup_error is not None:
+                    raise RuntimeError("fault injection cleanup failed") from cleanup_error
         except Exception as cleanup_error:
             if _exc is None:
                 raise
@@ -622,7 +650,10 @@ class FaultInjectionSession:
         except Exception as error:
             preparation_error = error
         if needs_consensus:
-            failures = _gather_rank_errors(preparation_error)
+            failures = self._gather_runtime_rank_errors(
+                preparation_error,
+                "iteration preparation",
+            )
             if failures:
                 cleanup_error = self._cleanup()
                 boundary_error = RuntimeError(
@@ -686,7 +717,10 @@ class FaultInjectionSession:
             self._preflight_iteration(iteration)
         except Exception as error:
             preflight_error = error
-        failures = _gather_rank_errors(preflight_error)
+        failures = self._gather_runtime_rank_errors(
+            preflight_error,
+            "iteration preflight",
+        )
         if failures:
             cleanup_error = self._cleanup()
             boundary_error = RuntimeError(
@@ -706,14 +740,20 @@ class FaultInjectionSession:
             staged = self._stage_iteration_attempts(iteration, candidates)
         except Exception as error:
             persistence_error = error
-        failures = _gather_rank_errors(persistence_error)
+        failures = self._gather_runtime_rank_errors(
+            persistence_error,
+            "attempt persistence",
+        )
         if failures:
             rollback_error: Exception | None = None
             try:
                 self._restore_journal_attempts(previous_attempts)
             except Exception as error:
                 rollback_error = error
-            rollback_failures = _gather_rank_errors(rollback_error)
+            rollback_failures = self._gather_runtime_rank_errors(
+                rollback_error,
+                "attempt rollback",
+            )
             cleanup_error = self._cleanup()
             boundary_error = RuntimeError(
                 "fault injection attempt persistence failed; " + "; ".join(failures)
@@ -738,7 +778,14 @@ class FaultInjectionSession:
         except Exception as error:
             activation_error = error
 
-        failures = _gather_rank_errors(activation_error) if requires_activation_consensus else []
+        failures = (
+            self._gather_runtime_rank_errors(
+                activation_error,
+                "iteration arming",
+            )
+            if requires_activation_consensus
+            else []
+        )
         if failures:
             boundary_error = RuntimeError(
                 "fault injection iteration arming failed; " + "; ".join(failures)
@@ -774,33 +821,79 @@ class FaultInjectionSession:
         iteration: int,
         candidates: tuple[tuple[FaultIncident, int], ...],
     ) -> tuple[_StagedIncident, ...]:
+        selections = tuple(
+            (
+                incident,
+                expected_attempt,
+                _probability_selected(
+                    self.campaign.seed,
+                    incident.incident_id,
+                    iteration,
+                    incident.trigger.probability,
+                ),
+            )
+            for incident, expected_attempt in candidates
+        )
+        if not any(selected for _incident, _attempt, selected in selections):
+            return tuple(
+                _StagedIncident(
+                    incident=incident,
+                    attempt=expected_attempt,
+                    occurrence_id=_occurrence_id(
+                        incident,
+                        iteration,
+                        expected_attempt,
+                    ),
+                    selected=False,
+                )
+                for incident, expected_attempt, _selected in selections
+            )
+
         previous = CampaignJournal.from_dict(self._journal.to_dict())
         updated = CampaignJournal.from_dict(self._journal.to_dict())
         staged: list[_StagedIncident] = []
-        for incident, expected_attempt in candidates:
-            attempt = updated.record_attempt(incident.incident_id, iteration)
-            if attempt != expected_attempt:
-                raise RuntimeError(
-                    f"campaign journal attempt for {incident.incident_id!r} changed "
-                    f"from {expected_attempt} to {attempt} during staging"
-                )
+        for incident, expected_attempt, selected in selections:
+            if selected:
+                attempt = updated.record_attempt(incident.incident_id, iteration)
+                if attempt != expected_attempt:
+                    raise RuntimeError(
+                        f"campaign journal attempt for {incident.incident_id!r} changed "
+                        f"from {expected_attempt} to {attempt} during staging"
+                    )
+            else:
+                attempt = expected_attempt
             staged.append(
                 _StagedIncident(
                     incident=incident,
                     attempt=attempt,
                     occurrence_id=_occurrence_id(incident, iteration, attempt),
-                    selected=_probability_selected(
-                        self.campaign.seed,
-                        incident.incident_id,
-                        iteration,
-                        incident.trigger.probability,
-                    ),
+                    selected=selected,
                 )
             )
         if not self._state_store.compare_and_swap(previous, updated):
             raise RuntimeError("campaign state changed concurrently while claiming occurrences")
         self._journal = updated
         return tuple(staged)
+
+    def _gather_runtime_rank_errors(
+        self,
+        error: Exception | None,
+        stage: str,
+    ) -> list[str]:
+        try:
+            return _gather_rank_errors(error)
+        except Exception as collective_error:
+            cleanup_error = self._cleanup()
+            _add_exception_note(
+                collective_error,
+                f"fault injection {stage} consensus failed",
+            )
+            if cleanup_error is not None:
+                _add_exception_note(
+                    collective_error,
+                    f"fault injection cleanup also failed: {cleanup_error}",
+                )
+            raise
 
     def _restore_journal_attempts(self, attempts: dict[str, int]) -> None:
         current = CampaignJournal.from_dict(self._journal.to_dict())
