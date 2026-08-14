@@ -12,7 +12,9 @@ from examples.fault_injection.generate_campaign import build_campaign
 from examples.fault_injection.pytorch import (
     EvaluationStateReset,
     _last_scheduled_iteration,
+    _state_hold_iterations,
     _state_reset_iterations,
+    _teardown,
     _validate_run,
     _validate_target_ranks,
 )
@@ -204,6 +206,64 @@ def test_evaluation_state_reset_restores_the_last_clean_optimizer_boundary() -> 
     torch.testing.assert_close(model.weight, clean)
     assert reset.restored_iterations == [2]
     reset.close()
+
+
+def test_evaluation_state_reset_freezes_snapshot_during_bounded_window() -> None:
+    model = torch.nn.Linear(2, 1, bias=False)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    reset = EvaluationStateReset(
+        SimpleNamespace(module=model),
+        optimizer,
+        {3},
+        {1, 2},
+    )
+    clean = model.weight.detach().clone()
+
+    def step() -> None:
+        optimizer.zero_grad()
+        model(torch.ones(1, 2)).sum().backward()
+        optimizer.step()
+
+    step()
+    first_faulty = model.weight.detach().clone()
+    step()
+    second_faulty = model.weight.detach().clone()
+    step()
+
+    assert not torch.equal(first_faulty, clean)
+    assert not torch.equal(second_faulty, first_faulty)
+    torch.testing.assert_close(model.weight, clean)
+    assert reset.restored_iterations == [3]
+    reset.close()
+
+
+def test_teardown_attempts_every_cleanup_and_preserves_active_error() -> None:
+    events: list[str] = []
+
+    class Cleanup:
+        def __init__(self, name: str, *, error: Exception | None = None) -> None:
+            self.name = name
+            self.error = error
+
+        def close(self) -> None:
+            events.append(self.name)
+            if self.error is not None:
+                raise self.error
+
+    active_error = RuntimeError("training failed")
+    _teardown(
+        Cleanup("faults", error=RuntimeError("fault cleanup failed")),
+        Cleanup("state-reset", error=RuntimeError("state cleanup failed")),
+        Cleanup("resiliency"),
+        active_error=active_error,
+        destroy_process_group=lambda: events.append("process-group"),
+    )
+
+    assert events == ["faults", "state-reset", "resiliency", "process-group"]
+    assert getattr(active_error, "__notes__", []) == [
+        "example teardown also failed: fault cleanup failed",
+        "example teardown also failed: state cleanup failed",
+    ]
 
 
 def test_comparison_accepts_matching_scout_localization() -> None:
@@ -609,10 +669,51 @@ def test_state_reset_waits_for_bounded_state_fault_expiration() -> None:
     )
 
     reset_iterations = _state_reset_iterations(campaign)
+    hold_iterations = _state_hold_iterations(campaign)
 
     assert 5 not in reset_iterations
     assert 6 not in reset_iterations
     assert 7 in reset_iterations
+    assert 5 in hold_iterations
+    assert 6 in hold_iterations
+    assert 7 not in hold_iterations
+
+
+def test_state_hold_schedule_remains_lazy_for_long_exact_lifetime() -> None:
+    campaign = FaultCampaign.from_dict(
+        {
+            "schema_version": 1,
+            "name": "long-state-window",
+            "incidents": [
+                {
+                    "id": "weight-window",
+                    "trigger": {"at": [5]},
+                    "lifetime": {"iterations": 1_000_000_000},
+                    "faults": [
+                        {
+                            "id": "weight",
+                            "type": "tensor_corruption",
+                            "target": {
+                                "rank": 0,
+                                "module_path": "layers.0",
+                                "surface": "weight",
+                            },
+                            "parameters": {
+                                "operation": "sign_flip",
+                                "scope": "single",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    hold_iterations = _state_hold_iterations(campaign)
+
+    assert 5 in hold_iterations
+    assert 1_000_000_003 in hold_iterations
+    assert 1_000_000_004 not in hold_iterations
 
 
 def test_example_rejects_campaign_end_state_reset() -> None:

@@ -6,7 +6,8 @@ import argparse
 import copy
 import json
 import os
-from collections.abc import Container
+import sys
+from collections.abc import Callable, Container
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -53,10 +54,12 @@ class EvaluationStateReset:
         model: DistributedDataParallel,
         optimizer: torch.optim.Optimizer,
         reset_iterations: Container[int],
+        hold_iterations: Container[int] = (),
     ) -> None:
         self._model = model.module
         self._optimizer = optimizer
         self._reset_iterations = reset_iterations
+        self._hold_iterations = hold_iterations
         self._model_state: dict[str, Any]
         self._optimizer_state: dict[str, Any]
         self._completed_iterations = 0
@@ -73,6 +76,8 @@ class EvaluationStateReset:
             self._model.load_state_dict(copy.deepcopy(self._model_state))
             self._optimizer.load_state_dict(copy.deepcopy(self._optimizer_state))
             self.restored_iterations.append(self._completed_iterations)
+            return
+        if self._completed_iterations in self._hold_iterations:
             return
         self._capture()
 
@@ -145,6 +150,7 @@ def main() -> None:
         model,
         optimizer,
         _state_reset_iterations(campaign),
+        _state_hold_iterations(campaign),
     )
     try:
         faults = enable_fault_injection(
@@ -228,11 +234,13 @@ def main() -> None:
                     "SCOUT did not detect and localize every successfully injected occurrence"
                 )
     finally:
-        if faults is not None:
-            faults.close()
-        state_reset.close()
-        resiliency.close()
-        dist.destroy_process_group()
+        _teardown(
+            faults,
+            state_reset,
+            resiliency,
+            active_error=sys.exc_info()[1],
+            destroy_process_group=dist.destroy_process_group,
+        )
 
 
 def _validate_run(campaign: FaultCampaign, steps: int) -> None:
@@ -290,24 +298,31 @@ class _ResetIterationSchedule:
         )
 
 
+@dataclass(frozen=True)
+class _HoldIterationSchedule:
+    exact: tuple[tuple[int, int], ...]
+    ranged: tuple[tuple[FaultIncident, int], ...]
+
+    def __contains__(self, iteration: object) -> bool:
+        if not isinstance(iteration, int):
+            return False
+        if any(start <= iteration <= end for start, end in self.exact):
+            return True
+        for incident, offset in self.ranged:
+            trigger_range = incident.trigger.range
+            if trigger_range is None or iteration < trigger_range.start:
+                continue
+            trigger = (
+                trigger_range.start
+                + ((iteration - trigger_range.start) // trigger_range.every) * trigger_range.every
+            )
+            if trigger <= trigger_range.end and 0 <= iteration - trigger < offset:
+                return True
+        return False
+
+
 def _state_reset_iterations(campaign: FaultCampaign) -> Container[int]:
-    gradient_affecting_surfaces = {
-        "input",
-        "output",
-        "weight",
-        "bias",
-        "gradient",
-        "optimizer_state",
-    }
-    eligible = tuple(
-        incident
-        for incident in campaign.incidents
-        if any(
-            fault.type.value != "delay"
-            and fault.target.surface.value in gradient_affecting_surfaces
-            for fault in incident.faults
-        )
-    )
+    eligible = _state_reset_incidents(campaign)
     offsets = {incident.incident_id: _state_reset_offset(incident) for incident in eligible}
     ranged = tuple(
         (incident, offsets[incident.incident_id])
@@ -323,6 +338,43 @@ def _state_reset_iterations(campaign: FaultCampaign) -> Container[int]:
     if not ranged:
         return set(exact)
     return _ResetIterationSchedule(exact=exact, ranged=ranged)
+
+
+def _state_hold_iterations(campaign: FaultCampaign) -> Container[int]:
+    eligible = _state_reset_incidents(campaign)
+    offsets = {incident.incident_id: _state_reset_offset(incident) for incident in eligible}
+    exact = tuple(
+        (iteration, iteration + offsets[incident.incident_id] - 1)
+        for incident in eligible
+        if incident.trigger.at and offsets[incident.incident_id] > 0
+        for iteration in incident.trigger.at
+    )
+    ranged = tuple(
+        (incident, offsets[incident.incident_id])
+        for incident in eligible
+        if incident.trigger.range is not None and offsets[incident.incident_id] > 0
+    )
+    return _HoldIterationSchedule(exact=exact, ranged=ranged)
+
+
+def _state_reset_incidents(campaign: FaultCampaign) -> tuple[FaultIncident, ...]:
+    gradient_affecting_surfaces = {
+        "input",
+        "output",
+        "weight",
+        "bias",
+        "gradient",
+        "optimizer_state",
+    }
+    return tuple(
+        incident
+        for incident in campaign.incidents
+        if any(
+            fault.type.value != "delay"
+            and fault.target.surface.value in gradient_affecting_surfaces
+            for fault in incident.faults
+        )
+    )
 
 
 def _state_reset_offset(incident: FaultIncident) -> int:
@@ -356,6 +408,50 @@ def _complete_permanent_incidents(
         faults.notify_recovery()
     if "replacement" in boundaries:
         faults.notify_replacement()
+
+
+def _teardown(
+    faults: FaultInjectionSession | None,
+    state_reset: EvaluationStateReset,
+    resiliency: Any,
+    *,
+    active_error: BaseException | None,
+    destroy_process_group: Callable[[], None],
+) -> None:
+    cleanup_errors: list[BaseException] = []
+    actions = (
+        None if faults is None else faults.close,
+        state_reset.close,
+        resiliency.close,
+        destroy_process_group,
+    )
+    for action in actions:
+        if action is None:
+            continue
+        try:
+            action()
+        except BaseException as error:
+            cleanup_errors.append(error)
+
+    if active_error is not None:
+        for error in cleanup_errors:
+            _add_exception_note(active_error, f"example teardown also failed: {error}")
+        return
+    if cleanup_errors:
+        first_error = cleanup_errors[0]
+        for error in cleanup_errors[1:]:
+            _add_exception_note(first_error, f"additional teardown failure: {error}")
+        raise first_error
+
+
+def _add_exception_note(error: BaseException, note: str) -> None:
+    add_note = getattr(error, "add_note", None)
+    if callable(add_note):
+        add_note(note)
+        return
+    notes = list(getattr(error, "__notes__", ()))
+    notes.append(note)
+    error.__notes__ = notes
 
 
 def _write_json(path: Path, value: dict[str, Any]) -> None:

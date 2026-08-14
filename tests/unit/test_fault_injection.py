@@ -5702,6 +5702,36 @@ def test_missing_flow_history_fails_without_aborting_training(
     session.close()
 
 
+def test_first_iteration_state_history_fails_without_aborting_enablement() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    baseline = model.layers[0].weight.detach().clone()
+    fault = FaultSpec(
+        fault_id="stale-weight",
+        type=FailureType.STALE_STATE,
+        target=_target(surface=FaultSurface.WEIGHT),
+        parameters={"scope": FaultScope.FULL.value},
+    )
+
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(iterations=1),
+                faults=(fault,),
+            )
+        ),
+        rank=0,
+    )
+
+    assert session.records[0].status is InjectionStatus.FAILED
+    assert "no prior observed value" in (session.records[0].error or "")
+    torch.testing.assert_close(model.layers[0].weight, baseline)
+    session.close()
+
+
 def test_logical_layer_rejects_ambiguous_suffix_matches() -> None:
     class EncoderDecoderModel(nn.Module):
         def __init__(self) -> None:

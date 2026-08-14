@@ -311,11 +311,14 @@ class LocalFaultExecutor:
                 continue
             tensor = self._state_tensor(fault)
             history = self._history.get(self._history_key(fault))
-            _indices, original, transformed = _prepare_state_values(
-                tensor,
-                request,
-                history,
-            )
+            try:
+                _indices, original, transformed = _prepare_state_values(
+                    tensor,
+                    request,
+                    history,
+                )
+            except _UnavailableHistoryError:
+                continue
             _validate_state_retirement(original, transformed, request)
 
     def sync_history(self, faults: tuple[FaultSpec, ...]) -> None:
@@ -401,6 +404,9 @@ class LocalFaultExecutor:
                 self._activate_gradient(request, effect)
             else:
                 raise ValueError(f"unsupported local target surface {fault.target.surface.value}")
+        except _UnavailableHistoryError as error:
+            effect.fail(error)
+            return effect
         except Exception as error:
             effect.fail(error)
             raise

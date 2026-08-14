@@ -371,7 +371,10 @@ training iteration before a candidate and is removed at the optimizer boundary
 after the occurrence. Input, output, gradient, and state histories retain only
 the values selected by `scope`, rather than cloning the complete tensor for a
 narrow fault. A stale or duplicate incident scheduled for the first iteration
-fails verification because no prior value exists.
+fails verification because no prior value exists. For model and optimizer state,
+that missing history produces a failed ground-truth record during activation;
+it does not abort campaign enablement. Unsupported targets and no-op mutations
+remain hard validation failures.
 For state surfaces, an incident at iteration N is armed after iteration N-1
 completes. It applies the snapshot from before iteration N-1, making the target
 one completed optimizer update behind its current state. The latest snapshot is
