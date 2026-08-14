@@ -259,7 +259,7 @@ def _external_fault(
     *,
     fault_id: str | None = None,
     resource: str = "node-0",
-    rank: int = 0,
+    rank: int | None = 0,
 ) -> FaultSpec:
     parameters: dict[str, object] = {}
     if failure_type is FailureType.TENSOR_CORRUPTION:
@@ -804,6 +804,46 @@ def test_distributed_enablement_arms_iteration_one_after_consensus() -> None:
     assert events == [("activate", "process_termination")]
     assert gathers == 4
     session.close()
+
+
+def test_journal_consensus_failure_closes_deferred_session() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    session = MagicMock()
+    session.current_iteration = 1
+    session.journal_attempts_identity = "journal"
+    gathers = 0
+
+    def gather(values, local_value) -> None:
+        nonlocal gathers
+        gathers += 1
+        if gathers == 1:
+            values[:] = [local_value, dict(local_value)]
+            return
+        raise RuntimeError("journal consensus timed out")
+
+    with (
+        patch(
+            "lm_resiliency.fault_injection.injector.FaultInjectionSession",
+            return_value=session,
+        ),
+        patch("lm_resiliency.fault_injection.injector.dist.is_available", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.is_initialized", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.get_world_size", return_value=2),
+        patch(
+            "lm_resiliency.fault_injection.injector.dist.all_gather_object",
+            side_effect=gather,
+        ),
+        pytest.raises(RuntimeError, match="journal consensus timed out"),
+    ):
+        enable_fault_injection(
+            model,
+            optimizer,
+            campaign=_campaign(),
+        )
+
+    session._cleanup.assert_called_once()
+    session._start.assert_not_called()
 
 
 def test_distributed_destructive_activation_failure_raises_without_post_consensus() -> None:
@@ -2738,11 +2778,12 @@ def test_delay_fault_uses_module_hook_without_manual_trigger() -> None:
         campaign=_campaign(_incident(at=(1,), faults=(fault,))),
         rank=0,
     )
+    effect = session._active[0].effect
 
-    with patch("lm_resiliency.fault_injection.local.time.sleep") as sleep:
+    with patch.object(effect.cancel_event, "wait", return_value=False) as wait:
         _step(model, optimizer)
 
-    sleep.assert_called_once_with(0.025)
+    wait.assert_called_once_with(0.025)
     assert session.records[0].expected_kind == "straggler"
     session.close()
 
@@ -3776,6 +3817,92 @@ def test_set_value_overflow_fails_without_escaping_output_hook() -> None:
     session.close()
 
 
+def test_sparse_gradient_fails_without_escaping_hook() -> None:
+    class SparseEmbeddingModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.embedding = nn.Embedding(8, 4, sparse=True)
+
+        def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+            return self.embedding(tokens).sum()
+
+    model = SparseEmbeddingModel()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.0)
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                faults=(
+                    _corruption(
+                        target=_target(
+                            surface=FaultSurface.GRADIENT,
+                            module_path="embedding",
+                        ),
+                    ),
+                ),
+            )
+        ),
+        rank=0,
+    )
+
+    model(torch.tensor([1, 3])).backward()
+
+    assert model.embedding.weight.grad is not None
+    assert model.embedding.weight.grad.is_sparse
+    assert session.records[0].status is InjectionStatus.FAILED
+    assert "layout torch.sparse_coo is not supported" in str(session.records[0].error)
+    session.close()
+
+
+def test_close_interrupts_in_flight_delay() -> None:
+    model = TinyModel()
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                faults=(
+                    FaultSpec(
+                        fault_id="long-delay",
+                        type=FailureType.DELAY,
+                        target=_target(surface=FaultSurface.COMPUTE),
+                        parameters={"delay_ms": 10_000.0},
+                    ),
+                ),
+            )
+        ),
+        rank=0,
+    )
+    effect = session._active[0].effect
+    entered = threading.Event()
+    original_event = effect.cancel_event
+
+    class NotifyingEvent:
+        def set(self) -> None:
+            original_event.set()
+
+        def is_set(self) -> bool:
+            return original_event.is_set()
+
+        def wait(self, timeout: float | None = None) -> bool:
+            entered.set()
+            return original_event.wait(timeout)
+
+    effect.cancel_event = NotifyingEvent()
+    forward = threading.Thread(target=lambda: model(torch.ones(2, 4)))
+    forward.start()
+    assert entered.wait(timeout=5)
+
+    session.close()
+    forward.join(timeout=1)
+
+    assert not forward.is_alive()
+    assert session.records[0].status is InjectionStatus.CANCELLED
+
+
 def test_history_observer_cleanup_attempts_every_handle() -> None:
     removed: list[str] = []
 
@@ -4632,11 +4759,13 @@ def test_correlated_faults_share_one_occurrence_and_evaluation() -> None:
             FailureType.PROCESS_TERMINATION,
             fault_id="process",
             resource="process-3",
+            rank=None,
         ),
         _external_fault(
             FailureType.RESOURCE_UNAVAILABLE,
             fault_id="gpu",
             resource="gpu-3",
+            rank=None,
         ),
     )
     model = TinyModel()
@@ -4660,6 +4789,7 @@ def test_correlated_faults_share_one_occurrence_and_evaluation() -> None:
     )
 
     assert {record.occurrence_id for record in session.records} == {"incident@1"}
+    assert all(record.expected_rank is None for record in session.records)
     assert report.evaluations[0].localized
     assert report.evaluations[0].kind_matches
     assert report.evaluations[0].expected_ranks == ()
@@ -5365,6 +5495,33 @@ def test_selected_bounded_occurrence_requires_consensus_on_non_target_ranks() ->
     session._journal.record_attempt("incident", 1)
 
     assert session._requires_boundary_consensus(2, 3)
+    session.close()
+
+
+def test_destructive_expiration_does_not_require_in_band_consensus() -> None:
+    model = TinyModel()
+    session = FaultInjectionSession(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(iterations=2),
+                faults=(_external_fault(FailureType.PROCESS_TERMINATION),),
+            )
+        ),
+        executors=(
+            _recording_executor(
+                {FailureType.PROCESS_TERMINATION},
+                [],
+            ),
+        ),
+        rank=1,
+        _defer_activation=True,
+    )
+    session._journal.record_attempt("incident", 1)
+
+    assert not session._requires_boundary_consensus(2, 3)
     session.close()
 
 

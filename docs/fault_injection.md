@@ -344,7 +344,9 @@ accepts only a number or `nan`/`inf` sentinel, and state-flow `scope` values
 must be one of the documented selectors. Invalid values never survive until a
 model hook executes. A finite `set_value` must also fit the dtype observed at
 runtime; otherwise the action is recorded as failed and the hook returns the
-unmodified tensor.
+unmodified tensor. Built-in hook transforms also require a strided layout.
+Sparse or otherwise non-strided tensors are returned unchanged and recorded as
+unsupported instead of raising from one distributed rank.
 
 Stale and duplicate faults retain two observed values only during their
 scheduled collection window. Module and gradient observation starts one
@@ -454,7 +456,8 @@ The execution rank applies the action and records rank-local ground truth.
 For a resource-only action, that execution rank is not automatically an
 expected failed rank. Localization should report the resource through
 `failed_resources` and include a failed rank only when the campaign also
-targets that rank directly.
+targets that rank directly. `FaultInjectionRecord.expected_rank` likewise
+returns `None` when the target has a resource but no explicit rank.
 
 ## Destructive and Environment-Specific Failures
 
@@ -527,7 +530,12 @@ used only when every selected action is `safe_in_process`. A successful process
 termination, hang, resource loss, or network partition may make its execution
 rank unable to enter another training-process collective, so destructive
 executors must report activation and failures through their training manager or
-other out-of-band control plane.
+other out-of-band control plane. Their later expiration also avoids in-band
+consensus for the same reason.
+
+Built-in delays use an interruptible wait. Recovery or session cleanup signals
+that wait before acquiring the effect lock, so shutdown does not wait for the
+configured delay duration.
 
 The kit injects observable effects, not physical defects.
 For example, an ECC event is represented as tensor corruption or resource loss;
@@ -540,6 +548,8 @@ This ordering applies to both distributed and single-rank future iterations, so
 an invalid target or executor does not consume a retry attempt.
 If a later single-rank preflight fails, the session closes and restores every
 effect already active from an earlier iteration before propagating the error.
+Distributed journal-binding consensus failures follow the same rule: the
+deferred session removes its callbacks before the collective exception escapes.
 The default `retrigger: "once"` prevents the same occurrence from firing again
 after rollback when a persistent state store is used.
 
@@ -659,7 +669,9 @@ A rank-local evaluation of a correlated multi-rank occurrence remains
 unsuccessful when records for any manifest action are absent, even if the
 submitted localization identifies every job-wide target. Aggregate the
 rank-local injection records, as the eight-GPU example does, before certifying
-the complete occurrence.
+the complete occurrence. The example comparator also checks the embedded
+manifest and requires every fault action for an occurrence exactly once; a
+partial or duplicate aggregate cannot pass.
 
 ## Current Boundaries
 

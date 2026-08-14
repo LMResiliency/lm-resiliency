@@ -648,6 +648,8 @@ class FaultInjectionSession:
         if self._history_faults_for(next_iteration):
             return True
         for incident, start_iteration in self._schedule.expirations(finished_iteration):
+            if any(fault.safety is not SafetyClass.SAFE_IN_PROCESS for fault in incident.faults):
+                continue
             if not _probability_selected(
                 self.campaign.seed,
                 incident.incident_id,
@@ -1254,7 +1256,16 @@ def enable_fault_injection(
         session._commit_journal_binding()
     except Exception as error:
         journal_error = error
-    journal_failures = _gather_rank_errors(journal_error)
+    try:
+        journal_failures = _gather_rank_errors(journal_error)
+    except Exception as error:
+        cleanup_error = session._cleanup()
+        if cleanup_error is not None:
+            _add_exception_note(
+                error,
+                f"fault injection cleanup also failed: {cleanup_error}",
+            )
+        raise
     if journal_failures:
         cleanup_error = session._cleanup()
         enablement_error = RuntimeError(

@@ -66,6 +66,8 @@ class FaultInjectionRecord:
     @property
     def expected_rank(self) -> int | None:
         rank = self.target.get("rank")
+        if rank is None and self.target.get("resource") is not None:
+            return None
         return self.execution_rank if rank is None else int(rank)
 
     @property

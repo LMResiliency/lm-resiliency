@@ -24,9 +24,19 @@ def _injection_payload() -> dict:
     return {
         "campaign": "pytorch-production-loop-sdc",
         "manifest_identity": MANIFEST_IDENTITY,
+        "manifest": {
+            "incidents": [
+                {
+                    "incident_id": "hidden-output-sdc",
+                    "faults": [{"fault_id": "hidden-output"}],
+                }
+            ]
+        },
         "injections": [
             {
                 "occurrence_id": "hidden-output-sdc@4",
+                "incident_id": "hidden-output-sdc",
+                "fault_id": "hidden-output",
                 "iteration": 4,
                 "execution_rank": 0,
                 "expected_kind": "sdc",
@@ -215,12 +225,14 @@ def test_comparison_counts_correlated_rank_local_actions() -> None:
     injection = _injection_payload()
     second = {
         **injection["injections"][0],
+        "fault_id": "rank-one-output",
         "execution_rank": 1,
         "target": {
             **injection["injections"][0]["target"],
             "rank": 1,
         },
     }
+    injection["manifest"]["incidents"][0]["faults"].append({"fault_id": "rank-one-output"})
     injection["injections"].append(second)
     localization = _localization_payload()
     localization["reports"][0]["failed_ranks"] = [0, 1]
@@ -241,6 +253,7 @@ def test_comparison_counts_correlated_rank_local_actions() -> None:
 
 def test_comparison_correlates_failure_kind_with_rank() -> None:
     injection = _injection_payload()
+    injection["manifest"]["incidents"][0]["faults"].append({"fault_id": "rank-1-delay"})
     injection["injections"].append(
         {
             **injection["injections"][0],
@@ -271,6 +284,20 @@ def test_comparison_correlates_failure_kind_with_rank() -> None:
     assert occurrence["kind_match"]
     assert not occurrence["kind_rank_match"]
     assert occurrence["detected_action_count"] == 0
+    assert not occurrence["localized"]
+    assert not evaluation["summary"]["passed"]
+
+
+def test_comparison_requires_every_manifest_action_record() -> None:
+    injection = _injection_payload()
+    injection["manifest"]["incidents"][0]["faults"].append({"fault_id": "missing-rank-one-action"})
+
+    evaluation = compare_payloads(injection, _localization_payload())
+
+    occurrence = evaluation["evaluations"][0]
+    assert occurrence["action_count"] == 1
+    assert occurrence["expected_action_count"] == 2
+    assert not occurrence["injection_succeeded"]
     assert not occurrence["localized"]
     assert not evaluation["summary"]["passed"]
 

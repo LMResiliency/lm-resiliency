@@ -120,6 +120,7 @@ class LocalFaultEffect:
     replacement_identity: int | None = None
     done: bool = False
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
+    cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
 
     def verify(self, evidence: dict[str, Any]) -> None:
         with self.lock:
@@ -145,6 +146,7 @@ class LocalFaultEffect:
         *,
         preserve_replaced_state: bool = False,
     ) -> None:
+        self.cancel_event.set()
         with self.lock:
             if self.done:
                 return
@@ -186,6 +188,7 @@ class LocalFaultEffect:
         *,
         propagate_cleanup_error: bool = False,
     ) -> None:
+        self.cancel_event.set()
         with self.lock:
             if self.done:
                 return
@@ -419,11 +422,12 @@ class LocalFaultExecutor:
             _args: tuple[Any, ...],
             _kwargs: dict[str, Any],
         ) -> None:
+            if effect.cancel_event.wait(delay_ms / 1000.0):
+                return None
             with effect.lock:
-                if effect.done:
+                if effect.done or effect.cancel_event.is_set():
                     return None
                 try:
-                    time.sleep(delay_ms / 1000.0)
                     effect.verify({"delay_ms": delay_ms})
                     effect.matched()
                 except Exception as error:
@@ -871,6 +875,10 @@ def _transform_tensor(
     tensor = _local_shard(tensor)
     if tensor.numel() == 0:
         raise _UnsupportedTargetTensorError("fault target tensor must be non-empty")
+    if tensor.layout is not torch.strided:
+        raise _UnsupportedTargetTensorError(
+            f"fault target tensor layout {tensor.layout} is not supported"
+        )
     if not tensor.is_floating_point():
         raise TypeError("fault target tensor must be floating point")
     transformed = tensor.clone().contiguous()

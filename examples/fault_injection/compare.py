@@ -26,6 +26,7 @@ def compare_payloads(
         for record in injection.get("injections", ())
         if record.get("status") != "skipped_probability"
     ]
+    expected_fault_ids = _manifest_fault_ids(injection)
     reports = [dict(report) for report in localization.get("reports", ())]
     grouped: dict[str, list[dict[str, Any]]] = {}
     for record in records:
@@ -33,7 +34,12 @@ def compare_payloads(
     _reject_ambiguous_occurrence_iterations(grouped)
 
     evaluations = [
-        _evaluate_occurrence(occurrence_id, occurrence_records, reports)
+        _evaluate_occurrence(
+            occurrence_id,
+            occurrence_records,
+            reports,
+            expected_fault_ids,
+        )
         for occurrence_id, occurrence_records in grouped.items()
     ]
     localized = sum(bool(evaluation["localized"]) for evaluation in evaluations)
@@ -93,9 +99,26 @@ def _evaluate_occurrence(
     occurrence_id: str,
     records: Sequence[Mapping[str, Any]],
     reports: Sequence[Mapping[str, Any]],
+    manifest_fault_ids: Mapping[str, frozenset[str]],
 ) -> dict[str, Any]:
-    injection_succeeded = bool(records) and all(
-        bool(record.get("injection_succeeded")) for record in records
+    incident_ids = {str(record.get("incident_id", "")) for record in records}
+    if len(incident_ids) != 1 or "" in incident_ids:
+        raise ValueError(f"occurrence {occurrence_id!r} requires one non-empty incident_id")
+    incident_id = incident_ids.pop()
+    expected_fault_ids = manifest_fault_ids.get(incident_id)
+    if expected_fault_ids is None:
+        raise ValueError(
+            f"occurrence {occurrence_id!r} references unknown incident {incident_id!r}"
+        )
+    recorded_fault_ids = [str(record.get("fault_id", "")) for record in records]
+    complete_action_set = (
+        len(recorded_fault_ids) == len(expected_fault_ids)
+        and set(recorded_fault_ids) == expected_fault_ids
+    )
+    injection_succeeded = (
+        complete_action_set
+        and bool(records)
+        and all(bool(record.get("injection_succeeded")) for record in records)
     )
     iterations = {int(record["iteration"]) for record in records}
     if len(iterations) != 1:
@@ -205,6 +228,7 @@ def _evaluate_occurrence(
         "occurrence_id": occurrence_id,
         "iteration": iteration,
         "action_count": len(records),
+        "expected_action_count": len(expected_fault_ids),
         "detected_action_count": detected_action_count,
         "injection_succeeded": injection_succeeded,
         "detected": detected,
@@ -232,6 +256,36 @@ def _evaluate_occurrence(
         "source_match": source_match,
         "matched_reports": matching,
     }
+
+
+def _manifest_fault_ids(injection: Mapping[str, Any]) -> dict[str, frozenset[str]]:
+    manifest = injection.get("manifest")
+    if not isinstance(manifest, Mapping):
+        raise ValueError("injection artifact requires an embedded manifest")
+    incidents = manifest.get("incidents")
+    if isinstance(incidents, (str, bytes)) or not isinstance(incidents, Sequence):
+        raise TypeError("injection manifest incidents must be an array")
+    expected: dict[str, frozenset[str]] = {}
+    for incident in incidents:
+        if not isinstance(incident, Mapping):
+            raise TypeError("injection manifest incidents must contain objects")
+        incident_id = str(incident.get("incident_id", incident.get("id", "")))
+        faults = incident.get("faults")
+        if not incident_id:
+            raise ValueError("injection manifest incident_id must be non-empty")
+        if isinstance(faults, (str, bytes)) or not isinstance(faults, Sequence):
+            raise TypeError("injection manifest faults must be an array")
+        fault_ids = [
+            str(fault.get("fault_id", fault.get("id", "")))
+            for fault in faults
+            if isinstance(fault, Mapping)
+        ]
+        if len(fault_ids) != len(faults) or not fault_ids or any(not item for item in fault_ids):
+            raise ValueError("injection manifest faults require non-empty fault_id values")
+        if len(set(fault_ids)) != len(fault_ids):
+            raise ValueError("injection manifest fault_id values must be unique per incident")
+        expected[incident_id] = frozenset(fault_ids)
+    return expected
 
 
 def _expected_source_prefix(record: Mapping[str, Any]) -> str | None:
