@@ -13,6 +13,7 @@ The project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 ### Changed
 
 - Quick Start installs the core package from PyPI before introducing optional framework integrations.
+- Release publishing now requires a protected default-branch tag, revalidates source and exact artifact digests, uses a pinned build/audit toolchain, emits build provenance, and publishes draft-populated immutable GitHub releases.
 - GEMINI node-local checkpoints now use a versioned, schema-validated, weights-only format that rejects arbitrary pickle globals. The unrestricted-pickle format written by `0.1.0` is intentionally not loadable after this change.
 
 ## [0.1.0] - 2026-08-12
@@ -31,4 +32,4 @@ The project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 
 Accumulate user-visible changes under `Unreleased`.
 Before tagging a release, move those entries under the new version, replace `Pending` with the release date, and update the versions in `pyproject.toml` and `CITATION.cff`.
-Release artifacts are built and published by the [Release workflow](.github/workflows/release.yml).
+Release artifacts are built and published by the [Release workflow](.github/workflows/release.yml) under the documented [release process](docs/release.md).
