@@ -1245,7 +1245,7 @@ def _evaluate_occurrence(
     component_matches = (
         None
         if not reported_components
-        else bool(expected_components) and expected_components.issubset(reported_components)
+        else bool(expected_components) and expected_components == reported_components
     )
     localized = (
         injection_succeeded

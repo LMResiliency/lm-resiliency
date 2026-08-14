@@ -256,7 +256,10 @@ class TrainingContext:
                     ) -> None:
                         _pending["identities"] = frozenset(
                             id(parameter)
-                            for name, parameter in module.named_parameters(recurse=True)
+                            for name, parameter in module.named_parameters(
+                                recurse=True,
+                                remove_duplicate=False,
+                            )
                             if f"{prefix}{name}" in state_dict
                         )
 

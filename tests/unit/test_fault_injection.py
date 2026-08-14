@@ -1986,6 +1986,49 @@ def test_partial_model_state_load_does_not_preserve_omitted_fault_target() -> No
     session.close()
 
 
+def test_tied_parameter_alias_load_preserves_replaced_fault_target() -> None:
+    class TiedModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.embedding = nn.Embedding(8, 4)
+            self.lm_head = nn.Linear(4, 8, bias=False)
+            self.lm_head.weight = self.embedding.weight
+
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            return self.lm_head(self.embedding(value))
+
+    model = TiedModel()
+    optimizer = _optimizer(model)
+    replacement = torch.full_like(model.embedding.weight, 7.0)
+    fault = _corruption(
+        target=FaultTarget(
+            rank=0,
+            surface=FaultSurface.WEIGHT,
+            module_path="embedding",
+        ),
+        scope=FaultScope.SINGLE,
+    )
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="recovery"),
+                faults=(fault,),
+            )
+        ),
+        rank=0,
+    )
+
+    model.load_state_dict({"lm_head.weight": replacement}, strict=False)
+    session.notify_recovery()
+
+    torch.testing.assert_close(model.embedding.weight, replacement)
+    torch.testing.assert_close(model.lm_head.weight, replacement)
+    session.close()
+
+
 def test_optimizer_state_load_does_not_preserve_active_model_fault() -> None:
     model = TinyModel()
     optimizer = _optimizer(model)
@@ -3278,6 +3321,124 @@ def test_failed_later_incident_rolls_back_earlier_active_incidents() -> None:
     _step(model, optimizer)
 
 
+def test_equivalent_target_selectors_collide_by_resolved_parameter() -> None:
+    model = TinyModel()
+    baseline = model.layers[0].weight.detach().clone()
+    explicit = _corruption(
+        fault_id="explicit",
+        target=_target(
+            surface=FaultSurface.WEIGHT,
+            module_path="layers.0",
+        ),
+        scope=FaultScope.SINGLE,
+    )
+    logical = _corruption(
+        fault_id="logical",
+        target=_target(
+            surface=FaultSurface.WEIGHT,
+            module_path=None,
+            component="transformer_block",
+            index=0,
+        ),
+        scope=FaultScope.SINGLE,
+        parameter="weight",
+    )
+
+    with pytest.raises(RuntimeError, match="already active on the same target"):
+        enable_fault_injection(
+            model,
+            _optimizer(model),
+            campaign=_campaign(
+                _incident(
+                    at=(1,),
+                    lifetime=IncidentLifetime(until="recovery"),
+                    faults=(explicit, logical),
+                )
+            ),
+            rank=0,
+        )
+
+    torch.testing.assert_close(model.layers[0].weight, baseline)
+
+
+def test_state_history_is_separate_for_different_scopes() -> None:
+    model = TinyModel()
+    stale_single = FaultSpec(
+        fault_id="stale-single",
+        type=FailureType.STALE_STATE,
+        target=_target(surface=FaultSurface.WEIGHT),
+        parameters={"scope": FaultScope.SINGLE.value},
+    )
+    stale_full = FaultSpec(
+        fault_id="stale-full",
+        type=FailureType.STALE_STATE,
+        target=_target(surface=FaultSurface.WEIGHT),
+        parameters={"scope": FaultScope.FULL.value},
+    )
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                incident_id="single",
+                at=(2,),
+                lifetime=IncidentLifetime(iterations=1),
+                faults=(stale_single,),
+            ),
+            _incident(
+                incident_id="full",
+                at=(2,),
+                lifetime=IncidentLifetime(iterations=1),
+                faults=(stale_full,),
+            ),
+        ),
+        rank=0,
+    )
+
+    assert len(session._local._history) == 2
+    session.close()
+
+
+def test_optimizer_state_history_survives_state_dict_tensor_replacement() -> None:
+    model = TinyModel()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.0)
+    _step(model, optimizer)
+    stale = FaultSpec(
+        fault_id="stale-optimizer-state",
+        type=FailureType.STALE_STATE,
+        target=_target(surface=FaultSurface.OPTIMIZER_STATE),
+        parameters={
+            "scope": FaultScope.SINGLE.value,
+            "parameter": "weight",
+            "state_key": "exp_avg",
+        },
+    )
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(3,),
+                lifetime=IncidentLifetime(iterations=1),
+                faults=(stale,),
+            )
+        ),
+        completed_iterations=1,
+        rank=0,
+    )
+    state = copy.deepcopy(optimizer.state_dict())
+    previous_tensor = optimizer.state[model.layers[0].weight]["exp_avg"]
+
+    optimizer.load_state_dict(state)
+    replacement_tensor = optimizer.state[model.layers[0].weight]["exp_avg"]
+    assert replacement_tensor is not previous_tensor
+    _step(model, optimizer)
+    _step(model, optimizer)
+
+    assert session.records[0].injection_succeeded
+    session.close()
+
+
 def test_correlated_faults_share_one_occurrence_and_evaluation() -> None:
     events: list[tuple[str, str]] = []
     executor = _recording_executor(
@@ -3457,6 +3618,33 @@ def test_supplied_kind_and_component_mismatches_are_not_localized(
 
     assert not evaluation.localized
     assert evaluation.kind_matches is False or evaluation.component_matches is False
+    session.close()
+
+
+def test_extra_component_evidence_is_not_localized() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(_incident(at=(1,))),
+        rank=0,
+    )
+    _step(model, optimizer)
+
+    evaluation = session.evaluate(
+        [
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_ranks=(0,),
+                components=("layers.0", "embedding"),
+            )
+        ]
+    ).evaluations[0]
+
+    assert not evaluation.localized
+    assert evaluation.component_matches is False
     session.close()
 
 

@@ -249,10 +249,10 @@ class LocalFaultExecutor:
             fault = request.fault
             if fault.target.execution_rank != self._rank or not self.supports(fault):
                 continue
-            key = _target_key(fault)
-            if key in seen or key in self._active_keys:
+            target_key = self._resolved_target_key(fault)
+            if target_key in seen or target_key in self._active_keys:
                 raise RuntimeError("another fault is already active on the same target")
-            seen.add(key)
+            seen.add(target_key)
             if fault.target.surface not in {
                 FaultSurface.WEIGHT,
                 FaultSurface.BIAS,
@@ -260,7 +260,7 @@ class LocalFaultExecutor:
             }:
                 continue
             tensor = self._state_tensor(fault)
-            history = self._history.get(key)
+            history = self._history.get(self._history_key(fault))
             _indices, original, transformed = _prepare_state_values(
                 tensor,
                 request,
@@ -278,7 +278,7 @@ class LocalFaultExecutor:
                 continue
             if not self.supports(fault):
                 continue
-            key = _target_key(fault)
+            key = self._history_key(fault)
             desired.setdefault(key, fault)
 
         for key in set(self._history) - set(desired):
@@ -318,7 +318,7 @@ class LocalFaultExecutor:
                 f"local executor does not support {fault.type.value} on "
                 f"{fault.target.surface.value}"
             )
-        key = _target_key(fault)
+        key = self._resolved_target_key(fault)
         if key in self._active_keys:
             raise RuntimeError("another fault is already active on the same target")
         self._active_keys.add(key)
@@ -436,7 +436,7 @@ class LocalFaultExecutor:
     ) -> None:
         fault = request.fault
         module = self._context.resolve_module(fault.target)
-        history = self._history.get(_target_key(fault))
+        history = self._history.get(self._history_key(fault))
         if fault.target.surface is FaultSurface.INPUT:
 
             def transform_input(
@@ -501,7 +501,7 @@ class LocalFaultExecutor:
             fault.target,
             parameter_name=_parameter_name(fault),
         )
-        history = self._history.get(_target_key(fault))
+        history = self._history.get(self._history_key(fault))
 
         def transform_gradient(gradient: torch.Tensor) -> torch.Tensor:
             try:
@@ -556,13 +556,58 @@ class LocalFaultExecutor:
             return owner_identity
         return None
 
+    def _resolved_target_key(self, fault: FaultSpec) -> tuple[Any, ...]:
+        surface = fault.target.surface
+        parameter_name = _parameter_name(fault)
+        if surface in {
+            FaultSurface.WEIGHT,
+            FaultSurface.BIAS,
+            FaultSurface.GRADIENT,
+        }:
+            target = self._context.resolve_gradient_parameter(
+                fault.target,
+                parameter_name=parameter_name,
+            )
+        elif surface is FaultSurface.OPTIMIZER_STATE:
+            parameter = self._context.resolve_gradient_parameter(
+                fault.target,
+                parameter_name=parameter_name,
+            )
+            _tensor, owner_identity = self._context.resolve_optimizer_state_with_owner(
+                fault.target,
+                parameter_name=parameter_name,
+                state_key=(
+                    None
+                    if fault.parameters.get("state_key") is None
+                    else str(fault.parameters["state_key"])
+                ),
+            )
+            return (
+                fault.target.execution_rank,
+                surface.value,
+                id(parameter),
+                owner_identity,
+                fault.parameters.get("state_key"),
+            )
+        else:
+            target = self._context.resolve_module(fault.target)
+        return (
+            fault.target.execution_rank,
+            surface.value,
+            id(target),
+        )
+
+    def _history_key(self, fault: FaultSpec) -> tuple[Any, ...]:
+        scope = FaultScope(fault.parameters.get("scope", FaultScope.SINGLE.value))
+        return (*self._resolved_target_key(fault), scope.value)
+
     def _mutate_state_tensor(
         self,
         tensor: torch.Tensor,
         request: FaultExecutionRequest,
     ) -> tuple[Callable[[bool, bool], None], int]:
         tensor = _local_shard(tensor)
-        history = self._history.get(_target_key(request.fault))
+        history = self._history.get(self._history_key(request.fault))
         changed_indices, original, transformed = _prepare_state_values(
             tensor,
             request,
@@ -889,20 +934,6 @@ def _first_float_tensor(value: Any) -> torch.Tensor | None:
         if isinstance(leaf, torch.Tensor) and leaf.is_floating_point() and leaf.numel():
             return leaf
     return None
-
-
-def _target_key(fault: FaultSpec) -> tuple[Any, ...]:
-    target = fault.target
-    return (
-        target.execution_rank,
-        target.model_part,
-        target.component,
-        target.index,
-        target.module_path,
-        target.surface.value,
-        _parameter_name(fault),
-        fault.parameters.get("state_key"),
-    )
 
 
 def _parameter_name(fault: FaultSpec) -> str | None:

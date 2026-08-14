@@ -598,6 +598,8 @@ for an occurrence whose injected targets have no expected component is an
 overclaim and fails attribution.
 `failed_resources` and `components` must be arrays of non-empty strings; scalar
 strings and coercible non-string values are rejected.
+When component evidence is supplied, it must exactly match the expected
+component set; extra components are attribution errors.
 Example detection counts also require a report with the expected failure kind;
 an unrelated report at the same iteration is retained as evidence but does not
 count as detecting the injected occurrence. For correlated incidents containing
