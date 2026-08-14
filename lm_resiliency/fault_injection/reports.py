@@ -169,6 +169,11 @@ class LocalizationResult:
             raise ValueError("localization occurrence_id must be non-empty")
         if not isinstance(self.detected, bool):
             raise TypeError("localization detected must be a boolean")
+        if self.kind is not None:
+            if not isinstance(self.kind, str):
+                raise TypeError("localization kind must be a string")
+            if not self.kind.strip():
+                raise ValueError("localization kind must be non-empty")
         if any(rank < 0 for rank in self.failed_ranks):
             raise ValueError("localization failed_ranks must be non-negative")
         if not self.detected and (self.failed_ranks or self.failed_resources or self.components):

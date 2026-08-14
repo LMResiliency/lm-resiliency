@@ -11,6 +11,7 @@ from typing import Any, Mapping, Sequence
 
 import torch.distributed as dist
 
+from lm_resiliency.fault_injection._json import freeze_json_mapping, thaw_json
 from lm_resiliency.fault_injection.config import (
     ClockOrigin,
     FailureType,
@@ -364,9 +365,21 @@ class FaultInjectionSession:
             if self._local.supports(request.fault):
                 continue
             executor = self._executor_for(request.fault)
+            self._validate_executor_lifecycle(executor)
             validate = getattr(executor, "validate", None)
             if callable(validate):
                 validate(request)
+
+    @staticmethod
+    def _validate_executor_lifecycle(executor: FaultExecutor) -> None:
+        if getattr(executor, "can_deactivate", True) is False and not getattr(
+            executor,
+            "one_shot",
+            False,
+        ):
+            raise ValueError(
+                f"fault executor {executor.name!r} without deactivation must declare one_shot=True"
+            )
 
     def _requests_for_iteration(self, iteration: int) -> tuple[FaultExecutionRequest, ...]:
         requests: list[FaultExecutionRequest] = []
@@ -499,6 +512,7 @@ class FaultInjectionSession:
             for fault in incident.faults
         )
         if _distributed_world_size() <= 1:
+            self._preflight_iteration(iteration)
             staged = self._stage_iteration_attempts(iteration, candidates)
             self._activate_staged_iteration(iteration, staged)
             return
@@ -687,6 +701,8 @@ class FaultInjectionSession:
         record: FaultInjectionRecord,
     ) -> _ExternalEffect:
         executor = self._executor_for(request.fault)
+        record.executor = executor.name
+        self._validate_executor_lifecycle(executor)
         try:
             result = executor.activate(request)
         except Exception as error:
@@ -700,7 +716,6 @@ class FaultInjectionSession:
             record.completed_at_ns = time.monotonic_ns()
             raise TypeError(record.error)
         if result.active and getattr(executor, "can_deactivate", True) is False:
-            record.executor = executor.name
             record.verified = result.verified
             record.status = InjectionStatus.FAILED
             record.error = (
@@ -718,14 +733,12 @@ class FaultInjectionSession:
                     executor.deactivate(request, result)
                 except Exception as caught:
                     deactivation_error = caught
-            record.executor = executor.name
             record.status = InjectionStatus.FAILED
             record.error = str(error)
             if deactivation_error is not None:
                 record.error += f"; deactivation also failed: {deactivation_error}"
             record.completed_at_ns = time.monotonic_ns()
             raise ValueError(record.error) from error
-        record.executor = executor.name
         record.verified = result.verified
         record.evidence = evidence
         record.activated_at_ns = time.monotonic_ns()
@@ -1097,10 +1110,13 @@ def _distributed_world_size() -> int:
 def _json_mapping(value: Mapping[str, Any] | None, label: str) -> dict[str, Any]:
     normalized = {} if value is None else dict(value)
     try:
-        json.dumps(normalized, allow_nan=False, sort_keys=True)
+        frozen = freeze_json_mapping(normalized, label)
     except (TypeError, ValueError) as error:
         raise ValueError(f"{label} must be strictly JSON-serializable: {error}") from error
-    return normalized
+    thawed = thaw_json(frozen)
+    if not isinstance(thawed, dict):
+        raise AssertionError("JSON mapping thaw did not produce a dictionary")
+    return thawed
 
 
 def _probability_selected(
@@ -1200,7 +1216,9 @@ def _evaluate_occurrence(
         component for result in detected_results for component in result.components
     }
     component_matches = (
-        None if not reported_components else expected_components.issubset(reported_components)
+        None
+        if not reported_components
+        else bool(expected_components) and expected_components.issubset(reported_components)
     )
     localized = (
         injection_succeeded

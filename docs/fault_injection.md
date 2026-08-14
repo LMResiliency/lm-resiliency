@@ -330,6 +330,12 @@ fails and the campaign must specify an exact `module_path`.
 | `state_key` | `optimizer_state` | First suitable tensor | Exact optimizer-state entry, such as `exp_avg` or `exp_avg_sq`. |
 | `delay_ms` | `delay` | Required | Finite positive JSON number in milliseconds. Strings, booleans, NaN, and infinity are rejected. |
 
+Built-in local parameters are validated when the manifest is constructed.
+`factor` and `std` must be finite numbers, `std` must be positive, `set_value`
+accepts only a number or `nan`/`inf` sentinel, and state-flow `scope` values
+must be one of the documented selectors. Invalid values never survive until a
+model hook executes.
+
 Stale and duplicate faults retain two observed values only during their
 scheduled collection window. Module and gradient observation starts one
 training iteration before a candidate and is removed at the optimizer boundary
@@ -484,8 +490,14 @@ The executor result's `verified` and `active` fields must be JSON booleans;
 truthy strings and integers are rejected.
 Activation and deactivation evidence must be strictly JSON-serializable; invalid
 evidence fails the action immediately and active effects are deactivated.
-An executor that returns an active effect must provide a deactivation callback;
-callback-free executors are valid only for one-shot `active=false` results.
+An executor that returns an active effect must provide a deactivation callback.
+A callback executor without deactivation must declare `one_shot=True`, which is
+an explicit promise that activation returns `active=false`. This capability is
+validated before the callback runs; returning an active result from a one-shot
+executor is still rejected.
+Executor activation and deactivation evidence is captured as a deep JSON
+snapshot, so later mutation of callback-owned dictionaries or lists cannot
+change campaign ground truth.
 
 The kit injects observable effects, not physical defects.
 For example, an ECC event is represented as tensor corruption or resource loss;
@@ -493,7 +505,9 @@ a failed cable is represented as delay, message loss, or network partition.
 
 ## Restart and Retrigger Behavior
 
-Each candidate occurrence is journaled before activation.
+Each candidate occurrence is preflighted and then journaled before activation.
+This ordering applies to both distributed and single-rank future iterations, so
+an invalid target or executor does not consume a retry attempt.
 The default `retrigger: "once"` prevents the same occurrence from firing again
 after rollback when a persistent state store is used.
 
@@ -575,6 +589,9 @@ sets. Extra targets are attribution errors, not successful localization. If a
 localization result also supplies `kind` or `components`, that evidence must
 match the injected fault; omit optional evidence when the resiliency system does
 not report it.
+`kind`, when supplied, must be a non-empty string. Supplying component evidence
+for an occurrence whose injected targets have no expected component is an
+overclaim and fails attribution.
 Example detection counts also require a report with the expected failure kind;
 an unrelated report at the same iteration is retained as evidence but does not
 count as detecting the injected occurrence. For correlated incidents containing

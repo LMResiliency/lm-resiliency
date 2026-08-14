@@ -96,6 +96,7 @@ class CallbackFaultExecutor:
             Mapping[str, Any] | None,
         ]
         | None = None,
+        one_shot: bool = False,
         max_safety: SafetyClass = SafetyClass.SAFE_IN_PROCESS,
     ) -> None:
         if not name or not name.strip():
@@ -107,6 +108,11 @@ class CallbackFaultExecutor:
         self._activate = activate
         self._validate = validate
         self._deactivate = deactivate
+        if not isinstance(one_shot, bool):
+            raise TypeError("fault executor one_shot must be a boolean")
+        if deactivate is None and not one_shot:
+            raise ValueError("callback executors without deactivate must declare one_shot=True")
+        self._one_shot = one_shot
         self._max_safety = SafetyClass(max_safety)
 
     @property
@@ -122,6 +128,10 @@ class CallbackFaultExecutor:
     @property
     def can_deactivate(self) -> bool:
         return self._deactivate is not None
+
+    @property
+    def one_shot(self) -> bool:
+        return self._one_shot
 
     def validate(self, request: FaultExecutionRequest) -> None:
         if self._validate is not None:

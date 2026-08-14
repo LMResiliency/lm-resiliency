@@ -506,15 +506,36 @@ class FaultSpec:
         return expected_failure_kind(self.type)
 
     def _validate_parameters(self) -> None:
+        if (
+            self.type
+            in {
+                FailureType.TENSOR_CORRUPTION,
+                FailureType.STALE_STATE,
+                FailureType.DROP,
+                FailureType.DUPLICATE,
+                FailureType.REORDER,
+            }
+            and "scope" in self.parameters
+        ):
+            FaultScope(self.parameters["scope"])
         if self.type is FailureType.TENSOR_CORRUPTION:
             operation = self.parameters.get("operation")
             if operation is None:
                 raise ValueError("tensor_corruption requires parameters.operation")
             CorruptionOperation(operation)
-            if "scope" in self.parameters:
-                FaultScope(self.parameters["scope"])
             if "magnitude" in self.parameters:
                 FaultMagnitude(self.parameters["magnitude"])
+            if "factor" in self.parameters:
+                _finite_number(self.parameters["factor"], "tensor_corruption parameters.factor")
+            if "std" in self.parameters:
+                standard_deviation = _finite_number(
+                    self.parameters["std"],
+                    "tensor_corruption parameters.std",
+                )
+                if standard_deviation <= 0:
+                    raise ValueError("tensor_corruption parameters.std must be greater than zero")
+            if "value" in self.parameters:
+                _corruption_value(self.parameters["value"])
         if self.type is FailureType.DELAY:
             delay_ms = self.parameters.get("delay_ms")
             if delay_ms is None:
@@ -774,6 +795,33 @@ def _strict_int(value: Any, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"{label} must be an integer")
     return value
+
+
+def _finite_number(value: Any, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{label} must be a number")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{label} must be finite")
+    return number
+
+
+def _corruption_value(value: Any) -> None:
+    if isinstance(value, str):
+        if value.lower() not in {
+            "nan",
+            "inf",
+            "+inf",
+            "infinity",
+            "+infinity",
+            "-inf",
+            "-infinity",
+        }:
+            raise ValueError(
+                "tensor_corruption parameters.value must be numeric, nan, inf, or -inf"
+            )
+        return
+    _finite_number(value, "tensor_corruption parameters.value")
 
 
 __all__ = [

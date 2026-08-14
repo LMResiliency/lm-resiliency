@@ -503,6 +503,66 @@ def test_fault_parameter_contracts_are_rejected() -> None:
         _corruption(operation=CorruptionOperation.SET_VALUE)
 
 
+@pytest.mark.parametrize(
+    ("operation", "parameters", "error_type", "message"),
+    [
+        (
+            CorruptionOperation.SCALE,
+            {"factor": "large"},
+            TypeError,
+            "parameters.factor must be a number",
+        ),
+        (
+            CorruptionOperation.NOISE,
+            {"std": "small"},
+            TypeError,
+            "parameters.std must be a number",
+        ),
+        (
+            CorruptionOperation.NOISE,
+            {"std": 0.0},
+            ValueError,
+            "parameters.std must be greater than zero",
+        ),
+        (
+            CorruptionOperation.SET_VALUE,
+            {"value": "invalid"},
+            ValueError,
+            "parameters.value must be numeric",
+        ),
+    ],
+)
+def test_tensor_corruption_rejects_malformed_operation_parameters(
+    operation: CorruptionOperation,
+    parameters: dict[str, object],
+    error_type: type[Exception],
+    message: str,
+) -> None:
+    with pytest.raises(error_type, match=message):
+        _corruption(operation=operation, **parameters)
+
+
+@pytest.mark.parametrize(
+    "failure_type",
+    [
+        FailureType.STALE_STATE,
+        FailureType.DROP,
+        FailureType.DUPLICATE,
+        FailureType.REORDER,
+    ],
+)
+def test_state_flow_faults_validate_scope_during_manifest_construction(
+    failure_type: FailureType,
+) -> None:
+    with pytest.raises(ValueError, match="not a valid FaultScope"):
+        FaultSpec(
+            fault_id=failure_type.value,
+            type=failure_type,
+            target=_target(),
+            parameters={"scope": "invalid"},
+        )
+
+
 @pytest.mark.parametrize("delay_ms", ["nan", "inf", True])
 def test_delay_rejects_non_numeric_parameters(delay_ms: object) -> None:
     with pytest.raises(TypeError, match="delay_ms must be a number"):
@@ -811,6 +871,36 @@ def test_future_iteration_preflight_failure_is_propagated_to_all_ranks() -> None
             _step(model, optimizer)
 
     assert session._closed
+
+
+def test_single_rank_future_preflight_failure_does_not_consume_attempt() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    store = MemoryCampaignStateStore()
+    fault = _corruption(
+        target=_target(surface=FaultSurface.OPTIMIZER_STATE),
+        parameter="weight",
+        state_key="missing",
+    )
+    campaign = _campaign(
+        _incident(
+            at=(2,),
+            lifetime=IncidentLifetime(iterations=1),
+            faults=(fault,),
+        )
+    )
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=campaign,
+        state_store=store,
+    )
+
+    with pytest.raises(LookupError, match="missing"):
+        _step(model, optimizer)
+
+    assert store.load(campaign.name).attempts == {}
+    session.close()
 
 
 def test_future_boundary_preparation_failure_is_propagated_to_all_ranks() -> None:
@@ -2725,33 +2815,19 @@ def test_external_result_flags_must_be_booleans(field: str, value: object) -> No
 
 
 def test_active_external_effect_requires_deactivation_callback() -> None:
-    active_executor = CallbackFaultExecutor(
-        name="leaky",
-        supported_types={FailureType.PROCESS_TERMINATION},
-        activate=lambda _request: FaultExecutionResult(verified=True, active=True),
-        max_safety=SafetyClass.ISOLATED_DESTRUCTIVE,
-    )
-    model = TinyModel()
-
-    with pytest.raises(ValueError, match="without a deactivation callback"):
-        enable_fault_injection(
-            model,
-            _optimizer(model),
-            campaign=_campaign(
-                _incident(
-                    at=(1,),
-                    lifetime=IncidentLifetime(until="campaign_end"),
-                    faults=(_external_fault(FailureType.PROCESS_TERMINATION),),
-                )
-            ),
-            executors=(active_executor,),
-            rank=0,
+    with pytest.raises(ValueError, match="must declare one_shot=True"):
+        CallbackFaultExecutor(
+            name="leaky",
+            supported_types={FailureType.PROCESS_TERMINATION},
+            activate=lambda _request: FaultExecutionResult(verified=True, active=True),
+            max_safety=SafetyClass.ISOLATED_DESTRUCTIVE,
         )
 
     one_shot_executor = CallbackFaultExecutor(
         name="one-shot",
         supported_types={FailureType.EXCEPTION},
         activate=lambda _request: FaultExecutionResult(verified=True, active=False),
+        one_shot=True,
         max_safety=SafetyClass.ISOLATED_DESTRUCTIVE,
     )
     one_shot_model = TinyModel()
@@ -2763,6 +2839,39 @@ def test_active_external_effect_requires_deactivation_callback() -> None:
         rank=0,
     )
     assert session.records[0].status is InjectionStatus.COMPLETED
+    session.close()
+
+
+def test_external_activation_failure_records_selected_executor() -> None:
+    def activate(_request):
+        raise RuntimeError("activation failed")
+
+    executor = CallbackFaultExecutor(
+        name="failing-executor",
+        supported_types={FailureType.EXCEPTION},
+        activate=activate,
+        deactivate=lambda _request, _result: None,
+        max_safety=SafetyClass.ISOLATED_DESTRUCTIVE,
+    )
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(2,),
+                faults=(_external_fault(FailureType.EXCEPTION),),
+            )
+        ),
+        executors=(executor,),
+    )
+
+    with pytest.raises(RuntimeError, match="activation failed"):
+        _step(model, optimizer)
+
+    assert session.records[0].executor == "failing-executor"
+    assert session.records[0].status is InjectionStatus.FAILED
     session.close()
 
 
@@ -2806,6 +2915,38 @@ def test_external_executor_evidence_must_be_json_serializable() -> None:
         )
 
     assert events == ["activate", "deactivate"]
+
+
+def test_external_executor_evidence_is_a_deep_snapshot() -> None:
+    nested_values = [1]
+    executor = CallbackFaultExecutor(
+        name="snapshot-evidence",
+        supported_types={FailureType.EXCEPTION},
+        activate=lambda _request: FaultExecutionResult(
+            verified=True,
+            active=False,
+            evidence={"nested": {"values": nested_values}},
+        ),
+        one_shot=True,
+        max_safety=SafetyClass.ISOLATED_DESTRUCTIVE,
+    )
+    model = TinyModel()
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                faults=(_external_fault(FailureType.EXCEPTION),),
+            )
+        ),
+        executors=(executor,),
+    )
+    nested_values.append(2)
+
+    assert session.records[0].evidence == {"nested": {"values": [1]}}
+    json.dumps(session.evaluate().to_dict(), allow_nan=False)
+    session.close()
 
 
 def test_external_permanent_fault_deactivates_on_replacement() -> None:
@@ -3160,6 +3301,40 @@ def test_unexpected_localization_targets_are_not_localized() -> None:
     session.close()
 
 
+def test_component_evidence_is_an_overclaim_when_target_has_no_component() -> None:
+    events: list[tuple[str, str]] = []
+    executor = _recording_executor({FailureType.PROCESS_TERMINATION}, events)
+    model = TinyModel()
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                faults=(_external_fault(FailureType.PROCESS_TERMINATION),),
+            )
+        ),
+        executors=(executor,),
+    )
+
+    evaluation = session.evaluate(
+        [
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_ranks=(0,),
+                failed_resources=("node-0",),
+                kind="process_failure",
+                components=("transformer_block",),
+            )
+        ]
+    ).evaluations[0]
+
+    assert not evaluation.localized
+    assert evaluation.component_matches is False
+    session.close()
+
+
 def test_unspecified_target_rank_scores_the_execution_rank() -> None:
     model = TinyModel()
     optimizer = _optimizer(model)
@@ -3270,6 +3445,25 @@ def test_evaluation_rejects_unknown_and_inconsistent_results() -> None:
             }
         )
     session.close()
+
+
+@pytest.mark.parametrize("kind", ["", "   "])
+def test_localization_rejects_empty_kind(kind: str) -> None:
+    with pytest.raises(ValueError, match="kind must be non-empty"):
+        LocalizationResult(
+            occurrence_id="incident@1",
+            detected=True,
+            kind=kind,
+        )
+
+
+def test_localization_rejects_non_string_kind() -> None:
+    with pytest.raises(TypeError, match="kind must be a string"):
+        LocalizationResult(
+            occurrence_id="incident@1",
+            detected=True,
+            kind=Path("sdc"),  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.parametrize("latency", [float("nan"), float("inf"), -1.0])
