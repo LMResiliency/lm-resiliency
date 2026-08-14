@@ -20,6 +20,19 @@ Correctness under partial failure is more important than convenience. Prefer con
 - Do not weaken a documented safety property merely to make a test pass. Update implementation, tests, and documentation together when the contract intentionally changes.
 - Keep optional framework dependencies lazy. Importing `lm_resiliency` must not require DeepSpeed, Megatron Core, TorchTitan, Triton, or CUDA-only packages.
 
+## Pull request review workflow
+
+Use Codex review in batches rather than after every revision commit.
+
+- The native Codex GitHub integration handles the initial review when a pull request is opened for review or moved from draft to ready.
+- When addressing review feedback, first inspect **all unresolved Codex review threads** and treat the complete set of actionable findings as one fix batch.
+- Implement the whole batch, add or update focused regression tests, run the relevant deterministic checks, and inspect the resulting diff before asking for another review.
+- Do **not** request `@codex review` after each commit, formatting fix, test-only adjustment, or other intermediate revision.
+- Resolve a review thread only after its underlying finding is actually addressed or intentionally rejected with a documented rationale.
+- After the current batch is addressed and the relevant CI checks pass, request **one** fresh `@codex review` to look for newly introduced or previously missed issues.
+- If that re-review produces new actionable findings, repeat the same batch process and request one additional review only after the next batch is complete.
+- A clean later review does not automatically resolve earlier GitHub review threads; verify the old findings are addressed and explicitly resolve those conversations before merge.
+
 ## Code Review Rules
 
 Review for concrete correctness, safety, compatibility, and performance regressions. Prefer a small number of high-confidence findings over speculative comments. Do not report style-only issues that deterministic tooling can catch.
