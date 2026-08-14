@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
 import random
 import threading
 import time
 from bisect import bisect_left
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 import torch.distributed as dist
@@ -66,27 +67,78 @@ class _StagedIncident:
     selected: bool
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
+class _ScheduleCursor:
+    incidents: tuple[FaultIncident, ...]
+    expiration: bool = False
+    _heap: list[tuple[int, int, int]] = field(init=False, default_factory=list)
+    _cache: dict[int, tuple[tuple[FaultIncident, int], ...]] = field(
+        init=False,
+        default_factory=dict,
+    )
+    _high_water: int = field(init=False, default=0)
+
+    def __post_init__(self) -> None:
+        for order, incident in enumerate(self.incidents):
+            offset = int(incident.lifetime.iterations or 0) - 1 if self.expiration else 0
+            if self.expiration and incident.lifetime.iterations is None:
+                continue
+            first = _next_trigger_at_or_after(incident, 1)
+            if first is not None:
+                heapq.heappush(self._heap, (first + offset, order, offset))
+
+    def at(self, iteration: int) -> tuple[tuple[FaultIncident, int], ...]:
+        cached = self._cache.get(iteration)
+        if cached is not None:
+            return cached
+        if iteration < self._high_water:
+            result: list[tuple[FaultIncident, int]] = []
+            for incident in self.incidents:
+                if self.expiration and incident.lifetime.iterations is None:
+                    continue
+                offset = int(incident.lifetime.iterations or 0) - 1 if self.expiration else 0
+                start = iteration - offset
+                if start > 0 and _trigger_contains_iteration(incident, start):
+                    result.append((incident, start))
+            return tuple(result)
+
+        while self._heap and self._heap[0][0] < iteration:
+            _scheduled, order, offset = heapq.heappop(self._heap)
+            incident = self.incidents[order]
+            next_start = _next_trigger_at_or_after(incident, iteration - offset)
+            if next_start is not None:
+                heapq.heappush(self._heap, (next_start + offset, order, offset))
+
+        matched: list[tuple[int, int, int]] = []
+        while self._heap and self._heap[0][0] == iteration:
+            matched.append(heapq.heappop(self._heap))
+        for item in matched:
+            heapq.heappush(self._heap, item)
+        result = tuple(
+            (self.incidents[order], iteration - offset) for _scheduled, order, offset in matched
+        )
+        self._high_water = iteration
+        self._cache[iteration] = result
+        while len(self._cache) > 8:
+            self._cache.pop(next(iter(self._cache)))
+        return result
+
+
+@dataclass(slots=True)
 class _CampaignSchedule:
     incidents: tuple[FaultIncident, ...]
+    _candidates: _ScheduleCursor = field(init=False)
+    _expirations: _ScheduleCursor = field(init=False)
+
+    def __post_init__(self) -> None:
+        self._candidates = _ScheduleCursor(self.incidents)
+        self._expirations = _ScheduleCursor(self.incidents, expiration=True)
 
     def candidates(self, iteration: int) -> tuple[FaultIncident, ...]:
-        return tuple(
-            incident
-            for incident in self.incidents
-            if _trigger_contains_iteration(incident, iteration)
-        )
+        return tuple(incident for incident, _start in self._candidates.at(iteration))
 
     def expirations(self, iteration: int) -> tuple[tuple[FaultIncident, int], ...]:
-        expiring: list[tuple[FaultIncident, int]] = []
-        for incident in self.incidents:
-            lifetime = incident.lifetime.iterations
-            if lifetime is None:
-                continue
-            start_iteration = iteration - lifetime + 1
-            if start_iteration > 0 and _trigger_contains_iteration(incident, start_iteration):
-                expiring.append((incident, start_iteration))
-        return tuple(expiring)
+        return self._expirations.at(iteration)
 
 
 @dataclass(slots=True)
@@ -96,52 +148,57 @@ class _ExternalEffect:
     executor: FaultExecutor
     result: FaultExecutionResult
     done: bool = False
+    lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def complete(self) -> None:
-        if self.done:
-            return
-        try:
-            evidence = self.executor.deactivate(self.request, self.result)
-            normalized_evidence = _json_mapping(
-                evidence,
-                "fault executor deactivation evidence",
-            )
-        except Exception as error:
+        with self.lock:
+            if self.done:
+                return
+            try:
+                evidence = self.executor.deactivate(self.request, self.result)
+                normalized_evidence = _json_mapping(
+                    evidence,
+                    "fault executor deactivation evidence",
+                )
+            except Exception as error:
+                with self.record._lock:
+                    self.record.status = InjectionStatus.FAILED
+                    self.record.error = f"fault deactivation failed: {error}"
+                    self.record.completed_at_ns = time.monotonic_ns()
+                self.done = True
+                raise
             with self.record._lock:
-                self.record.status = InjectionStatus.FAILED
-                self.record.error = f"fault deactivation failed: {error}"
+                if normalized_evidence:
+                    merged = dict(self.record.evidence)
+                    merged.update(normalized_evidence)
+                    self.record.evidence = merged
+                self.record.status = (
+                    InjectionStatus.COMPLETED if self.record.verified else InjectionStatus.CANCELLED
+                )
                 self.record.completed_at_ns = time.monotonic_ns()
             self.done = True
-            raise
-        with self.record._lock:
-            if normalized_evidence:
-                merged = dict(self.record.evidence)
-                merged.update(normalized_evidence)
-                self.record.evidence = merged
-            self.record.status = (
-                InjectionStatus.COMPLETED if self.record.verified else InjectionStatus.CANCELLED
-            )
-            self.record.completed_at_ns = time.monotonic_ns()
-        self.done = True
 
     def rollback(self, error: Exception) -> None:
-        if self.done:
-            return
-        cleanup_error: Exception | None = None
-        if self.result.active:
-            try:
-                self.executor.deactivate(self.request, self.result)
-            except Exception as caught:
-                cleanup_error = caught
-        with self.record._lock:
-            self.record.status = InjectionStatus.FAILED
-            self.record.error = f"fault activation rolled back: {error}"
+        with self.lock:
+            if self.done:
+                return
+            cleanup_error: Exception | None = None
+            if self.result.active:
+                try:
+                    self.executor.deactivate(self.request, self.result)
+                except Exception as caught:
+                    cleanup_error = caught
+            with self.record._lock:
+                self.record.status = InjectionStatus.FAILED
+                self.record.error = f"fault activation rolled back: {error}"
+                if cleanup_error is not None:
+                    self.record.error += f"; rollback cleanup also failed: {cleanup_error}"
+                self.record.completed_at_ns = time.monotonic_ns()
+            self.done = True
             if cleanup_error is not None:
-                self.record.error += f"; rollback cleanup also failed: {cleanup_error}"
-            self.record.completed_at_ns = time.monotonic_ns()
-        self.done = True
-        if cleanup_error is not None:
-            raise RuntimeError(f"fault rollback cleanup failed: {cleanup_error}") from cleanup_error
+                raise RuntimeError(
+                    f"fault rollback cleanup failed: {cleanup_error}"
+                ) from cleanup_error
 
 
 @dataclass(slots=True)
@@ -224,6 +281,7 @@ class FaultInjectionSession:
         self._local = LocalFaultExecutor(self._context, self.rank)
         self._records: list[FaultInjectionRecord] = []
         self._records_lock = threading.RLock()
+        self._lifecycle_lock = threading.RLock()
         self._active: list[_ActiveFault] = []
         self._closed = False
         self._started = False
@@ -290,11 +348,13 @@ class FaultInjectionSession:
 
     def notify_recovery(self) -> None:
         """End permanent effects configured to last until recovery."""
-        self._complete_until("recovery")
+        with self._lifecycle_lock:
+            self._complete_until("recovery")
 
     def notify_replacement(self) -> None:
         """End permanent effects configured to last until replacement."""
-        self._complete_until("replacement")
+        with self._lifecycle_lock:
+            self._complete_until("replacement")
 
     def evaluate(
         self,
@@ -373,6 +433,10 @@ class FaultInjectionSession:
 
     def _cleanup(self) -> Exception | None:
         """Best-effort cleanup shared by failed construction and close()."""
+        with self._lifecycle_lock:
+            return self._cleanup_locked()
+
+    def _cleanup_locked(self) -> Exception | None:
         if self._closed:
             return None
         unregister_automatic_cleanup(self)
@@ -523,6 +587,10 @@ class FaultInjectionSession:
         return tuple(candidates)
 
     def _on_step_complete(self) -> None:
+        with self._lifecycle_lock:
+            self._on_step_complete_locked()
+
+    def _on_step_complete_locked(self) -> None:
         if self._closed:
             return
         finished = self._current_iteration
@@ -1051,15 +1119,16 @@ class FaultInjectionSession:
         state_family: str,
         identities: frozenset[int],
     ) -> None:
-        surfaces = {"weight", "bias"} if state_family == "model" else {"optimizer_state"}
-        for active in self._active:
-            if (
-                isinstance(active.effect, LocalFaultEffect)
-                and not active.done
-                and active.effect.record.target.get("surface") in surfaces
-                and active.effect.replacement_identity in identities
-            ):
-                active.effect.mark_state_replaced()
+        with self._lifecycle_lock:
+            surfaces = {"weight", "bias"} if state_family == "model" else {"optimizer_state"}
+            for active in self._active:
+                if (
+                    isinstance(active.effect, LocalFaultEffect)
+                    and not active.done
+                    and active.effect.record.target.get("surface") in surfaces
+                    and active.effect.replacement_identity in identities
+                ):
+                    active.effect.mark_state_replaced()
 
     def _history_faults_for(self, iteration: int) -> tuple[FaultSpec, ...]:
         return tuple(
@@ -1114,7 +1183,21 @@ def enable_fault_injection(
         ),
     }
     gathered_preparations: list[dict[str, Any] | None] = [None] * world_size
-    dist.all_gather_object(gathered_preparations, preparation)
+    try:
+        dist.all_gather_object(gathered_preparations, preparation)
+    except Exception as error:
+        cleanup_error: Exception | None = None
+        if session is not None:
+            try:
+                session.close()
+            except Exception as caught:
+                cleanup_error = caught
+        if cleanup_error is not None:
+            _add_exception_note(
+                error,
+                f"fault injection cleanup also failed: {cleanup_error}",
+            )
+        raise
     failures: list[str] = []
     for prepared_rank, prepared in enumerate(gathered_preparations):
         if not isinstance(prepared, Mapping):
@@ -1291,6 +1374,21 @@ def _trigger_contains_iteration(incident: FaultIncident, iteration: int) -> bool
         return trigger.range.matches(iteration)
     position = bisect_left(trigger.at, iteration)
     return position < len(trigger.at) and trigger.at[position] == iteration
+
+
+def _next_trigger_at_or_after(
+    incident: FaultIncident,
+    iteration: int,
+) -> int | None:
+    trigger = incident.trigger
+    if trigger.range is None:
+        position = bisect_left(trigger.at, iteration)
+        return None if position == len(trigger.at) else trigger.at[position]
+    if iteration <= trigger.range.start:
+        return trigger.range.start
+    steps = (iteration - trigger.range.start + trigger.range.every - 1) // trigger.range.every
+    candidate = trigger.range.start + steps * trigger.range.every
+    return candidate if candidate <= trigger.range.end else None
 
 
 def _occurrence_id(

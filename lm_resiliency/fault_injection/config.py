@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import threading
 from bisect import bisect_left
 from dataclasses import dataclass, field
 from enum import Enum
@@ -580,6 +581,8 @@ class FaultSpec:
                 raise TypeError("delay parameters.delay_ms must be a number")
             if not math.isfinite(float(delay_ms)) or delay_ms <= 0:
                 raise ValueError("delay requires finite parameters.delay_ms greater than zero")
+            if float(delay_ms) / 1000.0 > threading.TIMEOUT_MAX:
+                raise ValueError("delay parameters.delay_ms exceeds the platform timer limit")
         if (
             self.type is FailureType.TENSOR_CORRUPTION
             and self.parameters.get("operation") == CorruptionOperation.SET_VALUE.value

@@ -237,7 +237,7 @@ Use exactly one of `at` or `range`.
 |---|---:|---|---|
 | `at` | One of `at`/`range` | - | Sorted, unique array of positive iteration numbers. Exact candidates use binary lookup, so healthy-step work remains bounded for large lists. |
 | `range.start` | For `range` | - | First candidate iteration; must be positive. |
-| `range.end` | For `range` | - | Last candidate iteration, inclusive. Range schedules are evaluated lazily and do not allocate one entry per candidate. |
+| `range.end` | For `range` | - | Last candidate iteration, inclusive. Range schedules are evaluated lazily and do not allocate one entry per candidate. Campaign incidents are held in lazy heap cursors, so healthy iterations do not scan every incident. |
 | `range.every` | No | `1` | Positive spacing between range candidates. |
 | `probability` | No | `1.0` | Selection probability for each candidate, from `0.0` through `1.0`. |
 
@@ -334,7 +334,7 @@ fails and the campaign must specify an exact `module_path`.
 | `std` | `noise` | Derived from `magnitude` | Gaussian-noise standard deviation. |
 | `parameter` | Parameter, gradient, or optimizer-state target | Surface-dependent | Exact parameter attribute, commonly `weight` or `bias`. |
 | `state_key` | `optimizer_state` | First suitable tensor | Exact optimizer-state entry, such as `exp_avg` or `exp_avg_sq`. |
-| `delay_ms` | `delay` | Required | Finite positive JSON number in milliseconds. Strings, booleans, NaN, and infinity are rejected. |
+| `delay_ms` | `delay` | Required | Finite positive JSON number in milliseconds that fits the platform timer. Strings, booleans, NaN, infinity, and unrepresentable durations are rejected. |
 
 Built-in local parameters are validated when the manifest is constructed.
 Unknown keys and keys that do not apply to the selected operation are rejected;
@@ -637,6 +637,11 @@ ranks; matching only the aggregate rank and kind sets is insufficient.
 updates before taking snapshots. A returned `CampaignReport` therefore remains
 internally consistent even if another thread is activating or completing a
 hook.
+Optimizer-boundary callbacks, recovery/replacement notifications, and session
+cleanup share one lifecycle lock. `close()` waits for an in-flight boundary and
+removes any effect or observer armed there before marking the session closed.
+External effect completion and rollback are independently serialized so a
+manager callback is never deactivated twice.
 
 Reports are rank-local.
 A distributed campaign runner or training manager should collect reports from all

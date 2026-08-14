@@ -671,6 +671,16 @@ def test_delay_rejects_non_finite_parameters(delay_ms: float) -> None:
         )
 
 
+def test_delay_rejects_values_above_the_platform_timer_limit() -> None:
+    with pytest.raises(ValueError, match="platform timer limit"):
+        FaultSpec(
+            fault_id="delay",
+            type=FailureType.DELAY,
+            target=_target(surface=FaultSurface.COMPUTE),
+            parameters={"delay_ms": threading.TIMEOUT_MAX * 2000.0},
+        )
+
+
 def test_enablement_has_no_trigger_or_framework_argument() -> None:
     signature = inspect.signature(enable_fault_injection)
 
@@ -900,6 +910,73 @@ def test_distributed_attempt_persistence_precedes_destructive_activation() -> No
         )
 
     assert events == []
+
+
+def test_distributed_preparation_collective_failure_closes_deferred_session() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    original_close = FaultInjectionSession.close
+    closed: list[FaultInjectionSession] = []
+
+    def close(session: FaultInjectionSession) -> None:
+        closed.append(session)
+        original_close(session)
+
+    with (
+        patch("lm_resiliency.fault_injection.injector.dist.is_available", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.is_initialized", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.get_world_size", return_value=2),
+        patch("lm_resiliency.fault_injection.injector.dist.get_rank", return_value=0),
+        patch(
+            "lm_resiliency.fault_injection.injector.dist.all_gather_object",
+            side_effect=RuntimeError("preparation timed out"),
+        ),
+        patch.object(FaultInjectionSession, "close", close),
+        pytest.raises(RuntimeError, match="preparation timed out"),
+    ):
+        enable_fault_injection(
+            model,
+            optimizer,
+            campaign=_campaign(_incident(at=(2,))),
+        )
+
+    assert len(closed) == 1
+    assert closed[0]._closed
+
+
+def test_external_effect_finalization_is_serialized() -> None:
+    events: list[tuple[str, str]] = []
+    executor = _recording_executor(
+        {FailureType.PROCESS_TERMINATION},
+        events,
+        active=True,
+    )
+    model = TinyModel()
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="recovery"),
+                faults=(_external_fault(FailureType.PROCESS_TERMINATION),),
+            )
+        ),
+        executors=(executor,),
+        rank=0,
+    )
+    effect = session._active[0].effect
+    first = threading.Thread(target=effect.complete)
+    second = threading.Thread(target=effect.complete)
+
+    first.start()
+    second.start()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert events.count(("deactivate", "process_termination")) == 1
+    assert effect.done
+    session.close()
 
 
 def test_distributed_safe_arming_failure_is_propagated_before_return() -> None:
@@ -1283,6 +1360,25 @@ def test_large_range_schedule_remains_lazy() -> None:
     assert schedule.candidates(1_000_000_000) == (incident,)
 
 
+def test_many_incidents_do_not_scan_on_healthy_iterations() -> None:
+    incidents = tuple(
+        _incident(
+            incident_id=f"future-{index}",
+            at=(1_000_000 + index,),
+        )
+        for index in range(1_000)
+    )
+    schedule = _CampaignSchedule(incidents)
+
+    with patch(
+        "lm_resiliency.fault_injection.injector._trigger_contains_iteration",
+        side_effect=AssertionError("healthy-path incident scan"),
+    ):
+        for iteration in range(1, 101):
+            assert schedule.candidates(iteration) == ()
+            assert schedule.expirations(iteration) == ()
+
+
 def test_completed_iterations_aligns_absolute_training_clock() -> None:
     model = TinyModel()
     optimizer = _optimizer(model)
@@ -1488,6 +1584,47 @@ def test_unscheduled_steps_do_not_rescan_incident_triggers() -> None:
         assert not session._requires_boundary_consensus(1, 2)
 
     session.close()
+
+
+def test_close_waits_for_inflight_step_callback_and_removes_rearmed_faults() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(_incident(at=(2,))),
+        rank=0,
+    )
+    callback_entered = threading.Event()
+    release_callback = threading.Event()
+    close_done = threading.Event()
+    original_sync_history = session._local.sync_history
+
+    def blocking_sync_history(faults) -> None:
+        callback_entered.set()
+        release_callback.wait(timeout=5)
+        original_sync_history(faults)
+
+    session._local.sync_history = blocking_sync_history
+    step_thread = threading.Thread(target=_step, args=(model, optimizer))
+    step_thread.start()
+    assert callback_entered.wait(timeout=5)
+
+    def close() -> None:
+        session.close()
+        close_done.set()
+
+    close_thread = threading.Thread(target=close)
+    close_thread.start()
+    assert not close_done.wait(timeout=0.05)
+    release_callback.set()
+    step_thread.join(timeout=5)
+    close_thread.join(timeout=5)
+
+    assert close_done.is_set()
+    assert session._closed
+    assert session._active == []
+    assert session._local._observer_handles == {}
 
 
 def test_permanent_parameter_fault_restores_on_recovery() -> None:
