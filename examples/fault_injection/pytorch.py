@@ -28,6 +28,7 @@ from lm_resiliency import (
     enable_fault_injection,
     enable_resiliency,
 )
+from lm_resiliency.fault_injection.injector import _probability_selected
 
 
 @dataclass
@@ -73,6 +74,9 @@ class EvaluationStateReset:
     def _after_step(self, *_args: Any, **_kwargs: Any) -> None:
         self._completed_iterations += 1
         if self._completed_iterations in self._reset_iterations:
+            device = next(self._model.parameters()).device
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
             self._model.load_state_dict(copy.deepcopy(self._model_state))
             self._optimizer.load_state_dict(copy.deepcopy(self._optimizer_state))
             self.restored_iterations.append(self._completed_iterations)
@@ -287,6 +291,7 @@ def _last_scheduled_iteration(campaign: FaultCampaign) -> int:
 class _ResetIterationSchedule:
     exact: frozenset[int]
     ranged: tuple[tuple[FaultIncident, int], ...]
+    campaign_seed: int
 
     def __contains__(self, iteration: object) -> bool:
         if not isinstance(iteration, int):
@@ -294,6 +299,7 @@ class _ResetIterationSchedule:
         return iteration in self.exact or any(
             incident.trigger.range is not None
             and incident.trigger.range.matches(iteration - offset)
+            and _incident_selected(incident, iteration - offset, self.campaign_seed)
             for incident, offset in self.ranged
         )
 
@@ -302,6 +308,7 @@ class _ResetIterationSchedule:
 class _HoldIterationSchedule:
     exact: tuple[tuple[int, int], ...]
     ranged: tuple[tuple[FaultIncident, int], ...]
+    campaign_seed: int
 
     def __contains__(self, iteration: object) -> bool:
         if not isinstance(iteration, int):
@@ -316,7 +323,11 @@ class _HoldIterationSchedule:
                 trigger_range.start
                 + ((iteration - trigger_range.start) // trigger_range.every) * trigger_range.every
             )
-            if trigger <= trigger_range.end and 0 <= iteration - trigger < offset:
+            if (
+                trigger <= trigger_range.end
+                and 0 <= iteration - trigger < offset
+                and _incident_selected(incident, trigger, self.campaign_seed)
+            ):
                 return True
         return False
 
@@ -334,10 +345,15 @@ def _state_reset_iterations(campaign: FaultCampaign) -> Container[int]:
         for incident in eligible
         if incident.trigger.at
         for iteration in incident.trigger.at
+        if _incident_selected(incident, iteration, campaign.seed)
     )
     if not ranged:
         return set(exact)
-    return _ResetIterationSchedule(exact=exact, ranged=ranged)
+    return _ResetIterationSchedule(
+        exact=exact,
+        ranged=ranged,
+        campaign_seed=campaign.seed,
+    )
 
 
 def _state_hold_iterations(campaign: FaultCampaign) -> Container[int]:
@@ -348,13 +364,18 @@ def _state_hold_iterations(campaign: FaultCampaign) -> Container[int]:
         for incident in eligible
         if incident.trigger.at and offsets[incident.incident_id] > 0
         for iteration in incident.trigger.at
+        if _incident_selected(incident, iteration, campaign.seed)
     )
     ranged = tuple(
         (incident, offsets[incident.incident_id])
         for incident in eligible
         if incident.trigger.range is not None and offsets[incident.incident_id] > 0
     )
-    return _HoldIterationSchedule(exact=exact, ranged=ranged)
+    return _HoldIterationSchedule(
+        exact=exact,
+        ranged=ranged,
+        campaign_seed=campaign.seed,
+    )
 
 
 def _state_reset_incidents(campaign: FaultCampaign) -> tuple[FaultIncident, ...]:
@@ -402,12 +423,27 @@ def _complete_permanent_incidents(
     boundaries = {
         incident.lifetime.until
         for incident in campaign.incidents
-        if incident.trigger.matches(iteration) and incident.lifetime.permanent
+        if incident.trigger.matches(iteration)
+        and incident.lifetime.permanent
+        and _incident_selected(incident, iteration, campaign.seed)
     }
     if "recovery" in boundaries:
         faults.notify_recovery()
     if "replacement" in boundaries:
         faults.notify_replacement()
+
+
+def _incident_selected(
+    incident: FaultIncident,
+    iteration: int,
+    campaign_seed: int,
+) -> bool:
+    return _probability_selected(
+        campaign_seed,
+        incident.incident_id,
+        iteration,
+        incident.trigger.probability,
+    )
 
 
 def _teardown(

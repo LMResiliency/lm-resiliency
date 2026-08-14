@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from lm_resiliency.fault_injection.config import FailureType, expected_failure_kind
+
 
 def compare_payloads(
     injection: Mapping[str, Any],
@@ -24,11 +26,13 @@ def compare_payloads(
         )
     _validate_embedded_manifest_identity(injection, injection_identity)
     all_records = [dict(record) for record in injection.get("injections", ())]
+    for record in all_records:
+        _record_injection_succeeded(record)
     _validate_scheduled_occurrence_coverage(injection, all_records)
     records = [
         dict(record) for record in all_records if record.get("status") != "skipped_probability"
     ]
-    expected_fault_ids = _manifest_fault_ids(injection)
+    expected_actions = _manifest_actions(injection)
     reports = [dict(report) for report in localization.get("reports", ())]
     grouped: dict[str, list[dict[str, Any]]] = {}
     for record in records:
@@ -40,7 +44,7 @@ def compare_payloads(
             occurrence_id,
             occurrence_records,
             reports,
-            expected_fault_ids,
+            expected_actions,
         )
         for occurrence_id, occurrence_records in grouped.items()
     ]
@@ -55,7 +59,7 @@ def compare_payloads(
         ),
         "detected_occurrences": sum(bool(item["detected"]) for item in evaluations),
         "localized_occurrences": localized,
-        "injected_actions": sum(bool(record.get("injection_succeeded")) for record in records),
+        "injected_actions": sum(_record_injection_succeeded(record) for record in records),
         "detected_actions": detected_actions,
         "localized_actions": localized_actions,
         "passed": bool(evaluations) and localized == len(evaluations),
@@ -101,18 +105,26 @@ def _evaluate_occurrence(
     occurrence_id: str,
     records: Sequence[Mapping[str, Any]],
     reports: Sequence[Mapping[str, Any]],
-    manifest_fault_ids: Mapping[str, frozenset[str]],
+    manifest_actions: Mapping[str, Mapping[str, Mapping[str, Any]]],
 ) -> dict[str, Any]:
     incident_ids = {str(record.get("incident_id", "")) for record in records}
     if len(incident_ids) != 1 or "" in incident_ids:
         raise ValueError(f"occurrence {occurrence_id!r} requires one non-empty incident_id")
     incident_id = incident_ids.pop()
-    expected_fault_ids = manifest_fault_ids.get(incident_id)
-    if expected_fault_ids is None:
+    expected_by_fault_id = manifest_actions.get(incident_id)
+    if expected_by_fault_id is None:
         raise ValueError(
             f"occurrence {occurrence_id!r} references unknown incident {incident_id!r}"
         )
-    recorded_fault_ids = [str(record.get("fault_id", "")) for record in records]
+    recorded_fault_ids = [
+        _required_string(record.get("fault_id"), "injection fault_id") for record in records
+    ]
+    for record, fault_id in zip(records, recorded_fault_ids, strict=True):
+        action = expected_by_fault_id.get(fault_id)
+        if action is None:
+            raise ValueError(f"occurrence {occurrence_id!r} references unknown fault {fault_id!r}")
+        _validate_record_against_manifest(record, action)
+    expected_fault_ids = frozenset(expected_by_fault_id)
     complete_action_set = (
         len(recorded_fault_ids) == len(expected_fault_ids)
         and set(recorded_fault_ids) == expected_fault_ids
@@ -120,30 +132,38 @@ def _evaluate_occurrence(
     injection_succeeded = (
         complete_action_set
         and bool(records)
-        and all(bool(record.get("injection_succeeded")) for record in records)
+        and all(_record_injection_succeeded(record) for record in records)
     )
-    iterations = {int(record["iteration"]) for record in records}
+    iterations = {
+        _required_integer(record.get("iteration"), "injection iteration") for record in records
+    }
     if len(iterations) != 1:
         raise ValueError(f"occurrence {occurrence_id!r} spans multiple training iterations")
     iteration = iterations.pop()
     expected_ranks = sorted(
         {
             expected_rank
-            for record in records
-            if (expected_rank := _expected_rank(record)) is not None
+            for action in expected_by_fault_id.values()
+            if (expected_rank := _expected_action_rank(action)) is not None
         }
     )
     expected_resources = sorted(
-        {resource for record in records if (resource := _expected_resource(record)) is not None}
+        {
+            resource
+            for action in expected_by_fault_id.values()
+            if (resource := _expected_action_resource(action)) is not None
+        }
     )
-    expected_kinds = sorted({str(record["expected_kind"]) for record in records})
+    expected_kinds = sorted(
+        {_expected_action_kind(action) for action in expected_by_fault_id.values()}
+    )
     expected_ranks_by_kind = {
         kind: sorted(
             {
                 expected_rank
-                for record in records
-                if str(record["expected_kind"]) == kind
-                and (expected_rank := _expected_rank(record)) is not None
+                for action in expected_by_fault_id.values()
+                if _expected_action_kind(action) == kind
+                and (expected_rank := _expected_action_rank(action)) is not None
             }
         )
         for kind in expected_kinds
@@ -152,9 +172,9 @@ def _evaluate_occurrence(
         kind: sorted(
             {
                 resource
-                for record in records
-                if str(record["expected_kind"]) == kind
-                and (resource := _expected_resource(record)) is not None
+                for action in expected_by_fault_id.values()
+                if _expected_action_kind(action) == kind
+                and (resource := _expected_action_resource(action)) is not None
             }
         )
         for kind in expected_kinds
@@ -162,14 +182,18 @@ def _evaluate_occurrence(
     expected_layers = sorted(
         {
             int(target["index"])
-            for record in records
-            if (target := dict(record.get("target", {}))).get("component")
+            for action in expected_by_fault_id.values()
+            if (target := _action_target(action)).get("component")
             in {"transformer_block", "transformer_layer", "layer"}
             and target.get("index") is not None
         }
     )
     expected_source_prefixes = sorted(
-        {prefix for record in records if (prefix := _expected_source_prefix(record)) is not None}
+        {
+            prefix
+            for action in expected_by_fault_id.values()
+            if (prefix := _expected_action_source_prefix(action)) is not None
+        }
     )
     at_iteration = [
         dict(report)
@@ -201,15 +225,25 @@ def _evaluate_occurrence(
         for kind in expected_kinds
     }
     observed_resources = sorted(
-        {str(resource) for report in matching for resource in report.get("failed_resources", ())}
+        {
+            resource
+            for report in matching
+            for resource in _required_string_sequence(
+                report.get("failed_resources", ()),
+                "localization failed_resources",
+            )
+        }
     )
     observed_resources_by_kind = {
         kind: sorted(
             {
-                str(resource)
+                resource
                 for report in at_iteration
                 if str(report.get("kind")) == kind
-                for resource in report.get("failed_resources", ())
+                for resource in _required_string_sequence(
+                    report.get("failed_resources", ()),
+                    "localization failed_resources",
+                )
             }
         )
         for kind in expected_kinds
@@ -231,12 +265,26 @@ def _evaluate_occurrence(
     kind_resource_match = observed_resources_by_kind == expected_resources_by_kind
     detected_action_count = sum(
         (
-            (expected_rank := _expected_rank(record)) is None
-            or expected_rank in observed_ranks_by_kind.get(str(record["expected_kind"]), ())
+            (expected_rank := _expected_action_rank(expected_by_fault_id[str(record["fault_id"])]))
+            is None
+            or expected_rank
+            in observed_ranks_by_kind.get(
+                _expected_action_kind(expected_by_fault_id[str(record["fault_id"])]),
+                (),
+            )
         )
         and (
-            (expected_resource := _expected_resource(record)) is None
-            or expected_resource in observed_resources_by_kind.get(str(record["expected_kind"]), ())
+            (
+                expected_resource := _expected_action_resource(
+                    expected_by_fault_id[str(record["fault_id"])]
+                )
+            )
+            is None
+            or expected_resource
+            in observed_resources_by_kind.get(
+                _expected_action_kind(expected_by_fault_id[str(record["fault_id"])]),
+                (),
+            )
         )
         for record in records
     )
@@ -275,7 +323,7 @@ def _evaluate_occurrence(
         "occurrence_id": occurrence_id,
         "iteration": iteration,
         "action_count": len(records),
-        "expected_action_count": len(expected_fault_ids),
+        "expected_action_count": len(expected_by_fault_id),
         "detected_action_count": detected_action_count,
         "injection_succeeded": injection_succeeded,
         "detected": detected,
@@ -311,59 +359,79 @@ def _evaluate_occurrence(
     }
 
 
-def _expected_rank(record: Mapping[str, Any]) -> int | None:
-    target = record.get("target", {})
-    if not isinstance(target, Mapping):
-        raise TypeError("injection target must be an object")
+def _expected_action_rank(action: Mapping[str, Any]) -> int | None:
+    target = _action_target(action)
     rank = target.get("rank")
     if rank is not None:
-        return _required_integer(rank, "injection target rank")
+        return _required_integer(rank, "manifest target rank")
     if target.get("resource") is not None:
         return None
-    return _required_integer(record.get("execution_rank"), "injection execution_rank")
+    return 0
 
 
-def _expected_resource(record: Mapping[str, Any]) -> str | None:
-    target = record.get("target", {})
-    if not isinstance(target, Mapping):
-        raise TypeError("injection target must be an object")
+def _expected_action_resource(action: Mapping[str, Any]) -> str | None:
+    target = _action_target(action)
     resource = target.get("resource")
     if resource is None:
         return None
     if not isinstance(resource, str):
-        raise TypeError("injection target resource must be a string")
+        raise TypeError("manifest target resource must be a string")
     if not resource:
-        raise ValueError("injection target resource must be non-empty")
+        raise ValueError("manifest target resource must be non-empty")
     return resource
 
 
-def _manifest_fault_ids(injection: Mapping[str, Any]) -> dict[str, frozenset[str]]:
+def _expected_action_kind(action: Mapping[str, Any]) -> str:
+    failure_type = _required_string(action.get("type"), "manifest fault type")
+    try:
+        return expected_failure_kind(FailureType(failure_type))
+    except ValueError as error:
+        raise ValueError(f"manifest fault type {failure_type!r} is unsupported") from error
+
+
+def _action_target(action: Mapping[str, Any]) -> Mapping[str, Any]:
+    target = action.get("target")
+    if not isinstance(target, Mapping):
+        raise TypeError("manifest fault target must be an object")
+    return target
+
+
+def _manifest_actions(
+    injection: Mapping[str, Any],
+) -> dict[str, dict[str, Mapping[str, Any]]]:
     manifest = injection.get("manifest")
     if not isinstance(manifest, Mapping):
         raise ValueError("injection artifact requires an embedded manifest")
     incidents = manifest.get("incidents")
     if isinstance(incidents, (str, bytes)) or not isinstance(incidents, Sequence):
         raise TypeError("injection manifest incidents must be an array")
-    expected: dict[str, frozenset[str]] = {}
+    expected: dict[str, dict[str, Mapping[str, Any]]] = {}
     for incident in incidents:
         if not isinstance(incident, Mapping):
             raise TypeError("injection manifest incidents must contain objects")
-        incident_id = str(incident.get("incident_id", incident.get("id", "")))
+        incident_id = _required_string(
+            incident.get("incident_id", incident.get("id")),
+            "injection manifest incident_id",
+        )
         faults = incident.get("faults")
-        if not incident_id:
-            raise ValueError("injection manifest incident_id must be non-empty")
         if isinstance(faults, (str, bytes)) or not isinstance(faults, Sequence):
             raise TypeError("injection manifest faults must be an array")
-        fault_ids = [
-            str(fault.get("fault_id", fault.get("id", "")))
-            for fault in faults
-            if isinstance(fault, Mapping)
-        ]
-        if len(fault_ids) != len(faults) or not fault_ids or any(not item for item in fault_ids):
+        actions: dict[str, Mapping[str, Any]] = {}
+        for fault in faults:
+            if not isinstance(fault, Mapping):
+                raise TypeError("injection manifest faults must contain objects")
+            fault_id = _required_string(
+                fault.get("fault_id", fault.get("id")),
+                "injection manifest fault_id",
+            )
+            if fault_id in actions:
+                raise ValueError("injection manifest fault_id values must be unique per incident")
+            _action_target(fault)
+            _expected_action_kind(fault)
+            actions[fault_id] = fault
+        if not actions:
             raise ValueError("injection manifest faults require non-empty fault_id values")
-        if len(set(fault_ids)) != len(fault_ids):
-            raise ValueError("injection manifest fault_id values must be unique per incident")
-        expected[incident_id] = frozenset(fault_ids)
+        expected[incident_id] = actions
     return expected
 
 
@@ -468,10 +536,69 @@ def _validate_scheduled_occurrence_coverage(
         raise ValueError(f"injection records reference unknown incidents: {unknown}")
 
 
-def _expected_source_prefix(record: Mapping[str, Any]) -> str | None:
-    if record.get("expected_kind") != "sdc":
+def _validate_record_against_manifest(
+    record: Mapping[str, Any],
+    action: Mapping[str, Any],
+) -> None:
+    expected_target = dict(_action_target(action))
+    target = record.get("target")
+    if not isinstance(target, Mapping):
+        raise TypeError("injection record target must be an object")
+    if dict(target) != expected_target:
+        raise ValueError("injection record target does not match the authenticated manifest")
+    expected_type = _required_string(action.get("type"), "manifest fault type")
+    if _required_string(record.get("failure_type"), "injection failure_type") != expected_type:
+        raise ValueError("injection record failure_type does not match the authenticated manifest")
+    expected_kind = _expected_action_kind(action)
+    if _required_string(record.get("expected_kind"), "injection expected_kind") != expected_kind:
+        raise ValueError("injection record expected_kind does not match the authenticated manifest")
+    parameters = record.get("parameters")
+    if not isinstance(parameters, Mapping):
+        raise TypeError("injection record parameters must be an object")
+    expected_parameters = action.get("parameters", {})
+    if not isinstance(expected_parameters, Mapping):
+        raise TypeError("manifest fault parameters must be an object")
+    if dict(parameters) != dict(expected_parameters):
+        raise ValueError("injection record parameters do not match the authenticated manifest")
+    expected_execution_rank = expected_target.get("rank", 0)
+    if expected_execution_rank is None:
+        expected_execution_rank = 0
+    if _required_integer(
+        record.get("execution_rank"),
+        "injection execution_rank",
+    ) != _required_integer(expected_execution_rank, "manifest execution rank"):
+        raise ValueError("injection execution_rank does not match the authenticated manifest")
+
+
+def _record_injection_succeeded(record: Mapping[str, Any]) -> bool:
+    succeeded = record.get("injection_succeeded")
+    if not isinstance(succeeded, bool):
+        raise TypeError("injection_succeeded must be a boolean")
+    verified = record.get("verified")
+    if not isinstance(verified, bool):
+        raise TypeError("injection verified must be a boolean")
+    status = _required_string(record.get("status"), "injection status")
+    if status not in {
+        "pending",
+        "active",
+        "completed",
+        "skipped_probability",
+        "failed",
+        "cancelled",
+    }:
+        raise ValueError(f"injection status {status!r} is unsupported")
+    expected = verified and status in {"active", "completed"}
+    if succeeded != expected:
+        raise ValueError(
+            "injection_succeeded disagrees with the record status and verification state"
+        )
+    return succeeded
+
+
+def _expected_action_source_prefix(action: Mapping[str, Any]) -> str | None:
+    if _expected_action_kind(action) != "sdc":
         return None
-    target = dict(record.get("target", {}))
+    target = dict(_action_target(action))
     component = str(target.get("component", "")).lower().replace("-", "_")
     if component in {"transformer_block", "transformer_layer", "layer"}:
         return "hidden."
@@ -483,6 +610,20 @@ def _expected_source_prefix(record: Mapping[str, Any]) -> str | None:
     if ".layers." in f".{module_path}.":
         return "hidden."
     return None
+
+
+def _required_string(value: object, label: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{label} must be a string")
+    if not value:
+        raise ValueError(f"{label} must be non-empty")
+    return value
+
+
+def _required_string_sequence(value: object, label: str) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise TypeError(f"{label} must be an array of strings")
+    return tuple(_required_string(item, f"{label} item") for item in value)
 
 
 def _required_integer(value: object, label: str) -> int:

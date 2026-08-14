@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import threading
 import time
+from bisect import bisect_left
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -15,6 +16,7 @@ from torch.utils._pytree import tree_flatten, tree_unflatten
 from lm_resiliency.fault_injection.config import (
     CorruptionOperation,
     FailureType,
+    FaultIncident,
     FaultMagnitude,
     FaultScope,
     FaultSpec,
@@ -289,6 +291,30 @@ class LocalFaultExecutor:
             else:
                 self._context.resolve_module(fault.target)
 
+    def validate_schedule(self, incidents: tuple[FaultIncident, ...]) -> None:
+        """Reject local effects whose possible active windows share a target."""
+        scheduled: list[tuple[tuple[Any, ...], FaultIncident, FaultSpec]] = []
+        for incident in incidents:
+            if incident.trigger.probability <= 0.0:
+                continue
+            for fault in incident.faults:
+                if fault.target.execution_rank != self._rank or not self.supports(fault):
+                    continue
+                key = self._schedule_target_key(fault)
+                for other_key, other_incident, other_fault in scheduled:
+                    if other_incident is incident:
+                        continue
+                    if key != other_key:
+                        continue
+                    if not _incident_windows_may_overlap(incident, other_incident):
+                        continue
+                    raise ValueError(
+                        "fault incidents may not overlap on the same resolved target: "
+                        f"{other_incident.incident_id}/{other_fault.fault_id} and "
+                        f"{incident.incident_id}/{fault.fault_id}"
+                    )
+                scheduled.append((key, incident, fault))
+
     def validate_activations(
         self,
         requests: tuple[FaultExecutionRequest, ...],
@@ -331,7 +357,12 @@ class LocalFaultExecutor:
                 continue
             if not self.supports(fault):
                 continue
-            key = self._history_key(fault)
+            try:
+                key = self._history_key(fault)
+            except LookupError:
+                # Optimizer state may not exist until the first optimizer step.
+                # Retry at the next history boundary instead of aborting enablement.
+                continue
             desired.setdefault(key, fault)
 
         removal_error: Exception | None = None
@@ -713,6 +744,19 @@ class LocalFaultExecutor:
             id(target),
         )
 
+    def _schedule_target_key(self, fault: FaultSpec) -> tuple[Any, ...]:
+        if fault.target.surface is not FaultSurface.OPTIMIZER_STATE:
+            return self._resolved_target_key(fault)
+        parameter = self._context.resolve_gradient_parameter(
+            fault.target,
+            parameter_name=_parameter_name(fault),
+        )
+        return (
+            fault.target.execution_rank,
+            FaultSurface.OPTIMIZER_STATE.value,
+            id(parameter),
+        )
+
     def _history_key(self, fault: FaultSpec) -> tuple[Any, ...]:
         scope = FaultScope(fault.parameters.get("scope", FaultScope.SINGLE.value))
         return (*self._resolved_target_key(fault), scope.value)
@@ -731,6 +775,7 @@ class LocalFaultExecutor:
         )
         _validate_state_retirement(original, transformed, request)
         retirement_delta = transformed - original
+        _synchronize_state_mutation(tensor)
         with torch.no_grad():
             _write_linear(tensor, changed_indices, transformed)
 
@@ -740,6 +785,7 @@ class LocalFaultExecutor:
         ) -> None:
             if replacement_confirmed:
                 return
+            _synchronize_state_mutation(tensor)
             with torch.no_grad():
                 current = _read_linear(tensor, changed_indices)
                 finite = torch.isfinite(retirement_delta)
@@ -1139,6 +1185,92 @@ def _elementwise_same(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
     if left.is_floating_point():
         equal = equal | (torch.isnan(left) & torch.isnan(right))
     return equal
+
+
+def _synchronize_state_mutation(tensor: torch.Tensor) -> None:
+    """Finish asynchronous device reads before mutating checkpoint source storage."""
+    if tensor.is_cuda:
+        torch.cuda.synchronize(tensor.device)
+
+
+def _incident_windows_may_overlap(
+    left: FaultIncident,
+    right: FaultIncident,
+) -> bool:
+    left_count = _trigger_candidate_count(left)
+    right_count = _trigger_candidate_count(right)
+    if min(left_count, right_count) <= 10_000:
+        if left_count <= right_count:
+            return any(
+                _candidate_window_hits_incident(value, left, right) for value in _triggers(left)
+            )
+        return any(
+            _candidate_window_hits_incident(value, right, left) for value in _triggers(right)
+        )
+
+    left_start, left_end = _incident_window_bounds(left)
+    right_start, right_end = _incident_window_bounds(right)
+    return left_start <= right_end and right_start <= left_end
+
+
+def _candidate_window_hits_incident(
+    iteration: int,
+    owner: FaultIncident,
+    other: FaultIncident,
+) -> bool:
+    owner_duration = _incident_iteration_duration(owner)
+    other_duration = _incident_iteration_duration(other)
+    low = 1 if other_duration is None else max(1, iteration - other_duration + 1)
+    high = math.inf if owner_duration is None else iteration + owner_duration - 1
+    return _trigger_has_candidate_between(other, low, high)
+
+
+def _trigger_has_candidate_between(
+    incident: FaultIncident,
+    low: int,
+    high: float,
+) -> bool:
+    trigger = incident.trigger
+    if trigger.range is not None:
+        candidate = trigger.range.start
+        if candidate < low:
+            candidate += (
+                (low - candidate + trigger.range.every - 1) // trigger.range.every
+            ) * trigger.range.every
+        return candidate <= trigger.range.end and candidate <= high
+    position = bisect_left(trigger.at, low)
+    return position < len(trigger.at) and trigger.at[position] <= high
+
+
+def _trigger_candidate_count(incident: FaultIncident) -> int:
+    trigger = incident.trigger
+    if trigger.range is None:
+        return len(trigger.at)
+    return 1 + (trigger.range.end - trigger.range.start) // trigger.range.every
+
+
+def _triggers(incident: FaultIncident):
+    trigger = incident.trigger
+    if trigger.range is None:
+        yield from trigger.at
+        return
+    yield from range(trigger.range.start, trigger.range.end + 1, trigger.range.every)
+
+
+def _incident_window_bounds(incident: FaultIncident) -> tuple[int, float]:
+    trigger = incident.trigger
+    first = trigger.range.start if trigger.range is not None else trigger.at[0]
+    last = trigger.range.end if trigger.range is not None else trigger.at[-1]
+    duration = _incident_iteration_duration(incident)
+    return first, math.inf if duration is None else last + duration - 1
+
+
+def _incident_iteration_duration(incident: FaultIncident) -> int | None:
+    if incident.lifetime.iterations is not None:
+        return incident.lifetime.iterations
+    if incident.lifetime.matching_calls is not None:
+        return 1
+    return None
 
 
 def _local_shard(tensor: torch.Tensor) -> torch.Tensor:

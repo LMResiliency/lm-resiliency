@@ -26,7 +26,23 @@ BASE_MANIFEST = {
         {
             "incident_id": "hidden-output-sdc",
             "trigger": {"at": [4], "probability": 1.0},
-            "faults": [{"fault_id": "hidden-output"}],
+            "faults": [
+                {
+                    "fault_id": "hidden-output",
+                    "type": "tensor_corruption",
+                    "target": {
+                        "rank": 0,
+                        "model_part": 0,
+                        "component": "transformer_block",
+                        "index": 0,
+                        "surface": "output",
+                    },
+                    "parameters": {
+                        "operation": "sign_flip",
+                        "scope": "single",
+                    },
+                }
+            ],
         }
     ]
 }
@@ -58,13 +74,21 @@ def _injection_payload() -> dict:
                 "fault_id": "hidden-output",
                 "iteration": 4,
                 "execution_rank": 0,
+                "failure_type": "tensor_corruption",
                 "expected_kind": "sdc",
+                "status": "completed",
+                "verified": True,
                 "injection_succeeded": True,
                 "target": {
                     "rank": 0,
+                    "model_part": 0,
                     "component": "transformer_block",
                     "index": 0,
                     "surface": "output",
+                },
+                "parameters": {
+                    "operation": "sign_flip",
+                    "scope": "single",
                 },
             }
         ],
@@ -319,7 +343,10 @@ def test_comparison_counts_correlated_rank_local_actions() -> None:
             "rank": 1,
         },
     }
-    injection["manifest"]["incidents"][0]["faults"].append({"fault_id": "rank-one-output"})
+    second_action = copy.deepcopy(injection["manifest"]["incidents"][0]["faults"][0])
+    second_action["fault_id"] = "rank-one-output"
+    second_action["target"]["rank"] = 1
+    injection["manifest"]["incidents"][0]["faults"].append(second_action)
     injection["injections"].append(second)
     localization = _localization_payload()
     localization["reports"][0]["failed_ranks"] = [0, 1]
@@ -344,13 +371,24 @@ def test_comparison_scores_resource_targets_without_executor_rank_blame() -> Non
     injection["injections"][0].update(
         {
             "execution_rank": 0,
+            "failure_type": "resource_unavailable",
             "expected_kind": "process_failure",
             "target": {
+                "model_part": 0,
                 "surface": "resource",
                 "resource": "node-5",
             },
+            "parameters": {},
         }
     )
+    action = injection["manifest"]["incidents"][0]["faults"][0]
+    action["type"] = "resource_unavailable"
+    action["target"] = {
+        "model_part": 0,
+        "surface": "resource",
+        "resource": "node-5",
+    }
+    action["parameters"] = {}
     localization = _localization_payload()
     localization["reports"][0] = {
         "training_iteration": 4,
@@ -359,6 +397,7 @@ def test_comparison_scores_resource_targets_without_executor_rank_blame() -> Non
         "kind": "process_failure",
         "scope": "resource",
     }
+    _refresh_manifest_identity(injection, localization)
 
     evaluation = compare_payloads(injection, localization)
     occurrence = evaluation["evaluations"][0]
@@ -375,18 +414,33 @@ def test_comparison_scores_resource_targets_without_executor_rank_blame() -> Non
 
 def test_comparison_correlates_failure_kind_with_rank() -> None:
     injection = _injection_payload()
-    injection["manifest"]["incidents"][0]["faults"].append({"fault_id": "rank-1-delay"})
+    delay_action = copy.deepcopy(injection["manifest"]["incidents"][0]["faults"][0])
+    delay_action.update(
+        {
+            "fault_id": "rank-1-delay",
+            "type": "delay",
+            "target": {
+                **delay_action["target"],
+                "rank": 1,
+                "surface": "compute",
+            },
+            "parameters": {"delay_ms": 10.0},
+        }
+    )
+    injection["manifest"]["incidents"][0]["faults"].append(delay_action)
     injection["injections"].append(
         {
             **injection["injections"][0],
             "fault_id": "rank-1-delay",
             "execution_rank": 1,
+            "failure_type": "delay",
             "expected_kind": "straggler",
             "target": {
                 **injection["injections"][0]["target"],
                 "rank": 1,
                 "surface": "compute",
             },
+            "parameters": {"delay_ms": 10.0},
         }
     )
     localization = _localization_payload(failed_rank=1)
@@ -413,7 +467,10 @@ def test_comparison_correlates_failure_kind_with_rank() -> None:
 
 def test_comparison_requires_every_manifest_action_record() -> None:
     injection = _injection_payload()
-    injection["manifest"]["incidents"][0]["faults"].append({"fault_id": "missing-rank-one-action"})
+    missing_action = copy.deepcopy(injection["manifest"]["incidents"][0]["faults"][0])
+    missing_action["fault_id"] = "missing-rank-one-action"
+    missing_action["target"]["rank"] = 1
+    injection["manifest"]["incidents"][0]["faults"].append(missing_action)
     localization = _localization_payload()
     _refresh_manifest_identity(injection, localization)
 
@@ -446,6 +503,23 @@ def test_comparison_fails_selected_unsuccessful_injections(status: str) -> None:
     assert not evaluation["evaluations"][0]["localized"]
 
 
+@pytest.mark.parametrize("value", ["false", 1])
+def test_comparison_rejects_coerced_injection_success(value: object) -> None:
+    injection = _injection_payload()
+    injection["injections"][0]["injection_succeeded"] = value
+
+    with pytest.raises(TypeError, match="injection_succeeded must be a boolean"):
+        compare_payloads(injection, _localization_payload())
+
+
+def test_comparison_rejects_inconsistent_injection_lifecycle() -> None:
+    injection = _injection_payload()
+    injection["injections"][0]["status"] = "failed"
+
+    with pytest.raises(ValueError, match="disagrees with the record status"):
+        compare_payloads(injection, _localization_payload())
+
+
 def test_comparison_ignores_explicit_probability_skips() -> None:
     injection = _injection_payload()
     injection["completed_iterations"] = 5
@@ -453,7 +527,12 @@ def test_comparison_ignores_explicit_probability_skips() -> None:
         {
             "incident_id": "skipped",
             "trigger": {"at": [5], "probability": 0.0},
-            "faults": [{"fault_id": "skipped-output"}],
+            "faults": [
+                {
+                    **copy.deepcopy(injection["manifest"]["incidents"][0]["faults"][0]),
+                    "fault_id": "skipped-output",
+                }
+            ],
         }
     )
     injection["injections"].append(
@@ -464,6 +543,7 @@ def test_comparison_ignores_explicit_probability_skips() -> None:
             "fault_id": "skipped-output",
             "iteration": 5,
             "status": "skipped_probability",
+            "verified": False,
             "injection_succeeded": False,
         }
     )
@@ -483,7 +563,12 @@ def test_comparison_rejects_a_wholly_missing_scheduled_occurrence() -> None:
         {
             "incident_id": "missing",
             "trigger": {"at": [5], "probability": 1.0},
-            "faults": [{"fault_id": "missing-output"}],
+            "faults": [
+                {
+                    **copy.deepcopy(injection["manifest"]["incidents"][0]["faults"][0]),
+                    "fault_id": "missing-output",
+                }
+            ],
         }
     )
     localization = _localization_payload()
@@ -512,6 +597,53 @@ def test_comparison_rejects_wrong_failure_evidence(
 
     assert not evaluation["summary"]["passed"]
     assert not evaluation["evaluations"][0][mismatch]
+
+
+def test_comparison_rejects_non_string_resource_evidence() -> None:
+    injection = _injection_payload()
+    injection["injections"][0].update(
+        {
+            "execution_rank": 0,
+            "failure_type": "resource_unavailable",
+            "expected_kind": "process_failure",
+            "target": {
+                "model_part": 0,
+                "surface": "resource",
+                "resource": "0",
+            },
+            "parameters": {},
+        }
+    )
+    action = injection["manifest"]["incidents"][0]["faults"][0]
+    action["type"] = "resource_unavailable"
+    action["target"] = {
+        "model_part": 0,
+        "surface": "resource",
+        "resource": "0",
+    }
+    action["parameters"] = {}
+    localization = _localization_payload()
+    localization["reports"][0] = {
+        "training_iteration": 4,
+        "failed_ranks": [],
+        "failed_resources": [0],
+        "kind": "process_failure",
+        "scope": "resource",
+    }
+    _refresh_manifest_identity(injection, localization)
+
+    with pytest.raises(TypeError, match="failed_resources item must be a string"):
+        compare_payloads(injection, localization)
+
+
+def test_comparison_rejects_record_target_tampering() -> None:
+    injection = _injection_payload()
+    injection["injections"][0]["target"]["rank"] = 1
+    injection["injections"][0]["execution_rank"] = 1
+    localization = _localization_payload(failed_rank=1)
+
+    with pytest.raises(ValueError, match="target does not match"):
+        compare_payloads(injection, localization)
 
 
 def test_comparison_rejects_extra_positive_layer_attribution() -> None:
@@ -714,6 +846,46 @@ def test_state_hold_schedule_remains_lazy_for_long_exact_lifetime() -> None:
     assert 5 in hold_iterations
     assert 1_000_000_003 in hold_iterations
     assert 1_000_000_004 not in hold_iterations
+
+
+def test_state_reset_ignores_deterministically_skipped_occurrences() -> None:
+    campaign = FaultCampaign.from_dict(
+        {
+            "schema_version": 1,
+            "name": "skipped-state-window",
+            "seed": 17,
+            "incidents": [
+                {
+                    "id": "weight-window",
+                    "trigger": {"at": [5], "probability": 0.0},
+                    "lifetime": {"iterations": 3},
+                    "faults": [
+                        {
+                            "id": "weight",
+                            "type": "tensor_corruption",
+                            "target": {
+                                "rank": 0,
+                                "module_path": "layers.0",
+                                "surface": "weight",
+                            },
+                            "parameters": {
+                                "operation": "sign_flip",
+                                "scope": "single",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    reset_iterations = _state_reset_iterations(campaign)
+    hold_iterations = _state_hold_iterations(campaign)
+
+    assert 5 not in reset_iterations
+    assert 7 not in reset_iterations
+    assert 5 not in hold_iterations
+    assert 6 not in hold_iterations
 
 
 def test_example_rejects_campaign_end_state_reset() -> None:

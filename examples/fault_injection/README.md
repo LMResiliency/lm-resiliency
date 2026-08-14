@@ -43,8 +43,10 @@ For those cases, an evaluation-only optimizer hook restores the last clean
 model and optimizer snapshot after SCOUT reports the fault and at the configured
 effect-expiration boundary. The clean snapshot is frozen throughout a bounded
 fault window, so contaminated intermediate iterations cannot become the next
-reset point. This isolates each case; it is not a replacement for production
-checkpoint recovery. The example rejects `campaign_end` lifetimes for
+reset point. Reset and hold windows use the campaign's deterministic
+probability selection, so an explicitly skipped occurrence never restores or
+holds evaluation state. This isolates each case; it is not a replacement for
+production checkpoint recovery. The example rejects `campaign_end` lifetimes for
 gradient-affecting incidents because they cannot produce a clean certification
 iteration before shutdown. It also requires `matching_calls=1` for those
 incidents because framework call multiplicity cannot be converted portably into
@@ -68,6 +70,10 @@ recomputes that identity from the embedded injection manifest and rejects
 tampered, missing, or mismatched identities, so localization output from an
 earlier campaign revision cannot satisfy new injection ground truth with the
 same name.
+Expected fault kinds, ranks, resources, layers, components, and parameters are
+derived from that authenticated manifest rather than trusted from individual
+injection records. Record targets and lifecycle fields must match the manifest
+and use strict JSON types before they can contribute to a passing result.
 SCOUT reports currently carry a training iteration but no campaign occurrence
 ID, so this example also rejects two distinct occurrences scheduled at the same
 iteration instead of crediting one report to both.

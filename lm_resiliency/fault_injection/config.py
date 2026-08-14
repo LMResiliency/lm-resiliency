@@ -422,6 +422,14 @@ class FaultTarget:
                 raise TypeError("fault target component must be a string")
             if not self.component.strip():
                 raise ValueError("fault target component must be non-empty")
+        for field_name in ("module_path", "operation", "path"):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                raise TypeError(f"fault target {field_name} must be a string")
+            if not value.strip():
+                raise ValueError(f"fault target {field_name} must be non-empty")
         object.__setattr__(
             self,
             "metadata",
@@ -443,8 +451,6 @@ class FaultTarget:
                 raise ValueError(
                     "fault target index is supported only for layer or expert logical components"
                 )
-        if self.module_path is not None and not self.module_path:
-            raise ValueError("fault target module_path must be non-empty")
         if self.resource is not None:
             if not isinstance(self.resource, str):
                 raise TypeError("fault target resource must be a string")

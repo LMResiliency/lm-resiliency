@@ -463,6 +463,18 @@ def test_campaign_mappings_are_deeply_immutable_snapshots() -> None:
     }
 
 
+@pytest.mark.parametrize("field", ["module_path", "operation", "path"])
+def test_fault_target_rejects_mutable_string_selectors(field: str) -> None:
+    target = {
+        "surface": "resource",
+        "resource": "gpu-0",
+        field: ["mutable"],
+    }
+
+    with pytest.raises(TypeError, match=f"{field} must be a string"):
+        FaultTarget.from_dict(target)
+
+
 def test_temporal_behavior_is_derived_from_schedule() -> None:
     transient = _incident(at=(3,))
     sparse_range = _incident(
@@ -4495,6 +4507,38 @@ def test_external_matching_calls_requires_inline_capability_before_activation() 
     assert events == []
 
 
+def test_external_persistent_lifetime_requires_an_active_result() -> None:
+    events: list[tuple[str, str]] = []
+    executor = _recording_executor(
+        {FailureType.EXCEPTION},
+        events,
+        active=False,
+        max_safety=SafetyClass.ISOLATED_DESTRUCTIVE,
+    )
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(2,),
+                lifetime=IncidentLifetime(iterations=2),
+                faults=(_external_fault(FailureType.EXCEPTION),),
+            )
+        ),
+        executors=(executor,),
+        rank=0,
+    )
+
+    with pytest.raises(ValueError, match="completed inline before"):
+        _step(model, optimizer)
+
+    assert events == [("activate", "exception")]
+    assert session.records[0].status is InjectionStatus.FAILED
+    session.close()
+
+
 def test_external_activation_failure_records_selected_executor() -> None:
     def activate(_request):
         raise RuntimeError("activation failed")
@@ -4924,6 +4968,48 @@ def test_failed_later_incident_rolls_back_earlier_active_incidents() -> None:
     _step(model, optimizer)
 
 
+def test_cross_incident_target_overlap_is_rejected_before_training() -> None:
+    model = TinyModel()
+    baseline = model.layers[0].weight.detach().clone()
+    target = _target(surface=FaultSurface.WEIGHT)
+    campaign = _campaign(
+        _incident(
+            incident_id="long-window",
+            at=(1,),
+            lifetime=IncidentLifetime(iterations=2),
+            faults=(
+                _corruption(
+                    fault_id="long-weight",
+                    target=target,
+                    scope=FaultScope.SINGLE,
+                ),
+            ),
+        ),
+        _incident(
+            incident_id="overlapping-window",
+            at=(2,),
+            lifetime=IncidentLifetime(iterations=1),
+            faults=(
+                _corruption(
+                    fault_id="overlap-weight",
+                    target=target,
+                    scope=FaultScope.SINGLE,
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="may not overlap on the same resolved target"):
+        enable_fault_injection(
+            model,
+            _optimizer(model),
+            campaign=campaign,
+            rank=0,
+        )
+
+    torch.testing.assert_close(model.layers[0].weight, baseline)
+
+
 def test_equivalent_target_selectors_collide_by_resolved_parameter() -> None:
     model = TinyModel()
     baseline = model.layers[0].weight.detach().clone()
@@ -5015,16 +5101,9 @@ def test_state_history_is_separate_for_different_scopes() -> None:
         _optimizer(model),
         campaign=_campaign(
             _incident(
-                incident_id="single",
                 at=(2,),
                 lifetime=IncidentLifetime(iterations=1),
-                faults=(stale_single,),
-            ),
-            _incident(
-                incident_id="full",
-                at=(2,),
-                lifetime=IncidentLifetime(iterations=1),
-                faults=(stale_full,),
+                faults=(stale_single, stale_full),
             ),
         ),
         rank=0,
@@ -5673,6 +5752,38 @@ def test_close_restores_active_faults_and_optimizer_hook() -> None:
     assert session.completed_iterations == 0
 
 
+def test_state_fault_waits_for_async_device_reads_before_mutation_and_restore() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    baseline = model.layers[0].weight.detach().clone()
+    campaign = _campaign(
+        _incident(
+            at=(1,),
+            lifetime=IncidentLifetime(until="recovery"),
+            faults=(
+                _corruption(
+                    target=_target(surface=FaultSurface.WEIGHT),
+                    scope=FaultScope.SINGLE,
+                ),
+            ),
+        )
+    )
+
+    with patch("lm_resiliency.fault_injection.local._synchronize_state_mutation") as synchronize:
+        session = enable_fault_injection(
+            model,
+            optimizer,
+            campaign=campaign,
+            rank=0,
+        )
+        assert synchronize.call_count == 1
+        session.notify_recovery()
+        assert synchronize.call_count == 2
+
+    torch.testing.assert_close(model.layers[0].weight, baseline)
+    session.close()
+
+
 @pytest.mark.parametrize(
     "surface",
     [FaultSurface.INPUT, FaultSurface.OUTPUT, FaultSurface.GRADIENT],
@@ -5729,6 +5840,40 @@ def test_first_iteration_state_history_fails_without_aborting_enablement() -> No
     assert session.records[0].status is InjectionStatus.FAILED
     assert "no prior observed value" in (session.records[0].error or "")
     torch.testing.assert_close(model.layers[0].weight, baseline)
+    session.close()
+
+
+def test_optimizer_state_history_waits_for_lazy_state_initialization() -> None:
+    model = TinyModel()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.0)
+    fault = FaultSpec(
+        fault_id="stale-exp-avg",
+        type=FailureType.STALE_STATE,
+        target=_target(surface=FaultSurface.OPTIMIZER_STATE),
+        parameters={
+            "scope": FaultScope.FULL.value,
+            "parameter": "weight",
+            "state_key": "exp_avg",
+        },
+    )
+
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(2,),
+                lifetime=IncidentLifetime(iterations=1),
+                faults=(fault,),
+            )
+        ),
+        rank=0,
+    )
+    _step(model, optimizer)
+    _step(model, optimizer)
+
+    assert session.records[0].status is InjectionStatus.FAILED
+    assert "no prior observed value" in (session.records[0].error or "")
     session.close()
 
 

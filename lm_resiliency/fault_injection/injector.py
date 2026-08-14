@@ -21,6 +21,7 @@ from lm_resiliency.fault_injection.config import (
     FaultCampaign,
     FaultIncident,
     FaultSpec,
+    IncidentLifetime,
     RetriggerPolicy,
     SafetyClass,
 )
@@ -301,6 +302,7 @@ class FaultInjectionSession:
         try:
             self._validate_capabilities()
             self._local.validate_targets(self._faults)
+            self._local.validate_schedule(self.campaign.incidents)
             self._local.sync_history(self._history_faults_for(self._current_iteration))
             self._preflight_current_iteration()
             self._context.register_step_callback(self._on_step_complete)
@@ -543,6 +545,15 @@ class FaultInjectionSession:
                 raise ValueError(
                     f"fault executor {executor.name!r} must declare "
                     "completes_inline=True for matching_calls incidents"
+                )
+            if _requires_active_external_effect(request.lifetime) and getattr(
+                executor,
+                "one_shot",
+                False,
+            ):
+                raise ValueError(
+                    f"fault executor {executor.name!r} cannot use a one-shot result "
+                    "for a multi-iteration or until lifetime"
                 )
             validate = getattr(executor, "validate", None)
             if callable(validate):
@@ -1104,6 +1115,15 @@ class FaultInjectionSession:
                     record.error += f"; deactivation also failed: {deactivation_error}"
                 record.completed_at_ns = time.monotonic_ns()
             raise RuntimeError(record.error)
+        if _requires_active_external_effect(request.lifetime) and not result.active:
+            with record._lock:
+                record.status = InjectionStatus.FAILED
+                record.error = (
+                    "external executor completed inline before its configured "
+                    "multi-iteration or until lifetime"
+                )
+                record.completed_at_ns = time.monotonic_ns()
+            raise ValueError(record.error)
         if request.lifetime.matching_calls is not None and result.active:
             try:
                 executor.deactivate(request, result)
@@ -1471,6 +1491,12 @@ def _json_mapping(value: Mapping[str, Any] | None, label: str) -> dict[str, Any]
     if not isinstance(thawed, dict):
         raise AssertionError("JSON mapping thaw did not produce a dictionary")
     return thawed
+
+
+def _requires_active_external_effect(lifetime: IncidentLifetime) -> bool:
+    return lifetime.until is not None or (
+        lifetime.iterations is not None and lifetime.iterations > 1
+    )
 
 
 def _probability_selected(

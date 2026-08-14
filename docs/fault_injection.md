@@ -263,6 +263,11 @@ classified as intermittent; one bounded candidate is transient.
 For an `iterations` lifetime, candidate spacing must be at least the configured
 duration. Exact or ranged candidates whose active windows would overlap are
 rejected when the manifest is constructed.
+Separate incidents that can overlap on the same resolved local target are also
+rejected during enablement. Probability-zero incidents are ignored; for other
+probabilistic incidents the validator conservatively treats a candidate as
+potentially selected. Large ranged schedules are checked without materializing
+every candidate.
 Closing a session normally completes a verified `campaign_end` effect. Closing
 before a `matching_calls` or `iterations` lifetime finishes cancels that effect,
 so a partial-duration injection cannot be certified as successful. Error-path
@@ -298,10 +303,10 @@ injection IDs but the same occurrence ID.
 | `model_part` | No | `0` | TorchTitan model-part or Megatron model-chunk index. |
 | `component` | For logical module targets | - | Non-empty logical component string such as `transformer_block`, `embedding`, `output`, or `expert`. |
 | `index` | For indexed components | - | Global layer or expert index. |
-| `module_path` | For explicit module targets | - | Exact path from the user model's `named_modules()`, such as `model.layers.12.mlp`. It is attempted before logical component resolution. |
-| `operation` | Executor-specific | - | Runtime operation such as `all_reduce` for a collective fault. |
+| `module_path` | For explicit module targets | - | Non-empty exact path from the user model's `named_modules()`, such as `model.layers.12.mlp`. It is attempted before logical component resolution. |
+| `operation` | Executor-specific | - | Non-empty runtime operation such as `all_reduce` for a collective fault. |
 | `resource` | Executor-specific | - | Non-empty string identifying a GPU, NIC, worker, node, or other resource. |
-| `path` | Executor-specific | - | Checkpoint or storage path. |
+| `path` | Executor-specific | - | Non-empty checkpoint or storage path. |
 | `metadata` | No | `{}` | Additional selector data consumed by framework resolution or a custom executor. |
 
 Module surfaces (`input`, `output`, `weight`, `bias`, `gradient`,
@@ -375,6 +380,9 @@ fails verification because no prior value exists. For model and optimizer state,
 that missing history produces a failed ground-truth record during activation;
 it does not abort campaign enablement. Unsupported targets and no-op mutations
 remain hard validation failures.
+Optimizer entries such as Adam moments may not exist until the first optimizer
+step. History setup defers those unresolved entries and retries at later
+optimizer boundaries instead of rejecting campaign enablement prematurely.
 For state surfaces, an incident at iteration N is armed after iteration N-1
 completes. It applies the snapshot from before iteration N-1, making the target
 one completed optimizer update behind its current state. The latest snapshot is
@@ -398,6 +406,10 @@ instead of subtracting an obsolete injection delta.
 Custom executors receive the full `target` and `parameters` objects unchanged.
 They may define additional fields, but should validate those fields before the
 training loop begins.
+All string selectors are validated before training and captured in the
+campaign's immutable manifest snapshot. Non-string or whitespace-only
+`module_path`, `operation`, and `path` values are rejected instead of being
+coerced by a framework adapter or executor.
 
 ## Schedule Examples
 
@@ -548,6 +560,11 @@ executor is still rejected.
 An external executor used with a `matching_calls` lifetime must declare
 `completes_inline=True` and return `active=false`. This capability is checked
 before activation so an unsupported destructive effect is never started.
+For an `iterations` lifetime greater than one, or any `until` lifetime, the
+executor must return `active=true` and support deactivation. An inline,
+inactive result cannot prove that a persistent effect remained present for its
+configured lifetime. Executors declared `one_shot=True` are therefore rejected
+for those lifetimes during preflight.
 Executor activation and deactivation evidence is captured as a deep JSON
 snapshot, so later mutation of callback-owned dictionaries or lists cannot
 change campaign ground truth.
@@ -713,6 +730,12 @@ partial or duplicate aggregate cannot pass.
 It additionally requires a record for every manifest candidate at or before the
 artifact's `completed_iterations`, including explicit probability skips. Losing
 an entire occurrence therefore cannot reduce the certification denominator.
+The example treats the embedded manifest as the authenticated source of
+expected fault type, target, parameters, rank, resource, and component
+evidence. Each injection record must match that manifest exactly.
+`injection_succeeded` and `verified` must be JSON booleans and must agree with
+the record lifecycle status; truthy strings, inconsistent statuses, and
+record-level target tampering are rejected before localization scoring.
 
 ## Current Boundaries
 
@@ -739,3 +762,9 @@ preserving subsequent updates. Use those state faults in isolated campaigns that
 recover or terminate after localization. `notify_recovery()` preserves values
 that were replaced by checkpoint loading and only removes an effect that is
 still visibly present.
+
+Before mutating or restoring live CUDA parameter or optimizer-state storage,
+the built-in executor synchronizes pending work on that device. This prevents a
+rare injected write from racing an asynchronous checkpoint copy that is still
+reading the same storage. The synchronization is limited to state-fault
+activation and cleanup; healthy optimizer iterations remain asynchronous.
