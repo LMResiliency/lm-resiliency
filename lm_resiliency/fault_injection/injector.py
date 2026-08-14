@@ -1279,16 +1279,18 @@ class FaultInjectionSession:
                 self._records.append(record)
 
     def _complete_until(self, boundary: str) -> None:
-        first_error: Exception | None = None
+        first_error: BaseException | None = None
         for active in self._active:
             if not active.done and active.incident.lifetime.until == boundary:
                 try:
                     active.complete(preserve_replaced_state=boundary == "recovery")
-                except Exception as error:
+                except BaseException as error:
                     if first_error is None:
                         first_error = error
         self._discard_completed()
         if first_error is not None:
+            if not isinstance(first_error, Exception):
+                raise first_error
             raise RuntimeError(f"fault {boundary} cleanup failed") from first_error
 
     def _discard_completed(self) -> None:
@@ -1300,13 +1302,23 @@ class FaultInjectionSession:
         identities: frozenset[int],
     ) -> None:
         with self._lifecycle_lock:
-            surfaces = {"weight", "bias"} if state_family == "model" else {"optimizer_state"}
+            if state_family == "model":
+                surfaces = {"weight", "bias"}
+            elif state_family == "optimizer":
+                surfaces = {"optimizer_state"}
+            elif state_family == "checkpoint":
+                surfaces = {"weight", "bias", "optimizer_state"}
+            else:
+                raise ValueError(f"unsupported state replacement family {state_family!r}")
             for active in self._active:
                 if (
                     isinstance(active.effect, LocalFaultEffect)
                     and not active.done
                     and active.effect.record.target.get("surface") in surfaces
-                    and active.effect.replacement_identity in identities
+                    and (
+                        state_family == "checkpoint"
+                        or active.effect.replacement_identity in identities
+                    )
                 ):
                     active.effect.mark_state_replaced()
                     lifetime = active.incident.lifetime

@@ -370,6 +370,27 @@ class TestMegatronAdapterStateDict:
         adapter.load_state_dict(state)
         assert self.model.decoder.layers[0].weight[0, 0].item() == 99.0
 
+    @patch("lm_resiliency.integrations.megatron.adapter.notify_checkpoint_tensor_load")
+    def test_load_checkpoint_tensors_notifies_replacement_observers(
+        self,
+        notify_checkpoint_tensor_load,
+    ):
+        optimizer = torch.optim.SGD(self.model.parameters(), lr=0.1)
+        adapter = MegatronAdapter(
+            model=[self.wrapped_model],
+            optimizer=optimizer,
+        )
+        tensors = adapter.collect_checkpoint_tensors()
+        saved = [tensor.clone() for tensor in tensors]
+        for tensor in tensors:
+            tensor.zero_()
+
+        adapter.load_checkpoint_tensors(saved)
+
+        for live, expected in zip(adapter.collect_checkpoint_tensors(), saved):
+            torch.testing.assert_close(live, expected)
+        notify_checkpoint_tensor_load.assert_called_once_with(adapter)
+
     @patch("torch.distributed.get_world_size", return_value=8)
     @patch("torch.distributed.get_rank", return_value=0)
     def test_extra_state_included(self, *mocks):

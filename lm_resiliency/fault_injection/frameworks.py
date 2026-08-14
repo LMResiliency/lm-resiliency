@@ -10,6 +10,7 @@ import torch.nn as nn
 
 from lm_resiliency.dispatch import _select_framework
 from lm_resiliency.fault_injection.config import FaultTarget
+from lm_resiliency.integrations._common import register_checkpoint_tensor_load_observer
 
 _LAYER_PARENTS = {
     "block",
@@ -363,6 +364,33 @@ class TrainingContext:
                     )
                 )
                 self._cleanups.append(handle.remove)
+        if self.framework in {"deepspeed", "megatron"}:
+
+            def observe_checkpoint_tensor_load(adapter: Any) -> None:
+                if self._owns_checkpoint_adapter(adapter):
+                    callback("checkpoint", frozenset())
+
+            self._cleanups.append(
+                register_checkpoint_tensor_load_observer(observe_checkpoint_tensor_load)
+            )
+
+    def _owns_checkpoint_adapter(self, adapter: Any) -> bool:
+        if self.framework == "deepspeed":
+            engine = getattr(adapter, "_engine", None)
+            return (
+                engine is self.step_owner and getattr(engine, "optimizer", None) is self.optimizer
+            )
+        if self.framework == "megatron":
+            adapter_models = getattr(adapter, "_model", None)
+            adapter_optimizer = getattr(adapter, "_optimizer", None)
+            if not isinstance(adapter_models, (list, tuple)):
+                return False
+            normalized = tuple(
+                _require_module(_unwrap_module(model), "Megatron checkpoint model")
+                for model in adapter_models
+            )
+            return normalized == self.models and adapter_optimizer is self.optimizer
+        return False
 
     def _register_deepspeed_step_callback(self, callback: Callable[[], None]) -> None:
         owner = self.step_owner

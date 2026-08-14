@@ -6,7 +6,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from lm_resiliency.fault_injection.config import FailureType, expected_failure_kind
 from lm_resiliency.fault_injection.injector import _probability_selected
@@ -181,13 +181,27 @@ def _evaluate_occurrence(
         )
         for kind in expected_kinds
     }
+    expected_rank_resource_pairs = _sorted_rank_resource_pairs(
+        (expected_rank, expected_resource)
+        for action in expected_by_fault_id.values()
+        if (expected_rank := _expected_action_rank(action)) is not None
+        and (expected_resource := _expected_action_resource(action)) is not None
+    )
+    expected_rank_resource_pairs_by_kind = {
+        kind: _sorted_rank_resource_pairs(
+            (expected_rank, expected_resource)
+            for action in expected_by_fault_id.values()
+            if _expected_action_kind(action) == kind
+            and (expected_rank := _expected_action_rank(action)) is not None
+            and (expected_resource := _expected_action_resource(action)) is not None
+        )
+        for kind in expected_kinds
+    }
     expected_layers = sorted(
         {
-            int(target["index"])
+            layer
             for action in expected_by_fault_id.values()
-            if (target := _action_target(action)).get("component")
-            in {"transformer_block", "transformer_layer", "layer"}
-            and target.get("index") is not None
+            if (layer := _expected_action_layer(action)) is not None
         }
     )
     expected_source_prefixes = sorted(
@@ -207,11 +221,12 @@ def _evaluate_occurrence(
         == iteration
     ]
     matching = [report for report in at_iteration if str(report.get("kind")) in expected_kinds]
-    observed_kinds = sorted({str(report.get("kind")) for report in at_iteration})
+    localizing = [report for report in matching if report.get("scope") != "peer_group"]
+    observed_kinds = sorted({str(report.get("kind")) for report in localizing})
     observed_ranks = sorted(
         {
             _required_integer(rank, "localization failed rank")
-            for report in matching
+            for report in localizing
             for rank in report.get("failed_ranks", ())
         }
     )
@@ -219,7 +234,7 @@ def _evaluate_occurrence(
         kind: sorted(
             {
                 _required_integer(rank, "localization failed rank")
-                for report in at_iteration
+                for report in localizing
                 if str(report.get("kind")) == kind
                 for rank in report.get("failed_ranks", ())
             }
@@ -229,7 +244,7 @@ def _evaluate_occurrence(
     observed_resources = sorted(
         {
             resource
-            for report in matching
+            for report in localizing
             for resource in _required_string_sequence(
                 report.get("failed_resources", ()),
                 "localization failed_resources",
@@ -240,7 +255,7 @@ def _evaluate_occurrence(
         kind: sorted(
             {
                 resource
-                for report in at_iteration
+                for report in localizing
                 if str(report.get("kind")) == kind
                 for resource in _required_string_sequence(
                     report.get("failed_resources", ()),
@@ -250,9 +265,16 @@ def _evaluate_occurrence(
         )
         for kind in expected_kinds
     }
+    observed_rank_resource_pairs = _reported_rank_resource_pairs(localizing)
+    observed_rank_resource_pairs_by_kind = {
+        kind: _reported_rank_resource_pairs(
+            tuple(report for report in localizing if str(report.get("kind")) == kind)
+        )
+        for kind in expected_kinds
+    }
     reported_layer_ids = {
         _required_integer(report["layer_id"], "localization layer_id")
-        for report in matching
+        for report in localizing
         if report.get("layer_id") is not None
     }
     observed_layers = sorted(layer_id for layer_id in reported_layer_ids if layer_id >= 0)
@@ -260,7 +282,7 @@ def _evaluate_occurrence(
     observed_sources = sorted(
         {
             source
-            for report in matching
+            for report in localizing
             for source in _required_string_sequence(
                 report.get("sources", ()),
                 "localization sources",
@@ -272,6 +294,10 @@ def _evaluate_occurrence(
     resource_match = observed_resources == expected_resources
     kind_rank_match = observed_ranks_by_kind == expected_ranks_by_kind
     kind_resource_match = observed_resources_by_kind == expected_resources_by_kind
+    rank_resource_pair_match = observed_rank_resource_pairs == expected_rank_resource_pairs
+    kind_rank_resource_pair_match = (
+        observed_rank_resource_pairs_by_kind == expected_rank_resource_pairs_by_kind
+    )
     detected_action_count = sum(
         (
             (expected_rank := _expected_action_rank(expected_by_fault_id[str(record["fault_id"])]))
@@ -309,16 +335,29 @@ def _evaluate_occurrence(
         for prefix in expected_source_prefixes
     }
     observed_targets_by_source = {
-        prefix: _reported_targets_for_source(matching, prefix)
+        prefix: _reported_targets_for_source(localizing, prefix)
         for prefix in expected_source_prefixes
     }
     source_target_match = (
         not expected_source_prefixes or observed_targets_by_source == expected_targets_by_source
     )
+    expected_targets_by_layer = {
+        str(layer): _expected_targets_for_layer(
+            tuple(expected_by_fault_id.values()),
+            layer,
+        )
+        for layer in expected_layers
+    }
+    observed_targets_by_layer = {
+        str(layer): _reported_targets_for_layer(localizing, layer) for layer in observed_layers
+    }
     if not expected_layers:
         layer_match = True
         layer_evidence = "not_required"
-    elif set(expected_layers) == set(observed_layers):
+    elif (
+        set(expected_layers) == set(observed_layers)
+        and observed_targets_by_layer == expected_targets_by_layer
+    ):
         layer_match = True
         layer_evidence = "layer_id"
     elif not observed_layers and aggregate_layer_report and not expected_source_prefixes:
@@ -339,6 +378,8 @@ def _evaluate_occurrence(
         and resource_match
         and kind_rank_match
         and kind_resource_match
+        and rank_resource_pair_match
+        and kind_rank_resource_pair_match
         and layer_match
         and source_match
         and source_target_match
@@ -358,7 +399,10 @@ def _evaluate_occurrence(
             "kinds": expected_kinds,
             "ranks_by_kind": expected_ranks_by_kind,
             "resources_by_kind": expected_resources_by_kind,
+            "rank_resource_pairs": expected_rank_resource_pairs,
+            "rank_resource_pairs_by_kind": expected_rank_resource_pairs_by_kind,
             "layers": expected_layers,
+            "targets_by_layer": expected_targets_by_layer,
             "source_prefixes": expected_source_prefixes,
             "targets_by_source": expected_targets_by_source,
         },
@@ -368,7 +412,10 @@ def _evaluate_occurrence(
             "kinds": observed_kinds,
             "ranks_by_kind": observed_ranks_by_kind,
             "resources_by_kind": observed_resources_by_kind,
+            "rank_resource_pairs": observed_rank_resource_pairs,
+            "rank_resource_pairs_by_kind": observed_rank_resource_pairs_by_kind,
             "layers": observed_layers,
+            "targets_by_layer": observed_targets_by_layer,
             "aggregate_layer_report": aggregate_layer_report,
             "sources": observed_sources,
             "targets_by_source": observed_targets_by_source,
@@ -378,6 +425,8 @@ def _evaluate_occurrence(
         "resource_match": resource_match,
         "kind_rank_match": kind_rank_match,
         "kind_resource_match": kind_resource_match,
+        "rank_resource_pair_match": rank_resource_pair_match,
+        "kind_rank_resource_pair_match": kind_rank_resource_pair_match,
         "layer_match": layer_match,
         "layer_evidence": layer_evidence,
         "source_match": source_match,
@@ -783,6 +832,101 @@ def _reported_targets_for_source(
                     report.get("failed_resources", ()),
                     "localization failed_resources",
                 )
+            }
+        ),
+    }
+
+
+def _reported_rank_resource_pairs(
+    reports: Sequence[Mapping[str, Any]],
+) -> list[list[int | str]]:
+    return _sorted_rank_resource_pairs(
+        (
+            _required_integer(rank, "localization failed rank"),
+            resource,
+        )
+        for report in reports
+        for rank in report.get("failed_ranks", ())
+        for resource in _required_string_sequence(
+            report.get("failed_resources", ()),
+            "localization failed_resources",
+        )
+    )
+
+
+def _sorted_rank_resource_pairs(
+    pairs: Iterable[tuple[int, str]],
+) -> list[list[int | str]]:
+    return [[rank, resource] for rank, resource in sorted(set(pairs))]
+
+
+def _expected_targets_for_layer(
+    actions: Sequence[Mapping[str, Any]],
+    layer: int,
+) -> dict[str, list[int] | list[str]]:
+    matching = tuple(action for action in actions if _expected_action_layer(action) == layer)
+    return _targets_for_actions(matching)
+
+
+def _reported_targets_for_layer(
+    reports: Sequence[Mapping[str, Any]],
+    layer: int,
+) -> dict[str, list[int] | list[str]]:
+    matching = tuple(
+        report
+        for report in reports
+        if report.get("layer_id") is not None
+        and _required_integer(report["layer_id"], "localization layer_id") == layer
+    )
+    return {
+        "ranks": sorted(
+            {
+                _required_integer(rank, "localization failed rank")
+                for report in matching
+                for rank in report.get("failed_ranks", ())
+            }
+        ),
+        "resources": sorted(
+            {
+                resource
+                for report in matching
+                for resource in _required_string_sequence(
+                    report.get("failed_resources", ()),
+                    "localization failed_resources",
+                )
+            }
+        ),
+    }
+
+
+def _expected_action_layer(action: Mapping[str, Any]) -> int | None:
+    target = _action_target(action)
+    if target.get("component") not in {
+        "transformer_block",
+        "transformer_layer",
+        "layer",
+    }:
+        return None
+    index = target.get("index")
+    return None if index is None else _required_integer(index, "manifest target index")
+
+
+def _targets_for_actions(
+    actions: Sequence[Mapping[str, Any]],
+) -> dict[str, list[int] | list[str]]:
+    return {
+        "ranks": sorted(
+            {
+                expected_rank
+                for action in actions
+                if (expected_rank := _expected_action_rank(action)) is not None
+            }
+        ),
+        "resources": sorted(
+            {
+                resource
+                for action in actions
+                if (resource := _expected_action_resource(action)) is not None
             }
         ),
     }

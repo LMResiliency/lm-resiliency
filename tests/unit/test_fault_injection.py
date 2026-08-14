@@ -55,6 +55,7 @@ from lm_resiliency.fault_injection.local import (
     _observe_history,
 )
 from lm_resiliency.fault_injection.state import CampaignJournal
+from lm_resiliency.integrations._common import notify_checkpoint_tensor_load
 
 
 class TinyModel(nn.Module):
@@ -2480,6 +2481,34 @@ def test_deepspeed_zero3_weight_uses_local_partition_storage() -> None:
     session.close()
 
 
+def test_deepspeed_direct_checkpoint_tensor_load_preserves_recovered_state() -> None:
+    model = TinyModel()
+    engine = FakeDeepSpeedEngine(model)
+    fault = _corruption(
+        target=_target(surface=FaultSurface.WEIGHT),
+        scope=FaultScope.SINGLE,
+    )
+    session = enable_fault_injection(
+        engine,
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="recovery"),
+                faults=(fault,),
+            )
+        ),
+        rank=0,
+    )
+    recovered = model.layers[0].weight.detach().clone()
+
+    notify_checkpoint_tensor_load(SimpleNamespace(_engine=engine))
+    session.notify_recovery()
+
+    torch.testing.assert_close(model.layers[0].weight, recovered)
+    assert session.records[0].status is InjectionStatus.COMPLETED
+    session.close()
+
+
 def test_deepspeed_zero3_gradient_hook_uses_original_parameter() -> None:
     model = TinyModel()
     placeholder = nn.Parameter(torch.empty(0))
@@ -4806,6 +4835,65 @@ def test_replacement_attempts_all_matching_effect_cleanup_after_failure() -> Non
     assert events[-2:] == [("deactivate", "first"), ("deactivate", "second")]
     assert session.records[0].status is InjectionStatus.FAILED
     assert session.records[1].status is InjectionStatus.COMPLETED
+    session.close()
+
+
+def test_replacement_attempts_all_cleanup_after_interrupt() -> None:
+    deactivated: list[str] = []
+
+    def activate(request):
+        return FaultExecutionResult(verified=True, active=True)
+
+    def deactivate(request, _result):
+        deactivated.append(request.fault.fault_id)
+        if request.fault.fault_id == "first":
+            raise KeyboardInterrupt("stop replacement cleanup")
+        return None
+
+    executor = CallbackFaultExecutor(
+        name="interrupting-replacement-cleanup",
+        supported_types={
+            FailureType.RESOURCE_UNAVAILABLE,
+            FailureType.PROCESS_TERMINATION,
+        },
+        activate=activate,
+        deactivate=deactivate,
+        max_safety=SafetyClass.CLUSTER_DESTRUCTIVE,
+    )
+    faults = (
+        _external_fault(
+            FailureType.RESOURCE_UNAVAILABLE,
+            fault_id="first",
+            resource="gpu-0",
+        ),
+        _external_fault(
+            FailureType.PROCESS_TERMINATION,
+            fault_id="second",
+            resource="process-0",
+        ),
+    )
+    model = TinyModel()
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="replacement"),
+                faults=faults,
+            )
+        ),
+        executors=(executor,),
+        rank=0,
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="stop replacement cleanup"):
+        session.notify_replacement()
+
+    assert deactivated == ["first", "second"]
+    assert session.records[0].status is InjectionStatus.FAILED
+    assert session.records[1].status is InjectionStatus.COMPLETED
+    assert session._active == []
     session.close()
 
 

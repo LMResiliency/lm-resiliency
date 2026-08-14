@@ -704,6 +704,129 @@ def test_comparison_correlates_source_prefixes_with_failed_targets() -> None:
     assert not occurrence["localized"]
 
 
+def test_comparison_preserves_rank_resource_pairs() -> None:
+    injection = _injection_payload()
+    first_action = injection["manifest"]["incidents"][0]["faults"][0]
+    first_action.update(
+        {
+            "type": "resource_unavailable",
+            "target": {
+                "rank": 0,
+                "model_part": 0,
+                "surface": "resource",
+                "resource": "gpu-0",
+            },
+            "parameters": {},
+        }
+    )
+    injection["injections"][0].update(
+        {
+            "failure_type": "resource_unavailable",
+            "expected_kind": "process_failure",
+            "target": copy.deepcopy(first_action["target"]),
+            "parameters": {},
+        }
+    )
+    second_action = copy.deepcopy(first_action)
+    second_action["fault_id"] = "rank-one-gpu"
+    second_action["target"]["rank"] = 1
+    second_action["target"]["resource"] = "gpu-1"
+    injection["manifest"]["incidents"][0]["faults"].append(second_action)
+    second_record = copy.deepcopy(injection["injections"][0])
+    second_record.update(
+        {
+            "fault_id": "rank-one-gpu",
+            "execution_rank": 1,
+            "target": copy.deepcopy(second_action["target"]),
+        }
+    )
+    injection["injections"].append(second_record)
+    localization = _localization_payload()
+    localization["reports"] = [
+        {
+            "training_iteration": 4,
+            "failed_ranks": [0],
+            "failed_resources": ["gpu-1"],
+            "kind": "process_failure",
+            "scope": "resource",
+        },
+        {
+            "training_iteration": 4,
+            "failed_ranks": [1],
+            "failed_resources": ["gpu-0"],
+            "kind": "process_failure",
+            "scope": "resource",
+        },
+    ]
+    _refresh_manifest_identity(injection, localization)
+
+    occurrence = compare_payloads(injection, localization)["evaluations"][0]
+
+    assert occurrence["rank_match"]
+    assert occurrence["resource_match"]
+    assert not occurrence["rank_resource_pair_match"]
+    assert not occurrence["localized"]
+
+
+def test_comparison_correlates_positive_layers_with_failed_targets() -> None:
+    injection = _injection_payload()
+    second_action = copy.deepcopy(injection["manifest"]["incidents"][0]["faults"][0])
+    second_action["fault_id"] = "rank-one-hidden-output"
+    second_action["target"]["rank"] = 1
+    second_action["target"]["index"] = 1
+    injection["manifest"]["incidents"][0]["faults"].append(second_action)
+    second_record = copy.deepcopy(injection["injections"][0])
+    second_record.update(
+        {
+            "fault_id": "rank-one-hidden-output",
+            "execution_rank": 1,
+            "target": copy.deepcopy(second_action["target"]),
+        }
+    )
+    injection["injections"].append(second_record)
+    localization = _localization_payload()
+    localization["reports"] = [
+        {
+            "training_iteration": 4,
+            "failed_ranks": [0],
+            "kind": "sdc",
+            "scope": "rank",
+            "layer_id": 1,
+            "sources": ["hidden.output"],
+        },
+        {
+            "training_iteration": 4,
+            "failed_ranks": [1],
+            "kind": "sdc",
+            "scope": "rank",
+            "layer_id": 0,
+            "sources": ["hidden.output"],
+        },
+    ]
+    _refresh_manifest_identity(injection, localization)
+
+    occurrence = compare_payloads(injection, localization)["evaluations"][0]
+
+    assert occurrence["rank_match"]
+    assert set(occurrence["observed"]["layers"]) == {0, 1}
+    assert not occurrence["layer_match"]
+    assert not occurrence["localized"]
+
+
+def test_peer_group_report_counts_as_detection_but_not_localization() -> None:
+    localization = _localization_payload()
+    localization["reports"][0]["scope"] = "peer_group"
+
+    evaluation = compare_payloads(_injection_payload(), localization)
+    occurrence = evaluation["evaluations"][0]
+
+    assert occurrence["detected"]
+    assert not occurrence["localized"]
+    assert occurrence["detected_action_count"] == 0
+    assert evaluation["summary"]["detected_occurrences"] == 1
+    assert evaluation["summary"]["localized_occurrences"] == 0
+
+
 def test_comparison_deduplicates_expected_targets_for_shared_source() -> None:
     injection = _injection_payload()
     second_action = copy.deepcopy(injection["manifest"]["incidents"][0]["faults"][0])

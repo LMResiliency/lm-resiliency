@@ -424,6 +424,11 @@ If a model load copies an active target and then fails on another key, the
 copied target is still marked as replaced before the original load error is
 re-raised. Recovery cleanup therefore preserves the partially restored value
 instead of subtracting an obsolete injection delta.
+Megatron and DeepSpeed GEMINI recovery copy checkpoint tensors directly rather
+than calling framework `load_state_dict()` methods. Those successful direct
+loads notify the same replacement tracker before `notify_recovery()` retires
+active state faults, so a recovered value equal to the injected value is not
+mistaken for a still-live fault and overwritten with pre-fault state.
 A bounded state effect replaced before its configured expiration is recorded as
 failed because the requested lifetime was not executed. Replacement at the
 normal expiration boundary remains successful and preserves the restored state.
@@ -674,6 +679,10 @@ framework restoration.
 The same rule applies at later optimizer boundaries: interrupt-class preflight
 and safe-effect expiration failures enter rank consensus before the interrupted
 rank re-raises the original signal.
+Recovery and replacement notifications attempt every matching effect cleanup
+before returning. An ordinary cleanup failure is reported with its lifecycle
+boundary; an interrupt-class failure is re-raised unchanged after the remaining
+effects have been finalized and discarded.
 The journal stores the canonical manifest identity. Reusing a campaign name with
 changed triggers, targets, parameters, or metadata requires a new state file;
 stale attempts are never applied to an edited manifest.
@@ -740,6 +749,10 @@ not report it.
 When an action explicitly identifies both a rank and a resource, localization
 must preserve that rank-resource association. Correct aggregate rank and
 resource sets with the pairs swapped are not successful attribution.
+The standalone comparator applies the same association per failure kind.
+Positive SCOUT `layer_id` evidence is also associated with the failed ranks and
+resources in the same report; swapping correct layer IDs between targets is not
+successful localization.
 `kind`, when supplied, must be a non-empty string. Supplying component evidence
 for an occurrence whose injected targets have no expected component is an
 overclaim and fails attribution.
@@ -762,6 +775,9 @@ an unrelated report at the same iteration is retained as evidence but does not
 count as detecting the injected occurrence. For correlated incidents containing
 multiple failure kinds, each kind must identify its corresponding expected
 ranks; matching only the aggregate rank and kind sets is insufficient.
+SCOUT reports with `scope="peer_group"` are inconclusive. They may count as
+detection evidence, but their ranks, resources, kind, layer, and source fields
+are excluded from localization credit.
 `evaluate()` takes the campaign lifecycle lock before snapshotting every
 record, so expiration, recovery, replacement, and close cannot expose a
 half-transitioned correlated incident. A returned `CampaignReport` therefore

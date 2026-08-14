@@ -24,7 +24,10 @@ from lm_resiliency.detection.topology import (
     ReplayPeerRole,
     normalize_replay_peer_role,
 )
-from lm_resiliency.integrations._common import create_gloo_peer_group
+from lm_resiliency.integrations._common import (
+    create_gloo_peer_group,
+    notify_checkpoint_tensor_load,
+)
 
 if TYPE_CHECKING:
     pass
@@ -164,6 +167,7 @@ class DeepSpeedAdapter(FrameworkAdapter):
         )
         for live, saved in zip(live_tensors, saved_tensors):
             live.data.copy_(saved)
+        notify_checkpoint_tensor_load(self)
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         """Apply a checkpoint state dict to all framework components."""
