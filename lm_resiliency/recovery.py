@@ -45,9 +45,7 @@ def build_recovery_decision(
         if allow_collective:
             checkpoint_step = int(checkpoint_manager.find_latest(mode))  # type: ignore[attr-defined]
         elif hasattr(checkpoint_manager, "local_recovery_step"):
-            checkpoint_step = int(
-                checkpoint_manager.local_recovery_step(mode)
-            )
+            checkpoint_step = int(checkpoint_manager.local_recovery_step(mode))
         elif mode is RecoveryMode.RECOVERY_VERIFIED:
             status = checkpoint_manager.checkpoint_status  # type: ignore[attr-defined]
             checkpoint_step = int(status.recovery_verified_step)
