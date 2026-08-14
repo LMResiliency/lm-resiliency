@@ -465,6 +465,10 @@ expected failed rank. Localization should report the resource through
 `failed_resources` and include a failed rank only when the campaign also
 targets that rank directly. `FaultInjectionRecord.expected_rank` likewise
 returns `None` when the target has a resource but no explicit rank.
+When a target explicitly supplies both `rank` and `resource`, localization must
+report both dimensions; neither the rank-only nor resource-only result is
+complete attribution. The standalone example comparator applies the same rule
+and never substitutes an action's executor rank for a resource-only target.
 
 ## Destructive and Environment-Specific Failures
 

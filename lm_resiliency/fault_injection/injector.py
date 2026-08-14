@@ -1534,9 +1534,9 @@ def _evaluate_occurrence(
     expected_ranks = tuple(
         sorted(
             {
-                fault.target.execution_rank
+                expected_rank
                 for fault in incident.faults
-                if fault.target.resource is None
+                if (expected_rank := _expected_rank(fault)) is not None
             }
         )
     )
@@ -1643,9 +1643,21 @@ def _expected_targets_for_kind(
 ) -> tuple[frozenset[int], frozenset[str]]:
     faults = tuple(fault for fault in incident.faults if fault.expected_kind == kind)
     return (
-        frozenset(fault.target.execution_rank for fault in faults if fault.target.resource is None),
+        frozenset(
+            expected_rank
+            for fault in faults
+            if (expected_rank := _expected_rank(fault)) is not None
+        ),
         frozenset(fault.target.resource for fault in faults if fault.target.resource is not None),
     )
+
+
+def _expected_rank(fault: FaultSpec) -> int | None:
+    if fault.target.rank is not None:
+        return fault.target.rank
+    if fault.target.resource is not None:
+        return None
+    return fault.target.execution_rank
 
 
 def _reported_targets_for_kind(

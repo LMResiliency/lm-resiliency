@@ -4924,6 +4924,53 @@ def test_correlated_faults_share_one_occurrence_and_evaluation() -> None:
     session.close()
 
 
+def test_resource_target_with_explicit_rank_requires_both_attribution_dimensions() -> None:
+    events: list[tuple[str, str]] = []
+    executor = _recording_executor({FailureType.RESOURCE_UNAVAILABLE}, events)
+    fault = _external_fault(
+        FailureType.RESOURCE_UNAVAILABLE,
+        fault_id="ranked-gpu",
+        resource="gpu-3",
+        rank=3,
+    )
+    model = TinyModel()
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(_incident(at=(1,), faults=(fault,))),
+        executors=(executor,),
+        rank=3,
+    )
+
+    complete = session.evaluate(
+        [
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_ranks=(3,),
+                failed_resources=("gpu-3",),
+                kind="process_failure",
+            )
+        ]
+    ).evaluations[0]
+    missing_rank = session.evaluate(
+        [
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_resources=("gpu-3",),
+                kind="process_failure",
+            )
+        ]
+    ).evaluations[0]
+
+    assert complete.expected_ranks == (3,)
+    assert complete.expected_resources == ("gpu-3",)
+    assert complete.localized
+    assert not missing_rank.localized
+    session.close()
+
+
 def test_correlated_multi_rank_incident_requires_all_action_records() -> None:
     rank_zero = _corruption(
         fault_id="rank-zero",
@@ -4971,11 +5018,13 @@ def test_mixed_kind_correlated_faults_require_per_kind_target_evidence() -> None
             FailureType.PROCESS_TERMINATION,
             fault_id="process",
             resource="process-0",
+            rank=None,
         ),
         _external_fault(
             FailureType.TIMEOUT,
             fault_id="timeout",
             resource="worker-0",
+            rank=None,
         ),
     )
     model = TinyModel()

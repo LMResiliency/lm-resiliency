@@ -251,6 +251,40 @@ def test_comparison_counts_correlated_rank_local_actions() -> None:
     assert evaluation["evaluations"][0]["action_count"] == 2
 
 
+def test_comparison_scores_resource_targets_without_executor_rank_blame() -> None:
+    injection = _injection_payload()
+    injection["injections"][0].update(
+        {
+            "execution_rank": 0,
+            "expected_kind": "process_failure",
+            "target": {
+                "surface": "resource",
+                "resource": "node-5",
+            },
+        }
+    )
+    localization = _localization_payload()
+    localization["reports"][0] = {
+        "training_iteration": 4,
+        "failed_ranks": [],
+        "failed_resources": ["node-5"],
+        "kind": "process_failure",
+        "scope": "resource",
+    }
+
+    evaluation = compare_payloads(injection, localization)
+    occurrence = evaluation["evaluations"][0]
+
+    assert occurrence["localized"]
+    assert occurrence["expected"]["ranks"] == []
+    assert occurrence["expected"]["resources"] == ["node-5"]
+    assert occurrence["observed"]["ranks"] == []
+    assert occurrence["observed"]["resources"] == ["node-5"]
+    assert occurrence["resource_match"]
+    assert occurrence["kind_resource_match"]
+    assert evaluation["summary"]["passed"]
+
+
 def test_comparison_correlates_failure_kind_with_rank() -> None:
     injection = _injection_payload()
     injection["manifest"]["incidents"][0]["faults"].append({"fault_id": "rank-1-delay"})

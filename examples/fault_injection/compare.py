@@ -124,14 +124,35 @@ def _evaluate_occurrence(
     if len(iterations) != 1:
         raise ValueError(f"occurrence {occurrence_id!r} spans multiple training iterations")
     iteration = iterations.pop()
-    expected_ranks = sorted({int(record["execution_rank"]) for record in records})
+    expected_ranks = sorted(
+        {
+            expected_rank
+            for record in records
+            if (expected_rank := _expected_rank(record)) is not None
+        }
+    )
+    expected_resources = sorted(
+        {resource for record in records if (resource := _expected_resource(record)) is not None}
+    )
     expected_kinds = sorted({str(record["expected_kind"]) for record in records})
     expected_ranks_by_kind = {
         kind: sorted(
             {
-                int(record["execution_rank"])
+                expected_rank
                 for record in records
                 if str(record["expected_kind"]) == kind
+                and (expected_rank := _expected_rank(record)) is not None
+            }
+        )
+        for kind in expected_kinds
+    }
+    expected_resources_by_kind = {
+        kind: sorted(
+            {
+                resource
+                for record in records
+                if str(record["expected_kind"]) == kind
+                and (resource := _expected_resource(record)) is not None
             }
         )
         for kind in expected_kinds
@@ -177,6 +198,20 @@ def _evaluate_occurrence(
         )
         for kind in expected_kinds
     }
+    observed_resources = sorted(
+        {str(resource) for report in matching for resource in report.get("failed_resources", ())}
+    )
+    observed_resources_by_kind = {
+        kind: sorted(
+            {
+                str(resource)
+                for report in at_iteration
+                if str(report.get("kind")) == kind
+                for resource in report.get("failed_resources", ())
+            }
+        )
+        for kind in expected_kinds
+    }
     reported_layer_ids = {
         _required_integer(report["layer_id"], "localization layer_id")
         for report in matching
@@ -189,10 +224,18 @@ def _evaluate_occurrence(
     )
     kind_match = set(expected_kinds).issubset(observed_kinds)
     rank_match = observed_ranks == expected_ranks
+    resource_match = observed_resources == expected_resources
     kind_rank_match = observed_ranks_by_kind == expected_ranks_by_kind
+    kind_resource_match = observed_resources_by_kind == expected_resources_by_kind
     detected_action_count = sum(
-        int(record["execution_rank"])
-        in observed_ranks_by_kind.get(str(record["expected_kind"]), ())
+        (
+            (expected_rank := _expected_rank(record)) is None
+            or expected_rank in observed_ranks_by_kind.get(str(record["expected_kind"]), ())
+        )
+        and (
+            (expected_resource := _expected_resource(record)) is None
+            or expected_resource in observed_resources_by_kind.get(str(record["expected_kind"]), ())
+        )
         for record in records
     )
     source_match = not expected_source_prefixes or all(
@@ -220,7 +263,9 @@ def _evaluate_occurrence(
         and detected
         and kind_match
         and rank_match
+        and resource_match
         and kind_rank_match
+        and kind_resource_match
         and layer_match
         and source_match
     )
@@ -235,27 +280,59 @@ def _evaluate_occurrence(
         "localized": localized,
         "expected": {
             "ranks": expected_ranks,
+            "resources": expected_resources,
             "kinds": expected_kinds,
             "ranks_by_kind": expected_ranks_by_kind,
+            "resources_by_kind": expected_resources_by_kind,
             "layers": expected_layers,
             "source_prefixes": expected_source_prefixes,
         },
         "observed": {
             "ranks": observed_ranks,
+            "resources": observed_resources,
             "kinds": observed_kinds,
             "ranks_by_kind": observed_ranks_by_kind,
+            "resources_by_kind": observed_resources_by_kind,
             "layers": observed_layers,
             "aggregate_layer_report": aggregate_layer_report,
             "sources": observed_sources,
         },
         "kind_match": kind_match,
         "rank_match": rank_match,
+        "resource_match": resource_match,
         "kind_rank_match": kind_rank_match,
+        "kind_resource_match": kind_resource_match,
         "layer_match": layer_match,
         "layer_evidence": layer_evidence,
         "source_match": source_match,
         "matched_reports": matching,
     }
+
+
+def _expected_rank(record: Mapping[str, Any]) -> int | None:
+    target = record.get("target", {})
+    if not isinstance(target, Mapping):
+        raise TypeError("injection target must be an object")
+    rank = target.get("rank")
+    if rank is not None:
+        return _required_integer(rank, "injection target rank")
+    if target.get("resource") is not None:
+        return None
+    return _required_integer(record.get("execution_rank"), "injection execution_rank")
+
+
+def _expected_resource(record: Mapping[str, Any]) -> str | None:
+    target = record.get("target", {})
+    if not isinstance(target, Mapping):
+        raise TypeError("injection target must be an object")
+    resource = target.get("resource")
+    if resource is None:
+        return None
+    if not isinstance(resource, str):
+        raise TypeError("injection target resource must be a string")
+    if not resource:
+        raise ValueError("injection target resource must be non-empty")
+    return resource
 
 
 def _manifest_fault_ids(injection: Mapping[str, Any]) -> dict[str, frozenset[str]]:
