@@ -146,7 +146,7 @@ def _evaluate_occurrence(
     else:
         layer_match = False
         layer_evidence = "missing"
-    detected = bool(at_iteration)
+    detected = bool(matching)
     localized = (
         injection_succeeded
         and detected

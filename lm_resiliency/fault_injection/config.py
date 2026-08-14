@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from enum import Enum
@@ -9,6 +10,41 @@ from pathlib import Path
 from typing import Any, Mapping
 
 SCHEMA_VERSION = 1
+
+_CAMPAIGN_KEYS = {
+    "schema_version",
+    "name",
+    "seed",
+    "clock",
+    "incidents",
+    "metadata",
+}
+_CLOCK_KEYS = {"type", "origin"}
+_RANGE_KEYS = {"start", "end", "every"}
+_TRIGGER_KEYS = {"at", "range", "probability"}
+_LIFETIME_KEYS = {"matching_calls", "iterations", "until"}
+_TARGET_KEYS = {
+    "surface",
+    "rank",
+    "model_part",
+    "component",
+    "index",
+    "module_path",
+    "operation",
+    "resource",
+    "path",
+    "metadata",
+}
+_FAULT_KEYS = {"fault_id", "id", "type", "target", "parameters"}
+_INCIDENT_KEYS = {
+    "incident_id",
+    "id",
+    "trigger",
+    "lifetime",
+    "faults",
+    "retrigger",
+    "max_occurrences",
+}
 
 
 class ClockType(str, Enum):
@@ -181,6 +217,7 @@ class ClockSpec:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "ClockSpec":
+        _reject_unknown_keys(value, _CLOCK_KEYS, "clock")
         return cls(
             type=ClockType(value.get("type", ClockType.TRAINING_ITERATION.value)),
             origin=ClockOrigin(value.get("origin", ClockOrigin.TRAINING_RUN.value)),
@@ -211,6 +248,7 @@ class IterationRange:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "IterationRange":
+        _reject_unknown_keys(value, _RANGE_KEYS, "trigger range")
         return cls(
             start=int(value["start"]),
             end=int(value["end"]),
@@ -258,6 +296,7 @@ class IncidentTrigger:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "IncidentTrigger":
+        _reject_unknown_keys(value, _TRIGGER_KEYS, "incident trigger")
         return cls(
             at=tuple(int(iteration) for iteration in value.get("at", ())),
             range=(
@@ -304,6 +343,7 @@ class IncidentLifetime:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "IncidentLifetime":
+        _reject_unknown_keys(value, _LIFETIME_KEYS, "incident lifetime")
         return cls(
             matching_calls=(
                 None if value.get("matching_calls") is None else int(value["matching_calls"])
@@ -365,6 +405,7 @@ class FaultTarget:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "FaultTarget":
+        _reject_unknown_keys(value, _TARGET_KEYS, "fault target")
         return cls(
             surface=FaultSurface(value["surface"]),
             rank=None if value.get("rank") is None else int(value["rank"]),
@@ -448,6 +489,8 @@ class FaultSpec:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "FaultSpec":
+        _reject_unknown_keys(value, _FAULT_KEYS, "fault")
+        _reject_alias_pair(value, "fault_id", "id", "fault")
         return cls(
             fault_id=str(value.get("fault_id", value.get("id", ""))),
             type=FailureType(value["type"]),
@@ -538,6 +581,8 @@ class FaultIncident:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "FaultIncident":
+        _reject_unknown_keys(value, _INCIDENT_KEYS, "incident")
+        _reject_alias_pair(value, "incident_id", "id", "incident")
         return cls(
             incident_id=str(value.get("incident_id", value.get("id", ""))),
             trigger=IncidentTrigger.from_dict(value["trigger"]),
@@ -601,6 +646,7 @@ class FaultCampaign:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "FaultCampaign":
+        _reject_unknown_keys(value, _CAMPAIGN_KEYS, "campaign")
         return cls(
             schema_version=int(value.get("schema_version", SCHEMA_VERSION)),
             name=str(value["name"]),
@@ -628,10 +674,41 @@ class FaultCampaign:
             "metadata": dict(self.metadata),
         }
 
+    @property
+    def manifest_identity(self) -> str:
+        """Return a stable identity for the complete executable manifest."""
+        manifest = json.dumps(
+            self.to_dict(),
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return hashlib.sha256(manifest.encode("utf-8")).hexdigest()
+
     def to_json(self, path: str | Path) -> None:
         with Path(path).open("w", encoding="utf-8") as stream:
             json.dump(self.to_dict(), stream, indent=2, sort_keys=True)
             stream.write("\n")
+
+
+def _reject_unknown_keys(
+    value: Mapping[str, Any],
+    allowed: set[str],
+    label: str,
+) -> None:
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ValueError(f"{label} contains unknown fields: {unknown}")
+
+
+def _reject_alias_pair(
+    value: Mapping[str, Any],
+    canonical: str,
+    alias: str,
+    label: str,
+) -> None:
+    if canonical in value and alias in value:
+        raise ValueError(f"{label} cannot contain both {canonical!r} and {alias!r}")
 
 
 __all__ = [

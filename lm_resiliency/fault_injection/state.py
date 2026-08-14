@@ -16,7 +16,23 @@ class CampaignJournal:
     """Attempt counts keyed by incident candidate iteration."""
 
     campaign: str
+    manifest_identity: str | None = None
     attempts: dict[str, int] = field(default_factory=dict)
+
+    def bind_manifest(self, manifest_identity: str) -> None:
+        """Bind persisted attempts to one exact executable campaign manifest."""
+        if not manifest_identity:
+            raise ValueError("campaign manifest identity must be non-empty")
+        if self.manifest_identity is None:
+            if self.attempts:
+                raise ValueError(
+                    "campaign state contains attempts without a manifest identity; "
+                    "start with a new state file"
+                )
+            self.manifest_identity = manifest_identity
+            return
+        if self.manifest_identity != manifest_identity:
+            raise ValueError("campaign state manifest identity does not match the current campaign")
 
     def attempt_count(self, incident_id: str, iteration: int) -> int:
         return int(self.attempts.get(_candidate_key(incident_id, iteration), 0))
@@ -30,6 +46,7 @@ class CampaignJournal:
     def to_dict(self) -> dict[str, Any]:
         return {
             "campaign": self.campaign,
+            "manifest_identity": self.manifest_identity,
             "attempts": dict(sorted(self.attempts.items())),
         }
 
@@ -37,6 +54,9 @@ class CampaignJournal:
     def from_dict(cls, value: dict[str, Any]) -> "CampaignJournal":
         return cls(
             campaign=str(value["campaign"]),
+            manifest_identity=(
+                None if value.get("manifest_identity") is None else str(value["manifest_identity"])
+            ),
             attempts={
                 str(key): int(count) for key, count in dict(value.get("attempts", {})).items()
             },

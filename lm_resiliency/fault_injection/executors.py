@@ -86,6 +86,7 @@ class CallbackFaultExecutor:
         name: str,
         supported_types: set[FailureType] | frozenset[FailureType],
         activate: Callable[[FaultExecutionRequest], FaultExecutionResult],
+        validate: Callable[[FaultExecutionRequest], None] | None = None,
         deactivate: Callable[
             [FaultExecutionRequest, FaultExecutionResult],
             Mapping[str, Any] | None,
@@ -100,6 +101,7 @@ class CallbackFaultExecutor:
             FailureType(failure_type) for failure_type in supported_types
         )
         self._activate = activate
+        self._validate = validate
         self._deactivate = deactivate
         self._max_safety = SafetyClass(max_safety)
 
@@ -112,6 +114,14 @@ class CallbackFaultExecutor:
             fault.type in self._supported_types
             and _SAFETY_ORDER[fault.safety] <= _SAFETY_ORDER[self._max_safety]
         )
+
+    @property
+    def can_deactivate(self) -> bool:
+        return self._deactivate is not None
+
+    def validate(self, request: FaultExecutionRequest) -> None:
+        if self._validate is not None:
+            self._validate(request)
 
     def activate(self, request: FaultExecutionRequest) -> FaultExecutionResult:
         result = self._activate(request)

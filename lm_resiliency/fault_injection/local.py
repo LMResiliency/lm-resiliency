@@ -81,7 +81,7 @@ class _History:
 
     def observe(self, tensor: torch.Tensor) -> None:
         self.previous = self.latest
-        self.latest = tensor.detach().clone()
+        self.latest = _local_shard(tensor).detach().clone()
 
 
 @dataclass(slots=True)
@@ -210,6 +210,31 @@ class LocalFaultExecutor:
                 )
             else:
                 self._context.resolve_module(fault.target)
+
+    def validate_activations(
+        self,
+        requests: tuple[FaultExecutionRequest, ...],
+    ) -> None:
+        """Validate immediately armed local effects without mutating training state."""
+        seen: set[tuple[Any, ...]] = set()
+        for request in requests:
+            fault = request.fault
+            if fault.target.execution_rank != self._rank or not self.supports(fault):
+                continue
+            key = _target_key(fault)
+            if key in seen or key in self._active_keys:
+                raise RuntimeError("another fault is already active on the same target")
+            seen.add(key)
+            if fault.target.surface not in {
+                FaultSurface.WEIGHT,
+                FaultSurface.BIAS,
+                FaultSurface.OPTIMIZER_STATE,
+            }:
+                continue
+            tensor = self._state_tensor(fault)
+            history = self._history.get(key)
+            transformed, _ = _transform_tensor(tensor, request, history)
+            _validate_state_retirement(tensor, transformed, request)
 
     def sync_history(self, faults: tuple[FaultSpec, ...]) -> None:
         """Collect stale-state history only around upcoming scheduled faults."""
@@ -474,15 +499,54 @@ class LocalFaultExecutor:
         tensor: torch.Tensor,
         request: FaultExecutionRequest,
     ) -> tuple[Callable[[], None], int]:
+        tensor = _local_shard(tensor)
         original = tensor.detach().clone()
         history = self._history.get(_target_key(request.fault))
         transformed, affected = _transform_tensor(tensor, request, history)
+        transformed = _local_shard(transformed)
+        _validate_state_retirement(tensor, transformed, request)
+        changed_indices, retirement_delta = _state_retirement_delta(original, transformed)
         with torch.no_grad():
             tensor.copy_(transformed)
 
         def restore() -> None:
             with torch.no_grad():
-                tensor.copy_(original)
+                flat = tensor.view(-1)
+                original_flat = original.view(-1)
+                finite = torch.isfinite(retirement_delta)
+                current = flat.index_select(0, changed_indices)
+                expected = original_flat.index_select(0, changed_indices)
+                already_restored = current == expected
+                if current.is_floating_point():
+                    already_restored = already_restored | (
+                        torch.isnan(current) & torch.isnan(expected)
+                    )
+                retire_finite = finite & ~already_restored
+                if bool(torch.any(retire_finite).item()):
+                    finite_indices = changed_indices.index_select(
+                        0,
+                        torch.nonzero(retire_finite, as_tuple=False).view(-1),
+                    )
+                    finite_delta = retirement_delta.index_select(
+                        0,
+                        torch.nonzero(retire_finite, as_tuple=False).view(-1),
+                    )
+                    flat.index_copy_(
+                        0,
+                        finite_indices,
+                        flat.index_select(0, finite_indices) - finite_delta,
+                    )
+                restore_nonfinite = ~finite & ~already_restored
+                if bool(torch.any(restore_nonfinite).item()):
+                    nonfinite_indices = changed_indices.index_select(
+                        0,
+                        torch.nonzero(restore_nonfinite, as_tuple=False).view(-1),
+                    )
+                    flat.index_copy_(
+                        0,
+                        nonfinite_indices,
+                        original_flat.index_select(0, nonfinite_indices),
+                    )
 
         return restore, affected
 
@@ -572,6 +636,8 @@ def _transform_tensor(
     request: FaultExecutionRequest,
     history: _History | None,
 ) -> tuple[torch.Tensor, int]:
+    reference = tensor
+    tensor = _local_shard(tensor)
     if tensor.numel() == 0:
         raise ValueError("fault target tensor must be non-empty")
     if not tensor.is_floating_point():
@@ -614,7 +680,7 @@ def _transform_tensor(
     after = transformed.detach().view(-1).index_select(0, indices)
     if _same_tensor_values(before, after):
         raise RuntimeError("fault injection did not change the selected tensor values")
-    return transformed, int(indices.numel())
+    return _rewrap_local(reference, transformed), int(indices.numel())
 
 
 def _apply_corruption(
@@ -746,6 +812,65 @@ def _same_tensor_values(left: torch.Tensor, right: torch.Tensor) -> bool:
     if left.is_floating_point():
         equal = equal | (torch.isnan(left) & torch.isnan(right))
     return bool(torch.all(equal).item())
+
+
+def _local_shard(tensor: torch.Tensor) -> torch.Tensor:
+    to_local = getattr(tensor, "to_local", None)
+    if type(tensor).__name__ == "DTensor" and callable(to_local):
+        local = to_local()
+        if not isinstance(local, torch.Tensor):
+            raise TypeError("DTensor.to_local() must return a tensor")
+        return local
+    return tensor
+
+
+def _rewrap_local(reference: torch.Tensor, local: torch.Tensor) -> torch.Tensor:
+    if type(reference).__name__ != "DTensor":
+        return local
+    factory = getattr(type(reference), "from_local", None)
+    if not callable(factory):
+        raise TypeError("DTensor type exposes no from_local constructor")
+    return factory(
+        local,
+        device_mesh=reference.device_mesh,
+        placements=reference.placements,
+        run_check=False,
+        shape=reference.shape,
+        stride=reference.stride(),
+    )
+
+
+def _validate_state_retirement(
+    original: torch.Tensor,
+    transformed: torch.Tensor,
+    request: FaultExecutionRequest,
+) -> None:
+    if request.lifetime.iterations is None:
+        return
+    original = _local_shard(original)
+    transformed = _local_shard(transformed)
+    delta = transformed - original
+    if not bool(torch.all(torch.isfinite(delta)).item()):
+        raise ValueError(
+            "bounded weight, bias, and optimizer_state faults must have a finite "
+            "retirement delta; use an until lifetime with recovery for non-finite corruption"
+        )
+
+
+def _state_retirement_delta(
+    original: torch.Tensor,
+    transformed: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    original_flat = original.contiguous().view(-1)
+    transformed_flat = transformed.contiguous().view(-1)
+    equal = original_flat == transformed_flat
+    if original.is_floating_point():
+        equal = equal | (torch.isnan(original_flat) & torch.isnan(transformed_flat))
+    indices = torch.nonzero(~equal, as_tuple=False).view(-1)
+    return indices, transformed_flat.index_select(0, indices) - original_flat.index_select(
+        0,
+        indices,
+    )
 
 
 __all__ = ["LocalFaultEffect", "LocalFaultExecutor"]

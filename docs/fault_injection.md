@@ -155,6 +155,9 @@ failure effects:
 
 Load and write manifests with `FaultCampaign.from_json(...)` and
 `FaultCampaign.to_json(...)`.
+The versioned parser rejects unknown fields at every executable schema level,
+including misspelled trigger fields. Arbitrary user data remains allowed only
+inside `metadata` and executor-defined `parameters`.
 
 ## Campaign Field Reference
 
@@ -284,6 +287,10 @@ Module surfaces (`input`, `output`, `weight`, `bias`, `gradient`,
 `optimizer_state`, and `compute`) require either `module_path` or `component`.
 Supplying both is useful when the exact framework path is known but a logical
 component should remain available as a fallback and for localization comparison.
+For pipeline-sharded Megatron, TorchTitan, or DeepSpeed models, logical
+transformer-layer indices are resolved through global module metadata such as
+`layer_number` or `global_layer_index`. The injector rejects ambiguous
+stage-local numbering instead of binding the same local suffix on every stage.
 
 ### Built-In Parameters
 
@@ -305,6 +312,13 @@ training iteration before a candidate and is removed at the optimizer boundary
 after the occurrence. State surfaces are snapshotted over the equivalent
 two-boundary window. A stale or duplicate incident scheduled for the first
 iteration fails verification because no prior value exists.
+
+Weight, bias, and optimizer-state faults with bounded iteration lifetimes are
+retired by removing the injected finite delta from the current tensor. This
+preserves optimizer updates made during the active window. A bounded state fault
+whose injected delta is non-finite is rejected before mutation; represent such
+corruption with an `until` lifetime and recover the workload afterward.
+FSDP2/HSDP `DTensor` state is mutated and verified through the rank-local shard.
 
 Custom executors receive the full `target` and `parameters` objects unchanged.
 They may define additional fields, but should validate those fields before the
@@ -438,6 +452,8 @@ Unsupported effects are never silently skipped.
 At execution time, the selected executor must return verified evidence.
 An unverifiable activation is marked failed, deactivated when necessary, and is
 not accepted as campaign ground truth.
+An executor that returns an active effect must provide a deactivation callback;
+callback-free executors are valid only for one-shot `active=false` results.
 
 The kit injects observable effects, not physical defects.
 For example, an ECC event is represented as tensor corruption or resource loss;
@@ -469,6 +485,9 @@ Supported policies are:
 The state file must survive worker replacement for restart-stable behavior.
 Use one JSON state file per rank, or provide a manager-backed
 `CampaignStateStore` that serializes concurrent updates across workers.
+The journal stores the canonical manifest identity. Reusing a campaign name with
+changed triggers, targets, parameters, or metadata requires a new state file;
+stale attempts are never applied to an edited manifest.
 
 ## Ground Truth and Evaluation
 
@@ -510,6 +529,9 @@ sets. Extra targets are attribution errors, not successful localization. If a
 localization result also supplies `kind` or `components`, that evidence must
 match the injected fault; omit optional evidence when the resiliency system does
 not report it.
+Example detection counts also require a report with the expected failure kind;
+an unrelated report at the same iteration is retained as evidence but does not
+count as detecting the injected occurrence.
 
 Reports are rank-local.
 A distributed campaign runner or training manager should collect reports from all
@@ -522,8 +544,12 @@ The repository does not directly terminate the current process, damage arbitrary
 storage, alter a production network, or remove cluster resources.
 Those effects require an explicitly configured isolated or cluster executor.
 
-Permanent mutation of live parameter or optimizer state can interact with later
-optimizer updates.
-Use permanent state faults in isolated campaigns that recover or terminate after
-localization, and use the corresponding recovery or replacement notification to
-end executor-owned effects.
+DeepSpeed clocks advance only when `global_steps` advances, so gradient
+accumulation microbatches do not consume campaign iterations. PipelineEngine
+uses the active `OptimizerStep` instruction-map entry, composing with an already
+enabled SCOUT wrapper.
+
+Permanent non-finite mutation of live parameter or optimizer state requires
+checkpoint recovery because the affected values cannot be retired while
+preserving subsequent updates. Use those state faults in isolated campaigns that
+recover or terminate after localization.

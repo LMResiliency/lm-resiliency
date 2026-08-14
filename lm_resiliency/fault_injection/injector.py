@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import random
 import time
 from dataclasses import dataclass
@@ -18,6 +17,7 @@ from lm_resiliency.fault_injection.config import (
     FaultIncident,
     FaultSpec,
     RetriggerPolicy,
+    SafetyClass,
 )
 from lm_resiliency.fault_injection.executors import (
     FaultExecutionRequest,
@@ -133,6 +133,8 @@ class FaultInjectionSession:
         self._current_iteration = completed + 1
         self._state_store = state_store or MemoryCampaignStateStore()
         self._journal: CampaignJournal = self._state_store.load(campaign.name)
+        self._journal.bind_manifest(campaign.manifest_identity)
+        self._state_store.save(self._journal)
         self._executors = tuple(executors)
         self._local = LocalFaultExecutor(self._context, self.rank)
         self._records: list[FaultInjectionRecord] = []
@@ -145,6 +147,7 @@ class FaultInjectionSession:
             self._validate_capabilities()
             self._local.validate_targets(self._faults)
             self._local.sync_history(self._history_faults_for(self._current_iteration))
+            self._preflight_current_iteration()
             self._context.register_step_callback(self._on_step_complete)
             register_automatic_cleanup(self)
             if not _defer_activation:
@@ -296,6 +299,65 @@ class FaultInjectionSession:
             joined = "; ".join(unsupported)
             raise UnsupportedFaultError(f"campaign has no configured executor for: {joined}")
 
+    def _preflight_current_iteration(self) -> None:
+        requests = self._requests_for_iteration(self._current_iteration)
+        self._local.validate_activations(requests)
+        for request in requests:
+            if self._local.supports(request.fault):
+                continue
+            executor = self._executor_for(request.fault)
+            validate = getattr(executor, "validate", None)
+            if callable(validate):
+                validate(request)
+
+    def _requests_for_iteration(self, iteration: int) -> tuple[FaultExecutionRequest, ...]:
+        requests: list[FaultExecutionRequest] = []
+        for incident, attempt in self._selected_incidents_for_iteration(iteration):
+            occurrence_id = _occurrence_id(incident, iteration, attempt)
+            for fault in incident.faults:
+                if fault.target.execution_rank != self.rank:
+                    continue
+                requests.append(
+                    self._build_request(
+                        incident,
+                        fault,
+                        occurrence_id,
+                        iteration,
+                        attempt,
+                    )
+                )
+        return tuple(requests)
+
+    def _has_safe_current_activation(self) -> bool:
+        selected = self._selected_incidents_for_iteration(self._current_iteration)
+        faults = tuple(fault for incident, _attempt in selected for fault in incident.faults)
+        return bool(faults) and all(fault.safety is SafetyClass.SAFE_IN_PROCESS for fault in faults)
+
+    def _selected_incidents_for_iteration(
+        self,
+        iteration: int,
+    ) -> tuple[tuple[FaultIncident, int], ...]:
+        selected: list[tuple[FaultIncident, int]] = []
+        for incident in self.campaign.incidents:
+            if not incident.trigger.matches(iteration):
+                continue
+            attempt_count = self._journal.attempt_count(incident.incident_id, iteration)
+            if incident.retrigger is RetriggerPolicy.ONCE and attempt_count >= 1:
+                continue
+            if incident.retrigger is RetriggerPolicy.MAX_OCCURRENCES and attempt_count >= int(
+                incident.max_occurrences or 0
+            ):
+                continue
+            if not _probability_selected(
+                self.campaign.seed,
+                incident.incident_id,
+                iteration,
+                incident.trigger.probability,
+            ):
+                continue
+            selected.append((incident, attempt_count + 1))
+        return tuple(selected)
+
     def _on_step_complete(self) -> None:
         if self._closed:
             return
@@ -378,21 +440,12 @@ class FaultInjectionSession:
             for fault in incident.faults:
                 if fault.target.execution_rank != self.rank:
                     continue
-                request = FaultExecutionRequest(
-                    campaign=self.campaign.name,
-                    seed=_fault_seed(
-                        self.campaign.seed,
-                        incident.incident_id,
-                        fault.fault_id,
-                        iteration,
-                    ),
-                    occurrence_id=occurrence_id,
-                    incident_id=incident.incident_id,
-                    iteration=iteration,
-                    attempt=attempt,
-                    temporal_behavior=incident.temporal_behavior,
-                    lifetime=incident.lifetime,
-                    fault=fault,
+                request = self._build_request(
+                    incident,
+                    fault,
+                    occurrence_id,
+                    iteration,
+                    attempt,
                 )
                 record = self._new_record(request, incident)
                 self._records.append(record)
@@ -426,12 +479,7 @@ class FaultInjectionSession:
         request: FaultExecutionRequest,
         record: FaultInjectionRecord,
     ) -> _ExternalEffect:
-        executor = next(
-            (candidate for candidate in self._executors if candidate.supports(request.fault)),
-            None,
-        )
-        if executor is None:
-            raise UnsupportedFaultError(f"no executor supports {request.fault.type.value}")
+        executor = self._executor_for(request.fault)
         try:
             result = executor.activate(request)
         except Exception as error:
@@ -444,6 +492,17 @@ class FaultInjectionSession:
             record.error = "fault executor activate must return FaultExecutionResult"
             record.completed_at_ns = time.monotonic_ns()
             raise TypeError(record.error)
+        if result.active and getattr(executor, "can_deactivate", True) is False:
+            record.executor = executor.name
+            record.verified = result.verified
+            record.evidence = dict(result.evidence)
+            record.status = InjectionStatus.FAILED
+            record.error = (
+                "fault executor returned an active effect without a deactivation callback"
+            )
+            record.activated_at_ns = time.monotonic_ns()
+            record.completed_at_ns = time.monotonic_ns()
+            raise ValueError(record.error)
         record.executor = executor.name
         record.verified = result.verified
         record.evidence = dict(result.evidence)
@@ -489,6 +548,40 @@ class FaultInjectionSession:
             executor=executor,
             result=result,
             done=not result.active,
+        )
+
+    def _executor_for(self, fault: FaultSpec) -> FaultExecutor:
+        executor = next(
+            (candidate for candidate in self._executors if candidate.supports(fault)),
+            None,
+        )
+        if executor is None:
+            raise UnsupportedFaultError(f"no executor supports {fault.type.value}")
+        return executor
+
+    def _build_request(
+        self,
+        incident: FaultIncident,
+        fault: FaultSpec,
+        occurrence_id: str,
+        iteration: int,
+        attempt: int,
+    ) -> FaultExecutionRequest:
+        return FaultExecutionRequest(
+            campaign=self.campaign.name,
+            seed=_fault_seed(
+                self.campaign.seed,
+                incident.incident_id,
+                fault.fault_id,
+                iteration,
+            ),
+            occurrence_id=occurrence_id,
+            incident_id=incident.incident_id,
+            iteration=iteration,
+            attempt=attempt,
+            temporal_behavior=incident.temporal_behavior,
+            lifetime=incident.lifetime,
+            fault=fault,
         )
 
     def _new_record(
@@ -643,17 +736,51 @@ def enable_fault_injection(
         raise enablement_error from local_error
     if session is None:
         raise AssertionError("distributed fault injection enablement returned no session")
-    try:
-        session._start()
-    except Exception as error:
+    if session._has_safe_current_activation():
+        activation_error: Exception | None = None
         try:
-            session.close()
-        except Exception as cleanup_error:
-            _add_exception_note(
-                error,
-                f"fault injection cleanup also failed: {cleanup_error}",
+            session._start()
+        except Exception as error:
+            activation_error = error
+        activation_summary = (
+            None
+            if activation_error is None
+            else f"{type(activation_error).__name__}: {activation_error}"
+        )
+        gathered_activations: list[str | None] = [None] * world_size
+        dist.all_gather_object(gathered_activations, activation_summary)
+        activation_failures = [
+            f"rank {failed_rank}: {summary}"
+            for failed_rank, summary in enumerate(gathered_activations)
+            if summary is not None
+        ]
+        if activation_failures:
+            cleanup_error: Exception | None = None
+            try:
+                session.close()
+            except Exception as error:
+                cleanup_error = error
+            enablement_error = RuntimeError(
+                "fault injection arming failed; " + "; ".join(activation_failures)
             )
-        raise
+            if cleanup_error is not None:
+                _add_exception_note(
+                    enablement_error,
+                    f"fault injection cleanup also failed: {cleanup_error}",
+                )
+            raise enablement_error from activation_error
+    else:
+        try:
+            session._start()
+        except Exception as error:
+            try:
+                session.close()
+            except Exception as cleanup_error:
+                _add_exception_note(
+                    error,
+                    f"fault injection cleanup also failed: {cleanup_error}",
+                )
+            raise
     return session
 
 
@@ -671,13 +798,7 @@ def _add_exception_note(error: Exception, note: str) -> None:
 
 
 def _campaign_identity(campaign: FaultCampaign) -> str:
-    manifest = json.dumps(
-        campaign.to_dict(),
-        allow_nan=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    return hashlib.sha256(manifest.encode("utf-8")).hexdigest()
+    return campaign.manifest_identity
 
 
 def _validate_distributed_target_ranks(campaign: FaultCampaign, world_size: int) -> None:

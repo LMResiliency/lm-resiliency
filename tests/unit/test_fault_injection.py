@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 import inspect
 import json
+from types import MethodType
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -19,6 +21,7 @@ from lm_resiliency import (
     FaultCampaign,
     FaultExecutionResult,
     FaultIncident,
+    FaultInjectionSession,
     FaultMagnitude,
     FaultScope,
     FaultSpec,
@@ -62,6 +65,22 @@ class Wrapper(nn.Module):
         return self.module(value)
 
 
+class DTensor(torch.Tensor):
+    @staticmethod
+    def __new__(cls, local: torch.Tensor):
+        return torch.Tensor._make_subclass(cls, local, local.requires_grad)
+
+    def to_local(self) -> torch.Tensor:
+        return self.as_subclass(torch.Tensor)
+
+    @classmethod
+    def from_local(cls, local: torch.Tensor, **metadata):
+        value = cls(local)
+        value.device_mesh = metadata.get("device_mesh")
+        value.placements = metadata.get("placements")
+        return value
+
+
 class FakeDeepSpeedEngine:
     def __init__(self, module: nn.Module, *, global_steps: int = 0) -> None:
         self.module = module
@@ -74,6 +93,34 @@ class FakeDeepSpeedEngine:
 
     def zero_optimization_stage(self) -> int:
         return 2
+
+
+class AccumulatingDeepSpeedEngine(FakeDeepSpeedEngine):
+    def __init__(self, module: nn.Module, *, accumulation_steps: int = 2) -> None:
+        super().__init__(module)
+        self.accumulation_steps = accumulation_steps
+        self.micro_steps = 0
+
+    def step(self) -> None:
+        self.micro_steps += 1
+        if self.micro_steps % self.accumulation_steps == 0:
+            self.optimizer.step()
+            self.global_steps += 1
+
+
+class OptimizerStep:
+    pass
+
+
+class PipelineEngine(FakeDeepSpeedEngine):
+    def _exec_optimizer_step(self) -> None:
+        self.optimizer.step()
+        self.global_steps += 1
+
+    def step(self) -> None:
+        raise RuntimeError("PipelineEngine.step() is disabled")
+
+    _INSTRUCTION_MAP = {OptimizerStep: _exec_optimizer_step}
 
 
 class FakeTorchTitanTrainer:
@@ -261,6 +308,41 @@ def test_incident_campaign_json_round_trip(tmp_path) -> None:
     assert json.loads(path.read_text()) == campaign.to_dict()
     assert "framework" not in campaign.to_dict()
     assert campaign.clock.type.value == "training_iteration"
+
+
+@pytest.mark.parametrize(
+    ("path", "field"),
+    [
+        ((), "unknown_campaign"),
+        (("clock",), "unknown_clock"),
+        (("incidents", 0), "unknown_incident"),
+        (("incidents", 0, "trigger"), "probablity"),
+        (("incidents", 0, "lifetime"), "unknown_lifetime"),
+        (("incidents", 0, "faults", 0), "unknown_fault"),
+        (("incidents", 0, "faults", 0, "target"), "unknown_target"),
+    ],
+)
+def test_campaign_parser_rejects_unknown_fields(
+    path: tuple[object, ...],
+    field: str,
+) -> None:
+    value = copy.deepcopy(_campaign().to_dict())
+    current: object = value
+    for part in path:
+        current = current[part]  # type: ignore[index]
+    assert isinstance(current, dict)
+    current[field] = 0
+
+    with pytest.raises(ValueError, match="unknown fields"):
+        FaultCampaign.from_dict(value)
+
+
+def test_campaign_parser_rejects_unknown_range_fields() -> None:
+    value = _campaign(_incident(trigger_range=IterationRange(start=2, end=4))).to_dict()
+    value["incidents"][0]["trigger"]["range"]["evry"] = 1
+
+    with pytest.raises(ValueError, match="unknown fields"):
+        FaultCampaign.from_dict(value)
 
 
 def test_temporal_behavior_is_derived_from_schedule() -> None:
@@ -456,6 +538,62 @@ def test_distributed_enablement_arms_iteration_one_after_consensus() -> None:
         )
 
     assert events == [("activate", "process_termination")]
+    session.close()
+
+
+def test_distributed_safe_arming_failure_is_propagated_before_return() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    session = MagicMock()
+    session.current_iteration = 1
+    session._has_safe_current_activation.return_value = True
+    gathers = 0
+
+    def gather(values, local_value) -> None:
+        nonlocal gathers
+        gathers += 1
+        if gathers == 1:
+            values[:] = [local_value, dict(local_value)]
+        else:
+            values[:] = [local_value, "LookupError: optimizer state is unavailable"]
+
+    with (
+        patch(
+            "lm_resiliency.fault_injection.injector.FaultInjectionSession",
+            return_value=session,
+        ),
+        patch("lm_resiliency.fault_injection.injector.dist.is_available", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.is_initialized", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.get_world_size", return_value=2),
+        patch(
+            "lm_resiliency.fault_injection.injector.dist.all_gather_object",
+            side_effect=gather,
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="rank 1: LookupError"):
+            enable_fault_injection(
+                model,
+                optimizer,
+                campaign=_campaign(_incident(at=(1,))),
+            )
+
+    session._start.assert_called_once()
+    session.close.assert_called_once()
+
+
+def test_safe_arming_consensus_decision_includes_remote_rank_faults() -> None:
+    model = TinyModel()
+    fault = _corruption(target=_target(rank=1))
+    with patch.object(FaultInjectionSession, "_start"):
+        session = enable_fault_injection(
+            model,
+            _optimizer(model),
+            campaign=_campaign(_incident(at=(1,), faults=(fault,))),
+            rank=0,
+        )
+
+    assert session._has_safe_current_activation()
+    assert session.records == ()
     session.close()
 
 
@@ -688,6 +826,99 @@ def test_iteration_lifetime_restores_after_window() -> None:
     torch.testing.assert_close(model.layers[0].weight, baseline)
     assert session.records[0].status is InjectionStatus.COMPLETED
     session.close()
+
+
+def test_bounded_state_fault_retirement_preserves_optimizer_update() -> None:
+    model = TinyModel()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    baseline = model.layers[0].weight.detach().clone()
+    campaign = _campaign(
+        _incident(
+            at=(1,),
+            lifetime=IncidentLifetime(iterations=1),
+            faults=(
+                _corruption(
+                    target=_target(surface=FaultSurface.WEIGHT),
+                    operation=CorruptionOperation.SCALE,
+                    scope=FaultScope.FULL,
+                    factor=2.0,
+                ),
+            ),
+        )
+    )
+    session = enable_fault_injection(model, optimizer, campaign=campaign, rank=0)
+
+    for parameter in model.parameters():
+        parameter.grad = torch.ones_like(parameter)
+    optimizer.step()
+
+    torch.testing.assert_close(model.layers[0].weight, baseline - 0.1)
+    assert session.records[0].status is InjectionStatus.COMPLETED
+    session.close()
+
+
+def test_state_retirement_is_idempotent_after_external_restore() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    baseline = model.layers[0].weight.detach().clone()
+
+    def restore_before_injector_callback(*_args) -> None:
+        with torch.no_grad():
+            model.layers[0].weight.copy_(baseline)
+
+    reset_handle = optimizer.register_step_post_hook(restore_before_injector_callback)
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(iterations=1),
+                faults=(
+                    _corruption(
+                        target=_target(surface=FaultSurface.WEIGHT),
+                        operation=CorruptionOperation.SCALE,
+                        scope=FaultScope.FULL,
+                        factor=2.0,
+                    ),
+                ),
+            )
+        ),
+        rank=0,
+    )
+
+    optimizer.step()
+
+    torch.testing.assert_close(model.layers[0].weight, baseline)
+    session.close()
+    reset_handle.remove()
+
+
+def test_bounded_nonfinite_state_fault_is_rejected_before_mutation() -> None:
+    model = TinyModel()
+    baseline = model.layers[0].weight.detach().clone()
+    fault = _corruption(
+        target=_target(surface=FaultSurface.WEIGHT),
+        operation=CorruptionOperation.SET_VALUE,
+        scope=FaultScope.SINGLE,
+        value="nan",
+    )
+
+    with pytest.raises(ValueError, match="finite retirement delta"):
+        enable_fault_injection(
+            model,
+            _optimizer(model),
+            campaign=_campaign(
+                _incident(
+                    at=(1,),
+                    lifetime=IncidentLifetime(iterations=1),
+                    faults=(fault,),
+                )
+            ),
+            rank=0,
+        )
+
+    torch.testing.assert_close(model.layers[0].weight, baseline)
 
 
 @pytest.mark.parametrize(
@@ -986,6 +1217,60 @@ def test_optimizer_state_corruption_and_restoration() -> None:
     session.close()
 
 
+def test_immediate_optimizer_state_fault_is_preflighted() -> None:
+    model = TinyModel()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.0)
+    fault = _corruption(
+        target=_target(surface=FaultSurface.OPTIMIZER_STATE),
+        parameter="weight",
+        state_key="exp_avg",
+    )
+
+    with pytest.raises(LookupError, match="optimizer state tensor"):
+        enable_fault_injection(
+            model,
+            optimizer,
+            campaign=_campaign(
+                _incident(
+                    at=(1,),
+                    lifetime=IncidentLifetime(iterations=1),
+                    faults=(fault,),
+                )
+            ),
+            rank=0,
+        )
+
+
+def test_dtensor_state_fault_mutates_and_retires_local_shard() -> None:
+    model = TinyModel()
+    parameter = nn.Parameter(DTensor(model.layers[0].weight.detach().clone()))
+    parameter.device_mesh = object()
+    parameter.placements = ("shard",)
+    model.layers[0].weight = parameter
+    optimizer = _optimizer(model)
+    baseline = parameter.to_local().detach().clone()
+    fault = _corruption(
+        target=_target(surface=FaultSurface.WEIGHT),
+        scope=FaultScope.SINGLE,
+    )
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="recovery"),
+                faults=(fault,),
+            )
+        ),
+        rank=0,
+    )
+
+    assert not torch.equal(parameter.to_local(), baseline)
+    session.close()
+    torch.testing.assert_close(parameter.to_local(), baseline)
+
+
 def test_delay_fault_uses_module_hook_without_manual_trigger() -> None:
     model = TinyModel()
     optimizer = _optimizer(model)
@@ -1134,6 +1419,138 @@ def test_framework_inference_and_automatic_step_boundaries() -> None:
         session.close()
 
 
+def test_deepspeed_pipeline_uses_optimizer_instruction_map() -> None:
+    engine = PipelineEngine(TinyModel())
+    original_map = engine._INSTRUCTION_MAP
+    session = enable_fault_injection(
+        engine,
+        campaign=_campaign(_incident(at=(2,))),
+        rank=0,
+    )
+
+    assert engine._INSTRUCTION_MAP is not original_map
+    MethodType(engine._INSTRUCTION_MAP[OptimizerStep], engine)()
+    assert session.completed_iterations == 1
+    assert session.records[0].status is InjectionStatus.PENDING
+    output = engine.module(torch.ones(2, 4))
+    assert session.records[0].iteration == 2
+    output.sum().backward()
+    MethodType(engine._INSTRUCTION_MAP[OptimizerStep], engine)()
+    assert session.completed_iterations == 2
+
+    session.close()
+    assert engine._INSTRUCTION_MAP is original_map
+
+
+def test_deepspeed_pipeline_composes_with_existing_instruction_wrapper() -> None:
+    engine = PipelineEngine(TinyModel())
+    calls: list[str] = []
+
+    def scout_instruction(bound_engine) -> None:
+        calls.append("scout")
+        PipelineEngine._exec_optimizer_step(bound_engine)
+
+    scout_map = {OptimizerStep: scout_instruction}
+    engine._INSTRUCTION_MAP = scout_map
+    session = enable_fault_injection(
+        engine,
+        campaign=_campaign(_incident(at=(2,))),
+        rank=0,
+    )
+
+    MethodType(engine._INSTRUCTION_MAP[OptimizerStep], engine)()
+
+    assert calls == ["scout"]
+    assert session.completed_iterations == 1
+    session.close()
+    assert engine._INSTRUCTION_MAP is scout_map
+
+
+def test_deepspeed_clock_advances_only_when_global_steps_changes() -> None:
+    engine = AccumulatingDeepSpeedEngine(TinyModel(), accumulation_steps=2)
+    session = enable_fault_injection(
+        engine,
+        campaign=_campaign(_incident(at=(2,))),
+        rank=0,
+    )
+
+    engine.step()
+    assert session.completed_iterations == 0
+    assert session.records == ()
+    engine.step()
+    engine.step()
+    assert session.completed_iterations == 1
+    assert session.records[0].status is InjectionStatus.PENDING
+    engine.step()
+
+    assert session.completed_iterations == 2
+    assert session.records[0].iteration == 2
+    session.close()
+
+
+def test_pipeline_global_layer_index_uses_layer_number_metadata() -> None:
+    class PipelineChunk(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.decoder = nn.Module()
+            self.decoder.layers = nn.ModuleList([nn.Linear(4, 4)])
+            self.decoder.layers[0].layer_number = 13
+
+    chunk = PipelineChunk()
+    optimizer = _optimizer(chunk)
+    baseline = chunk.decoder.layers[0].weight.detach().clone()
+    fault = _corruption(
+        target=_target(
+            surface=FaultSurface.WEIGHT,
+            module_path=None,
+            component="transformer_block",
+            index=12,
+        ),
+        scope=FaultScope.SINGLE,
+    )
+    session = enable_fault_injection(
+        [chunk],
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="recovery"),
+                faults=(fault,),
+            )
+        ),
+        rank=0,
+    )
+
+    assert not torch.equal(chunk.decoder.layers[0].weight, baseline)
+    session.close()
+
+
+def test_pipeline_global_layer_index_rejects_stage_local_suffixes() -> None:
+    chunk = TinyModel()
+    fault = _corruption(
+        target=_target(
+            surface=FaultSurface.WEIGHT,
+            module_path=None,
+            component="transformer_block",
+            index=0,
+        )
+    )
+
+    with pytest.raises(LookupError, match="global layer metadata"):
+        enable_fault_injection(
+            [chunk],
+            _optimizer(chunk),
+            campaign=_campaign(
+                _incident(
+                    at=(1,),
+                    lifetime=IncidentLifetime(until="recovery"),
+                    faults=(fault,),
+                )
+            ),
+            rank=0,
+        )
+
+
 def test_once_retrigger_uses_restart_stable_journal() -> None:
     store = MemoryCampaignStateStore()
     events: list[tuple[str, str]] = []
@@ -1168,6 +1585,39 @@ def test_once_retrigger_uses_restart_stable_journal() -> None:
     assert second.records == ()
     assert events == [("activate", "process_termination")]
     second.close()
+
+
+@pytest.mark.parametrize("store_kind", ["memory", "json"])
+def test_restart_journal_rejects_changed_manifest_with_same_name(
+    store_kind: str,
+    tmp_path,
+) -> None:
+    store = (
+        MemoryCampaignStateStore()
+        if store_kind == "memory"
+        else JsonCampaignStateStore(tmp_path / "campaign-state.json")
+    )
+    first_campaign = _campaign(_incident(at=(2,)), name="stable-name", seed=1)
+    first_model = TinyModel()
+    first = enable_fault_injection(
+        first_model,
+        _optimizer(first_model),
+        campaign=first_campaign,
+        state_store=store,
+        rank=0,
+    )
+    first.close()
+    changed_campaign = _campaign(_incident(at=(2,)), name="stable-name", seed=2)
+    second_model = TinyModel()
+
+    with pytest.raises(ValueError, match="manifest identity"):
+        enable_fault_injection(
+            second_model,
+            _optimizer(second_model),
+            campaign=changed_campaign,
+            state_store=store,
+            rank=0,
+        )
 
 
 def test_every_attempt_and_max_occurrences_retrigger() -> None:
@@ -1340,6 +1790,48 @@ def test_unverified_external_activation_is_rejected_and_deactivated() -> None:
         )
 
     assert events == ["activate", "deactivate"]
+
+
+def test_active_external_effect_requires_deactivation_callback() -> None:
+    active_executor = CallbackFaultExecutor(
+        name="leaky",
+        supported_types={FailureType.PROCESS_TERMINATION},
+        activate=lambda _request: FaultExecutionResult(verified=True, active=True),
+        max_safety=SafetyClass.ISOLATED_DESTRUCTIVE,
+    )
+    model = TinyModel()
+
+    with pytest.raises(ValueError, match="without a deactivation callback"):
+        enable_fault_injection(
+            model,
+            _optimizer(model),
+            campaign=_campaign(
+                _incident(
+                    at=(1,),
+                    lifetime=IncidentLifetime(until="campaign_end"),
+                    faults=(_external_fault(FailureType.PROCESS_TERMINATION),),
+                )
+            ),
+            executors=(active_executor,),
+            rank=0,
+        )
+
+    one_shot_executor = CallbackFaultExecutor(
+        name="one-shot",
+        supported_types={FailureType.EXCEPTION},
+        activate=lambda _request: FaultExecutionResult(verified=True, active=False),
+        max_safety=SafetyClass.ISOLATED_DESTRUCTIVE,
+    )
+    one_shot_model = TinyModel()
+    session = enable_fault_injection(
+        one_shot_model,
+        _optimizer(one_shot_model),
+        campaign=_campaign(_incident(at=(1,), faults=(_external_fault(FailureType.EXCEPTION),))),
+        executors=(one_shot_executor,),
+        rank=0,
+    )
+    assert session.records[0].status is InjectionStatus.COMPLETED
+    session.close()
 
 
 def test_external_permanent_fault_deactivates_on_replacement() -> None:

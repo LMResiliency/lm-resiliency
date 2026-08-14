@@ -246,6 +246,18 @@ def test_comparison_rejects_wrong_failure_evidence(
     assert not evaluation["evaluations"][0][mismatch]
 
 
+def test_wrong_kind_at_the_injected_iteration_is_not_counted_as_detection() -> None:
+    injection = _injection_payload()
+    localization = _localization_payload()
+    localization["reports"][0]["kind"] = "straggler"
+
+    evaluation = compare_payloads(injection, localization)
+
+    assert not evaluation["evaluations"][0]["detected"]
+    assert evaluation["summary"]["detected_occurrences"] == 0
+    assert evaluation["summary"]["detected_actions"] == 0
+
+
 def test_example_rejects_missing_post_fault_iteration_and_rank() -> None:
     campaign = FaultCampaign.from_json(CAMPAIGN_PATH)
 
