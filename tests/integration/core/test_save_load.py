@@ -102,7 +102,7 @@ def test_save_and_periodic_flush():
     disk_path = Path(tmp) / "step-5" / f"rank-{rank}.pt"
     assert_all(disk_path.exists(), f"Disk checkpoint not found at {disk_path}")
 
-    data = torch.load(disk_path, weights_only=False)
+    data = torch.load(disk_path, weights_only=True)
     loaded_tensors = data["tensors"]
     assert_all(torch.allclose(loaded_tensors[0], t1.cpu()), "t1 mismatch")
     assert_all(torch.allclose(loaded_tensors[1], t2.cpu()), "t2 mismatch")
@@ -154,7 +154,7 @@ def test_sigterm_flush():
 
     # Verify data correctness
     disk_path = Path(tmp) / f"step-{flushed}" / f"rank-{rank}.pt"
-    data = torch.load(disk_path, weights_only=False)
+    data = torch.load(disk_path, weights_only=True)
     loaded_tensors = data["tensors"]
     assert_all(torch.allclose(loaded_tensors[0], t1.cpu()), "t1 mismatch after SIGTERM")
     assert_all(torch.allclose(loaded_tensors[1], t2.cpu()), "t2 mismatch after SIGTERM")

@@ -13,6 +13,7 @@ The project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 ### Changed
 
 - Quick Start installs the core package from PyPI before introducing optional framework integrations.
+- GEMINI node-local checkpoints now use a versioned, schema-validated, weights-only format that rejects arbitrary pickle globals. The unrestricted-pickle format written by `0.1.0` is intentionally not loadable after this change.
 
 ## [0.1.0] - 2026-08-12
 

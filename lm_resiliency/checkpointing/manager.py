@@ -19,6 +19,7 @@ from lm_resiliency.checkpointing.buffer import BufferPool, SlotState
 from lm_resiliency.checkpointing.config import InMemoryCkptConfig
 from lm_resiliency.checkpointing.copy import AsyncDeviceCopier
 from lm_resiliency.checkpointing.disk import (
+    CheckpointFormatError,
     CheckpointStatus,
     CheckpointStatusStore,
     ChecksumMismatch,
@@ -471,9 +472,9 @@ class InMemoryCheckpointManager:
             return None
         try:
             metadata, tensors = self._disk.load(latest)
-        except ChecksumMismatch as e:
+        except (CheckpointFormatError, ChecksumMismatch) as e:
             logger.error(
-                f"Checkpoint integrity check failed at step {latest}: {e} — "
+                f"Checkpoint validation failed at step {latest}: {e} — "
                 "treating as unrecoverable (falling back to framework recovery)"
             )
             return None
@@ -512,9 +513,9 @@ class InMemoryCheckpointManager:
             return None
         try:
             metadata, tensors = self._disk.load(latest)
-        except ChecksumMismatch as e:
+        except (CheckpointFormatError, ChecksumMismatch) as e:
             logger.error(
-                f"Checkpoint integrity check failed at step {latest}: {e} — "
+                f"Checkpoint validation failed at step {latest}: {e} — "
                 "treating as unrecoverable (falling back to framework recovery)"
             )
             return None
