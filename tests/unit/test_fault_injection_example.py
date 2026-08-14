@@ -1,3 +1,5 @@
+import copy
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +19,28 @@ from examples.fault_injection.pytorch import (
 from lm_resiliency import FaultCampaign
 
 CAMPAIGN_PATH = Path("examples/fault_injection/campaign.json")
-MANIFEST_IDENTITY = "0123456789abcdef"
+BASE_MANIFEST = {
+    "incidents": [
+        {
+            "incident_id": "hidden-output-sdc",
+            "trigger": {"at": [4], "probability": 1.0},
+            "faults": [{"fault_id": "hidden-output"}],
+        }
+    ]
+}
+
+
+def _manifest_identity(manifest: dict) -> str:
+    encoded = json.dumps(
+        manifest,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+MANIFEST_IDENTITY = _manifest_identity(BASE_MANIFEST)
 
 
 def _injection_payload() -> dict:
@@ -25,15 +48,7 @@ def _injection_payload() -> dict:
         "campaign": "pytorch-production-loop-sdc",
         "manifest_identity": MANIFEST_IDENTITY,
         "completed_iterations": 4,
-        "manifest": {
-            "incidents": [
-                {
-                    "incident_id": "hidden-output-sdc",
-                    "trigger": {"at": [4], "probability": 1.0},
-                    "faults": [{"fault_id": "hidden-output"}],
-                }
-            ]
-        },
+        "manifest": copy.deepcopy(BASE_MANIFEST),
         "injections": [
             {
                 "occurrence_id": "hidden-output-sdc@4",
@@ -52,6 +67,16 @@ def _injection_payload() -> dict:
             }
         ],
     }
+
+
+def _refresh_manifest_identity(
+    injection: dict,
+    localization: dict | None = None,
+) -> None:
+    identity = _manifest_identity(injection["manifest"])
+    injection["manifest_identity"] = identity
+    if localization is not None:
+        localization["manifest_identity"] = identity
 
 
 def _localization_payload(*, failed_rank: int = 0, layer_id: int = -1) -> dict:
@@ -238,6 +263,7 @@ def test_comparison_counts_correlated_rank_local_actions() -> None:
     injection["injections"].append(second)
     localization = _localization_payload()
     localization["reports"][0]["failed_ranks"] = [0, 1]
+    _refresh_manifest_identity(injection, localization)
 
     evaluation = compare_payloads(injection, localization)
 
@@ -312,6 +338,7 @@ def test_comparison_correlates_failure_kind_with_rank() -> None:
             "scope": "rank",
         }
     )
+    _refresh_manifest_identity(injection, localization)
 
     evaluation = compare_payloads(injection, localization)
     occurrence = evaluation["evaluations"][0]
@@ -327,8 +354,10 @@ def test_comparison_correlates_failure_kind_with_rank() -> None:
 def test_comparison_requires_every_manifest_action_record() -> None:
     injection = _injection_payload()
     injection["manifest"]["incidents"][0]["faults"].append({"fault_id": "missing-rank-one-action"})
+    localization = _localization_payload()
+    _refresh_manifest_identity(injection, localization)
 
-    evaluation = compare_payloads(injection, _localization_payload())
+    evaluation = compare_payloads(injection, localization)
 
     occurrence = evaluation["evaluations"][0]
     assert occurrence["action_count"] == 1
@@ -378,8 +407,10 @@ def test_comparison_ignores_explicit_probability_skips() -> None:
             "injection_succeeded": False,
         }
     )
+    localization = _localization_payload()
+    _refresh_manifest_identity(injection, localization)
 
-    evaluation = compare_payloads(injection, _localization_payload())
+    evaluation = compare_payloads(injection, localization)
 
     assert evaluation["summary"]["passed"]
     assert len(evaluation["evaluations"]) == 1
@@ -395,9 +426,11 @@ def test_comparison_rejects_a_wholly_missing_scheduled_occurrence() -> None:
             "faults": [{"fault_id": "missing-output"}],
         }
     )
+    localization = _localization_payload()
+    _refresh_manifest_identity(injection, localization)
 
     with pytest.raises(ValueError, match="occurrence coverage mismatch"):
-        compare_payloads(injection, _localization_payload())
+        compare_payloads(injection, localization)
 
 
 @pytest.mark.parametrize(
@@ -545,6 +578,111 @@ def test_example_clean_boundary_includes_bounded_incident_lifetime() -> None:
     _validate_run(campaign, steps=15)
 
 
+def test_state_reset_waits_for_bounded_state_fault_expiration() -> None:
+    campaign = FaultCampaign.from_dict(
+        {
+            "schema_version": 1,
+            "name": "bounded-state-reset",
+            "incidents": [
+                {
+                    "id": "weight-window",
+                    "trigger": {"at": [5]},
+                    "lifetime": {"iterations": 3},
+                    "faults": [
+                        {
+                            "id": "weight",
+                            "type": "tensor_corruption",
+                            "target": {
+                                "rank": 0,
+                                "module_path": "layers.0",
+                                "surface": "weight",
+                            },
+                            "parameters": {
+                                "operation": "sign_flip",
+                                "scope": "single",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    reset_iterations = _state_reset_iterations(campaign)
+
+    assert 5 not in reset_iterations
+    assert 6 not in reset_iterations
+    assert 7 in reset_iterations
+
+
+def test_example_rejects_campaign_end_state_reset() -> None:
+    campaign = FaultCampaign.from_dict(
+        {
+            "schema_version": 1,
+            "name": "campaign-end-state",
+            "incidents": [
+                {
+                    "id": "weight-window",
+                    "trigger": {"at": [5]},
+                    "lifetime": {"until": "campaign_end"},
+                    "faults": [
+                        {
+                            "id": "weight",
+                            "type": "tensor_corruption",
+                            "target": {
+                                "rank": 0,
+                                "module_path": "layers.0",
+                                "surface": "weight",
+                            },
+                            "parameters": {
+                                "operation": "sign_flip",
+                                "scope": "single",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(ValueError, match="does not support campaign_end"):
+        _state_reset_iterations(campaign)
+
+
+def test_example_rejects_multi_call_gradient_affecting_reset() -> None:
+    campaign = FaultCampaign.from_dict(
+        {
+            "schema_version": 1,
+            "name": "multi-call-reset",
+            "incidents": [
+                {
+                    "id": "output-window",
+                    "trigger": {"at": [5]},
+                    "lifetime": {"matching_calls": 2},
+                    "faults": [
+                        {
+                            "id": "output",
+                            "type": "tensor_corruption",
+                            "target": {
+                                "rank": 0,
+                                "module_path": "layers.0",
+                                "surface": "output",
+                            },
+                            "parameters": {
+                                "operation": "sign_flip",
+                                "scope": "single",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(ValueError, match="supports matching_calls=1"):
+        _state_reset_iterations(campaign)
+
+
 def test_comparison_rejects_mismatched_campaigns() -> None:
     localization = _localization_payload()
     localization["campaign"] = "another-campaign"
@@ -563,3 +701,11 @@ def test_comparison_requires_matching_manifest_identity() -> None:
     del localization["manifest_identity"]
     with pytest.raises(ValueError, match="requires a non-empty manifest_identity"):
         compare_payloads(_injection_payload(), localization)
+
+
+def test_comparison_rejects_tampered_embedded_manifest() -> None:
+    injection = _injection_payload()
+    injection["manifest"]["incidents"].clear()
+
+    with pytest.raises(ValueError, match="does not match its manifest_identity"):
+        compare_payloads(injection, _localization_payload())

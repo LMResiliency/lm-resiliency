@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -21,6 +22,7 @@ def compare_payloads(
         raise ValueError(
             "injection and localization artifacts belong to different campaign manifests"
         )
+    _validate_embedded_manifest_identity(injection, injection_identity)
     all_records = [dict(record) for record in injection.get("injections", ())]
     _validate_scheduled_occurrence_coverage(injection, all_records)
     records = [
@@ -363,6 +365,24 @@ def _manifest_fault_ids(injection: Mapping[str, Any]) -> dict[str, frozenset[str
             raise ValueError("injection manifest fault_id values must be unique per incident")
         expected[incident_id] = frozenset(fault_ids)
     return expected
+
+
+def _validate_embedded_manifest_identity(
+    injection: Mapping[str, Any],
+    expected_identity: str,
+) -> None:
+    manifest = injection.get("manifest")
+    if not isinstance(manifest, Mapping):
+        raise ValueError("injection artifact requires an embedded manifest")
+    encoded = json.dumps(
+        manifest,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    actual_identity = hashlib.sha256(encoded).hexdigest()
+    if actual_identity != expected_identity:
+        raise ValueError("injection manifest does not match its manifest_identity")
 
 
 def _validate_scheduled_occurrence_coverage(

@@ -260,6 +260,9 @@ Use exactly one lifetime field:
 An `until` lifetime is permanent and therefore requires a single trigger
 candidate. Multiple bounded candidates or probabilistic bounded candidates are
 classified as intermittent; one bounded candidate is transient.
+For an `iterations` lifetime, candidate spacing must be at least the configured
+duration. Exact or ranged candidates whose active windows would overlap are
+rejected when the manifest is constructed.
 Closing a session normally completes a verified `campaign_end` effect. Closing
 before a `matching_calls` or `iterations` lifetime finishes cancels that effect,
 so a partial-duration injection cannot be certified as successful. Error-path
@@ -356,7 +359,8 @@ value is remembered as unavailable history, and the later stale/duplicate
 occurrence fails locally without raising from the observer hook.
 Empty local tensors are also unsupported. A rejected observation invalidates
 that history slot, so a later dense value cannot reuse evidence from before the
-unsupported iteration.
+unsupported iteration. This includes empty module inputs and outputs; history
+selection does not silently skip them in favor of older evidence.
 Weight and bias collision detection is keyed by the resolved parameter storage,
 not by the selector spelling. A `weight` surface with `parameter: "bias"` and a
 direct `bias` surface therefore cannot overlap on the same tensor.
@@ -383,6 +387,10 @@ Model `load_state_dict()` marks only active weight and bias state as externally
 replaced; optimizer `load_state_dict()` marks only optimizer-state effects.
 This prevents an unrelated partial checkpoint load from suppressing cleanup of
 another state family.
+If a model load copies an active target and then fails on another key, the
+copied target is still marked as replaced before the original load error is
+re-raised. Recovery cleanup therefore preserves the partially restored value
+instead of subtracting an obsolete injection delta.
 
 Custom executors receive the full `target` and `parameters` objects unchanged.
 They may define additional fields, but should validate those fields before the
@@ -677,11 +685,12 @@ an unrelated report at the same iteration is retained as evidence but does not
 count as detecting the injected occurrence. For correlated incidents containing
 multiple failure kinds, each kind must identify its corresponding expected
 ranks; matching only the aggregate rank and kind sets is insufficient.
-`evaluate()` coordinates incident record creation with per-record lifecycle
-updates before taking snapshots. A returned `CampaignReport` therefore remains
-internally consistent even if another thread is activating or completing a
-hook. Direct `FaultInjectionRecord.to_dict()` serialization uses the same
-record lock and cannot expose a partially updated lifecycle transition.
+`evaluate()` takes the campaign lifecycle lock before snapshotting every
+record, so expiration, recovery, replacement, and close cannot expose a
+half-transitioned correlated incident. A returned `CampaignReport` therefore
+represents one coherent lifecycle instant. Direct
+`FaultInjectionRecord.to_dict()` serialization uses the record lock and cannot
+expose a partially updated individual transition.
 Optimizer-boundary callbacks, recovery/replacement notifications, and session
 cleanup share one lifecycle lock. `close()` waits for an in-flight boundary and
 removes any effect or observer armed there before marking the session closed.

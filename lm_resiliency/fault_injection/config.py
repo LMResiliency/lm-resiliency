@@ -732,6 +732,25 @@ class FaultIncident:
             )
         if self.lifetime.permanent and self.trigger.has_multiple_candidates:
             raise ValueError("permanent incidents require a single trigger candidate")
+        if self.lifetime.iterations is not None and self.lifetime.iterations > 1:
+            if self.trigger.range is not None:
+                overlaps = (
+                    self.trigger.has_multiple_candidates
+                    and self.trigger.range.every < self.lifetime.iterations
+                )
+            else:
+                overlaps = any(
+                    later - earlier < self.lifetime.iterations
+                    for earlier, later in zip(
+                        self.trigger.at,
+                        self.trigger.at[1:],
+                        strict=False,
+                    )
+                )
+            if overlaps:
+                raise ValueError(
+                    "bounded incident trigger candidates must not overlap their iteration lifetime"
+                )
         if self.lifetime.matching_calls is not None and any(
             fault.target.surface
             in {

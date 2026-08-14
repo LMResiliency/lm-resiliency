@@ -278,14 +278,15 @@ def _last_scheduled_iteration(campaign: FaultCampaign) -> int:
 @dataclass(frozen=True)
 class _ResetIterationSchedule:
     exact: frozenset[int]
-    ranged: tuple[FaultIncident, ...]
+    ranged: tuple[tuple[FaultIncident, int], ...]
 
     def __contains__(self, iteration: object) -> bool:
         if not isinstance(iteration, int):
             return False
         return iteration in self.exact or any(
-            incident.trigger.range is not None and incident.trigger.range.matches(iteration)
-            for incident in self.ranged
+            incident.trigger.range is not None
+            and incident.trigger.range.matches(iteration - offset)
+            for incident, offset in self.ranged
         )
 
 
@@ -307,9 +308,14 @@ def _state_reset_iterations(campaign: FaultCampaign) -> Container[int]:
             for fault in incident.faults
         )
     )
-    ranged = tuple(incident for incident in eligible if incident.trigger.range is not None)
+    offsets = {incident.incident_id: _state_reset_offset(incident) for incident in eligible}
+    ranged = tuple(
+        (incident, offsets[incident.incident_id])
+        for incident in eligible
+        if incident.trigger.range is not None
+    )
     exact = frozenset(
-        iteration
+        iteration + offsets[incident.incident_id]
         for incident in eligible
         if incident.trigger.at
         for iteration in incident.trigger.at
@@ -317,6 +323,23 @@ def _state_reset_iterations(campaign: FaultCampaign) -> Container[int]:
     if not ranged:
         return set(exact)
     return _ResetIterationSchedule(exact=exact, ranged=ranged)
+
+
+def _state_reset_offset(incident: FaultIncident) -> int:
+    if incident.lifetime.iterations is not None:
+        return incident.lifetime.iterations - 1
+    if incident.lifetime.matching_calls is not None:
+        if incident.lifetime.matching_calls != 1:
+            raise ValueError(
+                "the evaluation example supports matching_calls=1 for gradient-affecting incidents"
+            )
+        return 0
+    if incident.lifetime.until in {"recovery", "replacement"}:
+        return 0
+    raise ValueError(
+        "the evaluation example does not support campaign_end lifetimes for "
+        "gradient-affecting incidents"
+    )
 
 
 def _complete_permanent_incidents(

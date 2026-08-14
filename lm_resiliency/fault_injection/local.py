@@ -1094,7 +1094,7 @@ def _write_linear(
 def _first_float_tensor(value: Any) -> torch.Tensor | None:
     leaves, _ = tree_flatten(value)
     for leaf in leaves:
-        if isinstance(leaf, torch.Tensor) and leaf.is_floating_point() and leaf.numel():
+        if isinstance(leaf, torch.Tensor) and leaf.is_floating_point():
             return leaf
     return None
 

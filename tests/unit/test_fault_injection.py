@@ -339,6 +339,20 @@ def test_incident_campaign_json_round_trip(tmp_path) -> None:
     assert campaign.clock.type.value == "training_iteration"
 
 
+def test_bounded_incident_rejects_overlapping_candidates() -> None:
+    with pytest.raises(ValueError, match="must not overlap"):
+        _incident(
+            at=(1, 2),
+            lifetime=IncidentLifetime(iterations=2),
+        )
+
+    incident = _incident(
+        at=(1, 3),
+        lifetime=IncidentLifetime(iterations=2),
+    )
+    assert incident.trigger.at == (1, 3)
+
+
 @pytest.mark.parametrize(
     ("path", "field"),
     [
@@ -3758,6 +3772,62 @@ def test_evaluation_snapshots_record_transitions_atomically() -> None:
     session.close()
 
 
+def test_evaluation_waits_for_correlated_lifecycle_transition() -> None:
+    model = TinyModel()
+    faults = (
+        _corruption(
+            fault_id="layer-zero",
+            target=_target(surface=FaultSurface.OUTPUT, module_path="layers.0"),
+        ),
+        _corruption(
+            fault_id="layer-one",
+            target=_target(surface=FaultSurface.OUTPUT, module_path="layers.1"),
+        ),
+    )
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(_incident(at=(1,), faults=faults)),
+        rank=0,
+    )
+    records = session.records
+    transition_started = threading.Event()
+    release_transition = threading.Event()
+    evaluation_done = threading.Event()
+    reports = []
+
+    def transition() -> None:
+        with session._lifecycle_lock:
+            with records[0]._lock:
+                records[0].verified = True
+                records[0].status = InjectionStatus.COMPLETED
+            transition_started.set()
+            release_transition.wait(timeout=5)
+            with records[1]._lock:
+                records[1].verified = True
+                records[1].status = InjectionStatus.COMPLETED
+
+    def evaluate() -> None:
+        reports.append(session.evaluate())
+        evaluation_done.set()
+
+    transition_thread = threading.Thread(target=transition)
+    transition_thread.start()
+    assert transition_started.wait(timeout=5)
+    evaluation_thread = threading.Thread(target=evaluate)
+    evaluation_thread.start()
+    assert not evaluation_done.wait(timeout=0.05)
+    release_transition.set()
+    transition_thread.join(timeout=5)
+    evaluation_thread.join(timeout=5)
+
+    assert [record.status for record in reports[0].injections] == [
+        InjectionStatus.COMPLETED,
+        InjectionStatus.COMPLETED,
+    ]
+    session.close()
+
+
 def test_live_record_serialization_waits_for_atomic_transition() -> None:
     model = TinyModel()
     session = enable_fault_injection(
@@ -3992,6 +4062,51 @@ def test_empty_gradient_history_fails_without_escaping_hook() -> None:
 
     assert session.records[0].status is InjectionStatus.FAILED
     assert "must be non-empty" in str(session.records[0].error)
+    session.close()
+
+
+def test_empty_module_history_invalidates_the_observation_slot() -> None:
+    class BatchModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.layer = nn.Linear(1, 1)
+
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            return self.layer(value)
+
+    model = BatchModel()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.0)
+    stale_output = FaultSpec(
+        fault_id="stale-output",
+        type=FailureType.STALE_STATE,
+        target=_target(
+            surface=FaultSurface.OUTPUT,
+            module_path="layer",
+        ),
+        parameters={"scope": FaultScope.FULL.value},
+    )
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(_incident(at=(5, 6), faults=(stale_output,))),
+        rank=0,
+    )
+
+    for value in (
+        torch.ones(1, 1),
+        torch.ones(1, 1),
+        torch.ones(1, 1),
+        torch.ones(1, 1),
+        torch.empty(0, 1),
+        torch.full((1, 1), 2.0),
+    ):
+        optimizer.zero_grad()
+        model(value).sum().backward()
+        optimizer.step()
+
+    assert len(session.records) == 2
+    assert session.records[1].status is InjectionStatus.FAILED
+    assert "no prior observed value" in str(session.records[1].error)
     session.close()
 
 
@@ -4306,6 +4421,44 @@ def test_active_external_effect_requires_deactivation_callback() -> None:
     )
     assert session.records[0].status is InjectionStatus.COMPLETED
     session.close()
+
+
+def test_one_shot_executor_rejects_active_results_even_with_cleanup() -> None:
+    events: list[str] = []
+
+    def activate(_request):
+        events.append("activate")
+        return FaultExecutionResult(verified=True, active=True)
+
+    def deactivate(_request, _result):
+        events.append("deactivate")
+        return {"deactivated": True}
+
+    executor = CallbackFaultExecutor(
+        name="contradictory-one-shot",
+        supported_types={FailureType.EXCEPTION},
+        activate=activate,
+        deactivate=deactivate,
+        one_shot=True,
+        max_safety=SafetyClass.ISOLATED_DESTRUCTIVE,
+    )
+    model = TinyModel()
+
+    with pytest.raises(ValueError, match="one-shot fault executor returned an active effect"):
+        enable_fault_injection(
+            model,
+            _optimizer(model),
+            campaign=_campaign(
+                _incident(
+                    at=(1,),
+                    faults=(_external_fault(FailureType.EXCEPTION),),
+                )
+            ),
+            executors=(executor,),
+            rank=0,
+        )
+
+    assert events == ["activate", "deactivate"]
 
 
 def test_external_matching_calls_requires_inline_capability_before_activation() -> None:
@@ -5869,6 +6022,44 @@ def test_failed_model_state_load_does_not_mark_active_fault_replaced() -> None:
     session.notify_recovery()
 
     torch.testing.assert_close(model.layers[0].weight, baseline)
+    session.close()
+
+
+def test_partial_failed_model_state_load_marks_copied_fault_target_replaced() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    replacement = torch.full_like(model.layers[0].weight, 3.0)
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="recovery"),
+                faults=(
+                    _corruption(
+                        target=_target(surface=FaultSurface.WEIGHT),
+                        scope=FaultScope.SINGLE,
+                    ),
+                ),
+            )
+        ),
+        rank=0,
+    )
+
+    with pytest.raises(RuntimeError, match="size mismatch"):
+        model.load_state_dict(
+            {
+                "layers.0.weight": replacement,
+                "layers.1.weight": torch.ones(1),
+            },
+            strict=False,
+        )
+    torch.testing.assert_close(model.layers[0].weight, replacement)
+
+    session.notify_recovery()
+
+    torch.testing.assert_close(model.layers[0].weight, replacement)
     session.close()
 
 

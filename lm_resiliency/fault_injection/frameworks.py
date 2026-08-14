@@ -288,14 +288,41 @@ class TrainingContext:
                         _original: Callable[..., Any] = original,
                         **kwargs: Any,
                     ) -> Any:
-                        result = _original(state_dict, *args, **kwargs)
-                        identities = frozenset(
-                            id(parameter)
+                        tracked = {
+                            name: (parameter, parameter._version)
                             for name, parameter in _candidate.named_parameters(
                                 recurse=True,
                                 remove_duplicate=False,
                             )
                             if name in state_dict
+                        }
+                        try:
+                            result = _original(state_dict, *args, **kwargs)
+                        except BaseException as error:
+                            current = dict(
+                                _candidate.named_parameters(
+                                    recurse=True,
+                                    remove_duplicate=False,
+                                )
+                            )
+                            identities = frozenset(
+                                id(parameter)
+                                for name, (parameter, version) in tracked.items()
+                                if parameter._version != version
+                                or current.get(name) is not parameter
+                            )
+                            if identities:
+                                try:
+                                    callback("model", identities)
+                                except Exception as callback_error:
+                                    _add_exception_note(
+                                        error,
+                                        "fault injection state-load observation also failed: "
+                                        f"{callback_error}",
+                                    )
+                            raise
+                        identities = frozenset(
+                            id(parameter) for parameter, _version in tracked.values()
                         )
                         callback("model", identities)
                         return result
@@ -827,6 +854,16 @@ def _module_namespace_candidates(module: nn.Module) -> tuple[nn.Module, ...]:
     if wrapper and len(chain) > 1:
         return tuple(chain[1:] + chain[:1])
     return tuple(chain)
+
+
+def _add_exception_note(error: BaseException, note: str) -> None:
+    add_note = getattr(error, "add_note", None)
+    if callable(add_note):
+        add_note(note)
+        return
+    notes = list(getattr(error, "__notes__", ()))
+    notes.append(note)
+    error.__notes__ = notes
 
 
 __all__ = ["TrainingContext", "resolve_training_context"]

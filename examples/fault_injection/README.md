@@ -39,10 +39,14 @@ lifetime, then adds one clean iteration; it never treats a still-active
 multi-iteration effect as the post-fault certification step.
 
 Weight, bias, gradient, and optimizer-state faults can contaminate later cases.
-For those 14 iterations, an evaluation-only optimizer hook restores the last
-clean model and optimizer snapshot after SCOUT reports the fault and before the
-campaign advances. This isolates each case; it is not a replacement for
-production checkpoint recovery.
+For those cases, an evaluation-only optimizer hook restores the last clean
+model and optimizer snapshot after SCOUT reports the fault and at the configured
+effect-expiration boundary. This isolates each case; it is not a replacement
+for production checkpoint recovery. The example rejects `campaign_end`
+lifetimes for gradient-affecting incidents because they cannot produce a clean
+certification iteration before shutdown. It also requires `matching_calls=1`
+for those incidents because framework call multiplicity cannot be converted
+portably into a later optimizer-iteration reset.
 
 The example writes:
 
@@ -53,8 +57,10 @@ The example writes:
 | `evaluation.json` | Occurrence- and action-level detection/localization counts plus rank, failure-kind, and SCOUT component-source comparison |
 
 All three artifacts carry the same canonical `manifest_identity`. The comparator
-rejects missing or mismatched identities so localization output from an earlier
-campaign revision cannot satisfy new injection ground truth with the same name.
+recomputes that identity from the embedded injection manifest and rejects
+tampered, missing, or mismatched identities, so localization output from an
+earlier campaign revision cannot satisfy new injection ground truth with the
+same name.
 SCOUT reports currently carry a training iteration but no campaign occurrence
 ID, so this example also rejects two distinct occurrences scheduled at the same
 iteration instead of crediting one report to both.

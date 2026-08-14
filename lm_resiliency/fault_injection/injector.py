@@ -380,8 +380,10 @@ class FaultInjectionSession:
         by_occurrence: dict[str, list[LocalizationResult]] = {}
         for result in normalized:
             by_occurrence.setdefault(result.occurrence_id, []).append(result)
-        with self._records_lock:
-            records = tuple(record.snapshot() for record in self._records)
+        with self._lifecycle_lock:
+            with self._records_lock:
+                records = tuple(record.snapshot() for record in self._records)
+            completed_iterations = self.completed_iterations
         grouped = _group_records(records)
         unknown = sorted(set(by_occurrence) - set(grouped))
         if unknown:
@@ -406,7 +408,7 @@ class FaultInjectionSession:
             manifest=self.campaign.to_dict(),
             framework=self.framework,
             rank=self.rank,
-            completed_iterations=self.completed_iterations,
+            completed_iterations=completed_iterations,
             injections=records,
             localizations=normalized,
             evaluations=evaluations,
@@ -1042,6 +1044,22 @@ class FaultInjectionSession:
                 record.error = "fault executor activate must return FaultExecutionResult"
                 record.completed_at_ns = time.monotonic_ns()
             raise TypeError(record.error)
+        if result.active and getattr(executor, "one_shot", False):
+            deactivation_error: Exception | None = None
+            if getattr(executor, "can_deactivate", True):
+                try:
+                    executor.deactivate(request, result)
+                except Exception as caught:
+                    deactivation_error = caught
+            with record._lock:
+                record.verified = result.verified
+                record.status = InjectionStatus.FAILED
+                record.error = "one-shot fault executor returned an active effect"
+                if deactivation_error is not None:
+                    record.error += f"; deactivation also failed: {deactivation_error}"
+                record.activated_at_ns = time.monotonic_ns()
+                record.completed_at_ns = time.monotonic_ns()
+            raise ValueError(record.error)
         if result.active and getattr(executor, "can_deactivate", True) is False:
             with record._lock:
                 record.verified = result.verified
