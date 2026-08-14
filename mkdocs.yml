@@ -18,6 +18,9 @@ nav:
 theme:
   name: readthedocs
 
+hooks:
+  - docs_hooks.py
+
 markdown_extensions:
   - toc:
       permalink: true
