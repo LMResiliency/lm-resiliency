@@ -150,7 +150,10 @@ class FaultInjectionSession:
         except Exception as error:
             cleanup_error = self._cleanup()
             if cleanup_error is not None:
-                error.add_note(f"fault injection cleanup also failed: {cleanup_error}")
+                _add_exception_note(
+                    error,
+                    f"fault injection cleanup also failed: {cleanup_error}",
+                )
             raise
 
     @property
@@ -358,7 +361,7 @@ class FaultInjectionSession:
                             cleanup_error = caught
             del self._active[active_start:]
             if cleanup_error is not None:
-                error.add_note(f"fault rollback also failed: {cleanup_error}")
+                _add_exception_note(error, f"fault rollback also failed: {cleanup_error}")
             raise
 
     def _activate_incident(
@@ -413,7 +416,7 @@ class FaultInjectionSession:
                             cleanup_error = caught
             self._discard_completed()
             if cleanup_error is not None:
-                error.add_note(f"fault rollback also failed: {cleanup_error}")
+                _add_exception_note(error, f"fault rollback also failed: {cleanup_error}")
             raise
 
     def _activate_external(
@@ -597,7 +600,10 @@ def enable_fault_injection(
         message = "fault injection enablement failed; " + "; ".join(failures)
         enablement_error = RuntimeError(message)
         if cleanup_error is not None:
-            enablement_error.add_note(f"fault injection cleanup also failed: {cleanup_error}")
+            _add_exception_note(
+                enablement_error,
+                f"fault injection cleanup also failed: {cleanup_error}",
+            )
         raise enablement_error from local_error
     if session is None:
         raise AssertionError("distributed fault injection enablement returned no session")
@@ -607,9 +613,25 @@ def enable_fault_injection(
         try:
             session.close()
         except Exception as cleanup_error:
-            error.add_note(f"fault injection cleanup also failed: {cleanup_error}")
+            _add_exception_note(
+                error,
+                f"fault injection cleanup also failed: {cleanup_error}",
+            )
         raise
     return session
+
+
+def _add_exception_note(error: Exception, note: str) -> None:
+    """Attach cleanup context while supporting the Python 3.10 runtime floor."""
+    add_note = getattr(error, "add_note", None)
+    if callable(add_note):
+        add_note(note)
+        return
+    notes = getattr(error, "__notes__", None)
+    if notes is None:
+        error.__notes__ = [note]
+    else:
+        notes.append(note)
 
 
 def _distributed_rank() -> int:
