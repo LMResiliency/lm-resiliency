@@ -910,6 +910,16 @@ def test_restart_plan_removes_every_node_suspected_by_intent():
         )
 
 
+def test_restart_plan_quarantines_only_policy_approved_removed_nodes():
+    with pytest.raises(ProtocolValidationError, match="not in the intent's suspected scope"):
+        _validate(
+            plan=replace(
+                _plan(),
+                quarantined_node_ids=("node-b", "node-c"),
+            ),
+        )
+
+
 def test_restart_plan_preserves_committed_world_size():
     smaller_plan = replace(
         _plan(),
@@ -1002,6 +1012,7 @@ def test_event_reporter_must_match_committed_rank_assignment():
             agent_identity=_agent(),
             resource_to_node_id={"GPU-0": "node-a"},
             resource_to_kind={"GPU-0": "gpu"},
+            resource_to_global_rank={"GPU-0": 0},
         )
 
 
@@ -1037,6 +1048,10 @@ def test_hardware_report_resource_must_match_registered_owner():
                 "GPU-0": "gpu",
                 "GPU-1": "gpu",
             },
+            resource_to_global_rank={
+                "GPU-0": 0,
+                "GPU-1": 1,
+            },
         )
 
 
@@ -1051,7 +1066,7 @@ def test_hardware_report_accepts_registered_resource_on_reporter_node():
         report=HardwareFaultReport(
             kind="hardware",
             resource_kind="gpu",
-            resource_id="GPU-1",
+            resource_id="GPU-0",
             metric="uncorrectable_ecc",
             value=1.0,
             severity="fatal",
@@ -1070,6 +1085,10 @@ def test_hardware_report_accepts_registered_resource_on_reporter_node():
         resource_to_kind={
             "GPU-0": "gpu",
             "GPU-1": "gpu",
+        },
+        resource_to_global_rank={
+            "GPU-0": 0,
+            "GPU-1": 1,
         },
     )
 
@@ -1105,6 +1124,10 @@ def test_hardware_report_resource_kind_must_match_trusted_inventory():
             resource_to_kind={
                 "GPU-0": "gpu",
                 "GPU-1": "gpu",
+            },
+            resource_to_global_rank={
+                "GPU-0": 0,
+                "GPU-1": 1,
             },
         )
 
@@ -1152,6 +1175,7 @@ def test_fault_report_rejects_rank_outside_committed_assignment():
             agent_identity=_agent(),
             resource_to_node_id={"GPU-0": "node-a"},
             resource_to_kind={"GPU-0": "gpu"},
+            resource_to_global_rank={"GPU-0": 0},
         )
 
 
@@ -1184,6 +1208,7 @@ def test_fault_report_validates_all_rank_attribution_fields(field, value, messag
             agent_identity=_agent(),
             resource_to_node_id={"GPU-0": "node-a"},
             resource_to_kind={"GPU-0": "gpu"},
+            resource_to_global_rank={"GPU-0": 0},
         )
 
 
@@ -1211,6 +1236,44 @@ def test_fault_report_endpoint_must_match_failed_rank_and_node():
             agent_identity=_agent(),
             resource_to_node_id={"GPU-0": "node-a"},
             resource_to_kind={"GPU-0": "gpu"},
+            resource_to_global_rank={"GPU-0": 0},
+        )
+
+
+def test_fault_report_resource_endpoint_must_match_specific_rank():
+    event = FaultEvent(
+        event_id="fault-resource-endpoint",
+        incident_id="incident-a",
+        run_id=RUN_ID,
+        generation=4,
+        reporter=_worker(),
+        optimizer_step=41,
+        report={
+            "kind": "straggler",
+            "failed_ranks": [0],
+            "endpoint_kind": "gpu",
+            "endpoint_id": "GPU-1",
+            "endpoint_rank": 0,
+        },
+    )
+
+    with pytest.raises(ProtocolValidationError, match="resource rank"):
+        validate_event_reporter(
+            event,
+            _current_assignment(),
+            agent_identity=_agent(),
+            resource_to_node_id={
+                "GPU-0": "node-a",
+                "GPU-1": "node-a",
+            },
+            resource_to_kind={
+                "GPU-0": "gpu",
+                "GPU-1": "gpu",
+            },
+            resource_to_global_rank={
+                "GPU-0": 0,
+                "GPU-1": 1,
+            },
         )
 
 

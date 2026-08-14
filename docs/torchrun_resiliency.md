@@ -289,9 +289,10 @@ must not be allowed to choose its own quarantine identity. If no stable node
 identity is available, replacement mode should refuse to start.
 
 The trusted resource inventory maps every resource ID to both its stable node
-owner and resource kind (`gpu`, `nic`, `hca`, `link`, or `node`). Worker
-registration proves that an agent may report a resource; it does not allow the
-worker to relabel a GPU as a NIC or another resource class.
+owner, resource kind (`gpu`, `nic`, `hca`, `link`, or `node`), and the global
+rank for rank-bound endpoints. Worker registration proves that an agent may
+report a resource; it does not allow the worker to relabel a GPU as a NIC or
+attribute another local worker's GPU to its own rank.
 
 The topology digest covers at least the active world size, local worker count,
 framework parallel dimensions, logical rank-to-parallel-coordinate mapping,
@@ -564,6 +565,9 @@ Before commit, the coordinator validates:
 - the recovery mode is at least as conservative as the intent's minimum;
 - every node in the intent's suspected scope is removed from the next
   assignment;
+- every new quarantine entry is both in that suspected scope and removed from
+  the current assignment; unrelated standbys require separate trusted fault
+  evidence before quarantine;
 - exactly `min_nodes` active logical slots are assigned;
 - at least one assigned node is new to the active membership, because version
   1 uses standby admission as its healthy-group restart edge;

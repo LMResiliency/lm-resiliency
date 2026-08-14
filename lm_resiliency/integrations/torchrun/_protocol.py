@@ -2381,6 +2381,7 @@ def validate_event_reporter(
     agent_identity: AgentIdentity,
     resource_to_node_id: Mapping[str, str],
     resource_to_kind: Mapping[str, str],
+    resource_to_global_rank: Mapping[str, int],
 ) -> None:
     """Validate a report against committed rank and infrastructure identities."""
     if not isinstance(
@@ -2425,6 +2426,16 @@ def validate_event_reporter(
         )
         for resource_id, resource_kind in resource_to_kind.items()
     }
+    if not isinstance(resource_to_global_rank, Mapping):
+        raise ProtocolValidationError("resource_to_global_rank: expected an object")
+    resource_ranks = {
+        _string(resource_id, "resource_to_global_rank.key"): _integer(
+            global_rank,
+            f"resource_to_global_rank[{resource_id!r}]",
+            minimum=0,
+        )
+        for resource_id, global_rank in resource_to_global_rank.items()
+    }
     if reporter.gpu_uuid is not None:
         if reporter.gpu_uuid not in agent_identity.resource_ids:
             raise ProtocolValidationError(
@@ -2437,6 +2448,10 @@ def validate_event_reporter(
         if resource_kinds.get(reporter.gpu_uuid) != "gpu":
             raise ProtocolValidationError(
                 "WorkerIdentity.gpu_uuid: trusted resource kind is not gpu"
+            )
+        if resource_ranks.get(reporter.gpu_uuid) != reporter.global_rank:
+            raise ProtocolValidationError(
+                "WorkerIdentity.gpu_uuid: trusted resource rank does not match reporter"
             )
     if isinstance(event, FaultEvent):
         rank_to_node = {
@@ -2534,6 +2549,11 @@ def validate_event_reporter(
                     "FaultEvent.report.endpoint_id: trusted resource kind does not match "
                     "endpoint kind"
                 )
+            elif resource_ranks.get(endpoint_id) != endpoint_rank:
+                raise ProtocolValidationError(
+                    "FaultEvent.report.endpoint_id: trusted resource rank does not match "
+                    "endpoint rank"
+                )
     if not isinstance(event, FaultEvent) or event.report.get("kind") != "hardware":
         return
     resource_kind = _choice(
@@ -2561,6 +2581,10 @@ def validate_event_reporter(
     if resource_kinds.get(resource_id) != resource_kind:
         raise ProtocolValidationError(
             "FaultEvent.report.resource_id: trusted resource kind does not match report"
+        )
+    if resource_kind == "gpu" and resource_ranks.get(resource_id) != reporter.global_rank:
+        raise ProtocolValidationError(
+            "FaultEvent.report.resource_id: trusted GPU rank does not match reporter"
         )
 
 
@@ -2659,6 +2683,20 @@ def validate_restart_plan(
     if assigned_nodes == current_nodes:
         raise ProtocolValidationError(
             "RestartPlan.slot_assignments: version 1 requires at least one replacement node"
+        )
+    removed_nodes = current_nodes - assigned_nodes
+    plan_quarantined_nodes = set(plan.quarantined_node_ids)
+    unsupported_quarantine = sorted(plan_quarantined_nodes - suspected_nodes)
+    if unsupported_quarantine:
+        raise ProtocolValidationError(
+            "RestartPlan.quarantined_node_ids: nodes are not in the intent's suspected "
+            f"scope: {unsupported_quarantine!r}"
+        )
+    unremoved_quarantine = sorted(plan_quarantined_nodes - removed_nodes)
+    if unremoved_quarantine:
+        raise ProtocolValidationError(
+            "RestartPlan.quarantined_node_ids: nodes were not removed from the current "
+            f"assignment: {unremoved_quarantine!r}"
         )
     eligible = set(_strings(eligible_node_ids, "eligible_node_ids", unique=True))
     quarantined = set(_strings(quarantined_node_ids, "quarantined_node_ids", unique=True)) | set(
