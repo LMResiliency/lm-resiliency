@@ -54,7 +54,16 @@ all = [
     "deepspeed>=0.19.4,<0.20",
     "ninja",
 ]
-dev = ["pytest", "pytest-timeout", "pre-commit", "ruff==0.16.2"]
+dev = [
+    "build==1.3.0",
+    "detect-secrets==1.5.0",
+    "pip-audit==2.9.0",
+    "pre-commit==4.6.1",
+    "pytest==9.1.1",
+    "pytest-timeout==2.4.0",
+    "ruff==0.16.2",
+    "twine==6.2.0",
+]
 
 [build-system]
 requires = ["setuptools>=77.0"]

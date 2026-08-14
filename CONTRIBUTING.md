@@ -13,8 +13,11 @@ The following commands create a standard `pip` environment:
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e ".[dev]" build
+python -m pip install -e ".[dev]"
 ```
+
+The `dev` extra is synchronized with `requirements/tool-versions.txt`, which is also used as the automation constraints file.
+Update both files together when changing a development or CI tool version.
 
 Framework-specific development can install `.[torchtitan]`, `.[megatron]`, `.[deepspeed]`, or `.[all]` in the same environment.
 
