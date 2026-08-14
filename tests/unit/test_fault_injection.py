@@ -791,6 +791,41 @@ def test_distributed_enablement_preserves_rank_failure_when_cleanup_fails() -> N
     session._start.assert_not_called()
 
 
+def test_distributed_enablement_interrupt_reaches_preparation_consensus() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    gathered: list[dict[str, object]] = []
+
+    def gather(preparations, local_preparation) -> None:
+        gathered.append(local_preparation)
+        remote = dict(local_preparation)
+        remote["error"] = None
+        preparations[:] = [local_preparation, remote]
+
+    with (
+        patch(
+            "lm_resiliency.fault_injection.injector.FaultInjectionSession",
+            side_effect=KeyboardInterrupt("stop preparation"),
+        ),
+        patch("lm_resiliency.fault_injection.injector.dist.is_available", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.is_initialized", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.get_world_size", return_value=2),
+        patch(
+            "lm_resiliency.fault_injection.injector.dist.all_gather_object",
+            side_effect=gather,
+        ),
+        pytest.raises(KeyboardInterrupt, match="stop preparation") as caught,
+    ):
+        enable_fault_injection(
+            model,
+            optimizer,
+            campaign=_campaign(),
+        )
+
+    assert gathered[0]["error"] == "KeyboardInterrupt: stop preparation"
+    assert any("rank 0: KeyboardInterrupt" in note for note in caught.value.__notes__)
+
+
 def test_distributed_enablement_arms_iteration_one_after_consensus() -> None:
     events: list[tuple[str, str]] = []
     executor = _recording_executor({FailureType.PROCESS_TERMINATION}, events)
@@ -4950,7 +4985,7 @@ def test_overlapping_local_faults_roll_back_partial_activation() -> None:
         )
     )
 
-    with pytest.raises(RuntimeError, match="already active"):
+    with pytest.raises(ValueError, match="same resolved target"):
         enable_fault_injection(
             model,
             optimizer,
@@ -5084,7 +5119,7 @@ def test_equivalent_target_selectors_collide_by_resolved_parameter() -> None:
         parameter="weight",
     )
 
-    with pytest.raises(RuntimeError, match="already active on the same target"):
+    with pytest.raises(ValueError, match="same resolved target"):
         enable_fault_injection(
             model,
             _optimizer(model),
@@ -5116,7 +5151,7 @@ def test_weight_and_bias_surface_aliases_collide_by_parameter_storage() -> None:
         scope=FaultScope.SINGLE,
     )
 
-    with pytest.raises(RuntimeError, match="already active on the same target"):
+    with pytest.raises(ValueError, match="same resolved target"):
         enable_fault_injection(
             model,
             _optimizer(model),
@@ -5147,21 +5182,13 @@ def test_state_history_is_separate_for_different_scopes() -> None:
         target=_target(surface=FaultSurface.WEIGHT),
         parameters={"scope": FaultScope.FULL.value},
     )
-    session = enable_fault_injection(
-        model,
-        _optimizer(model),
-        campaign=_campaign(
-            _incident(
-                at=(2,),
-                lifetime=IncidentLifetime(iterations=1),
-                faults=(stale_single, stale_full),
-            ),
-        ),
-        rank=0,
-    )
+    context = resolve_training_context(model, _optimizer(model))
+    executor = LocalFaultExecutor(context, rank=0)
+    executor.sync_history((stale_single, stale_full))
 
-    assert len(session._local._history) == 2
-    session.close()
+    assert len(executor._history) == 2
+    executor.close()
+    context.close()
 
 
 def test_optimizer_state_history_survives_state_dict_tensor_replacement() -> None:
@@ -5465,6 +5492,69 @@ def test_mixed_kind_correlated_faults_require_per_kind_target_evidence() -> None
     assert complete.kind_matches
     assert not overclaimed.localized
     assert overclaimed.kind_matches is False
+    session.close()
+
+
+def test_mixed_kind_components_require_kind_component_association() -> None:
+    events: list[tuple[str, str]] = []
+    executor = _recording_executor(
+        {FailureType.PROCESS_TERMINATION, FailureType.TIMEOUT},
+        events,
+    )
+    shared_resource = "worker-0"
+    faults = (
+        FaultSpec(
+            fault_id="hidden-process",
+            type=FailureType.PROCESS_TERMINATION,
+            target=FaultTarget(
+                rank=None,
+                surface=FaultSurface.RESOURCE,
+                resource=shared_resource,
+                component="hidden",
+            ),
+        ),
+        FaultSpec(
+            fault_id="output-timeout",
+            type=FailureType.TIMEOUT,
+            target=FaultTarget(
+                rank=None,
+                surface=FaultSurface.RESOURCE,
+                resource=shared_resource,
+                component="output",
+            ),
+        ),
+    )
+    model = TinyModel()
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(_incident(at=(1,), faults=faults)),
+        executors=(executor,),
+        rank=0,
+    )
+
+    swapped = session.evaluate(
+        [
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_resources=(shared_resource,),
+                kind="process_failure",
+                components=("output",),
+            ),
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_resources=(shared_resource,),
+                kind="straggler",
+                components=("hidden",),
+            ),
+        ]
+    ).evaluations[0]
+
+    assert swapped.kind_matches
+    assert swapped.component_matches is False
+    assert not swapped.localized
     session.close()
 
 
@@ -6252,6 +6342,64 @@ def test_staged_activation_surfaces_external_rollback_cleanup_failure() -> None:
     assert any("rollback cleanup failed" in note for note in caught.value.__notes__)
 
 
+def test_close_continues_after_interrupt_class_deactivation_failure() -> None:
+    deactivated: list[str] = []
+
+    def activate(request):
+        return FaultExecutionResult(
+            verified=True,
+            active=True,
+            token=request.fault.fault_id,
+        )
+
+    def deactivate(request, _result):
+        deactivated.append(request.fault.fault_id)
+        if request.fault.fault_id == "second":
+            raise KeyboardInterrupt("stop cleanup")
+        return None
+
+    executor = CallbackFaultExecutor(
+        name="interrupting-cleanup",
+        supported_types={FailureType.RESOURCE_UNAVAILABLE},
+        activate=activate,
+        deactivate=deactivate,
+        max_safety=SafetyClass.CLUSTER_DESTRUCTIVE,
+    )
+    faults = (
+        _external_fault(
+            FailureType.RESOURCE_UNAVAILABLE,
+            fault_id="first",
+            resource="gpu-0",
+        ),
+        _external_fault(
+            FailureType.RESOURCE_UNAVAILABLE,
+            fault_id="second",
+            resource="gpu-1",
+        ),
+    )
+    model = TinyModel()
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="campaign_end"),
+                faults=faults,
+            )
+        ),
+        executors=(executor,),
+        rank=0,
+    )
+
+    with pytest.raises(RuntimeError, match="fault injection cleanup failed") as caught:
+        session.close()
+
+    assert isinstance(caught.value.__cause__, KeyboardInterrupt)
+    assert deactivated == ["second", "first"]
+    assert session._closed
+
+
 def test_probability_skip_does_not_require_expiration_consensus() -> None:
     model = TinyModel()
     session = enable_fault_injection(
@@ -6444,6 +6592,37 @@ def test_partial_failed_model_state_load_marks_copied_fault_target_replaced() ->
     session.close()
 
 
+def test_bounded_state_replacement_before_expiration_fails_occurrence() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    replacement = torch.full_like(model.layers[0].weight, 5.0)
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(iterations=3),
+                faults=(
+                    _corruption(
+                        target=_target(surface=FaultSurface.WEIGHT),
+                        scope=FaultScope.SINGLE,
+                    ),
+                ),
+            )
+        ),
+        rank=0,
+    )
+
+    model.load_state_dict({"layers.0.weight": replacement}, strict=False)
+
+    record = session.records[0]
+    assert record.status is InjectionStatus.FAILED
+    assert "replaced before its configured lifetime completed" in (record.error or "")
+    torch.testing.assert_close(model.layers[0].weight, replacement)
+    session.close()
+
+
 def test_implicit_and_explicit_optimizer_state_keys_collide() -> None:
     model = TinyModel()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.0)
@@ -6463,7 +6642,7 @@ def test_implicit_and_explicit_optimizer_state_keys_collide() -> None:
         state_key="exp_avg",
     )
 
-    with pytest.raises(RuntimeError, match="same target"):
+    with pytest.raises(ValueError, match="same resolved target"):
         enable_fault_injection(
             model,
             optimizer,
@@ -6479,6 +6658,83 @@ def test_implicit_and_explicit_optimizer_state_keys_collide() -> None:
         )
 
     torch.testing.assert_close(state, baseline)
+
+
+def test_duplicate_resolved_targets_in_one_incident_fail_enablement() -> None:
+    model = TinyModel()
+    by_weight_alias = _corruption(
+        fault_id="weight-alias",
+        target=_target(surface=FaultSurface.WEIGHT),
+        parameter="bias",
+    )
+    by_bias_surface = _corruption(
+        fault_id="bias-surface",
+        target=_target(surface=FaultSurface.BIAS),
+    )
+
+    with pytest.raises(ValueError, match="same resolved target"):
+        enable_fault_injection(
+            model,
+            _optimizer(model),
+            campaign=_campaign(
+                _incident(
+                    at=(2,),
+                    lifetime=IncidentLifetime(iterations=1),
+                    faults=(by_weight_alias, by_bias_surface),
+                )
+            ),
+            rank=0,
+        )
+
+
+def test_frozen_gradient_target_fails_before_training() -> None:
+    model = TinyModel()
+    model.layers[0].weight.requires_grad_(False)
+    fault = _corruption(
+        target=_target(surface=FaultSurface.GRADIENT),
+    )
+
+    with pytest.raises(LookupError, match="does not require gradients"):
+        enable_fault_injection(
+            model,
+            _optimizer(model),
+            campaign=_campaign(_incident(at=(2,), faults=(fault,))),
+            rank=0,
+        )
+
+
+def test_collective_desync_expects_hang_localization() -> None:
+    fault = FaultSpec(
+        fault_id="collective-desync",
+        type=FailureType.COLLECTIVE_DESYNC,
+        target=FaultTarget(
+            rank=0,
+            surface=FaultSurface.COLLECTIVE,
+        ),
+    )
+
+    assert fault.expected_kind == "hang"
+
+
+def test_collective_drop_requires_cluster_destructive_executor() -> None:
+    fault = FaultSpec(
+        fault_id="collective-drop",
+        type=FailureType.DROP,
+        target=FaultTarget(
+            rank=0,
+            surface=FaultSurface.COLLECTIVE,
+        ),
+    )
+    safe_executor = CallbackFaultExecutor(
+        name="safe-drop",
+        supported_types={FailureType.DROP},
+        activate=lambda _request: FaultExecutionResult(verified=True, active=False),
+        one_shot=True,
+        max_safety=SafetyClass.SAFE_IN_PROCESS,
+    )
+
+    assert fault.safety is SafetyClass.CLUSTER_DESTRUCTIVE
+    assert not safe_executor.supports(fault)
 
 
 def test_distributed_partial_attempt_save_restores_successful_rank_journal() -> None:

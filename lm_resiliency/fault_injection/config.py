@@ -184,6 +184,7 @@ _CLUSTER_DESTRUCTIVE = {
 _STRAGGLER_FAILURES = {FailureType.DELAY, FailureType.TIMEOUT}
 _HANG_FAILURES = {
     FailureType.HANG,
+    FailureType.COLLECTIVE_DESYNC,
     FailureType.MESSAGE_DROP,
     FailureType.NETWORK_PARTITION,
 }
@@ -195,8 +196,13 @@ _PROCESS_FAILURES = {
 }
 
 
-def minimum_safety(failure_type: FailureType) -> SafetyClass:
+def minimum_safety(
+    failure_type: FailureType,
+    surface: FaultSurface | None = None,
+) -> SafetyClass:
     """Return the minimum isolation required for a failure type."""
+    if failure_type is FailureType.DROP and surface is FaultSurface.COLLECTIVE:
+        return SafetyClass.CLUSTER_DESTRUCTIVE
     if failure_type in _CLUSTER_DESTRUCTIVE:
         return SafetyClass.CLUSTER_DESTRUCTIVE
     if failure_type in _ISOLATED_DESTRUCTIVE:
@@ -534,7 +540,7 @@ class FaultSpec:
 
     @property
     def safety(self) -> SafetyClass:
-        return minimum_safety(self.type)
+        return minimum_safety(self.type, self.target.surface)
 
     @property
     def expected_kind(self) -> str:

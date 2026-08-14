@@ -161,7 +161,7 @@ class _ExternalEffect:
                     evidence,
                     "fault executor deactivation evidence",
                 )
-            except Exception as error:
+            except BaseException as error:
                 with self.record._lock:
                     self.record.status = InjectionStatus.FAILED
                     self.record.error = f"fault deactivation failed: {error}"
@@ -185,11 +185,11 @@ class _ExternalEffect:
         with self.lock:
             if self.done:
                 return
-            cleanup_error: Exception | None = None
+            cleanup_error: BaseException | None = None
             if self.result.active:
                 try:
                     self.executor.deactivate(self.request, self.result)
-                except Exception as caught:
+                except BaseException as caught:
                     cleanup_error = caught
             with self.record._lock:
                 self.record.status = InjectionStatus.FAILED
@@ -311,7 +311,7 @@ class FaultInjectionSession:
             if not _defer_activation:
                 self._commit_journal_binding()
                 self._start()
-        except Exception as error:
+        except BaseException as error:
             cleanup_error = self._cleanup()
             if cleanup_error is not None:
                 _add_exception_note(
@@ -449,7 +449,7 @@ class FaultInjectionSession:
         self,
         *,
         complete_campaign_end: bool = False,
-    ) -> Exception | None:
+    ) -> BaseException | None:
         """Best-effort cleanup shared by failed construction and close()."""
         with self._lifecycle_lock:
             return self._cleanup_locked(complete_campaign_end=complete_campaign_end)
@@ -458,11 +458,11 @@ class FaultInjectionSession:
         self,
         *,
         complete_campaign_end: bool,
-    ) -> Exception | None:
+    ) -> BaseException | None:
         if self._closed:
             return None
         unregister_automatic_cleanup(self)
-        first_error: Exception | None = None
+        first_error: BaseException | None = None
         for active in reversed(self._active):
             if not active.done:
                 try:
@@ -472,18 +472,18 @@ class FaultInjectionSession:
                             or active.incident.lifetime.until != "campaign_end"
                         ),
                     )
-                except Exception as error:
+                except BaseException as error:
                     if first_error is None:
                         first_error = error
         self._active.clear()
         try:
             self._local.close()
-        except Exception as error:
+        except BaseException as error:
             if first_error is None:
                 first_error = error
         try:
             self._context.close()
-        except Exception as error:
+        except BaseException as error:
             if first_error is None:
                 first_error = error
         self._closed = True
@@ -1290,6 +1290,20 @@ class FaultInjectionSession:
                     and active.effect.replacement_identity in identities
                 ):
                     active.effect.mark_state_replaced()
+                    lifetime = active.incident.lifetime
+                    if (
+                        lifetime.iterations is not None
+                        and self._current_iteration
+                        < active.start_iteration + lifetime.iterations - 1
+                    ):
+                        active.effect.fail(
+                            RuntimeError(
+                                "bounded fault state was replaced before its "
+                                "configured lifetime completed"
+                            ),
+                            preserve_replaced_state=True,
+                        )
+            self._discard_completed()
 
     def _history_faults_for(self, iteration: int) -> tuple[FaultSpec, ...]:
         return tuple(
@@ -1325,13 +1339,13 @@ def enable_fault_injection(
     world_size = dist.get_world_size()
     arguments["_defer_activation"] = True
     session: FaultInjectionSession | None = None
-    local_error: Exception | None = None
+    local_error: BaseException | None = None
     campaign_identity: str | None = None
     try:
         _validate_distributed_target_ranks(campaign, world_size)
         campaign_identity = _campaign_identity(campaign)
         session = FaultInjectionSession(target, optimizer, **arguments)
-    except Exception as error:
+    except BaseException as error:
         local_error = error
 
     error_summary = None if local_error is None else f"{type(local_error).__name__}: {local_error}"
@@ -1346,12 +1360,12 @@ def enable_fault_injection(
     gathered_preparations: list[dict[str, Any] | None] = [None] * world_size
     try:
         dist.all_gather_object(gathered_preparations, preparation)
-    except Exception as error:
-        cleanup_error: Exception | None = None
+    except BaseException as error:
+        cleanup_error: BaseException | None = None
         if session is not None:
             try:
                 session.close()
-            except Exception as caught:
+            except BaseException as caught:
                 cleanup_error = caught
         if cleanup_error is not None:
             _add_exception_note(
@@ -1385,11 +1399,11 @@ def enable_fault_injection(
                     f"rank {prepared_rank} campaign journal attempts differ from rank 0"
                 )
     if failures:
-        cleanup_error: Exception | None = None
+        cleanup_error: BaseException | None = None
         if session is not None:
             try:
                 session.close()
-            except Exception as error:
+            except BaseException as error:
                 cleanup_error = error
         message = "fault injection enablement failed; " + "; ".join(failures)
         enablement_error = RuntimeError(message)
@@ -1398,17 +1412,25 @@ def enable_fault_injection(
                 enablement_error,
                 f"fault injection cleanup also failed: {cleanup_error}",
             )
+        if local_error is not None and not isinstance(local_error, Exception):
+            _add_exception_note(local_error, str(enablement_error))
+            if cleanup_error is not None:
+                _add_exception_note(
+                    local_error,
+                    f"fault injection cleanup also failed: {cleanup_error}",
+                )
+            raise local_error
         raise enablement_error from local_error
     if session is None:
         raise AssertionError("distributed fault injection enablement returned no session")
-    journal_error: Exception | None = None
+    journal_error: BaseException | None = None
     try:
         session._commit_journal_binding()
-    except Exception as error:
+    except BaseException as error:
         journal_error = error
     try:
         journal_failures = _gather_rank_errors(journal_error)
-    except Exception as error:
+    except BaseException as error:
         cleanup_error = session._cleanup()
         if cleanup_error is not None:
             _add_exception_note(
@@ -1426,10 +1448,18 @@ def enable_fault_injection(
                 enablement_error,
                 f"fault injection cleanup also failed: {cleanup_error}",
             )
+        if journal_error is not None and not isinstance(journal_error, Exception):
+            _add_exception_note(journal_error, str(enablement_error))
+            if cleanup_error is not None:
+                _add_exception_note(
+                    journal_error,
+                    f"fault injection cleanup also failed: {cleanup_error}",
+                )
+            raise journal_error
         raise enablement_error from journal_error
     try:
         session._start()
-    except Exception as error:
+    except BaseException as error:
         cleanup_error = session._cleanup()
         if cleanup_error is not None:
             _add_exception_note(
@@ -1678,10 +1708,41 @@ def _evaluate_occurrence(
             component: _reported_targets_for_component(detected_results, component)
             for component in reported_components
         }
+        expected_targets_by_kind_component = {
+            (kind, component): _expected_targets_for_kind_component(
+                incident,
+                kind,
+                component,
+            )
+            for kind in expected_kinds
+            for component in expected_components
+            if any(
+                fault.expected_kind == kind
+                and (fault.target.component or fault.target.module_path) == component
+                for fault in incident.faults
+            )
+        }
+        reported_targets_by_kind_component = {
+            (kind, component): _reported_targets_for_kind_component(
+                detected_results,
+                kind,
+                component,
+            )
+            for kind in reported_kinds
+            for component in reported_components
+            if any(
+                result.kind == kind and component in result.components
+                for result in detected_results
+            )
+        }
         component_matches = (
             bool(expected_components)
             and reported_components == expected_components
             and reported_targets_by_component == expected_targets_by_component
+            and (
+                not reported_kinds
+                or reported_targets_by_kind_component == expected_targets_by_kind_component
+            )
         )
     localized = (
         injection_succeeded
@@ -1769,6 +1830,41 @@ def _reported_targets_for_component(
     component: str,
 ) -> tuple[frozenset[int], frozenset[str]]:
     matching = tuple(result for result in results if component in result.components)
+    return (
+        frozenset(rank for result in matching for rank in result.failed_ranks),
+        frozenset(resource for result in matching for resource in result.failed_resources),
+    )
+
+
+def _expected_targets_for_kind_component(
+    incident: FaultIncident,
+    kind: str,
+    component: str,
+) -> tuple[frozenset[int], frozenset[str]]:
+    faults = tuple(
+        fault
+        for fault in incident.faults
+        if fault.expected_kind == kind
+        and (fault.target.component or fault.target.module_path) == component
+    )
+    return (
+        frozenset(
+            expected_rank
+            for fault in faults
+            if (expected_rank := _expected_rank(fault)) is not None
+        ),
+        frozenset(fault.target.resource for fault in faults if fault.target.resource is not None),
+    )
+
+
+def _reported_targets_for_kind_component(
+    results: tuple[LocalizationResult, ...],
+    kind: str,
+    component: str,
+) -> tuple[frozenset[int], frozenset[str]]:
+    matching = tuple(
+        result for result in results if result.kind == kind and component in result.components
+    )
     return (
         frozenset(rank for result in matching for rank in result.failed_ranks),
         frozenset(resource for result in matching for resource in result.failed_resources),

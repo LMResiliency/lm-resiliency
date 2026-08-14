@@ -124,6 +124,15 @@ class TrainingContext:
         parameter = self._resolve_model_parameter(target, parameter_name=parameter_name)
         return self._parameter_storage(parameter, target)
 
+    def resolve_model_parameter(
+        self,
+        target: FaultTarget,
+        *,
+        parameter_name: str | None = None,
+    ) -> torch.Tensor:
+        """Resolve the original model parameter without changing its storage view."""
+        return self._resolve_model_parameter(target, parameter_name=parameter_name)
+
     def resolve_gradient_parameter(
         self,
         target: FaultTarget,
@@ -131,7 +140,10 @@ class TrainingContext:
         parameter_name: str | None = None,
     ) -> torch.Tensor:
         """Resolve the model parameter whose materialized gradient is hooked."""
-        return self._resolve_model_parameter(target, parameter_name=parameter_name)
+        parameter = self._resolve_model_parameter(target, parameter_name=parameter_name)
+        if not parameter.requires_grad:
+            raise LookupError("resolved parameter does not require gradients and cannot be hooked")
+        return parameter
 
     def resolve_optimizer_state(
         self,
@@ -414,13 +426,13 @@ class TrainingContext:
         self._cleanups.append(restore)
 
     def close(self) -> None:
-        first_error: Exception | None = None
+        first_error: BaseException | None = None
         cleanups = tuple(reversed(self._cleanups))
         self._cleanups.clear()
         for cleanup in cleanups:
             try:
                 cleanup()
-            except Exception as error:
+            except BaseException as error:
                 if first_error is None:
                     first_error = error
         if first_error is not None:

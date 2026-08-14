@@ -736,14 +736,18 @@ def _expected_targets_for_source(
     )
     return {
         "ranks": sorted(
-            expected_rank
-            for action in matching
-            if (expected_rank := _expected_action_rank(action)) is not None
+            {
+                expected_rank
+                for action in matching
+                if (expected_rank := _expected_action_rank(action)) is not None
+            }
         ),
         "resources": sorted(
-            resource
-            for action in matching
-            if (resource := _expected_action_resource(action)) is not None
+            {
+                resource
+                for action in matching
+                if (resource := _expected_action_resource(action)) is not None
+            }
         ),
     }
 

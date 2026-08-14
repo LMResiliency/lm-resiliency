@@ -268,6 +268,10 @@ rejected during enablement. Probability-zero incidents are ignored; for other
 probabilistic incidents the validator conservatively treats a candidate as
 potentially selected. Large ranged schedules are checked without materializing
 every candidate.
+Correlated actions inside one incident must also resolve to distinct local
+targets. Selector aliases that identify the same parameter, gradient, or
+optimizer-state entry are rejected during enablement instead of failing at the
+scheduled activation boundary.
 For built-in local effects, a `matching_calls` lifetime greater than one may
 span optimizer iterations because framework call multiplicity is not portable.
 Such an incident must have one trigger candidate, and a later incident on the
@@ -378,6 +382,8 @@ selection does not silently skip them in favor of older evidence.
 Weight and bias collision detection is keyed by the resolved parameter storage,
 not by the selector spelling. A `weight` surface with `parameter: "bias"` and a
 direct `bias` surface therefore cannot overlap on the same tensor.
+Gradient targets must resolve to a parameter with `requires_grad=True`;
+otherwise enablement fails before the training loop installs a hook.
 
 Stale and duplicate faults retain two observed values only during their
 scheduled collection window. Module and gradient observation starts one
@@ -415,6 +421,9 @@ If a model load copies an active target and then fails on another key, the
 copied target is still marked as replaced before the original load error is
 re-raised. Recovery cleanup therefore preserves the partially restored value
 instead of subtracting an obsolete injection delta.
+A bounded state effect replaced before its configured expiration is recorded as
+failed because the requested lifetime was not executed. Replacement at the
+normal expiration boundary remains successful and preserves the restored state.
 
 Custom executors receive the full `target` and `parameters` objects unchanged.
 They may define additional fields, but should validate those fields before the
@@ -557,6 +566,10 @@ Safety classes are:
 
 Campaign enablement fails before training when no configured executor supports a
 local fault or when an executor's safety ceiling is insufficient.
+Collective desynchronization expects SCOUT `hang` localization. A `drop` action
+on the `collective` surface is cluster-destructive, so it cannot use a
+safe-in-process executor or participate in an in-band post-activation
+collective.
 Unsupported effects are never silently skipped.
 At execution time, the selected executor must return verified evidence.
 An unverifiable activation is marked failed, deactivated when necessary, and is
@@ -649,6 +662,10 @@ For a distributed enablement, the initial manifest binding is persisted only
 after every rank agrees on the manifest, training iteration, and persisted
 attempt journal. Divergent per-rank attempt histories fail enablement before any
 new occurrence is armed.
+Interrupt-class preparation failures participate in the same rank consensus
+before the original interrupt is re-raised. Cleanup preserves the first
+interrupt or error while continuing through every active effect, observer, and
+framework restoration.
 The journal stores the canonical manifest identity. Reusing a campaign name with
 changed triggers, targets, parameters, or metadata requires a new state file;
 stale attempts are never applied to an edited manifest.
@@ -722,9 +739,13 @@ component set; extra components are attribution errors. Component evidence is
 also correlated with the rank and resource targets in each localization result.
 Swapping correct component names between two failed targets is therefore an
 attribution failure even when the aggregate component and target sets match.
+When kind evidence is also supplied, the `(kind, component)` association must
+match the injected actions; independently correct kind and component sets cannot
+be swapped across a correlated occurrence.
 The standalone SCOUT comparator applies the same rule to replay source prefixes:
 each `hidden.*`, `embedding.*`, or `output.*` source remains associated with the
-failed ranks or resources in the report that supplied it.
+failed ranks or resources in the report that supplied it. Repeated actions with
+the same source and target are deduplicated for this set comparison.
 Example detection counts also require a report with the expected failure kind;
 an unrelated report at the same iteration is retained as evidence but does not
 count as detecting the injected occurrence. For correlated incidents containing

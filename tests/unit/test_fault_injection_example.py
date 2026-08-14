@@ -704,6 +704,28 @@ def test_comparison_correlates_source_prefixes_with_failed_targets() -> None:
     assert not occurrence["localized"]
 
 
+def test_comparison_deduplicates_expected_targets_for_shared_source() -> None:
+    injection = _injection_payload()
+    second_action = copy.deepcopy(injection["manifest"]["incidents"][0]["faults"][0])
+    second_action["fault_id"] = "second-hidden-output"
+    second_action["target"]["index"] = 1
+    injection["manifest"]["incidents"][0]["faults"].append(second_action)
+    second_record = copy.deepcopy(injection["injections"][0])
+    second_record.update(
+        {
+            "fault_id": "second-hidden-output",
+            "target": copy.deepcopy(second_action["target"]),
+        }
+    )
+    injection["injections"].append(second_record)
+    localization = _localization_payload()
+    _refresh_manifest_identity(injection, localization)
+
+    occurrence = compare_payloads(injection, localization)["evaluations"][0]
+
+    assert occurrence["source_target_match"]
+
+
 def test_comparison_rejects_non_string_resource_evidence() -> None:
     injection = _injection_payload()
     injection["injections"][0].update(

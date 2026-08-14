@@ -167,7 +167,7 @@ class LocalFaultEffect:
                     preserve_replaced_state=preserve_replaced_state,
                     replacement_confirmed=self.state_replaced,
                 )
-            except Exception as error:
+            except BaseException as error:
                 with self.record._lock:
                     self.record.status = InjectionStatus.FAILED
                     self.record.error = f"fault cleanup failed: {error}"
@@ -201,15 +201,19 @@ class LocalFaultEffect:
         error: BaseException,
         *,
         propagate_cleanup_error: bool = False,
+        preserve_replaced_state: bool = False,
     ) -> None:
         self.cancel_event.set()
         with self.lock:
             if self.done:
                 return
-            cleanup_error: Exception | None = None
+            cleanup_error: BaseException | None = None
             try:
-                self._cleanup()
-            except Exception as caught:
+                self._cleanup(
+                    preserve_replaced_state=preserve_replaced_state,
+                    replacement_confirmed=self.state_replaced,
+                )
+            except BaseException as caught:
                 cleanup_error = caught
             with self.record._lock:
                 self.record.status = InjectionStatus.FAILED
@@ -230,18 +234,18 @@ class LocalFaultEffect:
         preserve_replaced_state: bool = False,
         replacement_confirmed: bool = False,
     ) -> None:
-        first_error: Exception | None = None
+        first_error: BaseException | None = None
         for handle in self.handles:
             try:
                 handle.remove()
-            except Exception as error:
+            except BaseException as error:
                 if first_error is None:
                     first_error = error
         self.handles.clear()
         for callback in reversed(self.cleanup_callbacks):
             try:
                 callback(preserve_replaced_state, replacement_confirmed)
-            except Exception as error:
+            except BaseException as error:
                 if first_error is None:
                     first_error = error
         self.cleanup_callbacks.clear()
@@ -281,10 +285,14 @@ class LocalFaultExecutor:
             if fault.target.surface in {
                 FaultSurface.WEIGHT,
                 FaultSurface.BIAS,
-                FaultSurface.GRADIENT,
                 FaultSurface.OPTIMIZER_STATE,
             }:
                 self._context.resolve_parameter(
+                    fault.target,
+                    parameter_name=_parameter_name(fault),
+                )
+            elif fault.target.surface is FaultSurface.GRADIENT:
+                self._context.resolve_gradient_parameter(
                     fault.target,
                     parameter_name=_parameter_name(fault),
                 )
@@ -315,8 +323,6 @@ class LocalFaultExecutor:
             for fault in local_faults:
                 key = self._schedule_target_key(fault)
                 for other_key, other_incident, other_fault in scheduled:
-                    if other_incident is incident:
-                        continue
                     if key != other_key:
                         continue
                     if not _incident_windows_may_overlap(incident, other_incident):
@@ -457,12 +463,12 @@ class LocalFaultExecutor:
         return effect
 
     def close(self) -> None:
-        first_error: Exception | None = None
+        first_error: BaseException | None = None
         for handles in self._observer_handles.values():
             for handle in handles:
                 try:
                     handle.remove()
-                except Exception as error:
+                except BaseException as error:
                     if first_error is None:
                         first_error = error
         self._observer_handles.clear()
@@ -691,7 +697,7 @@ class LocalFaultExecutor:
         parameter_name = _parameter_name(fault)
         if fault.target.surface in {FaultSurface.WEIGHT, FaultSurface.BIAS}:
             return id(
-                self._context.resolve_gradient_parameter(
+                self._context.resolve_model_parameter(
                     fault.target,
                     parameter_name=parameter_name,
                 )
@@ -712,17 +718,18 @@ class LocalFaultExecutor:
     def _resolved_target_key(self, fault: FaultSpec) -> tuple[Any, ...]:
         surface = fault.target.surface
         parameter_name = _parameter_name(fault)
-        if surface in {
-            FaultSurface.WEIGHT,
-            FaultSurface.BIAS,
-            FaultSurface.GRADIENT,
-        }:
+        if surface is FaultSurface.GRADIENT:
             target = self._context.resolve_gradient_parameter(
                 fault.target,
                 parameter_name=parameter_name,
             )
+        elif surface in {FaultSurface.WEIGHT, FaultSurface.BIAS}:
+            target = self._context.resolve_parameter(
+                fault.target,
+                parameter_name=parameter_name,
+            )
         elif surface is FaultSurface.OPTIMIZER_STATE:
-            parameter = self._context.resolve_gradient_parameter(
+            parameter = self._context.resolve_model_parameter(
                 fault.target,
                 parameter_name=parameter_name,
             )
@@ -760,7 +767,7 @@ class LocalFaultExecutor:
     def _schedule_target_key(self, fault: FaultSpec) -> tuple[Any, ...]:
         if fault.target.surface is not FaultSurface.OPTIMIZER_STATE:
             return self._resolved_target_key(fault)
-        parameter = self._context.resolve_gradient_parameter(
+        parameter = self._context.resolve_model_parameter(
             fault.target,
             parameter_name=_parameter_name(fault),
         )
