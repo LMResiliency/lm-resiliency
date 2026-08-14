@@ -78,6 +78,10 @@ class _NoOpFaultError(RuntimeError):
     """The selected target already has the requested faulty value."""
 
 
+class _UnavailableHistoryError(RuntimeError):
+    """A stale or duplicate fault has no earlier observed value."""
+
+
 @dataclass(slots=True)
 class _History:
     previous: torch.Tensor | None = None
@@ -457,7 +461,7 @@ class LocalFaultExecutor:
                 except Exception as error:
                     if not effect.done:
                         effect.fail(error)
-                    if isinstance(error, _NoOpFaultError):
+                    if isinstance(error, (_NoOpFaultError, _UnavailableHistoryError)):
                         return args, kwargs
                     raise
 
@@ -480,7 +484,7 @@ class LocalFaultExecutor:
             except Exception as error:
                 if not effect.done:
                     effect.fail(error)
-                if isinstance(error, _NoOpFaultError):
+                if isinstance(error, (_NoOpFaultError, _UnavailableHistoryError)):
                     return output
                 raise
 
@@ -512,7 +516,7 @@ class LocalFaultExecutor:
             except Exception as error:
                 if not effect.done:
                     effect.fail(error)
-                if isinstance(error, _NoOpFaultError):
+                if isinstance(error, (_NoOpFaultError, _UnavailableHistoryError)):
                     return gradient
                 raise
 
@@ -747,7 +751,9 @@ def _prepare_state_values(
             _apply_corruption(transformed, local_indices, request)
     elif request.fault.type in {FailureType.STALE_STATE, FailureType.DUPLICATE}:
         if history is None or history.previous is None:
-            raise RuntimeError("stale or duplicate injection has no prior observed value")
+            raise _UnavailableHistoryError(
+                "stale or duplicate injection has no prior observed value"
+            )
         previous = _local_shard(history.previous).to(
             device=tensor.device,
             dtype=tensor.dtype,
@@ -786,7 +792,9 @@ def _transform_tensor(
             _apply_corruption(transformed, indices, request)
     elif fault.type in {FailureType.STALE_STATE, FailureType.DUPLICATE}:
         if history is None or history.previous is None:
-            raise RuntimeError("stale or duplicate injection has no prior observed value")
+            raise _UnavailableHistoryError(
+                "stale or duplicate injection has no prior observed value"
+            )
         previous = history.previous.to(device=transformed.device, dtype=transformed.dtype)
         if previous.shape != transformed.shape:
             raise RuntimeError("prior observed value shape does not match the target")

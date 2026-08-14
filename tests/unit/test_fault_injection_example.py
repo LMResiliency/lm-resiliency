@@ -96,7 +96,9 @@ def test_checked_in_campaign_targets_the_scout_replay_layer() -> None:
         "intermittent",
         "permanent",
     }
-    assert _state_reset_iterations(campaign) == set(range(41, 68, 2))
+    assert _state_reset_iterations(campaign) == (
+        set(range(4, 28)) | {31, 32, 34, 36, 38, 39} | set(range(41, 68, 2))
+    )
 
 
 def test_evaluation_state_reset_restores_the_last_clean_optimizer_boundary() -> None:

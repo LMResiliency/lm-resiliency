@@ -452,6 +452,7 @@ def _resolve_logical_module(
             return metadata_match
         if require_global_layer_metadata:
             return None
+        suffix_matches: list[nn.Module] = []
         for name, module in modules.items():
             pieces = name.split(".")
             if (
@@ -459,7 +460,8 @@ def _resolve_logical_module(
                 and pieces[-1] == str(index)
                 and pieces[-2].lower() in _LAYER_PARENTS
             ):
-                return module
+                suffix_matches.append(module)
+        return _unique_module(suffix_matches, index)
     if normalized in {"embedding", "token_embedding"}:
         return _resolve_embedding(modules)
     if normalized in {"output", "lm_head"}:
@@ -720,9 +722,7 @@ def _base_optimizers(value: Any) -> tuple[torch.optim.Optimizer, ...]:
         if candidate is None or id(candidate) in seen:
             return
         seen.add(id(candidate))
-        if isinstance(candidate, torch.optim.Optimizer):
-            found.append(candidate)
-            return
+        found_before = len(found)
         for attribute in (
             "optimizers",
             "chained_optimizers",
@@ -736,6 +736,8 @@ def _base_optimizers(value: Any) -> tuple[torch.optim.Optimizer, ...]:
                     pass
         for attribute in ("optimizer", "_inner", "optim"):
             visit(getattr(candidate, attribute, None))
+        if isinstance(candidate, torch.optim.Optimizer) and len(found) == found_before:
+            found.append(candidate)
 
     visit(value)
     return tuple(found)

@@ -40,6 +40,7 @@ from lm_resiliency import (
     UnsupportedFaultError,
     enable_fault_injection,
 )
+from lm_resiliency.fault_injection.frameworks import _base_optimizers
 from lm_resiliency.fault_injection.state import CampaignJournal
 
 
@@ -1659,9 +1660,9 @@ def test_runtime_injection_failure_is_recorded_and_hook_is_removed() -> None:
         rank=0,
     )
 
-    with pytest.raises(RuntimeError, match="no prior observed value"):
-        model(torch.ones(2, 4))
+    output = model(torch.ones(2, 4))
 
+    assert output.shape == (2, 4)
     assert session.records[0].status is InjectionStatus.FAILED
     assert "no prior observed value" in str(session.records[0].error)
     _step(model, optimizer)
@@ -3917,3 +3918,174 @@ def test_close_restores_active_faults_and_optimizer_hook() -> None:
     torch.testing.assert_close(model.layers[0].weight, baseline)
     optimizer.step()
     assert session.completed_iterations == 0
+
+
+@pytest.mark.parametrize(
+    "surface",
+    [FaultSurface.INPUT, FaultSurface.OUTPUT, FaultSurface.GRADIENT],
+)
+def test_missing_flow_history_fails_without_aborting_training(
+    surface: FaultSurface,
+) -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    fault = FaultSpec(
+        fault_id=f"stale-{surface.value}",
+        type=FailureType.STALE_STATE,
+        target=_target(surface=surface),
+        parameters={"scope": FaultScope.FULL.value},
+    )
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(_incident(at=(1,), faults=(fault,))),
+        rank=0,
+    )
+
+    _step(model, optimizer)
+
+    assert session.records[0].status is InjectionStatus.FAILED
+    assert "no prior observed value" in (session.records[0].error or "")
+    session.close()
+
+
+def test_logical_layer_rejects_ambiguous_suffix_matches() -> None:
+    class EncoderDecoderModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.encoder = nn.Module()
+            self.encoder.layers = nn.ModuleList([nn.Linear(4, 4)])
+            self.decoder = nn.Module()
+            self.decoder.layers = nn.ModuleList([nn.Linear(4, 4)])
+
+    model = EncoderDecoderModel()
+    fault = _corruption(
+        target=_target(
+            surface=FaultSurface.WEIGHT,
+            module_path=None,
+            component="transformer_block",
+            index=0,
+        ),
+    )
+
+    with pytest.raises(LookupError, match="resolves to multiple modules"):
+        enable_fault_injection(
+            model,
+            _optimizer(model),
+            campaign=_campaign(
+                _incident(
+                    at=(1,),
+                    lifetime=IncidentLifetime(until="recovery"),
+                    faults=(fault,),
+                )
+            ),
+            rank=0,
+        )
+
+
+def test_staged_activation_rollback_marks_verified_records_failed() -> None:
+    def activate(_request):
+        raise RuntimeError("later activation failed")
+
+    executor = CallbackFaultExecutor(
+        name="failing-executor",
+        supported_types={FailureType.EXCEPTION},
+        activate=activate,
+        deactivate=lambda _request, _result: None,
+        max_safety=SafetyClass.ISOLATED_DESTRUCTIVE,
+    )
+    model = TinyModel()
+    baseline = model.layers[0].weight.detach().clone()
+    session = FaultInjectionSession(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                incident_id="local-first",
+                at=(1,),
+                lifetime=IncidentLifetime(until="campaign_end"),
+                faults=(
+                    _corruption(
+                        target=_target(surface=FaultSurface.WEIGHT),
+                        scope=FaultScope.SINGLE,
+                    ),
+                ),
+            ),
+            _incident(
+                incident_id="external-second",
+                at=(1,),
+                faults=(_external_fault(FailureType.EXCEPTION),),
+            ),
+        ),
+        executors=(executor,),
+        rank=0,
+        _defer_activation=True,
+    )
+    session._commit_journal_binding()
+
+    with pytest.raises(RuntimeError, match="later activation failed"):
+        session._start()
+
+    local_record = next(record for record in session.records if record.incident_id == "local-first")
+    assert local_record.status is InjectionStatus.FAILED
+    assert not local_record.injection_succeeded
+    assert "rolled back" in (local_record.error or "")
+    torch.testing.assert_close(model.layers[0].weight, baseline)
+    session.close()
+
+
+def test_probability_skip_does_not_require_expiration_consensus() -> None:
+    model = TinyModel()
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                probability=0.0,
+                lifetime=IncidentLifetime(iterations=2),
+            )
+        ),
+        rank=0,
+    )
+
+    assert session.records[0].status is InjectionStatus.SKIPPED_PROBABILITY
+    assert not session._requires_boundary_consensus(1, 2)
+    session.close()
+
+
+def test_selected_bounded_occurrence_requires_consensus_on_non_target_ranks() -> None:
+    model = TinyModel()
+    session = FaultInjectionSession(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(iterations=2),
+            )
+        ),
+        rank=1,
+        _defer_activation=True,
+    )
+    session._journal.record_attempt("incident", 1)
+
+    assert session._requires_boundary_consensus(2, 3)
+    session.close()
+
+
+def test_optimizer_container_discovers_child_optimizers_first() -> None:
+    parameter = nn.Parameter(torch.ones(1))
+    child = torch.optim.Adam([parameter])
+
+    class OptimizerContainer(torch.optim.Optimizer):
+        def __init__(self) -> None:
+            super().__init__([nn.Parameter(torch.zeros(1))], {})
+            self.optimizers = [child]
+
+        def step(self, closure=None):
+            return None
+
+    container = OptimizerContainer()
+
+    assert _base_optimizers(container) == (child,)

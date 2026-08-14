@@ -97,6 +97,22 @@ class _ExternalEffect:
         self.record.completed_at_ns = time.monotonic_ns()
         self.done = True
 
+    def rollback(self, error: Exception) -> None:
+        if self.done:
+            return
+        cleanup_error: Exception | None = None
+        if self.result.active:
+            try:
+                self.executor.deactivate(self.request, self.result)
+            except Exception as caught:
+                cleanup_error = caught
+        self.record.status = InjectionStatus.FAILED
+        self.record.error = f"fault activation rolled back: {error}"
+        if cleanup_error is not None:
+            self.record.error += f"; rollback cleanup also failed: {cleanup_error}"
+        self.record.completed_at_ns = time.monotonic_ns()
+        self.done = True
+
 
 @dataclass(slots=True)
 class _ActiveFault:
@@ -113,6 +129,12 @@ class _ActiveFault:
             self.effect.complete(preserve_replaced_state=preserve_replaced_state)
         else:
             self.effect.complete()
+
+    def rollback(self, error: Exception) -> None:
+        if isinstance(self.effect, LocalFaultEffect):
+            self.effect.fail(RuntimeError(f"fault activation rolled back: {error}"))
+        else:
+            self.effect.rollback(error)
 
 
 class FaultInjectionSession:
@@ -507,6 +529,13 @@ class FaultInjectionSession:
             start_iteration = finished_iteration - lifetime + 1
             if start_iteration <= 0 or not incident.trigger.matches(start_iteration):
                 continue
+            if not _probability_selected(
+                self.campaign.seed,
+                incident.incident_id,
+                start_iteration,
+                incident.trigger.probability,
+            ):
+                continue
             if self._journal.attempt_count(incident.incident_id, start_iteration) > 0:
                 return True
         return False
@@ -650,7 +679,7 @@ class FaultInjectionSession:
             for active in reversed(self._active[active_start:]):
                 if not active.done:
                     try:
-                        active.complete()
+                        active.rollback(error)
                     except Exception as caught:
                         if cleanup_error is None:
                             cleanup_error = caught
@@ -696,7 +725,7 @@ class FaultInjectionSession:
             for active in reversed(activated):
                 if not active.done:
                     try:
-                        active.complete()
+                        active.rollback(error)
                     except Exception as caught:
                         if cleanup_error is None:
                             cleanup_error = caught

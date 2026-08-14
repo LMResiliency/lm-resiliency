@@ -279,11 +279,22 @@ def _scheduled_iterations(incident: FaultIncident) -> tuple[int, ...]:
 
 
 def _state_reset_iterations(campaign: FaultCampaign) -> set[int]:
-    state_surfaces = {"weight", "bias", "gradient", "optimizer_state"}
+    gradient_affecting_surfaces = {
+        "input",
+        "output",
+        "weight",
+        "bias",
+        "gradient",
+        "optimizer_state",
+    }
     return {
         iteration
         for incident in campaign.incidents
-        if any(fault.target.surface.value in state_surfaces for fault in incident.faults)
+        if any(
+            fault.type.value != "delay"
+            and fault.target.surface.value in gradient_affecting_surfaces
+            for fault in incident.faults
+        )
         for iteration in _scheduled_iterations(incident)
     }
 
