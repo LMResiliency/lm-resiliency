@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from lm_resiliency.checkpointing._disk_format import (
@@ -304,6 +305,15 @@ class DiskSerializer:
                 f"only format version {FORMAT_VERSION} is supported"
             ) from error
         metadata, tensors, stored = validate_payload(payload)
+        for index, tensor in enumerate(tensors):
+            if type(tensor) is not torch.Tensor:
+                raise CheckpointFormatError(
+                    f"{load_path}: checkpoint tensor {index} must be a plain torch.Tensor"
+                )
+            if tensor.layout is not torch.strided or tensor.is_quantized:
+                raise CheckpointFormatError(
+                    f"{load_path}: checkpoint tensor {index} must be dense, strided, and non-quantized"
+                )
         if self._integrity:
             if stored is not None:
                 actual = shard_checksums(tensors)
@@ -351,12 +361,37 @@ class DiskSerializer:
         self.wait()
 
 
+def _validate_metadata_runtime_types(value: object) -> None:
+    """Reject metadata subclasses whose semantics the safe codec cannot preserve."""
+    if isinstance(value, torch.Tensor):
+        if type(value) is not torch.Tensor:
+            raise TypeError(f"unsupported checkpoint metadata type: {type(value).__name__}")
+        return
+    if isinstance(value, np.ndarray):
+        if type(value) is not np.ndarray:
+            raise TypeError(f"unsupported checkpoint metadata type: {type(value).__name__}")
+        return
+    if isinstance(value, np.generic):
+        if type(value) is not value.dtype.type:
+            raise TypeError(f"unsupported checkpoint metadata type: {type(value).__name__}")
+        return
+    if type(value) is dict:
+        for key, item in value.items():
+            _validate_metadata_runtime_types(key)
+            _validate_metadata_runtime_types(item)
+        return
+    if type(value) in (list, tuple, set, frozenset):
+        for item in value:
+            _validate_metadata_runtime_types(item)
+
+
 def _checkpoint_payload(
     metadata: FlatStateDictMetadata,
     tensors: list[torch.Tensor],
     checksums: list[int] | None,
 ) -> dict[str, object]:
     """Build the only payload shape accepted by the safe loader."""
+    _validate_metadata_runtime_types(metadata.non_tensor_data)
     return {
         "format": FORMAT_NAME,
         "version": FORMAT_VERSION,
