@@ -414,6 +414,11 @@ class FaultTarget:
         )
         if self.index is not None:
             object.__setattr__(self, "index", _strict_int(self.index, "fault target index"))
+        if self.component is not None:
+            if not isinstance(self.component, str):
+                raise TypeError("fault target component must be a string")
+            if not self.component.strip():
+                raise ValueError("fault target component must be non-empty")
         object.__setattr__(
             self,
             "metadata",

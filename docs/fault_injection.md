@@ -237,7 +237,7 @@ Use exactly one of `at` or `range`.
 |---|---:|---|---|
 | `at` | One of `at`/`range` | - | Sorted, unique array of positive iteration numbers. |
 | `range.start` | For `range` | - | First candidate iteration; must be positive. |
-| `range.end` | For `range` | - | Last candidate iteration, inclusive. |
+| `range.end` | For `range` | - | Last candidate iteration, inclusive. Range schedules are evaluated lazily and do not allocate one entry per candidate. |
 | `range.every` | No | `1` | Positive spacing between range candidates. |
 | `probability` | No | `1.0` | Selection probability for each candidate, from `0.0` through `1.0`. |
 
@@ -289,7 +289,7 @@ injection IDs but the same occurrence ID.
 | `surface` | Yes | - | Training surface: `input`, `output`, `weight`, `bias`, `gradient`, `optimizer_state`, `rng_state`, `sampler_state`, `data`, `checkpoint`, `compute`, `collective`, `process`, `resource`, or `config`. |
 | `rank` | No | `0` | Global rank that executes the action. |
 | `model_part` | No | `0` | TorchTitan model-part or Megatron model-chunk index. |
-| `component` | For logical module targets | - | Logical component such as `transformer_block`, `embedding`, `output`, or `expert`. |
+| `component` | For logical module targets | - | Non-empty logical component string such as `transformer_block`, `embedding`, `output`, or `expert`. |
 | `index` | For indexed components | - | Global layer or expert index. |
 | `module_path` | For explicit module targets | - | Exact path from the user model's `named_modules()`, such as `model.layers.12.mlp`. It is attempted before logical component resolution. |
 | `operation` | Executor-specific | - | Runtime operation such as `all_reduce` for a collective fault. |

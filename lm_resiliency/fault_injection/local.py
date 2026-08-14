@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -114,21 +115,24 @@ class LocalFaultEffect:
     state_replaced: bool = False
     replacement_identity: int | None = None
     done: bool = False
+    lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def verify(self, evidence: dict[str, Any]) -> None:
-        if self.record.verified:
-            return
-        self.record.verified = True
-        self.record.status = InjectionStatus.ACTIVE
-        self.record.activated_at_ns = time.monotonic_ns()
-        self.record.evidence = dict(evidence)
+        with self.lock:
+            if self.done or self.record.verified:
+                return
+            self.record.verified = True
+            self.record.status = InjectionStatus.ACTIVE
+            self.record.activated_at_ns = time.monotonic_ns()
+            self.record.evidence = dict(evidence)
 
     def matched(self) -> None:
-        if self.remaining_calls is None:
-            return
-        self.remaining_calls -= 1
-        if self.remaining_calls == 0:
-            self.complete()
+        with self.lock:
+            if self.done or self.remaining_calls is None:
+                return
+            self.remaining_calls -= 1
+            if self.remaining_calls == 0:
+                self.complete()
 
     def complete(
         self,
@@ -136,49 +140,64 @@ class LocalFaultEffect:
         *,
         preserve_replaced_state: bool = False,
     ) -> None:
-        if self.done:
-            return
-        try:
-            self._cleanup(
-                preserve_replaced_state=preserve_replaced_state,
-                replacement_confirmed=self.state_replaced,
-            )
-        except Exception as error:
-            self.record.status = InjectionStatus.FAILED
-            self.record.error = f"fault cleanup failed: {error}"
+        with self.lock:
+            if self.done:
+                return
+            try:
+                self._cleanup(
+                    preserve_replaced_state=preserve_replaced_state,
+                    replacement_confirmed=self.state_replaced,
+                )
+            except Exception as error:
+                self.record.status = InjectionStatus.FAILED
+                self.record.error = f"fault cleanup failed: {error}"
+                self.record.completed_at_ns = time.monotonic_ns()
+                self.done = True
+                self.on_done(self.target_key)
+                raise
+            if evidence:
+                merged = dict(self.record.evidence)
+                merged.update(evidence)
+                self.record.evidence = merged
+            if self.record.verified:
+                self.record.status = InjectionStatus.COMPLETED
+            elif self.record.status is InjectionStatus.PENDING:
+                self.record.status = InjectionStatus.CANCELLED
             self.record.completed_at_ns = time.monotonic_ns()
             self.done = True
             self.on_done(self.target_key)
-            raise
-        if evidence:
-            merged = dict(self.record.evidence)
-            merged.update(evidence)
-            self.record.evidence = merged
-        if self.record.verified:
-            self.record.status = InjectionStatus.COMPLETED
-        elif self.record.status is InjectionStatus.PENDING:
-            self.record.status = InjectionStatus.CANCELLED
-        self.record.completed_at_ns = time.monotonic_ns()
-        self.done = True
-        self.on_done(self.target_key)
 
     def mark_state_replaced(self) -> None:
         """Preserve values loaded by an external checkpoint or recovery path."""
-        self.state_replaced = True
+        with self.lock:
+            if not self.done:
+                self.state_replaced = True
 
-    def fail(self, error: Exception) -> None:
-        cleanup_error: Exception | None = None
-        try:
-            self._cleanup()
-        except Exception as caught:
-            cleanup_error = caught
-        self.record.status = InjectionStatus.FAILED
-        self.record.error = str(error)
-        if cleanup_error is not None:
-            self.record.error += f"; cleanup also failed: {cleanup_error}"
-        self.record.completed_at_ns = time.monotonic_ns()
-        self.done = True
-        self.on_done(self.target_key)
+    def fail(
+        self,
+        error: Exception,
+        *,
+        propagate_cleanup_error: bool = False,
+    ) -> None:
+        with self.lock:
+            if self.done:
+                return
+            cleanup_error: Exception | None = None
+            try:
+                self._cleanup()
+            except Exception as caught:
+                cleanup_error = caught
+            self.record.status = InjectionStatus.FAILED
+            self.record.error = str(error)
+            if cleanup_error is not None:
+                self.record.error += f"; cleanup also failed: {cleanup_error}"
+            self.record.completed_at_ns = time.monotonic_ns()
+            self.done = True
+            self.on_done(self.target_key)
+            if cleanup_error is not None and propagate_cleanup_error:
+                raise RuntimeError(
+                    f"fault rollback cleanup failed: {cleanup_error}"
+                ) from cleanup_error
 
     def _cleanup(
         self,
@@ -378,14 +397,17 @@ class LocalFaultExecutor:
             _args: tuple[Any, ...],
             _kwargs: dict[str, Any],
         ) -> None:
-            try:
-                time.sleep(delay_ms / 1000.0)
-                effect.verify({"delay_ms": delay_ms})
-                effect.matched()
-            except Exception as error:
-                if not effect.done:
-                    effect.fail(error)
-                raise
+            with effect.lock:
+                if effect.done:
+                    return None
+                try:
+                    time.sleep(delay_ms / 1000.0)
+                    effect.verify({"delay_ms": delay_ms})
+                    effect.matched()
+                except Exception as error:
+                    if not effect.done:
+                        effect.fail(error)
+                    raise
             return None
 
         effect.handles.append(module.register_forward_pre_hook(delay, with_kwargs=True))
@@ -412,15 +434,18 @@ class LocalFaultExecutor:
             _kwargs: dict[str, Any],
         ) -> None:
             nonlocal restoration
-            try:
-                if restoration is None:
-                    restoration, affected = self._mutate_state_tensor(tensor, request)
-                    effect.cleanup_callbacks.append(restoration)
-                    effect.verify({"affected_elements": affected})
-            except Exception as error:
-                if not effect.done:
-                    effect.fail(error)
-                raise
+            with effect.lock:
+                if effect.done:
+                    return None
+                try:
+                    if restoration is None:
+                        restoration, affected = self._mutate_state_tensor(tensor, request)
+                        effect.cleanup_callbacks.append(restoration)
+                        effect.verify({"affected_elements": affected})
+                except Exception as error:
+                    if not effect.done:
+                        effect.fail(error)
+                    raise
             return None
 
         def count(
@@ -429,7 +454,9 @@ class LocalFaultExecutor:
             _kwargs: dict[str, Any],
             _output: Any,
         ) -> None:
-            effect.matched()
+            with effect.lock:
+                if not effect.done:
+                    effect.matched()
             return None
 
         effect.handles.append(module.register_forward_pre_hook(inject, with_kwargs=True))
@@ -452,29 +479,32 @@ class LocalFaultExecutor:
                 args: tuple[Any, ...],
                 kwargs: dict[str, Any],
             ) -> tuple[tuple[Any, ...], dict[str, Any]]:
-                try:
-                    transformed, affected = _transform_tree(
-                        (args, kwargs),
-                        request,
-                        history,
-                    )
-                    effect.verify({"affected_elements": affected})
-                    effect.matched()
-                    new_args, new_kwargs = transformed
-                    return tuple(new_args), dict(new_kwargs)
-                except Exception as error:
-                    if not effect.done:
-                        effect.fail(error)
-                    if isinstance(
-                        error,
-                        (
-                            _NoOpFaultError,
-                            _UnavailableHistoryError,
-                            _UnsupportedTargetTensorError,
-                        ),
-                    ):
+                with effect.lock:
+                    if effect.done:
                         return args, kwargs
-                    raise
+                    try:
+                        transformed, affected = _transform_tree(
+                            (args, kwargs),
+                            request,
+                            history,
+                        )
+                        effect.verify({"affected_elements": affected})
+                        effect.matched()
+                        new_args, new_kwargs = transformed
+                        return tuple(new_args), dict(new_kwargs)
+                    except Exception as error:
+                        if not effect.done:
+                            effect.fail(error)
+                        if isinstance(
+                            error,
+                            (
+                                _NoOpFaultError,
+                                _UnavailableHistoryError,
+                                _UnsupportedTargetTensorError,
+                            ),
+                        ):
+                            return args, kwargs
+                        raise
 
             effect.handles.append(
                 module.register_forward_pre_hook(transform_input, with_kwargs=True)
@@ -487,24 +517,27 @@ class LocalFaultExecutor:
             _kwargs: dict[str, Any],
             output: Any,
         ) -> Any:
-            try:
-                transformed, affected = _transform_tree(output, request, history)
-                effect.verify({"affected_elements": affected})
-                effect.matched()
-                return transformed
-            except Exception as error:
-                if not effect.done:
-                    effect.fail(error)
-                if isinstance(
-                    error,
-                    (
-                        _NoOpFaultError,
-                        _UnavailableHistoryError,
-                        _UnsupportedTargetTensorError,
-                    ),
-                ):
+            with effect.lock:
+                if effect.done:
                     return output
-                raise
+                try:
+                    transformed, affected = _transform_tree(output, request, history)
+                    effect.verify({"affected_elements": affected})
+                    effect.matched()
+                    return transformed
+                except Exception as error:
+                    if not effect.done:
+                        effect.fail(error)
+                    if isinstance(
+                        error,
+                        (
+                            _NoOpFaultError,
+                            _UnavailableHistoryError,
+                            _UnsupportedTargetTensorError,
+                        ),
+                    ):
+                        return output
+                    raise
 
         effect.handles.append(
             module.register_forward_hook(
@@ -526,24 +559,27 @@ class LocalFaultExecutor:
         history = self._history.get(self._history_key(fault))
 
         def transform_gradient(gradient: torch.Tensor) -> torch.Tensor:
-            try:
-                transformed, affected = _transform_tensor(gradient, request, history)
-                effect.verify({"affected_elements": affected})
-                effect.matched()
-                return transformed
-            except Exception as error:
-                if not effect.done:
-                    effect.fail(error)
-                if isinstance(
-                    error,
-                    (
-                        _NoOpFaultError,
-                        _UnavailableHistoryError,
-                        _UnsupportedTargetTensorError,
-                    ),
-                ):
+            with effect.lock:
+                if effect.done:
                     return gradient
-                raise
+                try:
+                    transformed, affected = _transform_tensor(gradient, request, history)
+                    effect.verify({"affected_elements": affected})
+                    effect.matched()
+                    return transformed
+                except Exception as error:
+                    if not effect.done:
+                        effect.fail(error)
+                    if isinstance(
+                        error,
+                        (
+                            _NoOpFaultError,
+                            _UnavailableHistoryError,
+                            _UnsupportedTargetTensorError,
+                        ),
+                    ):
+                        return gradient
+                    raise
 
         effect.handles.append(parameter.register_hook(transform_gradient))
 

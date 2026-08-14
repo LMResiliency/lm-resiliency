@@ -64,6 +64,29 @@ class _StagedIncident:
     selected: bool
 
 
+@dataclass(frozen=True, slots=True)
+class _CampaignSchedule:
+    incidents: tuple[FaultIncident, ...]
+
+    def candidates(self, iteration: int) -> tuple[FaultIncident, ...]:
+        return tuple(
+            incident
+            for incident in self.incidents
+            if _trigger_contains_iteration(incident, iteration)
+        )
+
+    def expirations(self, iteration: int) -> tuple[tuple[FaultIncident, int], ...]:
+        expiring: list[tuple[FaultIncident, int]] = []
+        for incident in self.incidents:
+            lifetime = incident.lifetime.iterations
+            if lifetime is None:
+                continue
+            start_iteration = iteration - lifetime + 1
+            if start_iteration > 0 and _trigger_contains_iteration(incident, start_iteration):
+                expiring.append((incident, start_iteration))
+        return tuple(expiring)
+
+
 @dataclass(slots=True)
 class _ExternalEffect:
     request: FaultExecutionRequest
@@ -134,7 +157,10 @@ class _ActiveFault:
 
     def rollback(self, error: Exception) -> None:
         if isinstance(self.effect, LocalFaultEffect):
-            self.effect.fail(RuntimeError(f"fault activation rolled back: {error}"))
+            self.effect.fail(
+                RuntimeError(f"fault activation rolled back: {error}"),
+                propagate_cleanup_error=True,
+            )
         else:
             self.effect.rollback(error)
 
@@ -194,10 +220,7 @@ class FaultInjectionSession:
         self._closed = False
         self._started = False
         self._faults = tuple(fault for incident in campaign.incidents for fault in incident.faults)
-        (
-            self._candidate_incidents_by_iteration,
-            self._expiring_incidents_by_iteration,
-        ) = _index_campaign_schedule(campaign)
+        self._schedule = _CampaignSchedule(campaign.incidents)
 
         try:
             self._validate_capabilities()
@@ -474,7 +497,7 @@ class FaultInjectionSession:
         iteration: int,
     ) -> tuple[tuple[FaultIncident, int], ...]:
         candidates: list[tuple[FaultIncident, int]] = []
-        for incident in self._candidate_incidents_by_iteration.get(iteration, ()):
+        for incident in self._schedule.candidates(iteration):
             attempt_count = self._journal.attempt_count(incident.incident_id, iteration)
             if incident.retrigger is RetriggerPolicy.ONCE and attempt_count >= 1:
                 continue
@@ -542,10 +565,7 @@ class FaultInjectionSession:
             return True
         if self._history_faults_for(next_iteration):
             return True
-        for incident, start_iteration in self._expiring_incidents_by_iteration.get(
-            finished_iteration,
-            (),
-        ):
+        for incident, start_iteration in self._schedule.expirations(finished_iteration):
             if not _probability_selected(
                 self.campaign.seed,
                 incident.incident_id,
@@ -1235,39 +1255,13 @@ def _stable_seed(campaign_seed: int, *parts: str) -> int:
     return int.from_bytes(digest.digest(), "little")
 
 
-def _index_campaign_schedule(
-    campaign: FaultCampaign,
-) -> tuple[
-    dict[int, tuple[FaultIncident, ...]],
-    dict[int, tuple[tuple[FaultIncident, int], ...]],
-]:
-    candidates: dict[int, list[FaultIncident]] = {}
-    expirations: dict[int, list[tuple[FaultIncident, int]]] = {}
-    for incident in campaign.incidents:
-        trigger = incident.trigger
-        if trigger.range is None:
-            iterations = trigger.at
-        else:
-            iterations = range(
-                trigger.range.start,
-                trigger.range.end + 1,
-                trigger.range.every,
-            )
-        for iteration in iterations:
-            candidates.setdefault(iteration, []).append(incident)
-            lifetime = incident.lifetime.iterations
-            if lifetime is not None:
-                expiration_iteration = iteration + lifetime - 1
-                expirations.setdefault(expiration_iteration, []).append((incident, iteration))
+def _trigger_contains_iteration(incident: FaultIncident, iteration: int) -> bool:
+    trigger = incident.trigger
+    if trigger.range is None:
+        return iteration in trigger.at
     return (
-        {
-            iteration: tuple(iteration_incidents)
-            for iteration, iteration_incidents in candidates.items()
-        },
-        {
-            iteration: tuple(iteration_incidents)
-            for iteration, iteration_incidents in expirations.items()
-        },
+        trigger.range.start <= iteration <= trigger.range.end
+        and (iteration - trigger.range.start) % trigger.range.every == 0
     )
 
 

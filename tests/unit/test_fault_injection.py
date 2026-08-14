@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import inspect
 import json
+import threading
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -40,7 +41,12 @@ from lm_resiliency import (
     UnsupportedFaultError,
     enable_fault_injection,
 )
-from lm_resiliency.fault_injection.frameworks import _base_optimizers
+from lm_resiliency.fault_injection.frameworks import (
+    _base_optimizers,
+    resolve_training_context,
+)
+from lm_resiliency.fault_injection.injector import _ActiveFault, _CampaignSchedule
+from lm_resiliency.fault_injection.local import LocalFaultEffect
 from lm_resiliency.fault_injection.state import CampaignJournal
 
 
@@ -604,6 +610,24 @@ def test_non_indexed_logical_targets_reject_index(component: str | None) -> None
             module_path="layers.0" if component is None else None,
             component=component,
             index=1,
+        )
+
+
+@pytest.mark.parametrize("component", [1, True, [], {}])
+def test_fault_target_rejects_non_string_components(component: object) -> None:
+    with pytest.raises(TypeError, match="component must be a string"):
+        FaultTarget(
+            surface=FaultSurface.OUTPUT,
+            component=component,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("component", ["", "   "])
+def test_fault_target_rejects_empty_components(component: str) -> None:
+    with pytest.raises(ValueError, match="component must be non-empty"):
+        FaultTarget(
+            surface=FaultSurface.OUTPUT,
+            component=component,
         )
 
 
@@ -1244,6 +1268,19 @@ def test_range_schedule_and_probability_zero() -> None:
     assert [record.iteration for record in session.records] == [2, 4, 6]
     assert all(record.status is InjectionStatus.SKIPPED_PROBABILITY for record in session.records)
     session.close()
+
+
+def test_large_range_schedule_remains_lazy() -> None:
+    incident = _incident(
+        trigger_range=IterationRange(start=1, end=1_000_000_000, every=3),
+    )
+    schedule = _CampaignSchedule((incident,))
+
+    assert schedule.incidents == (incident,)
+    assert schedule.candidates(1) == (incident,)
+    assert schedule.candidates(999_999_997) == (incident,)
+    assert schedule.candidates(999_999_999) == ()
+    assert schedule.candidates(1_000_000_000) == (incident,)
 
 
 def test_completed_iterations_aligns_absolute_training_clock() -> None:
@@ -1968,6 +2005,58 @@ def test_output_fault_preserves_original_forward_exception() -> None:
     assert session.records[0].status is InjectionStatus.PENDING
     session.close()
     assert session.records[0].status is InjectionStatus.CANCELLED
+
+
+def test_close_waits_for_in_flight_output_hook() -> None:
+    model = TinyModel()
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(_incident(at=(1,))),
+        rank=0,
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    close_done = threading.Event()
+    forward_errors: list[Exception] = []
+
+    def blocked_transform(value, _request, _history):
+        entered.set()
+        if not release.wait(timeout=5):
+            raise TimeoutError("test did not release the output transform")
+        if not isinstance(value, torch.Tensor):
+            raise TypeError("expected tensor output")
+        return value.neg(), value.numel()
+
+    def run_forward() -> None:
+        try:
+            model(torch.ones(2, 4))
+        except Exception as error:
+            forward_errors.append(error)
+
+    def close_session() -> None:
+        session.close()
+        close_done.set()
+
+    with patch(
+        "lm_resiliency.fault_injection.local._transform_tree",
+        side_effect=blocked_transform,
+    ):
+        forward_thread = threading.Thread(target=run_forward)
+        forward_thread.start()
+        assert entered.wait(timeout=5)
+        close_thread = threading.Thread(target=close_session)
+        close_thread.start()
+        assert not close_done.wait(timeout=0.05)
+        release.set()
+        forward_thread.join(timeout=5)
+        close_thread.join(timeout=5)
+
+    assert not forward_thread.is_alive()
+    assert not close_thread.is_alive()
+    assert forward_errors == []
+    assert close_done.is_set()
+    assert session.records[0].status is InjectionStatus.COMPLETED
 
 
 def test_gradient_drop_is_applied_once() -> None:
@@ -3809,6 +3898,30 @@ def test_context_manager_preserves_body_error_when_cleanup_fails() -> None:
     assert any("cleanup also failed" in note for note in caught.value.__notes__)
 
 
+def test_framework_context_cleanup_attempts_every_restoration() -> None:
+    model = TinyModel()
+    context = resolve_training_context(model, _optimizer(model))
+    events: list[str] = []
+
+    def first() -> None:
+        events.append("first")
+
+    def failing() -> None:
+        events.append("failing")
+        raise RuntimeError("optimizer hook removal failed")
+
+    def last() -> None:
+        events.append("last")
+
+    context._cleanups.extend((first, failing, last))
+
+    with pytest.raises(RuntimeError, match="optimizer hook removal failed"):
+        context.close()
+
+    assert events == ["last", "failing", "first"]
+    assert context._cleanups == []
+
+
 def test_overlapping_local_faults_roll_back_partial_activation() -> None:
     model = TinyModel()
     optimizer = _optimizer(model)
@@ -4646,6 +4759,29 @@ def test_staged_activation_rollback_marks_verified_records_failed() -> None:
     assert "rolled back" in (local_record.error or "")
     torch.testing.assert_close(model.layers[0].weight, baseline)
     session.close()
+
+
+def test_local_activation_rollback_propagates_cleanup_failure() -> None:
+    record = MagicMock()
+    effect = LocalFaultEffect(
+        record=record,
+        target_key=("parameter", 0),
+        on_done=lambda _key: None,
+        remaining_calls=None,
+    )
+
+    def fail_cleanup(_preserve_replaced_state: bool, _replacement_confirmed: bool) -> None:
+        raise RuntimeError("local restoration failed")
+
+    effect.cleanup_callbacks.append(fail_cleanup)
+    active = _ActiveFault(_incident(), 1, effect)
+
+    with pytest.raises(RuntimeError, match="local restoration failed"):
+        active.rollback(RuntimeError("later activation failed"))
+
+    assert effect.done
+    assert record.status is InjectionStatus.FAILED
+    assert "cleanup also failed: local restoration failed" in record.error
 
 
 def test_staged_activation_surfaces_external_rollback_cleanup_failure() -> None:

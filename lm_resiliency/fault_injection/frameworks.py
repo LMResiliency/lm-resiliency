@@ -387,9 +387,17 @@ class TrainingContext:
         self._cleanups.append(restore)
 
     def close(self) -> None:
-        for cleanup in reversed(self._cleanups):
-            cleanup()
+        first_error: Exception | None = None
+        cleanups = tuple(reversed(self._cleanups))
         self._cleanups.clear()
+        for cleanup in cleanups:
+            try:
+                cleanup()
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
 
 
 def resolve_training_context(
