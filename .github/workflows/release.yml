@@ -269,7 +269,7 @@ jobs:
 
   publish-pypi:
     name: Publish exact artifacts to PyPI
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs: [build, validate-artifacts]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -293,6 +293,19 @@ jobs:
           mkdir ../publish
           cp -- *.whl *.tar.gz ../publish/
 
+      - name: Recheck release tag target
+        run: |
+          tag_ref="refs/tags/$GITHUB_REF_NAME"
+          remote_commit=$(
+            git ls-remote "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" \
+              "$tag_ref" "$tag_ref^{}" |
+              awk '$2 ~ /\^\{\}$/ { peeled=$1 } $2 !~ /\^\{\}$/ { direct=$1 } END { print peeled ? peeled : direct }'
+          )
+          manifest_commit=$(jq -r '.commit_sha // empty' dist/release-manifest.json)
+          test -n "$remote_commit"
+          test "$remote_commit" = "$manifest_commit"
+          test "$manifest_commit" = "$GITHUB_SHA"
+
       - name: Publish wheel and source distribution
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
@@ -300,7 +313,7 @@ jobs:
 
   github-release:
     name: Publish immutable GitHub release
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs: publish-pypi
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -316,6 +329,19 @@ jobs:
 
       - name: Recheck artifact digests
         run: cd dist && sha256sum --check SHA256SUMS
+
+      - name: Recheck release tag target
+        run: |
+          tag_ref="refs/tags/$GITHUB_REF_NAME"
+          remote_commit=$(
+            git ls-remote "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" \
+              "$tag_ref" "$tag_ref^{}" |
+              awk '$2 ~ /\^\{\}$/ { peeled=$1 } $2 !~ /\^\{\}$/ { direct=$1 } END { print peeled ? peeled : direct }'
+          )
+          manifest_commit=$(jq -r '.commit_sha // empty' dist/release-manifest.json)
+          test -n "$remote_commit"
+          test "$remote_commit" = "$manifest_commit"
+          test "$manifest_commit" = "$GITHUB_SHA"
 
       - name: Draft, populate, and publish release
         env:
