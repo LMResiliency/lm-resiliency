@@ -352,8 +352,12 @@ class InMemoryCheckpointManager:
         )
 
     def _consistent_memory_step(self) -> int:
-        """Latest step for which every rank has a complete own in-memory shard."""
-        return self._collective_min_step(self._latest_memory_step())
+        """Latest exact in-memory step retained by every rank."""
+        step = self._collective_min_step(self._latest_memory_step())
+        if step <= 0:
+            return -1
+        local_has_step = self._memory_slot_by_step(step) is not None
+        return step if self._collective_min_step(int(local_has_step)) == 1 else -1
 
     def _latest_recovery_steps(self) -> tuple[int, int]:
         """Return (memory_step, disk_step), each made rank-consistent."""
