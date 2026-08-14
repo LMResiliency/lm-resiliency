@@ -13,10 +13,12 @@ LM Resiliency provides GEMINI checkpoint recovery and SCOUT failure localization
 
 ## Documentation versions
 
-The hosted site is versioned with `mike`:
+The hosted site publishes immutable static trees by source revision:
 
 - `/dev/` tracks the current `main` branch.
-- `/<version>/` contains documentation published from a `v<version>` release tag.
-- `/latest/` aliases the most recently published release documentation.
+- `/<version>/` contains documentation built from the successfully validated `v<version>` release revision.
+- `/latest/` mirrors the most recently published stable release documentation.
+
+Before the first stable documentation tree is published, the site root redirects to `/dev/`. Once a stable release is published through the repository release workflow, the root redirects to `/latest/`.
 
 The repository Markdown remains the source of truth for documentation changes. CI builds the site with warnings treated as errors before changes can satisfy the required CI gate.
