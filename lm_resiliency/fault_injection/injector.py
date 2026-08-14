@@ -773,20 +773,20 @@ class FaultInjectionSession:
 
         staged: tuple[_StagedIncident, ...] = ()
         previous_attempts = dict(self._journal.attempts)
-        persistence_error: Exception | None = None
+        persistence_error: BaseException | None = None
         try:
             staged = self._stage_iteration_attempts(iteration, candidates)
-        except Exception as error:
+        except BaseException as error:
             persistence_error = error
         failures = self._gather_runtime_rank_errors(
             persistence_error,
             "attempt persistence",
         )
         if failures:
-            rollback_error: Exception | None = None
+            rollback_error: BaseException | None = None
             try:
                 self._restore_journal_attempts(previous_attempts)
-            except Exception as error:
+            except BaseException as error:
                 rollback_error = error
             rollback_failures = self._gather_runtime_rank_errors(
                 rollback_error,
@@ -806,6 +806,23 @@ class FaultInjectionSession:
                     boundary_error,
                     f"fault injection cleanup also failed: {cleanup_error}",
                 )
+            if persistence_error is not None and not isinstance(
+                persistence_error,
+                Exception,
+            ):
+                _add_exception_note(persistence_error, str(boundary_error))
+                if rollback_failures:
+                    _add_exception_note(
+                        persistence_error,
+                        "fault injection attempt rollback also failed; "
+                        + "; ".join(rollback_failures),
+                    )
+                if cleanup_error is not None:
+                    _add_exception_note(
+                        persistence_error,
+                        f"fault injection cleanup also failed: {cleanup_error}",
+                    )
+                raise persistence_error
             raise boundary_error from persistence_error
 
         active_start = len(self._active)
@@ -1856,66 +1873,63 @@ def _reported_targets_for_kind(
 def _expected_targets_for_component(
     incident: FaultIncident,
     component: str,
-) -> tuple[frozenset[int], frozenset[str]]:
+) -> frozenset[tuple[int | None, str | None]]:
     faults = tuple(
         fault
         for fault in incident.faults
         if (fault.target.component or fault.target.module_path) == component
     )
-    return (
-        frozenset(
-            expected_rank
-            for fault in faults
-            if (expected_rank := _expected_rank(fault)) is not None
-        ),
-        frozenset(fault.target.resource for fault in faults if fault.target.resource is not None),
-    )
+    return _expected_target_associations(faults)
 
 
 def _reported_targets_for_component(
     results: tuple[LocalizationResult, ...],
     component: str,
-) -> tuple[frozenset[int], frozenset[str]]:
+) -> frozenset[tuple[int | None, str | None]]:
     matching = tuple(result for result in results if component in result.components)
-    return (
-        frozenset(rank for result in matching for rank in result.failed_ranks),
-        frozenset(resource for result in matching for resource in result.failed_resources),
-    )
+    return _reported_target_associations(matching)
 
 
 def _expected_targets_for_kind_component(
     incident: FaultIncident,
     kind: str,
     component: str,
-) -> tuple[frozenset[int], frozenset[str]]:
+) -> frozenset[tuple[int | None, str | None]]:
     faults = tuple(
         fault
         for fault in incident.faults
         if fault.expected_kind == kind
         and (fault.target.component or fault.target.module_path) == component
     )
-    return (
-        frozenset(
-            expected_rank
-            for fault in faults
-            if (expected_rank := _expected_rank(fault)) is not None
-        ),
-        frozenset(fault.target.resource for fault in faults if fault.target.resource is not None),
-    )
+    return _expected_target_associations(faults)
 
 
 def _reported_targets_for_kind_component(
     results: tuple[LocalizationResult, ...],
     kind: str,
     component: str,
-) -> tuple[frozenset[int], frozenset[str]]:
+) -> frozenset[tuple[int | None, str | None]]:
     matching = tuple(
         result for result in results if result.kind == kind and component in result.components
     )
-    return (
-        frozenset(rank for result in matching for rank in result.failed_ranks),
-        frozenset(resource for result in matching for resource in result.failed_resources),
-    )
+    return _reported_target_associations(matching)
+
+
+def _expected_target_associations(
+    faults: tuple[FaultSpec, ...],
+) -> frozenset[tuple[int | None, str | None]]:
+    return frozenset((_expected_rank(fault), fault.target.resource) for fault in faults)
+
+
+def _reported_target_associations(
+    results: tuple[LocalizationResult, ...],
+) -> frozenset[tuple[int | None, str | None]]:
+    associations: set[tuple[int | None, str | None]] = set()
+    for result in results:
+        ranks: tuple[int | None, ...] = result.failed_ranks or (None,)
+        resources: tuple[str | None, ...] = result.failed_resources or (None,)
+        associations.update((rank, resource) for rank in ranks for resource in resources)
+    return frozenset(associations)
 
 
 __all__ = [

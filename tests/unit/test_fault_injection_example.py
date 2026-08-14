@@ -3,10 +3,12 @@ import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 
+from examples.fault_injection import pytorch as fault_injection_example
 from examples.fault_injection.compare import compare_artifacts, compare_payloads
 from examples.fault_injection.generate_campaign import build_campaign
 from examples.fault_injection.pytorch import (
@@ -1170,6 +1172,63 @@ def test_example_rejects_campaign_end_state_reset() -> None:
 
     with pytest.raises(ValueError, match="does not support campaign_end"):
         _state_reset_iterations(campaign)
+
+
+def test_example_validates_reset_policy_before_distributed_setup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    campaign = FaultCampaign.from_dict(
+        {
+            "schema_version": 1,
+            "name": "campaign-end-state",
+            "incidents": [
+                {
+                    "id": "weight-window",
+                    "trigger": {"at": [5]},
+                    "lifetime": {"until": "campaign_end"},
+                    "faults": [
+                        {
+                            "id": "weight",
+                            "type": "tensor_corruption",
+                            "target": {
+                                "rank": 0,
+                                "module_path": "layers.0",
+                                "surface": "weight",
+                            },
+                            "parameters": {
+                                "operation": "sign_flip",
+                                "scope": "single",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    campaign_path = tmp_path / "campaign.json"
+    campaign.to_json(campaign_path)
+    init_process_group = MagicMock()
+    monkeypatch.setattr(
+        fault_injection_example.dist,
+        "init_process_group",
+        init_process_group,
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "pytorch.py",
+            "--artifact-dir",
+            str(tmp_path / "artifacts"),
+            "--campaign",
+            str(campaign_path),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="does not support campaign_end"):
+        fault_injection_example.main()
+
+    init_process_group.assert_not_called()
 
 
 def test_example_rejects_multi_call_gradient_affecting_reset() -> None:

@@ -53,7 +53,10 @@ rejects `campaign_end` lifetimes for gradient-affecting incidents because they
 cannot produce a clean certification iteration before shutdown. It requires
 `matching_calls=1` for every incident because framework call multiplicity
 cannot be converted portably into optimizer-iteration run length or
-certification boundaries.
+certification boundaries. These reset-policy constraints are validated before
+the example initializes distributed process groups, GEMINI, or SCOUT, so an
+unsupported manifest cannot leave runtime resources outside the teardown
+boundary.
 
 Teardown attempts fault-injection cleanup, evaluation-state cleanup, resiliency
 cleanup, and process-group destruction independently. A cleanup failure is

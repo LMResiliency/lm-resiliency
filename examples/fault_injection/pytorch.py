@@ -104,6 +104,8 @@ def main() -> None:
     campaign = FaultCampaign.from_json(args.campaign)
     steps = args.steps if args.steps is not None else _last_scheduled_iteration(campaign) + 1
     _validate_run(campaign, steps)
+    reset_iterations = _state_reset_iterations(campaign)
+    hold_iterations = _state_hold_iterations(campaign)
     args.artifact_dir.mkdir(parents=True, exist_ok=True)
 
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -153,8 +155,8 @@ def main() -> None:
     state_reset = EvaluationStateReset(
         model,
         optimizer,
-        _state_reset_iterations(campaign),
-        _state_hold_iterations(campaign),
+        reset_iterations,
+        hold_iterations,
     )
     try:
         faults = enable_fault_injection(

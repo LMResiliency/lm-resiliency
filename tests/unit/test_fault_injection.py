@@ -464,6 +464,31 @@ def test_campaign_mappings_are_deeply_immutable_snapshots() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("campaign", None, "campaign name must be a string"),
+        ("incident", True, "incident_id must be a string"),
+        ("fault", 7, "fault_id must be a string"),
+    ],
+)
+def test_campaign_parser_rejects_non_string_identifiers(
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    payload = _campaign().to_dict()
+    if field == "campaign":
+        payload["name"] = value
+    elif field == "incident":
+        payload["incidents"][0]["incident_id"] = value
+    else:
+        payload["incidents"][0]["faults"][0]["fault_id"] = value
+
+    with pytest.raises(TypeError, match=message):
+        FaultCampaign.from_dict(payload)
+
+
 @pytest.mark.parametrize("field", ["module_path", "operation", "path"])
 def test_fault_target_rejects_mutable_string_selectors(field: str) -> None:
     target = {
@@ -5789,6 +5814,114 @@ def test_correlated_components_require_per_target_evidence() -> None:
     session.close()
 
 
+def test_components_preserve_rank_resource_target_associations() -> None:
+    events: list[tuple[str, str]] = []
+    executor = _recording_executor({FailureType.RESOURCE_UNAVAILABLE}, events)
+    faults = (
+        FaultSpec(
+            fault_id="hidden-rank-zero",
+            type=FailureType.RESOURCE_UNAVAILABLE,
+            target=FaultTarget(
+                rank=0,
+                surface=FaultSurface.RESOURCE,
+                resource="gpu-0",
+                component="hidden",
+            ),
+        ),
+        FaultSpec(
+            fault_id="hidden-rank-one",
+            type=FailureType.RESOURCE_UNAVAILABLE,
+            target=FaultTarget(
+                rank=1,
+                surface=FaultSurface.RESOURCE,
+                resource="gpu-1",
+                component="hidden",
+            ),
+        ),
+        FaultSpec(
+            fault_id="output-rank-zero",
+            type=FailureType.RESOURCE_UNAVAILABLE,
+            target=FaultTarget(
+                rank=0,
+                surface=FaultSurface.RESOURCE,
+                resource="gpu-1",
+                component="output",
+            ),
+        ),
+        FaultSpec(
+            fault_id="output-rank-one",
+            type=FailureType.RESOURCE_UNAVAILABLE,
+            target=FaultTarget(
+                rank=1,
+                surface=FaultSurface.RESOURCE,
+                resource="gpu-0",
+                component="output",
+            ),
+        ),
+    )
+    campaign = _campaign(_incident(at=(1,), faults=faults))
+    rank_zero_model = TinyModel()
+    rank_one_model = TinyModel()
+    rank_zero = enable_fault_injection(
+        rank_zero_model,
+        _optimizer(rank_zero_model),
+        campaign=campaign,
+        executors=(executor,),
+        rank=0,
+    )
+    rank_one = enable_fault_injection(
+        rank_one_model,
+        _optimizer(rank_one_model),
+        campaign=campaign,
+        executors=(executor,),
+        rank=1,
+    )
+    rank_zero._records.extend(rank_one.records)
+
+    swapped = rank_zero.evaluate(
+        [
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_ranks=(0,),
+                failed_resources=("gpu-1",),
+                kind="process_failure",
+                components=("hidden",),
+            ),
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_ranks=(1,),
+                failed_resources=("gpu-0",),
+                kind="process_failure",
+                components=("hidden",),
+            ),
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_ranks=(0,),
+                failed_resources=("gpu-0",),
+                kind="process_failure",
+                components=("output",),
+            ),
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_ranks=(1,),
+                failed_resources=("gpu-1",),
+                kind="process_failure",
+                components=("output",),
+            ),
+        ]
+    ).evaluations[0]
+
+    assert swapped.kind_matches
+    assert swapped.component_matches is False
+    assert not swapped.localized
+    rank_zero.close()
+    rank_one.close()
+
+
 @pytest.mark.parametrize(
     "result",
     [
@@ -6408,6 +6541,58 @@ def test_safe_activation_interrupt_rolls_back_and_reaches_consensus() -> None:
     assert all(not record.injection_succeeded for record in session.records)
 
 
+def test_attempt_persistence_interrupt_reaches_rank_consensus() -> None:
+    model = TinyModel()
+    store = MemoryCampaignStateStore()
+    session = FaultInjectionSession(
+        model,
+        _optimizer(model),
+        campaign=_campaign(_incident(at=(1,))),
+        state_store=store,
+        rank=0,
+        _defer_activation=True,
+    )
+    session._commit_journal_binding()
+    original_compare_and_swap = store.compare_and_swap
+    compare_calls = 0
+
+    def compare_and_swap(expected, updated):
+        nonlocal compare_calls
+        compare_calls += 1
+        if compare_calls == 1:
+            raise KeyboardInterrupt("stop persistence")
+        return original_compare_and_swap(expected, updated)
+
+    stages: list[tuple[str, BaseException | None]] = []
+
+    def gather(error: BaseException | None, stage: str) -> list[str]:
+        stages.append((stage, error))
+        if stage == "attempt persistence":
+            return ["rank 0: KeyboardInterrupt: stop persistence"]
+        return []
+
+    with (
+        patch.object(store, "compare_and_swap", side_effect=compare_and_swap),
+        patch(
+            "lm_resiliency.fault_injection.injector._distributed_world_size",
+            return_value=2,
+        ),
+        patch.object(session, "_gather_runtime_rank_errors", side_effect=gather),
+        pytest.raises(KeyboardInterrupt, match="stop persistence") as caught,
+    ):
+        session._start()
+
+    assert [stage for stage, _error in stages] == [
+        "iteration preflight",
+        "attempt persistence",
+        "attempt rollback",
+    ]
+    assert isinstance(stages[1][1], KeyboardInterrupt)
+    assert any("attempt persistence failed" in note for note in caught.value.__notes__)
+    assert store.load(session.campaign.name).attempts == {}
+    assert session._closed
+
+
 def test_runtime_preflight_interrupt_reaches_rank_consensus() -> None:
     model = TinyModel()
     session = FaultInjectionSession(
@@ -6443,6 +6628,50 @@ def test_runtime_preflight_interrupt_reaches_rank_consensus() -> None:
     assert stages[0][0] == "iteration preflight"
     assert isinstance(stages[0][1], KeyboardInterrupt)
     assert any("iteration preflight failed" in note for note in caught.value.__notes__)
+    assert session._closed
+
+
+def test_local_activation_interrupt_restores_partial_state_effect() -> None:
+    model = TinyModel()
+    baseline = model.layers[0].weight.detach().clone()
+    session = FaultInjectionSession(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="campaign_end"),
+                faults=(
+                    _corruption(
+                        target=_target(surface=FaultSurface.WEIGHT),
+                        scope=FaultScope.SINGLE,
+                    ),
+                ),
+            )
+        ),
+        rank=0,
+        _defer_activation=True,
+    )
+    session._commit_journal_binding()
+    original_activate_state = session._local._activate_state
+
+    def activate_then_interrupt(request, effect) -> None:
+        original_activate_state(request, effect)
+        raise KeyboardInterrupt("stop local activation")
+
+    with (
+        patch.object(
+            session._local,
+            "_activate_state",
+            side_effect=activate_then_interrupt,
+        ),
+        pytest.raises(KeyboardInterrupt, match="stop local activation"),
+    ):
+        session._start()
+
+    torch.testing.assert_close(model.layers[0].weight, baseline)
+    assert session.records[0].status is InjectionStatus.FAILED
+    assert not session.records[0].injection_succeeded
     assert session._closed
 
 

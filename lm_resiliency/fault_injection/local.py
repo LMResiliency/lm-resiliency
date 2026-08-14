@@ -457,7 +457,7 @@ class LocalFaultExecutor:
         except _UnavailableHistoryError as error:
             effect.fail(error)
             return effect
-        except Exception as error:
+        except BaseException as error:
             effect.fail(error)
             raise
         return effect

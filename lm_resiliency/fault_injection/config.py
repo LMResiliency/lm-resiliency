@@ -527,6 +527,11 @@ class FaultSpec:
     parameters: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "fault_id",
+            _required_non_empty_string(self.fault_id, "fault_id"),
+        )
         object.__setattr__(self, "type", FailureType(self.type))
         if isinstance(self.target, Mapping):
             object.__setattr__(self, "target", FaultTarget.from_dict(self.target))
@@ -537,8 +542,6 @@ class FaultSpec:
             "parameters",
             freeze_json_mapping(self.parameters, "fault parameters"),
         )
-        if not self.fault_id or not self.fault_id.strip():
-            raise ValueError("fault_id must be non-empty")
         self._validate_parameters()
 
     @property
@@ -610,7 +613,7 @@ class FaultSpec:
         _reject_unknown_keys(value, _FAULT_KEYS, "fault")
         _reject_alias_pair(value, "fault_id", "id", "fault")
         return cls(
-            fault_id=str(value.get("fault_id", value.get("id", ""))),
+            fault_id=value.get("fault_id", value.get("id", "")),
             type=FailureType(value["type"]),
             target=FaultTarget.from_dict(value["target"]),
             parameters=value.get("parameters", {}),
@@ -713,6 +716,11 @@ class FaultIncident:
     max_occurrences: int | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "incident_id",
+            _required_non_empty_string(self.incident_id, "incident_id"),
+        )
         if isinstance(self.trigger, Mapping):
             object.__setattr__(self, "trigger", IncidentTrigger.from_dict(self.trigger))
         if isinstance(self.lifetime, Mapping):
@@ -729,8 +737,6 @@ class FaultIncident:
                 "max_occurrences",
                 _strict_int(self.max_occurrences, "max_occurrences"),
             )
-        if not self.incident_id or not self.incident_id.strip():
-            raise ValueError("incident_id must be non-empty")
         if not self.faults:
             raise ValueError("incident must contain at least one fault")
         if not all(isinstance(fault, FaultSpec) for fault in self.faults):
@@ -803,7 +809,7 @@ class FaultIncident:
         _reject_unknown_keys(value, _INCIDENT_KEYS, "incident")
         _reject_alias_pair(value, "incident_id", "id", "incident")
         return cls(
-            incident_id=str(value.get("incident_id", value.get("id", ""))),
+            incident_id=value.get("incident_id", value.get("id", "")),
             trigger=IncidentTrigger.from_dict(value["trigger"]),
             lifetime=IncidentLifetime.from_dict(value["lifetime"]),
             faults=tuple(FaultSpec.from_dict(fault) for fault in value["faults"]),
@@ -838,6 +844,11 @@ class FaultCampaign:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "name",
+            _required_non_empty_string(self.name, "campaign name"),
+        )
         normalized_incidents = tuple(
             FaultIncident.from_dict(incident) if isinstance(incident, Mapping) else incident
             for incident in self.incidents
@@ -861,8 +872,6 @@ class FaultCampaign:
                 f"unsupported campaign schema_version {self.schema_version}; "
                 f"expected {SCHEMA_VERSION}"
             )
-        if not self.name or not self.name.strip():
-            raise ValueError("campaign name must be non-empty")
         if not -(2**127) <= self.seed < 2**127:
             raise ValueError("campaign seed must fit in a signed 128-bit integer")
         if not self.incidents:
@@ -878,7 +887,7 @@ class FaultCampaign:
         _reject_unknown_keys(value, _CAMPAIGN_KEYS, "campaign")
         return cls(
             schema_version=value.get("schema_version", SCHEMA_VERSION),
-            name=str(value["name"]),
+            name=value["name"],
             seed=value.get("seed", 0),
             clock=ClockSpec.from_dict(value.get("clock", {})),
             incidents=tuple(FaultIncident.from_dict(incident) for incident in value["incidents"]),
@@ -943,6 +952,14 @@ def _reject_alias_pair(
 def _strict_int(value: Any, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"{label} must be an integer")
+    return value
+
+
+def _required_non_empty_string(value: Any, label: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{label} must be a string")
+    if not value.strip():
+        raise ValueError(f"{label} must be non-empty")
     return value
 
 

@@ -195,6 +195,10 @@ parameters.
 
 Integer fields use JSON integers only. Booleans and fractional numbers are not
 coerced into iteration, rank, index, lifetime, retry, seed, or schema values.
+The campaign `name`, every `incident_id`, and every `fault_id` must be
+non-empty strings. Nulls, booleans, and numeric identifiers are rejected rather
+than converted to strings because identifiers participate in manifest hashes,
+probability selection, occurrence IDs, and persistent journal keys.
 Campaign metadata, target metadata, and fault parameters are validated as
 finite JSON values and captured as deeply immutable snapshots. Mutating the
 caller's source dictionaries after construction cannot change scheduling or the
@@ -676,9 +680,12 @@ Interrupt-class preparation failures participate in the same rank consensus
 before the original interrupt is re-raised. Cleanup preserves the first
 interrupt or error while continuing through every active effect, observer, and
 framework restoration.
-The same rule applies at later optimizer boundaries: interrupt-class preflight
-and safe-effect expiration failures enter rank consensus before the interrupted
-rank re-raises the original signal.
+The same rule applies at later optimizer boundaries: interrupt-class preflight,
+attempt-persistence, and safe-effect expiration failures enter rank consensus
+before the interrupted rank re-raises the original signal. If an interrupt
+arrives after a built-in local mutation or hook registration begins, the
+partially constructed effect restores or removes that state before the
+interrupt escapes.
 Recovery and replacement notifications attempt every matching effect cleanup
 before returning. An ordinary cleanup failure is reported with its lifecycle
 boundary; an interrupt-class failure is re-raised unchanged after the remaining
@@ -760,9 +767,11 @@ overclaim and fails attribution.
 strings and coercible non-string values are rejected.
 When component evidence is supplied, it must exactly match the expected
 component set; extra components are attribution errors. Component evidence is
-also correlated with the rank and resource targets in each localization result.
-Swapping correct component names between two failed targets is therefore an
-attribution failure even when the aggregate component and target sets match.
+also correlated with the exact `(rank, resource)` target association in each
+localization result. Swapping correct component names between two target pairs
+is therefore an attribution failure even when every component has the same
+independent rank and resource projections. When kind evidence is present, the
+full `(kind, component, rank, resource)` association must match.
 When kind evidence is also supplied, the `(kind, component)` association must
 match the injected actions; independently correct kind and component sets cannot
 be swapped across a correlated occurrence.
