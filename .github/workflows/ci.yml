@@ -106,7 +106,7 @@ jobs:
             --only-binary=:all: \
             "torch==$TORCH_VERSION"
           python -m pip install -c requirements/tool-versions.txt \
-            "numpy==$NUMPY_VERSION" setuptools pytest pytest-timeout
+            "numpy==$NUMPY_VERSION" pytest pytest-timeout
           python -m pip install --no-deps -e .
           python -m pip check
 
@@ -143,8 +143,7 @@ jobs:
             --index-url https://download.pytorch.org/whl/cpu \
             --only-binary=:all: \
             "torch==2.13.0"
-          "$smoke_env/bin/python" -m pip install -c requirements/tool-versions.txt \
-            "numpy==2.5.1" setuptools
+          "$smoke_env/bin/python" -m pip install "numpy==2.5.1" "setuptools>=83"
           "$smoke_env/bin/python" -m pip install --no-deps dist/*.whl
           "$smoke_env/bin/python" -m pip check
           "$smoke_env/bin/lm-resiliency-discover-moe-regimes" --help
