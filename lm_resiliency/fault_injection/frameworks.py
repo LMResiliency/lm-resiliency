@@ -215,7 +215,7 @@ class TrainingContext:
 
         self._cleanups.append(restore)
 
-    def register_state_replacement_callback(self, callback: Callable[[], None]) -> None:
+    def register_state_replacement_callback(self, callback: Callable[[str], None]) -> None:
         """Observe model or optimizer state loads that replace active fault state."""
         seen: set[int] = set()
         for model in self.models:
@@ -225,7 +225,7 @@ class TrainingContext:
                 seen.add(id(candidate))
                 register = getattr(candidate, "register_load_state_dict_post_hook", None)
                 if callable(register):
-                    handle = register(lambda *_args, **_kwargs: callback())
+                    handle = register(lambda *_args, **_kwargs: callback("model"))
                     self._cleanups.append(handle.remove)
         for optimizer in _base_optimizers(self.optimizer):
             if id(optimizer) in seen:
@@ -233,7 +233,7 @@ class TrainingContext:
             seen.add(id(optimizer))
             register = getattr(optimizer, "register_load_state_dict_post_hook", None)
             if callable(register):
-                handle = register(lambda *_args, **_kwargs: callback())
+                handle = register(lambda *_args, **_kwargs: callback("optimizer"))
                 self._cleanups.append(handle.remove)
 
     def _register_deepspeed_step_callback(self, callback: Callable[[], None]) -> None:
@@ -409,9 +409,7 @@ def _resolve_logical_module(
             ):
                 return module
     if normalized in {"embedding", "token_embedding"}:
-        for name, module in modules.items():
-            if any(token in name.lower() for token in ("embed", "tok_embeddings")):
-                return module
+        return _resolve_embedding(modules)
     if normalized in {"output", "lm_head"}:
         for name, module in modules.items():
             if name.lower().endswith(("lm_head", "output_layer", "output")):
@@ -421,6 +419,42 @@ def _resolve_logical_module(
             raise ValueError("logical component 'expert' requires index")
         return _resolve_global_expert(modules, index, target)
     return None
+
+
+def _resolve_embedding(modules: dict[str, nn.Module]) -> nn.Module | None:
+    candidates = [
+        (name, module)
+        for name, module in modules.items()
+        if (
+            any(token in name.lower() for token in ("embed", "tok_embeddings"))
+            or name.lower().split(".")[-1] == "wte"
+        )
+    ]
+    if not candidates:
+        return None
+    token_candidates = [
+        (name, module)
+        for name, module in candidates
+        if any(
+            token in name.lower()
+            for token in (
+                "token_embedding",
+                "token_embeddings",
+                "tok_embedding",
+                "tok_embeddings",
+                "embed_tokens",
+                "word_embedding",
+                "word_embeddings",
+            )
+        )
+        or name.lower().split(".")[-1] == "wte"
+    ]
+    selected = token_candidates or candidates
+    unique = {id(module): (name, module) for name, module in selected}
+    if len(unique) == 1:
+        return next(iter(unique.values()))[1]
+    paths = ", ".join(sorted(name for name, _module in unique.values()))
+    raise ValueError(f"logical embedding target is ambiguous; specify module_path from: {paths}")
 
 
 def _is_layer_component(component: str) -> bool:

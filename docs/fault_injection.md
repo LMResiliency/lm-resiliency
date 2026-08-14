@@ -312,6 +312,9 @@ Expert indices are global. An expert module may expose `global_expert_index` or
 `global_expert_id`. Otherwise the target or model must provide
 `expert_parallel_rank` and `num_local_experts`; the injector maps the local
 module suffix through that topology and rejects ambiguous local numbering.
+Logical `embedding` targets prefer an unambiguous token, word, or vocabulary
+embedding. If only multiple generic embedding paths are available, enablement
+fails and the campaign must specify an exact `module_path`.
 
 ### Built-In Parameters
 
@@ -325,7 +328,7 @@ module suffix through that topology and rejects ambiguous local numbering.
 | `std` | `noise` | Derived from `magnitude` | Gaussian-noise standard deviation. |
 | `parameter` | Parameter, gradient, or optimizer-state target | Surface-dependent | Exact parameter attribute, commonly `weight` or `bias`. |
 | `state_key` | `optimizer_state` | First suitable tensor | Exact optimizer-state entry, such as `exp_avg` or `exp_avg_sq`. |
-| `delay_ms` | `delay` | Required | Positive delay in milliseconds. |
+| `delay_ms` | `delay` | Required | Finite positive JSON number in milliseconds. Strings, booleans, NaN, and infinity are rejected. |
 
 Stale and duplicate faults retain two observed values only during their
 scheduled collection window. Module and gradient observation starts one
@@ -340,9 +343,10 @@ preserves optimizer updates made during the active window. A bounded state fault
 whose injected delta is non-finite is rejected before mutation; represent such
 corruption with an `until` lifetime and recover the workload afterward.
 FSDP2/HSDP `DTensor` state is mutated and verified through the rank-local shard.
-Model and optimizer `load_state_dict()` hooks mark active state as externally
-replaced, so a bounded fault expiring after checkpoint loading does not subtract
-its old delta from recovered values.
+Model `load_state_dict()` marks only active weight and bias state as externally
+replaced; optimizer `load_state_dict()` marks only optimizer-state effects.
+This prevents an unrelated partial checkpoint load from suppressing cleanup of
+another state family.
 
 Custom executors receive the full `target` and `parameters` objects unchanged.
 They may define additional fields, but should validate those fields before the
@@ -520,6 +524,9 @@ new occurrence is armed.
 The journal stores the canonical manifest identity. Reusing a campaign name with
 changed triggers, targets, parameters, or metadata requires a new state file;
 stale attempts are never applied to an edited manifest.
+Attempt entries use `<incident_id>@<positive_iteration>` keys and strictly
+positive integer counts. Malformed, boolean, fractional, zero, or negative
+restart evidence is rejected rather than normalized.
 
 ## Ground Truth and Evaluation
 
@@ -545,6 +552,12 @@ report = faults.evaluate(
 report.to_json("campaign-report.json")
 ```
 
+A correlated occurrence may submit multiple `LocalizationResult` objects with
+the same `occurrence_id`. This is required when one incident contains different
+failure kinds or when the resiliency system emits separate reports for its
+actions. Each expected kind must correlate with its injected rank or resource;
+matching only the aggregate sets is insufficient.
+
 Reports contain:
 
 - the canonical manifest identity;
@@ -567,6 +580,9 @@ an unrelated report at the same iteration is retained as evidence but does not
 count as detecting the injected occurrence. For correlated incidents containing
 multiple failure kinds, each kind must identify its corresponding expected
 ranks; matching only the aggregate rank and kind sets is insufficient.
+`evaluate()` snapshots every mutable injection record before scoring. A returned
+`CampaignReport` therefore remains internally consistent even if the training
+session later activates or completes another hook.
 
 Reports are rank-local.
 A distributed campaign runner or training manager should collect reports from all

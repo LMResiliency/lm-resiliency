@@ -40,6 +40,7 @@ from lm_resiliency import (
     UnsupportedFaultError,
     enable_fault_injection,
 )
+from lm_resiliency.fault_injection.state import CampaignJournal
 
 
 class TinyModel(nn.Module):
@@ -500,6 +501,28 @@ def test_fault_parameter_contracts_are_rejected() -> None:
         )
     with pytest.raises(ValueError, match="parameters.value"):
         _corruption(operation=CorruptionOperation.SET_VALUE)
+
+
+@pytest.mark.parametrize("delay_ms", ["nan", "inf", True])
+def test_delay_rejects_non_numeric_parameters(delay_ms: object) -> None:
+    with pytest.raises(TypeError, match="delay_ms must be a number"):
+        FaultSpec(
+            fault_id="delay",
+            type=FailureType.DELAY,
+            target=_target(surface=FaultSurface.COMPUTE),
+            parameters={"delay_ms": delay_ms},
+        )
+
+
+@pytest.mark.parametrize("delay_ms", [float("nan"), float("inf")])
+def test_delay_rejects_non_finite_parameters(delay_ms: float) -> None:
+    with pytest.raises(ValueError, match="non-finite|finite parameters.delay_ms"):
+        FaultSpec(
+            fault_id="delay",
+            type=FailureType.DELAY,
+            target=_target(surface=FaultSurface.COMPUTE),
+            parameters={"delay_ms": delay_ms},
+        )
 
 
 def test_enablement_has_no_trigger_or_framework_argument() -> None:
@@ -1772,6 +1795,67 @@ def test_bounded_state_fault_preserves_checkpoint_loaded_replacement() -> None:
     session.close()
 
 
+def test_optimizer_state_load_does_not_preserve_active_model_fault() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    baseline = model.layers[0].weight.detach().clone()
+    fault = _corruption(
+        target=_target(surface=FaultSurface.WEIGHT),
+        scope=FaultScope.SINGLE,
+    )
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="recovery"),
+                faults=(fault,),
+            )
+        ),
+        rank=0,
+    )
+
+    optimizer.load_state_dict(optimizer.state_dict())
+    session.notify_recovery()
+
+    torch.testing.assert_close(model.layers[0].weight, baseline)
+    session.close()
+
+
+def test_model_state_load_does_not_preserve_active_optimizer_fault() -> None:
+    model = TinyModel()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.0)
+    _step(model, optimizer)
+    state = optimizer.state[model.layers[0].weight]["exp_avg"]
+    baseline = state.detach().clone()
+    fault = _corruption(
+        target=_target(surface=FaultSurface.OPTIMIZER_STATE),
+        scope=FaultScope.SINGLE,
+        parameter="weight",
+        state_key="exp_avg",
+    )
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(2,),
+                lifetime=IncidentLifetime(until="recovery"),
+                faults=(fault,),
+            )
+        ),
+        completed_iterations=1,
+        rank=0,
+    )
+
+    model.load_state_dict(model.state_dict())
+    session.notify_recovery()
+
+    torch.testing.assert_close(state, baseline)
+    session.close()
+
+
 def test_sparse_state_fault_does_not_use_full_tensor_transform() -> None:
     model = TinyModel()
     optimizer = _optimizer(model)
@@ -1907,6 +1991,76 @@ def test_logical_transformer_block_resolution() -> None:
     assert not torch.equal(model.layers[1].weight, baseline)
     session.close()
     torch.testing.assert_close(model.layers[1].weight, baseline)
+
+
+def test_logical_embedding_prefers_token_embeddings() -> None:
+    class EmbeddingModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.position_embeddings = nn.Embedding(8, 4)
+            self.token_embeddings = nn.Embedding(8, 4)
+
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            return self.token_embeddings(value).sum(dim=1)
+
+    model = EmbeddingModel()
+    position = model.position_embeddings.weight.detach().clone()
+    tokens = model.token_embeddings.weight.detach().clone()
+    fault = _corruption(
+        target=_target(
+            surface=FaultSurface.WEIGHT,
+            module_path=None,
+            component="embedding",
+        ),
+        scope=FaultScope.SINGLE,
+    )
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="recovery"),
+                faults=(fault,),
+            )
+        ),
+        rank=0,
+    )
+
+    torch.testing.assert_close(model.position_embeddings.weight, position)
+    assert not torch.equal(model.token_embeddings.weight, tokens)
+    session.close()
+
+
+def test_logical_embedding_rejects_ambiguous_generic_matches() -> None:
+    class EmbeddingModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.embed_a = nn.Embedding(8, 4)
+            self.embed_b = nn.Embedding(8, 4)
+
+    model = EmbeddingModel()
+    fault = _corruption(
+        target=_target(
+            surface=FaultSurface.WEIGHT,
+            module_path=None,
+            component="embedding",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="logical embedding target is ambiguous"):
+        enable_fault_injection(
+            model,
+            _optimizer(model),
+            campaign=_campaign(
+                _incident(
+                    at=(1,),
+                    lifetime=IncidentLifetime(until="recovery"),
+                    faults=(fault,),
+                )
+            ),
+            rank=0,
+        )
 
 
 def test_explicit_module_path_precedes_logical_fallback_across_wrappers() -> None:
@@ -2416,6 +2570,42 @@ def test_json_state_store_is_atomic_and_campaign_scoped(tmp_path) -> None:
         store.load("campaign-b")
 
 
+@pytest.mark.parametrize("count", [-1, 0])
+def test_campaign_journal_rejects_non_positive_attempt_counts(count: int) -> None:
+    with pytest.raises(ValueError, match="attempt counts must be positive"):
+        CampaignJournal.from_dict(
+            {
+                "campaign": "campaign",
+                "manifest_identity": "identity",
+                "attempts": {"incident@1": count},
+            }
+        )
+
+
+@pytest.mark.parametrize("count", [True, 1.5, "1"])
+def test_campaign_journal_rejects_non_integer_attempt_counts(count: object) -> None:
+    with pytest.raises(TypeError, match="attempt counts must be integers"):
+        CampaignJournal.from_dict(
+            {
+                "campaign": "campaign",
+                "manifest_identity": "identity",
+                "attempts": {"incident@1": count},
+            }
+        )
+
+
+@pytest.mark.parametrize("key", ["incident", "@1", "incident@0", "incident@-1"])
+def test_campaign_journal_rejects_invalid_attempt_keys(key: str) -> None:
+    with pytest.raises(ValueError, match="attempt keys"):
+        CampaignJournal.from_dict(
+            {
+                "campaign": "campaign",
+                "manifest_identity": "identity",
+                "attempts": {key: 1},
+            }
+        )
+
+
 def test_all_canonical_failure_types_can_use_capability_executor() -> None:
     events: list[tuple[str, str]] = []
     executor = _recording_executor(set(FailureType), events)
@@ -2841,6 +3031,70 @@ def test_correlated_faults_share_one_occurrence_and_evaluation() -> None:
     session.close()
 
 
+def test_mixed_kind_correlated_faults_require_per_kind_target_evidence() -> None:
+    events: list[tuple[str, str]] = []
+    executor = _recording_executor(
+        {FailureType.PROCESS_TERMINATION, FailureType.TIMEOUT},
+        events,
+    )
+    faults = (
+        _external_fault(
+            FailureType.PROCESS_TERMINATION,
+            fault_id="process",
+            resource="process-0",
+        ),
+        _external_fault(
+            FailureType.TIMEOUT,
+            fault_id="timeout",
+            resource="worker-0",
+        ),
+    )
+    model = TinyModel()
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(_incident(at=(1,), faults=faults)),
+        executors=(executor,),
+        rank=0,
+    )
+
+    partial = session.evaluate(
+        [
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_ranks=(0,),
+                failed_resources=("process-0", "worker-0"),
+                kind="process_failure",
+            )
+        ]
+    ).evaluations[0]
+    complete = session.evaluate(
+        [
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_ranks=(0,),
+                failed_resources=("process-0",),
+                kind="process_failure",
+            ),
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_ranks=(0,),
+                failed_resources=("worker-0",),
+                kind="straggler",
+            ),
+        ]
+    ).evaluations[0]
+
+    assert not partial.localized
+    assert partial.kind_matches is False
+    assert complete.localized
+    assert complete.kind_matches
+    session.close()
+
+
 @pytest.mark.parametrize(
     "result",
     [
@@ -2962,6 +3216,30 @@ def test_report_json_contains_manifest_ground_truth_and_scoring(tmp_path) -> Non
     assert value["injections"][0]["injection_succeeded"]
     assert value["evaluations"][0]["localized"]
     assert value["evaluations"][0]["component_matches"]
+    session.close()
+
+
+def test_campaign_report_snapshots_mutable_injection_records() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(_incident(at=(1,))),
+        rank=0,
+    )
+
+    report = session.evaluate()
+    assert report.injections[0].status is InjectionStatus.PENDING
+    assert not report.injections[0].injection_succeeded
+    assert not report.evaluations[0].injection_succeeded
+
+    _step(model, optimizer)
+
+    assert session.records[0].injection_succeeded
+    assert report.injections[0].status is InjectionStatus.PENDING
+    assert not report.injections[0].injection_succeeded
+    assert not report.evaluations[0].injection_succeeded
     session.close()
 
 

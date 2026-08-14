@@ -516,9 +516,13 @@ class FaultSpec:
             if "magnitude" in self.parameters:
                 FaultMagnitude(self.parameters["magnitude"])
         if self.type is FailureType.DELAY:
-            delay_ms = float(self.parameters.get("delay_ms", 0.0))
-            if delay_ms <= 0:
-                raise ValueError("delay requires parameters.delay_ms greater than zero")
+            delay_ms = self.parameters.get("delay_ms")
+            if delay_ms is None:
+                raise ValueError("delay requires parameters.delay_ms")
+            if isinstance(delay_ms, bool) or not isinstance(delay_ms, (int, float)):
+                raise TypeError("delay parameters.delay_ms must be a number")
+            if not math.isfinite(float(delay_ms)) or delay_ms <= 0:
+                raise ValueError("delay requires finite parameters.delay_ms greater than zero")
         if (
             self.type is FailureType.TENSOR_CORRUPTION
             and self.parameters.get("operation") == CorruptionOperation.SET_VALUE.value

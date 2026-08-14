@@ -241,19 +241,22 @@ class FaultInjectionSession:
         )
         if not all(isinstance(result, LocalizationResult) for result in normalized):
             raise TypeError("localization results must be LocalizationResult instances or mappings")
-        by_occurrence: dict[str, LocalizationResult] = {}
+        by_occurrence: dict[str, list[LocalizationResult]] = {}
         for result in normalized:
-            if result.occurrence_id in by_occurrence:
-                raise ValueError(f"duplicate localization result for {result.occurrence_id!r}")
-            by_occurrence[result.occurrence_id] = result
-        grouped = _group_records(self._records)
+            by_occurrence.setdefault(result.occurrence_id, []).append(result)
+        records = tuple(record.snapshot() for record in self._records)
+        grouped = _group_records(records)
         unknown = sorted(set(by_occurrence) - set(grouped))
         if unknown:
             raise ValueError(f"localization results reference unknown occurrences: {unknown}")
 
         evaluations = tuple(
-            _evaluate_occurrence(occurrence_id, records, by_occurrence.get(occurrence_id))
-            for occurrence_id, records in grouped.items()
+            _evaluate_occurrence(
+                occurrence_id,
+                occurrence_records,
+                tuple(by_occurrence.get(occurrence_id, ())),
+            )
+            for occurrence_id, occurrence_records in grouped.items()
         )
         return CampaignReport(
             campaign=self.campaign.name,
@@ -262,7 +265,7 @@ class FaultInjectionSession:
             framework=self.framework,
             rank=self.rank,
             completed_iterations=self.completed_iterations,
-            injections=tuple(self._records),
+            injections=records,
             localizations=normalized,
             evaluations=evaluations,
             metadata=self.campaign.metadata,
@@ -866,9 +869,14 @@ class FaultInjectionSession:
     def _discard_completed(self) -> None:
         self._active = [active for active in self._active if not active.done]
 
-    def _mark_state_replaced(self) -> None:
+    def _mark_state_replaced(self, state_family: str) -> None:
+        surfaces = {"weight", "bias"} if state_family == "model" else {"optimizer_state"}
         for active in self._active:
-            if isinstance(active.effect, LocalFaultEffect) and not active.done:
+            if (
+                isinstance(active.effect, LocalFaultEffect)
+                and not active.done
+                and active.effect.record.target.get("surface") in surfaces
+            ):
                 active.effect.mark_state_replaced()
 
     def _history_faults_for(self, iteration: int) -> tuple[FaultSpec, ...]:
@@ -1151,7 +1159,7 @@ def _group_records(
 def _evaluate_occurrence(
     occurrence_id: str,
     records: tuple[FaultInjectionRecord, ...],
-    result: LocalizationResult | None,
+    results: tuple[LocalizationResult, ...],
 ) -> FaultEvaluation:
     expected_ranks = tuple(
         sorted({rank for record in records if (rank := record.expected_rank) is not None})
@@ -1165,9 +1173,14 @@ def _evaluate_occurrence(
         component for record in records if (component := record.expected_component) is not None
     }
     injection_succeeded = bool(records) and all(record.injection_succeeded for record in records)
-    detected = bool(result is not None and result.detected)
-    reported_ranks = () if result is None else result.failed_ranks
-    reported_resources = () if result is None else result.failed_resources
+    detected_results = tuple(result for result in results if result.detected)
+    detected = bool(detected_results)
+    reported_ranks = tuple(
+        sorted({rank for result in detected_results for rank in result.failed_ranks})
+    )
+    reported_resources = tuple(
+        sorted({resource for result in detected_results for resource in result.failed_resources})
+    )
     ranks_match = set(expected_ranks) == set(reported_ranks)
     resources_match = set(expected_resources) == set(reported_resources)
     unexpected_ranks = tuple(rank for rank in reported_ranks if rank not in expected_ranks)
@@ -1175,11 +1188,19 @@ def _evaluate_occurrence(
         resource for resource in reported_resources if resource not in expected_resources
     )
     expected_kinds = {record.expected_kind for record in records}
-    kind_matches = None if result is None or result.kind is None else result.kind in expected_kinds
+    reported_kinds = {result.kind for result in detected_results if result.kind is not None}
+    if not reported_kinds and len(expected_kinds) == 1:
+        kind_matches: bool | None = None
+    else:
+        kind_matches = reported_kinds == expected_kinds and all(
+            any(_result_correlates_with_record(result, record) for result in detected_results)
+            for record in records
+        )
+    reported_components = {
+        component for result in detected_results for component in result.components
+    }
     component_matches = (
-        None
-        if result is None or not result.components
-        else expected_components.issubset(result.components)
+        None if not reported_components else expected_components.issubset(reported_components)
     )
     localized = (
         injection_succeeded
@@ -1202,7 +1223,28 @@ def _evaluate_occurrence(
         unexpected_resources=unexpected_resources,
         kind_matches=kind_matches,
         component_matches=component_matches,
-        latency_ms=None if result is None else result.latency_ms,
+        latency_ms=max(
+            (result.latency_ms for result in detected_results if result.latency_ms is not None),
+            default=None,
+        ),
+    )
+
+
+def _result_correlates_with_record(
+    result: LocalizationResult,
+    record: FaultInjectionRecord,
+) -> bool:
+    if not result.detected or result.kind != record.expected_kind:
+        return False
+    expected_rank = record.expected_rank
+    if expected_rank is not None and expected_rank not in result.failed_ranks:
+        return False
+    expected_resource = record.expected_resource
+    if expected_resource is not None and expected_resource not in result.failed_resources:
+        return False
+    expected_component = record.expected_component
+    return not result.components or (
+        expected_component is not None and expected_component in result.components
     )
 
 

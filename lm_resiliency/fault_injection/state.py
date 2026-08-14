@@ -19,6 +19,23 @@ class CampaignJournal:
     manifest_identity: str | None = None
     attempts: dict[str, int] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.campaign, str) or not self.campaign:
+            raise ValueError("campaign state campaign must be a non-empty string")
+        if self.manifest_identity is not None and (
+            not isinstance(self.manifest_identity, str) or not self.manifest_identity
+        ):
+            raise ValueError("campaign state manifest_identity must be a non-empty string")
+        validated: dict[str, int] = {}
+        for key, count in self.attempts.items():
+            _validate_candidate_key(key)
+            if isinstance(count, bool) or not isinstance(count, int):
+                raise TypeError("campaign state attempt counts must be integers")
+            if count <= 0:
+                raise ValueError("campaign state attempt counts must be positive")
+            validated[key] = count
+        self.attempts = validated
+
     def bind_manifest(self, manifest_identity: str) -> None:
         """Bind persisted attempts to one exact executable campaign manifest."""
         if not manifest_identity:
@@ -35,11 +52,12 @@ class CampaignJournal:
             raise ValueError("campaign state manifest identity does not match the current campaign")
 
     def attempt_count(self, incident_id: str, iteration: int) -> int:
-        return int(self.attempts.get(_candidate_key(incident_id, iteration), 0))
+        return self.attempts.get(_candidate_key(incident_id, iteration), 0)
 
     def record_attempt(self, incident_id: str, iteration: int) -> int:
         key = _candidate_key(incident_id, iteration)
-        attempt = int(self.attempts.get(key, 0)) + 1
+        _validate_candidate_key(key)
+        attempt = self.attempts.get(key, 0) + 1
         self.attempts[key] = attempt
         return attempt
 
@@ -52,14 +70,18 @@ class CampaignJournal:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "CampaignJournal":
+        if not isinstance(value.get("campaign"), str):
+            raise TypeError("campaign state campaign must be a string")
+        manifest_identity = value.get("manifest_identity")
+        if manifest_identity is not None and not isinstance(manifest_identity, str):
+            raise TypeError("campaign state manifest_identity must be a string")
+        attempts = value.get("attempts", {})
+        if not isinstance(attempts, dict):
+            raise TypeError("campaign state attempts must be an object")
         return cls(
-            campaign=str(value["campaign"]),
-            manifest_identity=(
-                None if value.get("manifest_identity") is None else str(value["manifest_identity"])
-            ),
-            attempts={
-                str(key): int(count) for key, count in dict(value.get("attempts", {})).items()
-            },
+            campaign=value["campaign"],
+            manifest_identity=manifest_identity,
+            attempts=dict(attempts),
         )
 
 
@@ -134,6 +156,16 @@ class JsonCampaignStateStore:
 
 def _candidate_key(incident_id: str, iteration: int) -> str:
     return f"{incident_id}@{iteration}"
+
+
+def _validate_candidate_key(key: Any) -> None:
+    if not isinstance(key, str):
+        raise TypeError("campaign state attempt keys must be strings")
+    incident_id, separator, iteration = key.rpartition("@")
+    if not separator or not incident_id or not iteration.isdigit() or int(iteration) <= 0:
+        raise ValueError(
+            "campaign state attempt keys must use '<incident_id>@<positive_iteration>'"
+        )
 
 
 __all__ = [

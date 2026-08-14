@@ -73,6 +73,32 @@ class FaultInjectionRecord:
         value = component if component is not None else module_path
         return None if value is None else str(value)
 
+    def snapshot(self) -> "FaultInjectionRecord":
+        """Return an evaluation-stable copy of this mutable runtime record."""
+        return FaultInjectionRecord(
+            injection_id=self.injection_id,
+            occurrence_id=self.occurrence_id,
+            incident_id=self.incident_id,
+            fault_id=self.fault_id,
+            iteration=self.iteration,
+            attempt=self.attempt,
+            temporal_behavior=self.temporal_behavior,
+            failure_type=self.failure_type,
+            expected_kind=self.expected_kind,
+            safety=self.safety,
+            framework=self.framework,
+            executor=self.executor,
+            execution_rank=self.execution_rank,
+            target=freeze_json_mapping(self.target, "injection target"),
+            parameters=freeze_json_mapping(self.parameters, "injection parameters"),
+            status=self.status,
+            verified=self.verified,
+            activated_at_ns=self.activated_at_ns,
+            completed_at_ns=self.completed_at_ns,
+            evidence=freeze_json_mapping(self.evidence, "injection evidence"),
+            error=self.error,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "injection_id": self.injection_id,
