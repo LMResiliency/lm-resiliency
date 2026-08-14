@@ -45,10 +45,7 @@ class TrainingContext:
                 f"framework exposes {len(self.models)} part(s)"
             )
         model = self.models[target.model_part]
-        candidates = [model]
-        unwrapped = _unwrap_module(model)
-        if unwrapped is not model:
-            candidates.append(unwrapped)
+        candidates = _module_namespace_candidates(model)
         candidate_modules = [dict(candidate.named_modules()) for candidate in candidates]
         if target.module_path is not None:
             for modules in candidate_modules:
@@ -68,7 +65,7 @@ class TrainingContext:
                 )
                 if resolved is not None:
                     return resolved
-        available = sorted(candidate_modules[-1])
+        available = sorted(candidate_modules[0])
         sample = ", ".join(repr(name) for name in available[:10])
         selector = target.module_path or (
             f"{target.component}[{target.index}]" if target.index is not None else target.component
@@ -774,6 +771,29 @@ def _unwrap_module(module: nn.Module) -> nn.Module:
         current = child
         seen.add(id(current))
     return current
+
+
+def _module_namespace_candidates(module: nn.Module) -> tuple[nn.Module, ...]:
+    chain = [module]
+    current = module
+    seen = {id(current)}
+    for _ in range(4):
+        child = getattr(current, "module", None)
+        if not isinstance(child, nn.Module) or id(child) in seen:
+            break
+        chain.append(child)
+        current = child
+        seen.add(id(current))
+    name = type(module).__name__
+    wrapper = name in {
+        "DistributedDataParallel",
+        "FullyShardedDataParallel",
+        "OptimizedModule",
+        "Wrapper",
+    } or name.endswith("Wrapper")
+    if wrapper and len(chain) > 1:
+        return tuple(chain[1:] + chain[:1])
+    return tuple(chain)
 
 
 __all__ = ["TrainingContext", "resolve_training_context"]

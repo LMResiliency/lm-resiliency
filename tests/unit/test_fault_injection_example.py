@@ -311,6 +311,29 @@ def test_comparison_rejects_coerced_localization_iteration(
         compare_payloads(_injection_payload(), localization)
 
 
+@pytest.mark.parametrize("failed_rank", [True, 0.5, "0"])
+def test_comparison_rejects_coerced_localization_rank(failed_rank: object) -> None:
+    localization = _localization_payload()
+    localization["reports"][0]["failed_ranks"] = [failed_rank]
+
+    with pytest.raises(TypeError, match="failed rank must be an integer"):
+        compare_payloads(_injection_payload(), localization)
+
+
+def test_comparison_rejects_ambiguous_same_iteration_occurrences() -> None:
+    injection = _injection_payload()
+    injection["injections"].append(
+        {
+            **injection["injections"][0],
+            "occurrence_id": "another-sdc@4",
+            "fault_id": "another-sdc",
+        }
+    )
+
+    with pytest.raises(ValueError, match="cannot be correlated uniquely"):
+        compare_payloads(injection, _localization_payload())
+
+
 def test_example_rejects_missing_post_fault_iteration_and_rank() -> None:
     campaign = FaultCampaign.from_json(CAMPAIGN_PATH)
 

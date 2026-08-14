@@ -30,6 +30,7 @@ def compare_payloads(
     grouped: dict[str, list[dict[str, Any]]] = {}
     for record in records:
         grouped.setdefault(str(record["occurrence_id"]), []).append(record)
+    _reject_ambiguous_occurrence_iterations(grouped)
 
     evaluations = [
         _evaluate_occurrence(occurrence_id, occurrence_records, reports)
@@ -136,12 +137,16 @@ def _evaluate_occurrence(
     matching = [report for report in at_iteration if str(report.get("kind")) in expected_kinds]
     observed_kinds = sorted({str(report.get("kind")) for report in at_iteration})
     observed_ranks = sorted(
-        {int(rank) for report in matching for rank in report.get("failed_ranks", ())}
+        {
+            _required_integer(rank, "localization failed rank")
+            for report in matching
+            for rank in report.get("failed_ranks", ())
+        }
     )
     observed_ranks_by_kind = {
         kind: sorted(
             {
-                int(rank)
+                _required_integer(rank, "localization failed rank")
                 for report in at_iteration
                 if str(report.get("kind")) == kind
                 for rank in report.get("failed_ranks", ())
@@ -248,6 +253,26 @@ def _required_integer(value: object, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"{label} must be an integer")
     return value
+
+
+def _reject_ambiguous_occurrence_iterations(
+    grouped: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> None:
+    owners: dict[int, str] = {}
+    for occurrence_id, records in grouped.items():
+        iterations = {
+            _required_integer(record.get("iteration"), "injection iteration") for record in records
+        }
+        if len(iterations) != 1:
+            continue
+        iteration = next(iter(iterations))
+        previous = owners.setdefault(iteration, occurrence_id)
+        if previous != occurrence_id:
+            raise ValueError(
+                "localization reports cannot be correlated uniquely because "
+                f"occurrences {previous!r} and {occurrence_id!r} share training "
+                f"iteration {iteration}"
+            )
 
 
 def _load_object(path: str | Path) -> dict[str, Any]:

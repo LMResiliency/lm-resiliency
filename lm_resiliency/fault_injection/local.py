@@ -534,7 +534,14 @@ class LocalFaultExecutor:
             except Exception as error:
                 if not effect.done:
                     effect.fail(error)
-                if isinstance(error, (_NoOpFaultError, _UnavailableHistoryError)):
+                if isinstance(
+                    error,
+                    (
+                        _NoOpFaultError,
+                        _UnavailableHistoryError,
+                        _UnsupportedTargetTensorError,
+                    ),
+                ):
                     return gradient
                 raise
 
@@ -830,7 +837,7 @@ def _transform_tensor(
         with torch.no_grad():
             transformed.view(-1).index_fill_(0, indices, 0.0)
     elif fault.type is FailureType.REORDER:
-        if transformed.shape[0] < 2:
+        if transformed.ndim == 0 or transformed.shape[0] < 2:
             raise _UnsupportedTargetTensorError(
                 "reorder requires a leading dimension of at least two"
             )

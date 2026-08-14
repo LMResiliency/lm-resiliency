@@ -97,6 +97,7 @@ class CallbackFaultExecutor:
         ]
         | None = None,
         one_shot: bool = False,
+        completes_inline: bool = False,
         max_safety: SafetyClass = SafetyClass.SAFE_IN_PROCESS,
     ) -> None:
         if not name or not name.strip():
@@ -110,9 +111,12 @@ class CallbackFaultExecutor:
         self._deactivate = deactivate
         if not isinstance(one_shot, bool):
             raise TypeError("fault executor one_shot must be a boolean")
+        if not isinstance(completes_inline, bool):
+            raise TypeError("fault executor completes_inline must be a boolean")
         if deactivate is None and not one_shot:
             raise ValueError("callback executors without deactivate must declare one_shot=True")
         self._one_shot = one_shot
+        self._completes_inline = completes_inline or one_shot
         self._max_safety = SafetyClass(max_safety)
 
     @property
@@ -132,6 +136,10 @@ class CallbackFaultExecutor:
     @property
     def one_shot(self) -> bool:
         return self._one_shot
+
+    @property
+    def completes_inline(self) -> bool:
+        return self._completes_inline
 
     def validate(self, request: FaultExecutionRequest) -> None:
         if self._validate is not None:

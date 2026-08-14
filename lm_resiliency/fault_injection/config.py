@@ -506,6 +506,7 @@ class FaultSpec:
         return expected_failure_kind(self.type)
 
     def _validate_parameters(self) -> None:
+        _validate_builtin_local_parameters(self)
         if (
             self.type
             in {
@@ -576,6 +577,81 @@ class FaultSpec:
             "target": self.target.to_dict(),
             "parameters": thaw_json(self.parameters),
         }
+
+
+def _validate_builtin_local_parameters(fault: FaultSpec) -> None:
+    surface = fault.target.surface
+    local_tensor_surfaces = {
+        FaultSurface.INPUT,
+        FaultSurface.OUTPUT,
+        FaultSurface.WEIGHT,
+        FaultSurface.BIAS,
+        FaultSurface.GRADIENT,
+        FaultSurface.OPTIMIZER_STATE,
+    }
+    flow_surfaces = {
+        FaultSurface.INPUT,
+        FaultSurface.OUTPUT,
+        FaultSurface.GRADIENT,
+    }
+    delay_surfaces = {
+        FaultSurface.INPUT,
+        FaultSurface.OUTPUT,
+        FaultSurface.COMPUTE,
+    }
+    is_local = (
+        (
+            fault.type
+            in {
+                FailureType.TENSOR_CORRUPTION,
+                FailureType.STALE_STATE,
+                FailureType.DUPLICATE,
+            }
+            and surface in local_tensor_surfaces
+        )
+        or (fault.type in {FailureType.DROP, FailureType.REORDER} and surface in flow_surfaces)
+        or (fault.type is FailureType.DELAY and surface in delay_surfaces)
+    )
+    if not is_local:
+        return
+
+    allowed: set[str] = set()
+    if fault.type is FailureType.DELAY:
+        allowed.add("delay_ms")
+    else:
+        allowed.add("scope")
+        if surface in {
+            FaultSurface.WEIGHT,
+            FaultSurface.BIAS,
+            FaultSurface.GRADIENT,
+            FaultSurface.OPTIMIZER_STATE,
+        }:
+            allowed.add("parameter")
+        if surface is FaultSurface.OPTIMIZER_STATE:
+            allowed.add("state_key")
+        if fault.type is FailureType.TENSOR_CORRUPTION:
+            allowed.add("operation")
+            operation = fault.parameters.get("operation")
+            if operation in {
+                CorruptionOperation.SINGLE_BITFLIP.value,
+                CorruptionOperation.MULTI_BITFLIP.value,
+                CorruptionOperation.SCALE.value,
+                CorruptionOperation.NOISE.value,
+            }:
+                allowed.add("magnitude")
+            if operation == CorruptionOperation.SET_VALUE.value:
+                allowed.add("value")
+            elif operation == CorruptionOperation.SCALE.value:
+                allowed.add("factor")
+            elif operation == CorruptionOperation.NOISE.value:
+                allowed.add("std")
+    unknown = set(fault.parameters) - allowed
+    if unknown:
+        fields = ", ".join(sorted(unknown))
+        raise ValueError(
+            f"unsupported built-in local parameters for {fault.type.value} on "
+            f"{surface.value}: {fields}"
+        )
 
 
 @dataclass(frozen=True, slots=True)

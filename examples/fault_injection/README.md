@@ -52,6 +52,9 @@ The example writes:
 All three artifacts carry the same canonical `manifest_identity`. The comparator
 rejects missing or mismatched identities so localization output from an earlier
 campaign revision cannot satisfy new injection ground truth with the same name.
+SCOUT reports currently carry a training iteration but no campaign occurrence
+ID, so this example also rejects two distinct occurrences scheduled at the same
+iteration instead of crediting one report to both.
 
 The process exits unsuccessfully unless every selected action is injected
 successfully and every resulting occurrence is detected and localized.

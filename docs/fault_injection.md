@@ -291,7 +291,7 @@ injection IDs but the same occurrence ID.
 | `model_part` | No | `0` | TorchTitan model-part or Megatron model-chunk index. |
 | `component` | For logical module targets | - | Logical component such as `transformer_block`, `embedding`, `output`, or `expert`. |
 | `index` | For indexed components | - | Global layer or expert index. |
-| `module_path` | For explicit module targets | - | Exact path from `named_modules()`, such as `model.layers.12.mlp`. It is attempted before logical component resolution. |
+| `module_path` | For explicit module targets | - | Exact path from the user model's `named_modules()`, such as `model.layers.12.mlp`. It is attempted before logical component resolution. |
 | `operation` | Executor-specific | - | Runtime operation such as `all_reduce` for a collective fault. |
 | `resource` | Executor-specific | - | Resource selector such as a GPU, NIC, worker, or node identifier. |
 | `path` | Executor-specific | - | Checkpoint or storage path. |
@@ -324,7 +324,7 @@ fails and the campaign must specify an exact `module_path`.
 |---|---|---|---|
 | `operation` | `tensor_corruption` | Required | `single_bitflip`, `multi_bitflip`, `set_value`, `scale`, `noise`, or `sign_flip`. |
 | `scope` | Local tensor and state-flow faults | `single` | Elements selected by the effect: `single`, `row`, `1%`, `10%`, or `100%`. `reorder` always reorders the full leading dimension. |
-| `magnitude` | Tensor corruption | `medium` | `catastrophic`, `large`, `medium`, `subtle`, or `near_invisible`; selects bit position or the default scale/noise strength. |
+| `magnitude` | Bit flip, scale, or noise corruption | `medium` | `catastrophic`, `large`, `medium`, `subtle`, or `near_invisible`; selects bit position or the default scale/noise strength. |
 | `value` | `set_value` | Required | Numeric value, or `nan`, `inf`, or `-inf`. |
 | `factor` | `scale` | Derived from `magnitude` | Explicit multiplication factor. |
 | `std` | `noise` | Derived from `magnitude` | Gaussian-noise standard deviation. |
@@ -333,6 +333,8 @@ fails and the campaign must specify an exact `module_path`.
 | `delay_ms` | `delay` | Required | Finite positive JSON number in milliseconds. Strings, booleans, NaN, and infinity are rejected. |
 
 Built-in local parameters are validated when the manifest is constructed.
+Unknown keys and keys that do not apply to the selected operation are rejected;
+for example, `factor` is valid only for `scale` and `std` only for `noise`.
 `factor` and `std` must be finite numbers, `std` must be positive, `set_value`
 accepts only a number or `nan`/`inf` sentinel, and state-flow `scope` values
 must be one of the documented selectors. Invalid values never survive until a
@@ -497,6 +499,9 @@ A callback executor without deactivation must declare `one_shot=True`, which is
 an explicit promise that activation returns `active=false`. This capability is
 validated before the callback runs; returning an active result from a one-shot
 executor is still rejected.
+An external executor used with a `matching_calls` lifetime must declare
+`completes_inline=True` and return `active=false`. This capability is checked
+before activation so an unsupported destructive effect is never started.
 Executor activation and deactivation evidence is captured as a deep JSON
 snapshot, so later mutation of callback-owned dictionaries or lists cannot
 change campaign ground truth.

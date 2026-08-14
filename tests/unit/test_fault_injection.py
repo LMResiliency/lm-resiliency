@@ -296,6 +296,7 @@ def _recording_executor(
         supported_types=supported_types,
         activate=activate,
         deactivate=deactivate,
+        completes_inline=not active,
         max_safety=max_safety,
     )
 
@@ -407,8 +408,8 @@ def test_campaign_mappings_are_deeply_immutable_snapshots() -> None:
                         type=FailureType.TENSOR_CORRUPTION,
                         target=FaultTarget(
                             rank=0,
-                            surface=FaultSurface.OUTPUT,
-                            module_path="layers.0",
+                            surface=FaultSurface.RESOURCE,
+                            resource="gpu-0",
                             metadata=metadata,
                         ),
                         parameters=parameters,
@@ -518,6 +519,10 @@ def test_fault_parameter_contracts_are_rejected() -> None:
             operation=CorruptionOperation.SCALE,
             factor=1.0,
         )
+    with pytest.raises(ValueError, match="unsupported built-in local parameters.*scoep"):
+        _corruption(scoep=FaultScope.FULL.value)
+    with pytest.raises(ValueError, match="unsupported built-in local parameters.*factor"):
+        _corruption(factor=2.0)
 
 
 @pytest.mark.parametrize(
@@ -1239,6 +1244,74 @@ def test_invalid_reorder_shape_fails_record_without_aborting_training() -> None:
     session.close()
 
 
+def test_scalar_reorder_fails_record_without_aborting_training() -> None:
+    class ScalarLayer(nn.Module):
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            return value.sum()
+
+    model = nn.Sequential(ScalarLayer())
+    optimizer = torch.optim.SGD([nn.Parameter(torch.ones(()))], lr=0.0)
+    fault = FaultSpec(
+        fault_id="reorder-scalar-output",
+        type=FailureType.REORDER,
+        target=FaultTarget(
+            rank=0,
+            surface=FaultSurface.OUTPUT,
+            module_path="0",
+        ),
+    )
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(_incident(at=(1,), faults=(fault,))),
+        rank=0,
+    )
+
+    output = model(torch.ones(1, 4))
+
+    assert output.shape == ()
+    assert session.records[0].status is InjectionStatus.FAILED
+    assert "leading dimension of at least two" in (session.records[0].error or "")
+    session.close()
+
+
+def test_unsupported_gradient_reorder_fails_without_aborting_backward() -> None:
+    class ScalarParameterLayer(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(()))
+
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            return value.sum() * self.weight
+
+    model = nn.Sequential(ScalarParameterLayer())
+    optimizer = _optimizer(model)
+    fault = FaultSpec(
+        fault_id="reorder-scalar-gradient",
+        type=FailureType.REORDER,
+        target=FaultTarget(
+            rank=0,
+            surface=FaultSurface.GRADIENT,
+            module_path="0",
+        ),
+        parameters={"parameter": "weight"},
+    )
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(_incident(at=(1,), faults=(fault,))),
+        rank=0,
+    )
+
+    optimizer.zero_grad()
+    model(torch.ones(1, 4)).backward()
+    optimizer.step()
+
+    assert session.records[0].status is InjectionStatus.FAILED
+    assert "leading dimension of at least two" in (session.records[0].error or "")
+    session.close()
+
+
 def test_campaign_start_origin_ignores_framework_progress() -> None:
     engine = FakeDeepSpeedEngine(TinyModel(), global_steps=40)
     campaign = _campaign(
@@ -1249,6 +1322,27 @@ def test_campaign_start_origin_ignores_framework_progress() -> None:
 
     assert session.current_iteration == 1
     assert session.records[0].iteration == 1
+    session.close()
+
+
+def test_unscheduled_steps_do_not_rescan_incident_triggers() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(_incident(at=(100,))),
+        rank=0,
+    )
+
+    with patch.object(
+        IncidentTrigger,
+        "matches",
+        side_effect=AssertionError("runtime trigger scan"),
+    ):
+        _step(model, optimizer)
+        assert not session._requires_boundary_consensus(1, 2)
+
     session.close()
 
 
@@ -1463,7 +1557,17 @@ def test_numerical_corruption_operations(
                     operation=operation,
                     target=_target(surface=FaultSurface.WEIGHT),
                     scope=FaultScope.SINGLE,
-                    magnitude=FaultMagnitude.MEDIUM.value,
+                    **(
+                        {"magnitude": FaultMagnitude.MEDIUM.value}
+                        if operation
+                        in {
+                            CorruptionOperation.SINGLE_BITFLIP,
+                            CorruptionOperation.MULTI_BITFLIP,
+                            CorruptionOperation.SCALE,
+                            CorruptionOperation.NOISE,
+                        }
+                        else {}
+                    ),
                     **parameters,
                 ),
             ),
@@ -2435,6 +2539,44 @@ def test_explicit_module_path_precedes_logical_fallback_across_wrappers() -> Non
     torch.testing.assert_close(model.layers[1].weight, second)
 
 
+def test_explicit_path_is_resolved_in_wrapped_user_model_namespace() -> None:
+    class UserModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.module = nn.Linear(4, 4, bias=False)
+            with torch.no_grad():
+                self.module.weight.copy_(torch.eye(4))
+
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            return self.module(value) + 1.0
+
+    user_model = UserModel()
+    model = Wrapper(user_model)
+    optimizer = _optimizer(model)
+    fault = FaultSpec(
+        fault_id="drop-user-child-output",
+        type=FailureType.DROP,
+        target=FaultTarget(
+            rank=0,
+            surface=FaultSurface.OUTPUT,
+            module_path="module",
+        ),
+        parameters={"scope": FaultScope.FULL.value},
+    )
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(_incident(at=(1,), faults=(fault,))),
+        rank=0,
+    )
+
+    output = model(torch.ones(2, 4))
+
+    torch.testing.assert_close(output, torch.ones_like(output))
+    assert session.records[0].injection_succeeded
+    session.close()
+
+
 def test_framework_inference_and_automatic_step_boundaries() -> None:
     pytorch_model = TinyModel()
     pytorch_optimizer = _optimizer(pytorch_model)
@@ -3107,6 +3249,40 @@ def test_active_external_effect_requires_deactivation_callback() -> None:
     session.close()
 
 
+def test_external_matching_calls_requires_inline_capability_before_activation() -> None:
+    events: list[str] = []
+
+    def activate(_request):
+        events.append("activate")
+        return FaultExecutionResult(verified=True, active=True)
+
+    executor = CallbackFaultExecutor(
+        name="not-inline",
+        supported_types={FailureType.PROCESS_TERMINATION},
+        activate=activate,
+        deactivate=lambda _request, _result: events.append("deactivate"),
+        max_safety=SafetyClass.ISOLATED_DESTRUCTIVE,
+    )
+    model = TinyModel()
+
+    with pytest.raises(ValueError, match="completes_inline=True"):
+        enable_fault_injection(
+            model,
+            _optimizer(model),
+            campaign=_campaign(
+                _incident(
+                    at=(1,),
+                    lifetime=IncidentLifetime(matching_calls=1),
+                    faults=(_external_fault(FailureType.PROCESS_TERMINATION),),
+                )
+            ),
+            executors=(executor,),
+            rank=0,
+        )
+
+    assert events == []
+
+
 def test_external_activation_failure_records_selected_executor() -> None:
     def activate(_request):
         raise RuntimeError("activation failed")
@@ -3116,6 +3292,7 @@ def test_external_activation_failure_records_selected_executor() -> None:
         supported_types={FailureType.EXCEPTION},
         activate=activate,
         deactivate=lambda _request, _result: None,
+        completes_inline=True,
         max_safety=SafetyClass.ISOLATED_DESTRUCTIVE,
     )
     model = TinyModel()
@@ -4141,6 +4318,7 @@ def test_staged_activation_rollback_marks_verified_records_failed() -> None:
         supported_types={FailureType.EXCEPTION},
         activate=activate,
         deactivate=lambda _request, _result: None,
+        completes_inline=True,
         max_safety=SafetyClass.ISOLATED_DESTRUCTIVE,
     )
     model = TinyModel()

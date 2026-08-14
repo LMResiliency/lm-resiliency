@@ -192,6 +192,10 @@ class FaultInjectionSession:
         self._closed = False
         self._started = False
         self._faults = tuple(fault for incident in campaign.incidents for fault in incident.faults)
+        (
+            self._candidate_incidents_by_iteration,
+            self._expiring_incidents_by_iteration,
+        ) = _index_campaign_schedule(campaign)
 
         try:
             self._validate_capabilities()
@@ -398,6 +402,15 @@ class FaultInjectionSession:
                 continue
             executor = self._executor_for(request.fault)
             self._validate_executor_lifecycle(executor)
+            if request.lifetime.matching_calls is not None and not getattr(
+                executor,
+                "completes_inline",
+                False,
+            ):
+                raise ValueError(
+                    f"fault executor {executor.name!r} must declare "
+                    "completes_inline=True for matching_calls incidents"
+                )
             validate = getattr(executor, "validate", None)
             if callable(validate):
                 validate(request)
@@ -459,9 +472,7 @@ class FaultInjectionSession:
         iteration: int,
     ) -> tuple[tuple[FaultIncident, int], ...]:
         candidates: list[tuple[FaultIncident, int]] = []
-        for incident in self.campaign.incidents:
-            if not incident.trigger.matches(iteration):
-                continue
+        for incident in self._candidate_incidents_by_iteration.get(iteration, ()):
             attempt_count = self._journal.attempt_count(incident.incident_id, iteration)
             if incident.retrigger is RetriggerPolicy.ONCE and attempt_count >= 1:
                 continue
@@ -522,13 +533,10 @@ class FaultInjectionSession:
             return True
         if self._history_faults_for(next_iteration):
             return True
-        for incident in self.campaign.incidents:
-            lifetime = incident.lifetime.iterations
-            if lifetime is None:
-                continue
-            start_iteration = finished_iteration - lifetime + 1
-            if start_iteration <= 0 or not incident.trigger.matches(start_iteration):
-                continue
+        for incident, start_iteration in self._expiring_incidents_by_iteration.get(
+            finished_iteration,
+            (),
+        ):
             if not _probability_selected(
                 self.campaign.seed,
                 incident.incident_id,
@@ -1264,6 +1272,42 @@ def _stable_seed(campaign_seed: int, *parts: str) -> int:
         digest.update(b"\0")
         digest.update(part.encode("utf-8"))
     return int.from_bytes(digest.digest(), "little")
+
+
+def _index_campaign_schedule(
+    campaign: FaultCampaign,
+) -> tuple[
+    dict[int, tuple[FaultIncident, ...]],
+    dict[int, tuple[tuple[FaultIncident, int], ...]],
+]:
+    candidates: dict[int, list[FaultIncident]] = {}
+    expirations: dict[int, list[tuple[FaultIncident, int]]] = {}
+    for incident in campaign.incidents:
+        trigger = incident.trigger
+        if trigger.range is None:
+            iterations = trigger.at
+        else:
+            iterations = range(
+                trigger.range.start,
+                trigger.range.end + 1,
+                trigger.range.every,
+            )
+        for iteration in iterations:
+            candidates.setdefault(iteration, []).append(incident)
+            lifetime = incident.lifetime.iterations
+            if lifetime is not None:
+                expiration_iteration = iteration + lifetime - 1
+                expirations.setdefault(expiration_iteration, []).append((incident, iteration))
+    return (
+        {
+            iteration: tuple(iteration_incidents)
+            for iteration, iteration_incidents in candidates.items()
+        },
+        {
+            iteration: tuple(iteration_incidents)
+            for iteration, iteration_incidents in expirations.items()
+        },
+    )
 
 
 def _occurrence_id(
