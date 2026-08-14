@@ -99,6 +99,47 @@ class TrainingContext:
         parameter_name: str | None = None,
     ) -> torch.Tensor:
         """Resolve a parameter on the selected logical module."""
+        parameter = self._resolve_model_parameter(target, parameter_name=parameter_name)
+        return self._parameter_storage(parameter, target)
+
+    def resolve_gradient_parameter(
+        self,
+        target: FaultTarget,
+        *,
+        parameter_name: str | None = None,
+    ) -> torch.Tensor:
+        """Resolve the model parameter whose materialized gradient is hooked."""
+        return self._resolve_model_parameter(target, parameter_name=parameter_name)
+
+    def resolve_optimizer_state(
+        self,
+        target: FaultTarget,
+        *,
+        parameter_name: str | None,
+        state_key: str | None,
+    ) -> torch.Tensor:
+        """Resolve one optimizer-state tensor associated with the target parameter."""
+        parameter = self._resolve_model_parameter(target, parameter_name=parameter_name)
+        for optimizer in _base_optimizers(self.optimizer):
+            state = optimizer.state.get(parameter, {})
+            if state_key is not None:
+                value = state.get(state_key)
+                if isinstance(value, torch.Tensor):
+                    return value
+                continue
+            for key in sorted(state):
+                value = state[key]
+                if isinstance(value, torch.Tensor) and value.numel() > 1:
+                    return value
+        suffix = "" if state_key is None else f" {state_key!r}"
+        raise LookupError(f"optimizer state tensor{suffix} is unavailable")
+
+    def _resolve_model_parameter(
+        self,
+        target: FaultTarget,
+        *,
+        parameter_name: str | None = None,
+    ) -> torch.Tensor:
         module = self.resolve_module(target)
         preferred = parameter_name
         if preferred is None and target.surface.value in {"weight", "bias"}:
@@ -114,28 +155,20 @@ class TrainingContext:
             return parameter
         raise LookupError(f"module {type(module).__name__} exposes no direct parameters")
 
-    def resolve_optimizer_state(
+    def _parameter_storage(
         self,
+        parameter: torch.Tensor,
         target: FaultTarget,
-        *,
-        parameter_name: str | None,
-        state_key: str | None,
     ) -> torch.Tensor:
-        """Resolve one optimizer-state tensor associated with the target parameter."""
-        parameter = self.resolve_parameter(target, parameter_name=parameter_name)
-        for optimizer in _base_optimizers(self.optimizer):
-            state = optimizer.state.get(parameter, {})
-            if state_key is not None:
-                value = state.get(state_key)
-                if isinstance(value, torch.Tensor):
-                    return value
-                continue
-            for key in sorted(state):
-                value = state[key]
-                if isinstance(value, torch.Tensor) and value.numel() > 1:
-                    return value
-        suffix = "" if state_key is None else f" {state_key!r}"
-        raise LookupError(f"optimizer state tensor{suffix} is unavailable")
+        if (
+            self.framework == "deepspeed"
+            and target.surface.value in {"weight", "bias"}
+            and parameter.numel() == 0
+        ):
+            partition = getattr(parameter, "ds_tensor", None)
+            if isinstance(partition, torch.Tensor) and partition.numel() > 0:
+                return partition
+        return parameter
 
     def register_step_callback(self, callback: Callable[[], None]) -> None:
         """Run a callback after every completed framework optimizer boundary."""

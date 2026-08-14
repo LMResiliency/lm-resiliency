@@ -57,6 +57,10 @@ class FaultExecutionResult:
     evidence: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.verified, bool):
+            raise TypeError("fault execution verified must be a boolean")
+        if not isinstance(self.active, bool):
+            raise TypeError("fault execution active must be a boolean")
         object.__setattr__(self, "evidence", dict(self.evidence))
 
 

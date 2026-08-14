@@ -192,6 +192,42 @@ def test_comparison_counts_correlated_rank_local_actions() -> None:
     assert evaluation["evaluations"][0]["action_count"] == 2
 
 
+def test_comparison_correlates_failure_kind_with_rank() -> None:
+    injection = _injection_payload()
+    injection["injections"].append(
+        {
+            **injection["injections"][0],
+            "fault_id": "rank-1-delay",
+            "execution_rank": 1,
+            "expected_kind": "straggler",
+            "target": {
+                **injection["injections"][0]["target"],
+                "rank": 1,
+                "surface": "compute",
+            },
+        }
+    )
+    localization = _localization_payload(failed_rank=1)
+    localization["reports"].append(
+        {
+            "training_iteration": 4,
+            "failed_ranks": [0],
+            "kind": "straggler",
+            "scope": "rank",
+        }
+    )
+
+    evaluation = compare_payloads(injection, localization)
+    occurrence = evaluation["evaluations"][0]
+
+    assert occurrence["rank_match"]
+    assert occurrence["kind_match"]
+    assert not occurrence["kind_rank_match"]
+    assert occurrence["detected_action_count"] == 0
+    assert not occurrence["localized"]
+    assert not evaluation["summary"]["passed"]
+
+
 @pytest.mark.parametrize("status", ["pending", "failed", "cancelled"])
 def test_comparison_fails_selected_unsuccessful_injections(status: str) -> None:
     injection = _injection_payload()

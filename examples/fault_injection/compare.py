@@ -36,9 +36,7 @@ def compare_payloads(
         for occurrence_id, occurrence_records in grouped.items()
     ]
     localized = sum(bool(evaluation["localized"]) for evaluation in evaluations)
-    detected_actions = sum(
-        int(evaluation["action_count"]) for evaluation in evaluations if evaluation["detected"]
-    )
+    detected_actions = sum(int(evaluation["detected_action_count"]) for evaluation in evaluations)
     localized_actions = sum(
         int(evaluation["action_count"]) for evaluation in evaluations if evaluation["localized"]
     )
@@ -104,6 +102,16 @@ def _evaluate_occurrence(
     iteration = iterations.pop()
     expected_ranks = sorted({int(record["execution_rank"]) for record in records})
     expected_kinds = sorted({str(record["expected_kind"]) for record in records})
+    expected_ranks_by_kind = {
+        kind: sorted(
+            {
+                int(record["execution_rank"])
+                for record in records
+                if str(record["expected_kind"]) == kind
+            }
+        )
+        for kind in expected_kinds
+    }
     expected_layers = sorted(
         {
             int(target["index"])
@@ -124,6 +132,17 @@ def _evaluate_occurrence(
     observed_ranks = sorted(
         {int(rank) for report in matching for rank in report.get("failed_ranks", ())}
     )
+    observed_ranks_by_kind = {
+        kind: sorted(
+            {
+                int(rank)
+                for report in at_iteration
+                if str(report.get("kind")) == kind
+                for rank in report.get("failed_ranks", ())
+            }
+        )
+        for kind in expected_kinds
+    }
     reported_layer_ids = {
         int(report["layer_id"]) for report in matching if report.get("layer_id") is not None
     }
@@ -134,6 +153,12 @@ def _evaluate_occurrence(
     )
     kind_match = set(expected_kinds).issubset(observed_kinds)
     rank_match = observed_ranks == expected_ranks
+    kind_rank_match = observed_ranks_by_kind == expected_ranks_by_kind
+    detected_action_count = sum(
+        int(record["execution_rank"])
+        in observed_ranks_by_kind.get(str(record["expected_kind"]), ())
+        for record in records
+    )
     source_match = not expected_source_prefixes or all(
         any(source.startswith(prefix) for source in observed_sources)
         for prefix in expected_source_prefixes
@@ -159,6 +184,7 @@ def _evaluate_occurrence(
         and detected
         and kind_match
         and rank_match
+        and kind_rank_match
         and layer_match
         and source_match
     )
@@ -166,24 +192,28 @@ def _evaluate_occurrence(
         "occurrence_id": occurrence_id,
         "iteration": iteration,
         "action_count": len(records),
+        "detected_action_count": detected_action_count,
         "injection_succeeded": injection_succeeded,
         "detected": detected,
         "localized": localized,
         "expected": {
             "ranks": expected_ranks,
             "kinds": expected_kinds,
+            "ranks_by_kind": expected_ranks_by_kind,
             "layers": expected_layers,
             "source_prefixes": expected_source_prefixes,
         },
         "observed": {
             "ranks": observed_ranks,
             "kinds": observed_kinds,
+            "ranks_by_kind": observed_ranks_by_kind,
             "layers": observed_layers,
             "aggregate_layer_report": aggregate_layer_report,
             "sources": observed_sources,
         },
         "kind_match": kind_match,
         "rank_match": rank_match,
+        "kind_rank_match": kind_rank_match,
         "layer_match": layer_match,
         "layer_evidence": layer_evidence,
         "source_match": source_match,

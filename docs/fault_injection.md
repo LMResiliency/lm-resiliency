@@ -457,6 +457,8 @@ Unsupported effects are never silently skipped.
 At execution time, the selected executor must return verified evidence.
 An unverifiable activation is marked failed, deactivated when necessary, and is
 not accepted as campaign ground truth.
+The executor result's `verified` and `active` fields must be JSON booleans;
+truthy strings and integers are rejected.
 Activation and deactivation evidence must be strictly JSON-serializable; invalid
 evidence fails the action immediately and active effects are deactivated.
 An executor that returns an active effect must provide a deactivation callback;
@@ -493,7 +495,9 @@ The state file must survive worker replacement for restart-stable behavior.
 Use one JSON state file per rank, or provide a manager-backed
 `CampaignStateStore` that serializes concurrent updates across workers.
 For a distributed enablement, the initial manifest binding is persisted only
-after every rank agrees on the manifest and training iteration.
+after every rank agrees on the manifest, training iteration, and persisted
+attempt journal. Divergent per-rank attempt histories fail enablement before any
+new occurrence is armed.
 The journal stores the canonical manifest identity. Reusing a campaign name with
 changed triggers, targets, parameters, or metadata requires a new state file;
 stale attempts are never applied to an edited manifest.
@@ -541,7 +545,9 @@ match the injected fault; omit optional evidence when the resiliency system does
 not report it.
 Example detection counts also require a report with the expected failure kind;
 an unrelated report at the same iteration is retained as evidence but does not
-count as detecting the injected occurrence.
+count as detecting the injected occurrence. For correlated incidents containing
+multiple failure kinds, each kind must identify its corresponding expected
+ranks; matching only the aggregate rank and kind sets is insufficient.
 
 Reports are rank-local.
 A distributed campaign runner or training manager should collect reports from all
@@ -557,9 +563,14 @@ Those effects require an explicitly configured isolated or cluster executor.
 DeepSpeed clocks advance only when `global_steps` advances, so gradient
 accumulation microbatches do not consume campaign iterations. PipelineEngine
 uses the active `OptimizerStep` instruction-map entry, composing with an already
-enabled SCOUT wrapper.
+enabled SCOUT wrapper. Under ZeRO-3, weight and bias effects mutate the
+rank-owned `ds_tensor` partition rather than the zero-sized model placeholder;
+gradient hooks remain attached to the original parameter so they receive the
+materialized backward gradient.
 
 Permanent non-finite mutation of live parameter or optimizer state requires
 checkpoint recovery because the affected values cannot be retired while
 preserving subsequent updates. Use those state faults in isolated campaigns that
-recover or terminate after localization.
+recover or terminate after localization. `notify_recovery()` preserves values
+that were replaced by checkpoint loading and only removes an effect that is
+still visibly present.

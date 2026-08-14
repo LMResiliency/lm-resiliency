@@ -93,7 +93,7 @@ class LocalFaultEffect:
     on_done: Callable[[tuple[Any, ...]], None]
     remaining_calls: int | None
     handles: list[Any] = field(default_factory=list)
-    cleanup_callbacks: list[Callable[[], None]] = field(default_factory=list)
+    cleanup_callbacks: list[Callable[[bool], None]] = field(default_factory=list)
     done: bool = False
 
     def verify(self, evidence: dict[str, Any]) -> None:
@@ -111,11 +111,16 @@ class LocalFaultEffect:
         if self.remaining_calls == 0:
             self.complete()
 
-    def complete(self, evidence: dict[str, Any] | None = None) -> None:
+    def complete(
+        self,
+        evidence: dict[str, Any] | None = None,
+        *,
+        preserve_replaced_state: bool = False,
+    ) -> None:
         if self.done:
             return
         try:
-            self._cleanup()
+            self._cleanup(preserve_replaced_state=preserve_replaced_state)
         except Exception as error:
             self.record.status = InjectionStatus.FAILED
             self.record.error = f"fault cleanup failed: {error}"
@@ -149,7 +154,7 @@ class LocalFaultEffect:
         self.done = True
         self.on_done(self.target_key)
 
-    def _cleanup(self) -> None:
+    def _cleanup(self, *, preserve_replaced_state: bool = False) -> None:
         first_error: Exception | None = None
         for handle in self.handles:
             try:
@@ -160,7 +165,7 @@ class LocalFaultEffect:
         self.handles.clear()
         for callback in reversed(self.cleanup_callbacks):
             try:
-                callback()
+                callback(preserve_replaced_state)
             except Exception as error:
                 if first_error is None:
                     first_error = error
@@ -361,7 +366,7 @@ class LocalFaultExecutor:
             return
 
         module = self._context.resolve_module(fault.target)
-        restoration: Callable[[], None] | None = None
+        restoration: Callable[[bool], None] | None = None
 
         def inject(
             _module: nn.Module,
@@ -449,7 +454,6 @@ class LocalFaultExecutor:
             module.register_forward_hook(
                 transform_output,
                 with_kwargs=True,
-                always_call=True,
             )
         )
 
@@ -459,7 +463,7 @@ class LocalFaultExecutor:
         effect: LocalFaultEffect,
     ) -> None:
         fault = request.fault
-        parameter = self._context.resolve_parameter(
+        parameter = self._context.resolve_gradient_parameter(
             fault.target,
             parameter_name=_parameter_name(fault),
         )
@@ -498,7 +502,7 @@ class LocalFaultExecutor:
         self,
         tensor: torch.Tensor,
         request: FaultExecutionRequest,
-    ) -> tuple[Callable[[], None], int]:
+    ) -> tuple[Callable[[bool], None], int]:
         tensor = _local_shard(tensor)
         original = tensor.detach().clone()
         history = self._history.get(_target_key(request.fault))
@@ -509,7 +513,9 @@ class LocalFaultExecutor:
         with torch.no_grad():
             tensor.copy_(transformed)
 
-        def restore() -> None:
+        transformed_flat = transformed.contiguous().view(-1)
+
+        def restore(preserve_replaced_state: bool) -> None:
             with torch.no_grad():
                 current_tensor = tensor.detach().clone().contiguous()
                 flat = current_tensor.view(-1)
@@ -517,12 +523,13 @@ class LocalFaultExecutor:
                 finite = torch.isfinite(retirement_delta)
                 current = flat.index_select(0, changed_indices)
                 expected = original_flat.index_select(0, changed_indices)
-                already_restored = current == expected
-                if current.is_floating_point():
-                    already_restored = already_restored | (
-                        torch.isnan(current) & torch.isnan(expected)
-                    )
-                retire_finite = finite & ~already_restored
+                injected = transformed_flat.index_select(0, changed_indices)
+                already_restored = _elementwise_same(current, expected)
+                still_injected = _elementwise_same(current, injected)
+                preserve = (
+                    ~still_injected if preserve_replaced_state else torch.zeros_like(still_injected)
+                )
+                retire_finite = finite & ~already_restored & ~preserve
                 if bool(torch.any(retire_finite).item()):
                     finite_indices = changed_indices.index_select(
                         0,
@@ -537,7 +544,7 @@ class LocalFaultExecutor:
                         finite_indices,
                         flat.index_select(0, finite_indices) - finite_delta,
                     )
-                restore_nonfinite = ~finite & ~already_restored
+                restore_nonfinite = ~finite & ~already_restored & ~preserve
                 if bool(torch.any(restore_nonfinite).item()):
                     nonfinite_indices = changed_indices.index_select(
                         0,
@@ -604,7 +611,7 @@ class LocalFaultExecutor:
             )
             return
         if surface is FaultSurface.GRADIENT:
-            parameter = self._context.resolve_parameter(
+            parameter = self._context.resolve_gradient_parameter(
                 fault.target,
                 parameter_name=_parameter_name(fault),
             )
@@ -814,6 +821,13 @@ def _same_tensor_values(left: torch.Tensor, right: torch.Tensor) -> bool:
     if left.is_floating_point():
         equal = equal | (torch.isnan(left) & torch.isnan(right))
     return bool(torch.all(equal).item())
+
+
+def _elementwise_same(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+    equal = left == right
+    if left.is_floating_point():
+        equal = equal | (torch.isnan(left) & torch.isnan(right))
+    return equal
 
 
 def _local_shard(tensor: torch.Tensor) -> torch.Tensor:

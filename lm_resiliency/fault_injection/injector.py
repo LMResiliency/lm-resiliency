@@ -99,8 +99,11 @@ class _ActiveFault:
     def done(self) -> bool:
         return self.effect.done
 
-    def complete(self) -> None:
-        self.effect.complete()
+    def complete(self, *, preserve_replaced_state: bool = False) -> None:
+        if isinstance(self.effect, LocalFaultEffect):
+            self.effect.complete(preserve_replaced_state=preserve_replaced_state)
+        else:
+            self.effect.complete()
 
 
 class FaultInjectionSession:
@@ -184,6 +187,17 @@ class FaultInjectionSession:
     @property
     def records(self) -> tuple[FaultInjectionRecord, ...]:
         return tuple(self._records)
+
+    @property
+    def journal_attempts_identity(self) -> str:
+        """Return a stable digest of restart-sensitive occurrence attempts."""
+        encoded = json.dumps(
+            self._journal.attempts,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     @property
     def supported_failure_types(self) -> frozenset[FailureType]:
@@ -789,7 +803,7 @@ class FaultInjectionSession:
     def _complete_until(self, boundary: str) -> None:
         for active in self._active:
             if not active.done and active.incident.lifetime.until == boundary:
-                active.complete()
+                active.complete(preserve_replaced_state=boundary == "recovery")
         self._discard_completed()
 
     def _discard_completed(self) -> None:
@@ -843,6 +857,9 @@ def enable_fault_injection(
         "error": error_summary,
         "campaign_identity": campaign_identity,
         "current_iteration": None if session is None else session.current_iteration,
+        "journal_attempts_identity": (
+            None if session is None else session.journal_attempts_identity
+        ),
     }
     gathered_preparations: list[dict[str, Any] | None] = [None] * world_size
     dist.all_gather_object(gathered_preparations, preparation)
@@ -866,6 +883,10 @@ def enable_fault_injection(
                     f"rank {prepared_rank} current_iteration "
                     f"{prepared['current_iteration']} differs from rank 0 "
                     f"{reference['current_iteration']}"
+                )
+            if prepared["journal_attempts_identity"] != reference["journal_attempts_identity"]:
+                failures.append(
+                    f"rank {prepared_rank} campaign journal attempts differ from rank 0"
                 )
     if failures:
         cleanup_error: Exception | None = None

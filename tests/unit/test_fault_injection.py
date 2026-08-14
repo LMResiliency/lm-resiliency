@@ -703,6 +703,11 @@ def test_future_boundary_preparation_failure_is_propagated_to_all_ranks() -> Non
     [
         ("campaign_identity", "different-manifest", "campaign manifest differs"),
         ("current_iteration", 2, "current_iteration 2 differs"),
+        (
+            "journal_attempts_identity",
+            "different-journal",
+            "campaign journal attempts differ",
+        ),
     ],
 )
 def test_distributed_enablement_requires_consistent_campaign_state(
@@ -1131,6 +1136,37 @@ def test_numerical_corruption_operations(
     session.close()
 
 
+def test_recovery_cleanup_preserves_checkpoint_loaded_nonfinite_state() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    fault = _corruption(
+        operation=CorruptionOperation.SET_VALUE,
+        target=_target(surface=FaultSurface.WEIGHT),
+        scope=FaultScope.SINGLE,
+        value="nan",
+    )
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="recovery"),
+                faults=(fault,),
+            )
+        ),
+        rank=0,
+    )
+    recovered = torch.full_like(model.layers[0].weight, 7.0)
+
+    with torch.no_grad():
+        model.layers[0].weight.copy_(recovered)
+    session.notify_recovery()
+
+    torch.testing.assert_close(model.layers[0].weight, recovered)
+    session.close()
+
+
 def test_set_nan_rejects_an_existing_nan_as_an_unverified_noop() -> None:
     model = TinyModel()
     with torch.no_grad():
@@ -1322,6 +1358,33 @@ def test_runtime_injection_failure_is_recorded_and_hook_is_removed() -> None:
     session.close()
 
 
+def test_output_fault_preserves_original_forward_exception() -> None:
+    class RaisingLayer(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(1))
+
+        def forward(self, _value: torch.Tensor) -> torch.Tensor:
+            raise RuntimeError("model forward failed")
+
+    model = TinyModel()
+    model.layers[0] = RaisingLayer()
+    optimizer = _optimizer(model)
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(_incident(at=(1,))),
+        rank=0,
+    )
+
+    with pytest.raises(RuntimeError, match="model forward failed"):
+        model(torch.ones(2, 4))
+
+    assert session.records[0].status is InjectionStatus.PENDING
+    session.close()
+    assert session.records[0].status is InjectionStatus.CANCELLED
+
+
 def test_gradient_drop_is_applied_once() -> None:
     model = TinyModel()
     optimizer = _optimizer(model)
@@ -1347,6 +1410,68 @@ def test_gradient_drop_is_applied_once() -> None:
     assert torch.count_nonzero(model.layers[0].weight.grad) == 0
     assert session.records[0].status is InjectionStatus.COMPLETED
     optimizer.step()
+    session.close()
+
+
+def test_deepspeed_zero3_weight_uses_local_partition_storage() -> None:
+    model = TinyModel()
+    placeholder = nn.Parameter(torch.empty(0))
+    partition = torch.linspace(-1.0, 1.0, 16)
+    placeholder.ds_tensor = partition
+    model.layers[0].weight = placeholder
+    engine = FakeDeepSpeedEngine(model)
+    engine.zero_optimization_stage = lambda: 3
+    baseline = partition.clone()
+    fault = _corruption(
+        target=_target(surface=FaultSurface.WEIGHT),
+        scope=FaultScope.SINGLE,
+    )
+    session = enable_fault_injection(
+        engine,
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="recovery"),
+                faults=(fault,),
+            )
+        ),
+        rank=0,
+    )
+
+    assert placeholder.numel() == 0
+    assert not torch.equal(partition, baseline)
+    session.notify_recovery()
+    torch.testing.assert_close(partition, baseline)
+    session.close()
+
+
+def test_deepspeed_zero3_gradient_hook_uses_original_parameter() -> None:
+    model = TinyModel()
+    placeholder = nn.Parameter(torch.empty(0))
+    placeholder.ds_tensor = torch.ones(16)
+    model.layers[0].weight = placeholder
+    engine = FakeDeepSpeedEngine(model)
+    engine.zero_optimization_stage = lambda: 3
+    fault = FaultSpec(
+        fault_id="zero3-gradient",
+        type=FailureType.DROP,
+        target=_target(surface=FaultSurface.GRADIENT),
+        parameters={"parameter": "weight", "scope": FaultScope.FULL.value},
+    )
+    session = enable_fault_injection(
+        engine,
+        campaign=_campaign(_incident(at=(1,), faults=(fault,))),
+        rank=0,
+    )
+
+    assert session.records[0].status is InjectionStatus.PENDING
+    assert (
+        session._context.resolve_gradient_parameter(
+            fault.target,
+            parameter_name="weight",
+        )
+        is placeholder
+    )
     session.close()
 
 
@@ -1955,6 +2080,21 @@ def test_unverified_external_activation_is_rejected_and_deactivated() -> None:
         )
 
     assert events == ["activate", "deactivate"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("verified", "false"),
+        ("active", 1),
+    ],
+)
+def test_external_result_flags_must_be_booleans(field: str, value: object) -> None:
+    arguments = {"verified": True, "active": False}
+    arguments[field] = value
+
+    with pytest.raises(TypeError, match=f"fault execution {field} must be a boolean"):
+        FaultExecutionResult(**arguments)
 
 
 def test_active_external_effect_requires_deactivation_callback() -> None:
