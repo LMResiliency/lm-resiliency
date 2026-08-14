@@ -48,7 +48,12 @@ from lm_resiliency.fault_injection.frameworks import (
     resolve_training_context,
 )
 from lm_resiliency.fault_injection.injector import _ActiveFault, _CampaignSchedule
-from lm_resiliency.fault_injection.local import LocalFaultEffect, LocalFaultExecutor
+from lm_resiliency.fault_injection.local import (
+    LocalFaultEffect,
+    LocalFaultExecutor,
+    _History,
+    _observe_history,
+)
 from lm_resiliency.fault_injection.state import CampaignJournal
 
 
@@ -3947,6 +3952,66 @@ def test_sparse_gradient_history_fails_without_escaping_hook() -> None:
     session.close()
 
 
+def test_empty_gradient_history_fails_without_escaping_hook() -> None:
+    class EmptyLayer(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = nn.Parameter(torch.empty(0))
+
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            return value.sum() + self.weight.sum()
+
+    class EmptyParameterModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.layer = EmptyLayer()
+
+        def forward(self, value: torch.Tensor) -> torch.Tensor:
+            return self.layer(value)
+
+    model = EmptyParameterModel()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.0)
+    stale_gradient = FaultSpec(
+        fault_id="stale-empty-gradient",
+        type=FailureType.STALE_STATE,
+        target=_target(
+            surface=FaultSurface.GRADIENT,
+            module_path="layer",
+        ),
+        parameters={"scope": FaultScope.SINGLE.value},
+    )
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(_incident(at=(2,), faults=(stale_gradient,))),
+        rank=0,
+    )
+
+    _step(model, optimizer)
+    _step(model, optimizer)
+
+    assert session.records[0].status is InjectionStatus.FAILED
+    assert "must be non-empty" in str(session.records[0].error)
+    session.close()
+
+
+def test_rejected_history_observation_invalidates_the_latest_slot() -> None:
+    history = _History()
+    _observe_history(history, torch.tensor([1.0]), FaultScope.SINGLE)
+    sparse = torch.sparse_coo_tensor(
+        torch.tensor([[0]]),
+        torch.tensor([2.0]),
+        (1,),
+        check_invariants=False,
+    )
+    _observe_history(history, sparse, FaultScope.SINGLE)
+    _observe_history(history, torch.tensor([3.0]), FaultScope.SINGLE)
+
+    assert history.observation_error is None
+    assert history.previous is None
+    torch.testing.assert_close(history.latest, torch.tensor([3.0]))
+
+
 def test_close_interrupts_in_flight_delay() -> None:
     model = TinyModel()
     session = enable_fault_injection(
@@ -4744,6 +4809,38 @@ def test_equivalent_target_selectors_collide_by_resolved_parameter() -> None:
         )
 
     torch.testing.assert_close(model.layers[0].weight, baseline)
+
+
+def test_weight_and_bias_surface_aliases_collide_by_parameter_storage() -> None:
+    model = TinyModel()
+    baseline = model.layers[0].bias.detach().clone()
+    weight_alias = _corruption(
+        fault_id="weight-alias",
+        target=_target(surface=FaultSurface.WEIGHT),
+        scope=FaultScope.SINGLE,
+        parameter="bias",
+    )
+    bias = _corruption(
+        fault_id="bias",
+        target=_target(surface=FaultSurface.BIAS),
+        scope=FaultScope.SINGLE,
+    )
+
+    with pytest.raises(RuntimeError, match="already active on the same target"):
+        enable_fault_injection(
+            model,
+            _optimizer(model),
+            campaign=_campaign(
+                _incident(
+                    at=(1,),
+                    lifetime=IncidentLifetime(until="recovery"),
+                    faults=(weight_alias, bias),
+                )
+            ),
+            rank=0,
+        )
+
+    torch.testing.assert_close(model.layers[0].bias, baseline)
 
 
 def test_state_history_is_separate_for_different_scopes() -> None:
@@ -5891,6 +5988,46 @@ def test_runtime_consensus_exception_cleans_active_effects() -> None:
     assert session._closed
     assert session.records[0].status is InjectionStatus.CANCELLED
     assert any("iteration preparation consensus failed" in note for note in caught.value.__notes__)
+    torch.testing.assert_close(model.layers[0].weight, baseline)
+
+
+def test_non_consensus_preparation_failure_cleans_active_effects() -> None:
+    model = TinyModel()
+    baseline = model.layers[0].weight.detach().clone()
+    session = FaultInjectionSession(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="campaign_end"),
+                faults=(
+                    _corruption(
+                        target=_target(surface=FaultSurface.WEIGHT),
+                        scope=FaultScope.SINGLE,
+                    ),
+                ),
+            )
+        ),
+        rank=0,
+        _defer_activation=True,
+    )
+    session._commit_journal_binding()
+    session._start()
+    assert not torch.equal(model.layers[0].weight, baseline)
+
+    with (
+        patch.object(
+            session._local,
+            "sync_history",
+            side_effect=RuntimeError("history preparation failed"),
+        ),
+        pytest.raises(RuntimeError, match="history preparation failed"),
+    ):
+        session._on_step_complete()
+
+    assert session._closed
+    assert session.records[0].status is InjectionStatus.CANCELLED
     torch.testing.assert_close(model.layers[0].weight, baseline)
 
 

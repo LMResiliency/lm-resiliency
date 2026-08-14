@@ -21,10 +21,10 @@ def compare_payloads(
         raise ValueError(
             "injection and localization artifacts belong to different campaign manifests"
         )
+    all_records = [dict(record) for record in injection.get("injections", ())]
+    _validate_scheduled_occurrence_coverage(injection, all_records)
     records = [
-        dict(record)
-        for record in injection.get("injections", ())
-        if record.get("status") != "skipped_probability"
+        dict(record) for record in all_records if record.get("status") != "skipped_probability"
     ]
     expected_fault_ids = _manifest_fault_ids(injection)
     reports = [dict(report) for report in localization.get("reports", ())]
@@ -363,6 +363,89 @@ def _manifest_fault_ids(injection: Mapping[str, Any]) -> dict[str, frozenset[str
             raise ValueError("injection manifest fault_id values must be unique per incident")
         expected[incident_id] = frozenset(fault_ids)
     return expected
+
+
+def _validate_scheduled_occurrence_coverage(
+    injection: Mapping[str, Any],
+    records: Sequence[Mapping[str, Any]],
+) -> None:
+    completed_iterations = _required_integer(
+        injection.get("completed_iterations"),
+        "injection completed_iterations",
+    )
+    if completed_iterations < 0:
+        raise ValueError("injection completed_iterations must be non-negative")
+    manifest = injection.get("manifest")
+    if not isinstance(manifest, Mapping):
+        raise ValueError("injection artifact requires an embedded manifest")
+    incidents = manifest.get("incidents")
+    if isinstance(incidents, (str, bytes)) or not isinstance(incidents, Sequence):
+        raise TypeError("injection manifest incidents must be an array")
+
+    observed: dict[str, set[int]] = {}
+    for record in records:
+        incident_id = record.get("incident_id")
+        if not isinstance(incident_id, str) or not incident_id:
+            raise ValueError("injection records require a non-empty incident_id")
+        iteration = _required_integer(record.get("iteration"), "injection iteration")
+        observed.setdefault(incident_id, set()).add(iteration)
+
+    manifest_ids: set[str] = set()
+    for incident in incidents:
+        if not isinstance(incident, Mapping):
+            raise TypeError("injection manifest incidents must contain objects")
+        incident_id = incident.get("incident_id", incident.get("id"))
+        if not isinstance(incident_id, str) or not incident_id:
+            raise ValueError("injection manifest incident_id must be non-empty")
+        manifest_ids.add(incident_id)
+        trigger = incident.get("trigger")
+        if not isinstance(trigger, Mapping):
+            raise TypeError("injection manifest trigger must be an object")
+        observed_iterations = observed.get(incident_id, set())
+        if "at" in trigger:
+            at = trigger["at"]
+            if isinstance(at, (str, bytes)) or not isinstance(at, Sequence):
+                raise TypeError("injection manifest trigger at must be an array")
+            scheduled = {
+                _required_integer(value, "injection manifest trigger iteration") for value in at
+            }
+            expected_iterations = {
+                iteration for iteration in scheduled if iteration <= completed_iterations
+            }
+            if observed_iterations != expected_iterations:
+                missing = sorted(expected_iterations - observed_iterations)
+                unexpected = sorted(observed_iterations - expected_iterations)
+                raise ValueError(
+                    f"incident {incident_id!r} occurrence coverage mismatch: "
+                    f"missing={missing}, unexpected={unexpected}"
+                )
+            continue
+
+        trigger_range = trigger.get("range")
+        if not isinstance(trigger_range, Mapping):
+            raise TypeError("injection manifest trigger requires at or range")
+        start = _required_integer(trigger_range.get("start"), "trigger range start")
+        end = _required_integer(trigger_range.get("end"), "trigger range end")
+        every = _required_integer(trigger_range.get("every", 1), "trigger range every")
+        if start <= 0 or end < start or every <= 0:
+            raise ValueError("injection manifest trigger range is invalid")
+        last = min(end, completed_iterations)
+        expected_count = 0 if last < start else (last - start) // every + 1
+        unexpected = sorted(
+            iteration
+            for iteration in observed_iterations
+            if iteration < start or iteration > last or (iteration - start) % every != 0
+        )
+        if unexpected or len(observed_iterations) != expected_count:
+            raise ValueError(
+                f"incident {incident_id!r} occurrence coverage mismatch: "
+                f"expected_count={expected_count}, observed_count={len(observed_iterations)}, "
+                f"unexpected={unexpected}"
+            )
+
+    unknown = sorted(set(observed) - manifest_ids)
+    if unknown:
+        raise ValueError(f"injection records reference unknown incidents: {unknown}")
 
 
 def _expected_source_prefix(record: Mapping[str, Any]) -> str | None:

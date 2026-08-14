@@ -34,6 +34,9 @@ local executor:
 SCOUT runs every iteration and emits normalized JSON reports through
 `OrchestrationHooks.report_fault`.
 Iteration 68 is fault-free and verifies that detection returns to a clean state.
+The default run length is derived from each incident's final trigger and bounded
+lifetime, then adds one clean iteration; it never treats a still-active
+multi-iteration effect as the post-fault certification step.
 
 Weight, bias, gradient, and optimizer-state faults can contaminate later cases.
 For those 14 iterations, an evaluation-only optimizer hook restores the last

@@ -260,13 +260,18 @@ def _last_scheduled_iteration(campaign: FaultCampaign) -> int:
     latest: list[int] = []
     for incident in campaign.incidents:
         if incident.trigger.at:
-            latest.append(incident.trigger.at[-1])
-            continue
-        trigger_range = incident.trigger.range
-        if trigger_range is None:
-            raise AssertionError("validated incident has no trigger schedule")
-        steps = (trigger_range.end - trigger_range.start) // trigger_range.every
-        latest.append(trigger_range.start + steps * trigger_range.every)
+            last_trigger = incident.trigger.at[-1]
+        else:
+            trigger_range = incident.trigger.range
+            if trigger_range is None:
+                raise AssertionError("validated incident has no trigger schedule")
+            steps = (trigger_range.end - trigger_range.start) // trigger_range.every
+            last_trigger = trigger_range.start + steps * trigger_range.every
+        if incident.lifetime.iterations is not None:
+            last_trigger += incident.lifetime.iterations - 1
+        elif incident.lifetime.matching_calls is not None:
+            last_trigger += incident.lifetime.matching_calls - 1
+        latest.append(last_trigger)
     return max(latest)
 
 

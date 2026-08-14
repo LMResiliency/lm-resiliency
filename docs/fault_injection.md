@@ -354,6 +354,12 @@ unsupported instead of raising from one distributed rank.
 History observers apply the same rule: an unsupported sparse gradient or module
 value is remembered as unavailable history, and the later stale/duplicate
 occurrence fails locally without raising from the observer hook.
+Empty local tensors are also unsupported. A rejected observation invalidates
+that history slot, so a later dense value cannot reuse evidence from before the
+unsupported iteration.
+Weight and bias collision detection is keyed by the resolved parameter storage,
+not by the selector spelling. A `weight` surface with `parameter: "bias"` and a
+direct `bias` surface therefore cannot overlap on the same tensor.
 
 Stale and duplicate faults retain two observed values only during their
 scheduled collection window. Module and gradient observation starts one
@@ -546,6 +552,8 @@ consensus for the same reason.
 If any runtime preparation, preflight, persistence, rollback, or safe-activation
 collective itself raises, the surviving rank performs bounded local cleanup
 before propagating the collective failure.
+Single-rank and intentionally non-consensus preparation failures follow the
+same cleanup rule.
 
 Built-in delays use an interruptible wait. Recovery or session cleanup signals
 that wait before acquiring the effect lock, so shutdown does not wait for the
@@ -690,6 +698,9 @@ rank-local injection records, as the eight-GPU example does, before certifying
 the complete occurrence. The example comparator also checks the embedded
 manifest and requires every fault action for an occurrence exactly once; a
 partial or duplicate aggregate cannot pass.
+It additionally requires a record for every manifest candidate at or before the
+artifact's `completed_iterations`, including explicit probability skips. Losing
+an entire occurrence therefore cannot reduce the certification denominator.
 
 ## Current Boundaries
 

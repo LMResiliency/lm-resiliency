@@ -24,10 +24,12 @@ def _injection_payload() -> dict:
     return {
         "campaign": "pytorch-production-loop-sdc",
         "manifest_identity": MANIFEST_IDENTITY,
+        "completed_iterations": 4,
         "manifest": {
             "incidents": [
                 {
                     "incident_id": "hidden-output-sdc",
+                    "trigger": {"at": [4], "probability": 1.0},
                     "faults": [{"fault_id": "hidden-output"}],
                 }
             ]
@@ -357,10 +359,20 @@ def test_comparison_fails_selected_unsuccessful_injections(status: str) -> None:
 
 def test_comparison_ignores_explicit_probability_skips() -> None:
     injection = _injection_payload()
+    injection["completed_iterations"] = 5
+    injection["manifest"]["incidents"].append(
+        {
+            "incident_id": "skipped",
+            "trigger": {"at": [5], "probability": 0.0},
+            "faults": [{"fault_id": "skipped-output"}],
+        }
+    )
     injection["injections"].append(
         {
             **injection["injections"][0],
             "occurrence_id": "skipped@5",
+            "incident_id": "skipped",
+            "fault_id": "skipped-output",
             "iteration": 5,
             "status": "skipped_probability",
             "injection_succeeded": False,
@@ -371,6 +383,21 @@ def test_comparison_ignores_explicit_probability_skips() -> None:
 
     assert evaluation["summary"]["passed"]
     assert len(evaluation["evaluations"]) == 1
+
+
+def test_comparison_rejects_a_wholly_missing_scheduled_occurrence() -> None:
+    injection = _injection_payload()
+    injection["completed_iterations"] = 5
+    injection["manifest"]["incidents"].append(
+        {
+            "incident_id": "missing",
+            "trigger": {"at": [5], "probability": 1.0},
+            "faults": [{"fault_id": "missing-output"}],
+        }
+    )
+
+    with pytest.raises(ValueError, match="occurrence coverage mismatch"):
+        compare_payloads(injection, _localization_payload())
 
 
 @pytest.mark.parametrize(
@@ -480,6 +507,42 @@ def test_example_rejects_missing_post_fault_iteration_and_rank() -> None:
 
     with pytest.raises(ValueError, match="unavailable global ranks"):
         _validate_target_ranks(campaign, world_size=7)
+
+
+def test_example_clean_boundary_includes_bounded_incident_lifetime() -> None:
+    campaign = FaultCampaign.from_dict(
+        {
+            "schema_version": 1,
+            "name": "bounded-lifetime",
+            "incidents": [
+                {
+                    "id": "long-window",
+                    "trigger": {"at": [5]},
+                    "lifetime": {"iterations": 10},
+                    "faults": [
+                        {
+                            "id": "output",
+                            "type": "tensor_corruption",
+                            "target": {
+                                "rank": 0,
+                                "module_path": "layers.0",
+                                "surface": "output",
+                            },
+                            "parameters": {
+                                "operation": "sign_flip",
+                                "scope": "single",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert _last_scheduled_iteration(campaign) == 14
+    with pytest.raises(ValueError, match="clean post-fault"):
+        _validate_run(campaign, steps=14)
+    _validate_run(campaign, steps=15)
 
 
 def test_comparison_rejects_mismatched_campaigns() -> None:

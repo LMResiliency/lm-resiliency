@@ -108,6 +108,10 @@ class _History:
         self.latest = local.detach().clone() if indices is None else _read_linear(local, indices)
 
     def reject(self, error: Exception) -> None:
+        self.previous = self.latest
+        self.previous_shape = self.latest_shape
+        self.latest = None
+        self.latest_shape = None
         self.observation_error = str(error)
 
 
@@ -692,9 +696,14 @@ class LocalFaultExecutor:
             )
         else:
             target = self._context.resolve_module(fault.target)
+        target_kind = (
+            "parameter_state"
+            if surface in {FaultSurface.WEIGHT, FaultSurface.BIAS}
+            else surface.value
+        )
         return (
             fault.target.execution_rank,
-            surface.value,
+            target_kind,
             id(target),
         )
 
@@ -1040,6 +1049,8 @@ def _observe_history(
 ) -> None:
     try:
         local = _local_shard(tensor)
+        if local.numel() == 0:
+            raise _UnsupportedTargetTensorError("fault target tensor must be non-empty")
         if local.layout is not torch.strided:
             raise _UnsupportedTargetTensorError(
                 f"fault target tensor layout {local.layout} is not supported"

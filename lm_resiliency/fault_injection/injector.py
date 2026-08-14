@@ -666,6 +666,12 @@ class FaultInjectionSession:
                     )
                 raise boundary_error from preparation_error
         elif preparation_error is not None:
+            cleanup_error = self._cleanup()
+            if cleanup_error is not None:
+                _add_exception_note(
+                    preparation_error,
+                    f"fault injection cleanup also failed: {cleanup_error}",
+                )
             raise preparation_error
         self._enter_iteration_consistently(self._current_iteration)
 
