@@ -41,6 +41,11 @@ consensus at their optimizer boundary. Iterations without a scheduled campaign
 candidate add no distributed synchronization. The optional `rank=` override is
 reserved for non-distributed testing; in an initialized distributed job it must
 match the process's global rank.
+Framework integration wraps the optimizer boundary itself rather than relying
+on a success-only post-step hook. When an optimizer attempt fails on one rank,
+every rank that attempted that scheduled boundary participates in failure
+consensus before cleanup; the failed attempt does not advance the campaign
+clock. The failing rank then re-raises its original optimizer error.
 
 The first arguments match the framework lifecycle:
 
@@ -78,6 +83,9 @@ Pass `completed_iterations=` when native PyTorch or Megatron is enabled after an
 externally managed resume.
 The value must be a non-negative integer; booleans, strings, and fractional
 values are rejected rather than coerced.
+Megatron optimizers commonly return an `update_successful` boolean as the first
+tuple element. A false value represents an overflow or otherwise skipped
+optimizer update and does not advance `training_iteration`.
 Use `"origin": "campaign_start"` when iteration numbers should be relative to
 enablement instead.
 
@@ -670,6 +678,9 @@ old and replacement workers overlap: only one worker may claim a
 file lock, atomic replacement, and a parent-directory `fsync` before
 acknowledging a claim; `MemoryCampaignStateStore` provides the same contract
 within one process.
+The exact `state_store` object passed by the caller is retained even when the
+object defines falsey truth-value semantics; only `None` selects the default
+in-memory store.
 Both journals passed to `compare_and_swap` must name the same campaign;
 cross-campaign updates are rejected before storage is modified.
 For a distributed enablement, the initial manifest binding is persisted only
@@ -735,6 +746,9 @@ the same `occurrence_id`. This is required when one incident contains different
 failure kinds or when the resiliency system emits separate reports for its
 actions. Each expected kind must correlate with its injected rank or resource;
 matching only the aggregate sets is insufficient.
+When a kind contains actions that specify both rank and resource, the exact
+`(rank, resource)` pairs must also match within that kind. Correct rank and
+resource projections with the pairs swapped are not successful attribution.
 
 Reports contain:
 

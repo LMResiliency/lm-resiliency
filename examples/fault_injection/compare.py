@@ -299,7 +299,8 @@ def _evaluate_occurrence(
         observed_rank_resource_pairs_by_kind == expected_rank_resource_pairs_by_kind
     )
     detected_action_count = sum(
-        (
+        _record_injection_succeeded(record)
+        and (
             (expected_rank := _expected_action_rank(expected_by_fault_id[str(record["fault_id"])]))
             is None
             or expected_rank
@@ -773,6 +774,29 @@ def _expected_action_source_prefix(action: Mapping[str, Any]) -> str | None:
     module_path = str(target.get("module_path", ""))
     if ".layers." in f".{module_path}.":
         return "hidden."
+    pieces = tuple(piece for piece in module_path.lower().split(".") if piece)
+    if any(piece in {"lm_head", "output_layer"} for piece in pieces):
+        return "output."
+    if any(
+        piece
+        in {
+            "embed_tokens",
+            "token_embedding",
+            "token_embeddings",
+            "tok_embedding",
+            "tok_embeddings",
+            "word_embedding",
+            "word_embeddings",
+            "wte",
+        }
+        for piece in pieces
+    ):
+        return "embedding."
+    if module_path:
+        raise ValueError(
+            f"cannot infer a SCOUT source prefix from explicit module_path {module_path!r}; "
+            "add a logical component"
+        )
     return None
 
 

@@ -246,19 +246,16 @@ class TrainingContext:
                 return partition
         return parameter
 
-    def register_step_callback(self, callback: Callable[[], None]) -> None:
-        """Run a callback after every completed framework optimizer boundary."""
+    def register_step_callback(
+        self,
+        callback: Callable[[BaseException | None], None],
+    ) -> None:
+        """Report every attempted optimizer boundary, including failures."""
         if self.framework == "deepspeed":
             if self.is_pipeline_engine:
                 self._register_deepspeed_pipeline_callback(callback)
             else:
                 self._register_deepspeed_step_callback(callback)
-            return
-
-        register = getattr(self.optimizer, "register_step_post_hook", None)
-        if callable(register):
-            handle = register(lambda *_args, **_kwargs: callback())
-            self._cleanups.append(handle.remove)
             return
 
         owner = self.step_owner
@@ -268,8 +265,13 @@ class TrainingContext:
             raise TypeError(f"{self.framework} optimizer boundary {attribute!r} is not callable")
 
         def wrapped(*args: Any, **kwargs: Any) -> Any:
-            result = original(*args, **kwargs)
-            callback()
+            try:
+                result = original(*args, **kwargs)
+            except BaseException as error:
+                _notify_failed_step(callback, error)
+                raise
+            if self.framework != "megatron" or _megatron_update_succeeded(result):
+                callback(None)
             return result
 
         setattr(owner, attribute, wrapped)
@@ -392,7 +394,10 @@ class TrainingContext:
             return normalized == self.models and adapter_optimizer is self.optimizer
         return False
 
-    def _register_deepspeed_step_callback(self, callback: Callable[[], None]) -> None:
+    def _register_deepspeed_step_callback(
+        self,
+        callback: Callable[[BaseException | None], None],
+    ) -> None:
         owner = self.step_owner
         attribute = self.step_attribute
         original = getattr(owner, attribute, None)
@@ -402,10 +407,14 @@ class TrainingContext:
 
         def wrapped(*args: Any, **kwargs: Any) -> Any:
             before = int(getattr(owner, counter_attribute))
-            result = original(*args, **kwargs)
+            try:
+                result = original(*args, **kwargs)
+            except BaseException as error:
+                _notify_failed_step(callback, error)
+                raise
             after = int(getattr(owner, counter_attribute))
             for _ in range(max(0, after - before)):
-                callback()
+                callback(None)
             return result
 
         setattr(owner, attribute, wrapped)
@@ -416,7 +425,10 @@ class TrainingContext:
 
         self._cleanups.append(restore)
 
-    def _register_deepspeed_pipeline_callback(self, callback: Callable[[], None]) -> None:
+    def _register_deepspeed_pipeline_callback(
+        self,
+        callback: Callable[[BaseException | None], None],
+    ) -> None:
         engine = self.step_owner
         instruction_map = getattr(engine, "_INSTRUCTION_MAP", None)
         if not isinstance(instruction_map, dict):
@@ -436,8 +448,12 @@ class TrainingContext:
         local_map = dict(instruction_map)
 
         def wrapped_instruction(bound_engine: Any, *args: Any, **kwargs: Any) -> Any:
-            result = original_instruction(bound_engine, *args, **kwargs)
-            callback()
+            try:
+                result = original_instruction(bound_engine, *args, **kwargs)
+            except BaseException as error:
+                _notify_failed_step(callback, error)
+                raise
+            callback(None)
             return result
 
         local_map[optimizer_instruction] = wrapped_instruction
@@ -465,6 +481,26 @@ class TrainingContext:
                     first_error = error
         if first_error is not None:
             raise first_error
+
+
+def _notify_failed_step(
+    callback: Callable[[BaseException | None], None],
+    error: BaseException,
+) -> None:
+    try:
+        callback(error)
+    except BaseException as callback_error:
+        if callback_error is not error:
+            _add_exception_note(
+                error,
+                f"fault injection optimizer-boundary handling also failed: {callback_error}",
+            )
+
+
+def _megatron_update_succeeded(result: Any) -> bool:
+    if isinstance(result, tuple) and result and isinstance(result[0], bool):
+        return result[0]
+    return True
 
 
 def resolve_training_context(

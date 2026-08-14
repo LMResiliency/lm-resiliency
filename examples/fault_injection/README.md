@@ -93,12 +93,17 @@ Explicit probability skips are excluded; pending, failed, or cancelled records
 remain in the evaluation and fail the campaign. Correlated incidents remain one
 detected occurrence, while `injected_actions`, `detected_actions`, and
 `localized_actions` account for every successful rank-local fault action inside
-those incidents.
+those incidents. An unsuccessful injection record never contributes to
+`detected_actions`, even when a localization report names the same target.
 Dense catalog reports use `layer_id: -1` when several replay recipes are
 aggregated; in that case the comparison uses the reported `hidden.*`,
 `embedding.*`, or `output.*` source as component-localization evidence.
 That evidence remains associated with the ranks or resources in the individual
 SCOUT report, so valid source names swapped between targets fail localization.
+Explicit module paths containing `lm_head` or `output_layer` map to
+`output.*`; token-embedding paths such as `embed_tokens`, `word_embeddings`, or
+`wte` map to `embedding.*`. Other explicit paths should also include a logical
+`component` so the comparator can derive the expected SCOUT source family.
 Aggregate straggler reports are tied to the configured replay catalog.
 Re-run the comparison independently with:
 

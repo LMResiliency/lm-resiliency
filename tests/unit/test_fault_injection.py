@@ -3330,6 +3330,73 @@ def test_framework_inference_and_automatic_step_boundaries() -> None:
         session.close()
 
 
+def test_failed_pytorch_optimizer_step_reaches_boundary_consensus() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+
+    def fail_step(*_args, **_kwargs):
+        raise RuntimeError("optimizer update failed")
+
+    optimizer.step = fail_step  # type: ignore[method-assign]
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(_incident(at=(2,))),
+        rank=0,
+    )
+    stages: list[tuple[str, BaseException | None]] = []
+
+    def gather(error: BaseException | None, stage: str) -> list[str]:
+        stages.append((stage, error))
+        return ["rank 0: RuntimeError: optimizer update failed"]
+
+    with (
+        patch(
+            "lm_resiliency.fault_injection.injector._distributed_world_size",
+            return_value=2,
+        ),
+        patch.object(session, "_gather_runtime_rank_errors", side_effect=gather),
+        pytest.raises(RuntimeError, match="optimizer update failed") as caught,
+    ):
+        optimizer.step()
+
+    assert stages == [("optimizer step", caught.value)]
+    assert session.completed_iterations == 0
+    assert session._closed
+    assert any("fault injection optimizer step failed" in note for note in caught.value.__notes__)
+
+
+def test_megatron_clock_ignores_skipped_optimizer_updates() -> None:
+    class MegatronOptimizer(torch.optim.SGD):
+        update_succeeded = False
+
+        def step(self, closure=None):
+            if self.update_succeeded:
+                super().step(closure)
+            return (self.update_succeeded, None, None)
+
+    model = TinyModel()
+    optimizer = MegatronOptimizer(model.parameters(), lr=0.0)
+    session = enable_fault_injection(
+        [Wrapper(model)],
+        optimizer,
+        campaign=_campaign(_incident(at=(2,))),
+        rank=0,
+    )
+
+    optimizer.step()
+
+    assert session.completed_iterations == 0
+    assert session.records == ()
+
+    optimizer.update_succeeded = True
+    optimizer.step()
+
+    assert session.completed_iterations == 1
+    assert session.records[0].status is InjectionStatus.PENDING
+    session.close()
+
+
 def test_deepspeed_pipeline_uses_optimizer_instruction_map() -> None:
     engine = PipelineEngine(TinyModel())
     original_map = engine._INSTRUCTION_MAP
@@ -5669,6 +5736,98 @@ def test_mixed_kind_correlated_faults_require_per_kind_target_evidence() -> None
     session.close()
 
 
+def test_mixed_kinds_preserve_rank_resource_pairs_within_each_kind() -> None:
+    events: list[tuple[str, str]] = []
+    executor = _recording_executor(
+        {FailureType.RESOURCE_UNAVAILABLE, FailureType.TIMEOUT},
+        events,
+    )
+    faults = (
+        _external_fault(
+            FailureType.RESOURCE_UNAVAILABLE,
+            fault_id="process-rank-zero",
+            resource="gpu-a",
+            rank=0,
+        ),
+        _external_fault(
+            FailureType.RESOURCE_UNAVAILABLE,
+            fault_id="process-rank-one",
+            resource="gpu-b",
+            rank=1,
+        ),
+        _external_fault(
+            FailureType.TIMEOUT,
+            fault_id="timeout-rank-zero",
+            resource="gpu-b",
+            rank=0,
+        ),
+        _external_fault(
+            FailureType.TIMEOUT,
+            fault_id="timeout-rank-one",
+            resource="gpu-a",
+            rank=1,
+        ),
+    )
+    campaign = _campaign(_incident(at=(1,), faults=faults))
+    rank_zero_model = TinyModel()
+    rank_one_model = TinyModel()
+    rank_zero = enable_fault_injection(
+        rank_zero_model,
+        _optimizer(rank_zero_model),
+        campaign=campaign,
+        executors=(executor,),
+        rank=0,
+    )
+    rank_one = enable_fault_injection(
+        rank_one_model,
+        _optimizer(rank_one_model),
+        campaign=campaign,
+        executors=(executor,),
+        rank=1,
+    )
+    rank_zero._records.extend(rank_one.records)
+
+    swapped = rank_zero.evaluate(
+        [
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_ranks=(0,),
+                failed_resources=("gpu-b",),
+                kind="process_failure",
+            ),
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_ranks=(1,),
+                failed_resources=("gpu-a",),
+                kind="process_failure",
+            ),
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_ranks=(0,),
+                failed_resources=("gpu-a",),
+                kind="straggler",
+            ),
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_ranks=(1,),
+                failed_resources=("gpu-b",),
+                kind="straggler",
+            ),
+        ]
+    ).evaluations[0]
+
+    assert swapped.expected_ranks == (0, 1)
+    assert swapped.expected_resources == ("gpu-a", "gpu-b")
+    assert swapped.kind_matches is False
+    assert not swapped.localized
+    rank_zero.close()
+    rank_one.close()
+
+
 def test_mixed_kind_components_require_kind_component_association() -> None:
     events: list[tuple[str, str]] = []
     executor = _recording_executor(
@@ -7272,6 +7431,26 @@ def test_memory_state_store_rejects_cross_campaign_compare_and_swap() -> None:
 
     assert store.load("campaign-a").to_dict() == expected.to_dict()
     assert store.load("campaign-b").to_dict() == updated.to_dict()
+
+
+def test_falsey_state_store_is_preserved() -> None:
+    class FalseyStore(MemoryCampaignStateStore):
+        def __bool__(self) -> bool:
+            return False
+
+    model = TinyModel()
+    store = FalseyStore()
+    session = FaultInjectionSession(
+        model,
+        _optimizer(model),
+        campaign=_campaign(_incident(at=(2,))),
+        state_store=store,
+        rank=0,
+        _defer_activation=True,
+    )
+
+    assert session._state_store is store
+    session.close()
 
 
 def test_distributed_partial_attempt_save_restores_successful_rank_journal() -> None:

@@ -706,6 +706,44 @@ def test_comparison_correlates_source_prefixes_with_failed_targets() -> None:
     assert not occurrence["localized"]
 
 
+@pytest.mark.parametrize(
+    ("module_path", "expected_source", "wrong_source"),
+    [
+        ("lm_head", "output.output", "hidden.output"),
+        ("model.embed_tokens", "embedding.output", "hidden.output"),
+    ],
+)
+def test_comparison_infers_source_prefix_from_explicit_module_path(
+    module_path: str,
+    expected_source: str,
+    wrong_source: str,
+) -> None:
+    injection = _injection_payload()
+    target = {
+        "rank": 0,
+        "model_part": 0,
+        "module_path": module_path,
+        "surface": "output",
+    }
+    injection["manifest"]["incidents"][0]["faults"][0]["target"] = copy.deepcopy(target)
+    injection["injections"][0]["target"] = copy.deepcopy(target)
+    localization = _localization_payload()
+    localization["reports"][0]["sources"] = [wrong_source]
+    _refresh_manifest_identity(injection, localization)
+
+    wrong = compare_payloads(injection, localization)["evaluations"][0]
+
+    assert not wrong["source_match"]
+    assert not wrong["localized"]
+
+    localization["reports"][0]["sources"] = [expected_source]
+    correct = compare_payloads(injection, localization)["evaluations"][0]
+
+    assert correct["source_match"]
+    assert correct["source_target_match"]
+    assert correct["localized"]
+
+
 def test_comparison_preserves_rank_resource_pairs() -> None:
     injection = _injection_payload()
     first_action = injection["manifest"]["incidents"][0]["faults"][0]

@@ -282,7 +282,7 @@ class FaultInjectionSession:
             raise ValueError("completed_iterations must be non-negative")
         self._completed_iterations = completed
         self._current_iteration = completed + 1
-        self._state_store = state_store or MemoryCampaignStateStore()
+        self._state_store = MemoryCampaignStateStore() if state_store is None else state_store
         loaded_journal = self._state_store.load(campaign.name)
         self._journal_base = CampaignJournal.from_dict(loaded_journal.to_dict())
         self._journal = CampaignJournal.from_dict(loaded_journal.to_dict())
@@ -627,60 +627,72 @@ class FaultInjectionSession:
             candidates.append((incident, attempt_count + 1))
         return tuple(candidates)
 
-    def _on_step_complete(self) -> None:
+    def _on_step_complete(self, optimizer_error: BaseException | None = None) -> None:
         with self._lifecycle_lock:
-            self._on_step_complete_locked()
+            self._on_step_complete_locked(optimizer_error)
 
-    def _on_step_complete_locked(self) -> None:
+    def _on_step_complete_locked(
+        self,
+        optimizer_error: BaseException | None = None,
+    ) -> None:
         if self._closed:
+            if optimizer_error is not None:
+                raise optimizer_error
             return
         finished = self._current_iteration
         next_iteration = finished + 1
         needs_consensus = _distributed_world_size() > 1 and self._requires_boundary_consensus(
             finished, next_iteration
         )
-        preparation_error: BaseException | None = None
-        try:
-            expiration_error: BaseException | None = None
-            for active in self._active:
-                lifetime = active.incident.lifetime
-                if (
-                    not active.done
-                    and lifetime.iterations is not None
-                    and finished >= active.start_iteration + lifetime.iterations - 1
-                ):
-                    try:
-                        active.complete()
-                    except BaseException as error:
-                        if expiration_error is None:
-                            expiration_error = error
-            self._discard_completed()
-            if expiration_error is not None:
-                raise expiration_error
-            self._completed_iterations = finished
-            self._current_iteration = next_iteration
-            self._local.sync_history(self._history_faults_for(self._current_iteration))
-        except BaseException as error:
-            preparation_error = error
+        preparation_error = optimizer_error
+        if optimizer_error is None:
+            try:
+                expiration_error: BaseException | None = None
+                for active in self._active:
+                    lifetime = active.incident.lifetime
+                    if (
+                        not active.done
+                        and lifetime.iterations is not None
+                        and finished >= active.start_iteration + lifetime.iterations - 1
+                    ):
+                        try:
+                            active.complete()
+                        except BaseException as error:
+                            if expiration_error is None:
+                                expiration_error = error
+                self._discard_completed()
+                if expiration_error is not None:
+                    raise expiration_error
+                self._completed_iterations = finished
+                self._current_iteration = next_iteration
+                self._local.sync_history(self._history_faults_for(self._current_iteration))
+            except BaseException as error:
+                preparation_error = error
         if needs_consensus:
+            stage = "optimizer step" if optimizer_error is not None else "iteration preparation"
             failures = self._gather_runtime_rank_errors(
                 preparation_error,
-                "iteration preparation",
+                stage,
             )
             if failures:
                 cleanup_error = self._cleanup()
                 boundary_error = RuntimeError(
-                    "fault injection iteration preparation failed; " + "; ".join(failures)
+                    f"fault injection {stage} failed; " + "; ".join(failures)
                 )
                 if cleanup_error is not None:
                     _add_exception_note(
                         boundary_error,
                         f"fault injection cleanup also failed: {cleanup_error}",
                     )
-                if preparation_error is not None and not isinstance(
-                    preparation_error,
-                    Exception,
-                ):
+                if optimizer_error is not None:
+                    _add_exception_note(optimizer_error, str(boundary_error))
+                    if cleanup_error is not None:
+                        _add_exception_note(
+                            optimizer_error,
+                            f"fault injection cleanup also failed: {cleanup_error}",
+                        )
+                    raise optimizer_error
+                if preparation_error is not None and not isinstance(preparation_error, Exception):
                     _add_exception_note(preparation_error, str(boundary_error))
                     if cleanup_error is not None:
                         _add_exception_note(
@@ -1839,16 +1851,9 @@ def _evaluate_occurrence(
 def _expected_targets_for_kind(
     incident: FaultIncident,
     kind: str,
-) -> tuple[frozenset[int], frozenset[str]]:
+) -> frozenset[tuple[int | None, str | None]]:
     faults = tuple(fault for fault in incident.faults if fault.expected_kind == kind)
-    return (
-        frozenset(
-            expected_rank
-            for fault in faults
-            if (expected_rank := _expected_rank(fault)) is not None
-        ),
-        frozenset(fault.target.resource for fault in faults if fault.target.resource is not None),
-    )
+    return _expected_target_associations(faults)
 
 
 def _expected_rank(fault: FaultSpec) -> int | None:
@@ -1862,12 +1867,9 @@ def _expected_rank(fault: FaultSpec) -> int | None:
 def _reported_targets_for_kind(
     results: tuple[LocalizationResult, ...],
     kind: str,
-) -> tuple[frozenset[int], frozenset[str]]:
+) -> frozenset[tuple[int | None, str | None]]:
     matching = tuple(result for result in results if result.kind == kind)
-    return (
-        frozenset(rank for result in matching for rank in result.failed_ranks),
-        frozenset(resource for result in matching for resource in result.failed_resources),
-    )
+    return _reported_target_associations(matching)
 
 
 def _expected_targets_for_component(
