@@ -18,7 +18,7 @@ def compare_payloads(
     records = [
         dict(record)
         for record in injection.get("injections", ())
-        if record.get("injection_succeeded")
+        if record.get("status") != "skipped_probability"
     ]
     reports = [dict(report) for report in localization.get("reports", ())]
     grouped: dict[str, list[dict[str, Any]]] = {}
@@ -37,10 +37,12 @@ def compare_payloads(
         int(evaluation["action_count"]) for evaluation in evaluations if evaluation["localized"]
     )
     summary = {
-        "injected_occurrences": len(evaluations),
+        "injected_occurrences": sum(
+            bool(evaluation["injection_succeeded"]) for evaluation in evaluations
+        ),
         "detected_occurrences": sum(bool(item["detected"]) for item in evaluations),
         "localized_occurrences": localized,
-        "injected_actions": len(records),
+        "injected_actions": sum(bool(record.get("injection_succeeded")) for record in records),
         "detected_actions": detected_actions,
         "localized_actions": localized_actions,
         "passed": bool(evaluations) and localized == len(evaluations),
@@ -86,6 +88,9 @@ def _evaluate_occurrence(
     records: Sequence[Mapping[str, Any]],
     reports: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
+    injection_succeeded = bool(records) and all(
+        bool(record.get("injection_succeeded")) for record in records
+    )
     iterations = {int(record["iteration"]) for record in records}
     if len(iterations) != 1:
         raise ValueError(f"occurrence {occurrence_id!r} spans multiple training iterations")
@@ -142,12 +147,19 @@ def _evaluate_occurrence(
         layer_match = False
         layer_evidence = "missing"
     detected = bool(at_iteration)
-    localized = detected and kind_match and rank_match and layer_match and source_match
+    localized = (
+        injection_succeeded
+        and detected
+        and kind_match
+        and rank_match
+        and layer_match
+        and source_match
+    )
     return {
         "occurrence_id": occurrence_id,
         "iteration": iteration,
         "action_count": len(records),
-        "injection_succeeded": True,
+        "injection_succeeded": injection_succeeded,
         "detected": detected,
         "localized": localized,
         "expected": {

@@ -49,10 +49,13 @@ The example writes:
 | `localization.json` | JSON-ready failures reported by `enable_resiliency()` |
 | `evaluation.json` | Occurrence- and action-level detection/localization counts plus rank, failure-kind, and SCOUT component-source comparison |
 
-The process exits unsuccessfully unless every successfully injected occurrence
-is detected and localized. Correlated incidents remain one detected occurrence,
-while `injected_actions`, `detected_actions`, and `localized_actions` account for
-every rank-local fault action inside those incidents.
+The process exits unsuccessfully unless every selected action is injected
+successfully and every resulting occurrence is detected and localized.
+Explicit probability skips are excluded; pending, failed, or cancelled records
+remain in the evaluation and fail the campaign. Correlated incidents remain one
+detected occurrence, while `injected_actions`, `detected_actions`, and
+`localized_actions` account for every successful rank-local fault action inside
+those incidents.
 Dense catalog reports use `layer_id: -1` when several replay recipes are
 aggregated; in that case the comparison uses the reported `hidden.*`,
 `embedding.*`, or `output.*` source as component-localization evidence.

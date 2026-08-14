@@ -31,9 +31,11 @@ No per-iteration trigger is required.
 The integration observes framework optimizer boundaries and arms incidents at the
 arbitrary training iterations specified by the campaign.
 In a distributed job, every rank completes campaign preparation and capability
-validation before any current-iteration incident is armed. This prevents an
+validation before any current-iteration incident is armed. Preparation rejects
+target ranks outside the process-group world size and requires every rank to
+report the same canonical manifest and `current_iteration`. This prevents an
 iteration-one process, communication, or cluster fault from interrupting
-enablement consensus.
+enablement consensus or running with divergent schedules.
 
 The first arguments match the framework lifecycle:
 
@@ -232,7 +234,7 @@ Use exactly one lifetime field:
 
 | Field | Value | Meaning |
 |---|---|---|
-| `matching_calls` | Positive integer | Apply the fault to that many matching target operations, then remove it. Not valid for `optimizer_state`; use `iterations` or `until` so the state remains modified when the optimizer consumes it. |
+| `matching_calls` | Positive integer | Apply the fault to that many matching target operations, then remove it. Not valid for `weight`, `bias`, or `optimizer_state`; use `iterations` or `until` so state mutations remain active through backward and the optimizer boundary. |
 | `iterations` | Positive integer | Keep the fault active for that many training iterations, including its trigger iteration. |
 | `until` | `recovery` | Keep it active until `FaultInjectionSession.notify_recovery()`. |
 | `until` | `replacement` | Keep it active until `FaultInjectionSession.notify_replacement()`. |
@@ -296,6 +298,13 @@ component should remain available as a fallback and for localization comparison.
 | `parameter` | Parameter, gradient, or optimizer-state target | Surface-dependent | Exact parameter attribute, commonly `weight` or `bias`. |
 | `state_key` | `optimizer_state` | First suitable tensor | Exact optimizer-state entry, such as `exp_avg` or `exp_avg_sq`. |
 | `delay_ms` | `delay` | Required | Positive delay in milliseconds. |
+
+Stale and duplicate faults retain two observed values only during their
+scheduled collection window. Module and gradient observation starts one
+training iteration before a candidate and is removed at the optimizer boundary
+after the occurrence. State surfaces are snapshotted over the equivalent
+two-boundary window. A stale or duplicate incident scheduled for the first
+iteration fails verification because no prior value exists.
 
 Custom executors receive the full `target` and `parameters` objects unchanged.
 They may define additional fields, but should validate those fields before the
@@ -496,9 +505,11 @@ Reports contain:
 - attribution accuracy and latency.
 
 An occurrence is `localized` only when injection succeeded, detection was
-reported, and the expected ranks and resources match. If a localization result
-also supplies `kind` or `components`, that evidence must match the injected
-fault; omit optional evidence when the resiliency system does not report it.
+reported, and the reported rank and resource sets exactly match the expected
+sets. Extra targets are attribution errors, not successful localization. If a
+localization result also supplies `kind` or `components`, that evidence must
+match the injected fault; omit optional evidence when the resiliency system does
+not report it.
 
 Reports are rank-local.
 A distributed campaign runner or training manager should collect reports from all

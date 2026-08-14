@@ -188,6 +188,43 @@ def test_comparison_counts_correlated_rank_local_actions() -> None:
     assert evaluation["evaluations"][0]["action_count"] == 2
 
 
+@pytest.mark.parametrize("status", ["pending", "failed", "cancelled"])
+def test_comparison_fails_selected_unsuccessful_injections(status: str) -> None:
+    injection = _injection_payload()
+    injection["injections"][0].update(
+        {
+            "status": status,
+            "injection_succeeded": False,
+        }
+    )
+
+    evaluation = compare_payloads(injection, _localization_payload())
+
+    assert not evaluation["summary"]["passed"]
+    assert evaluation["summary"]["injected_occurrences"] == 0
+    assert evaluation["summary"]["injected_actions"] == 0
+    assert not evaluation["evaluations"][0]["injection_succeeded"]
+    assert not evaluation["evaluations"][0]["localized"]
+
+
+def test_comparison_ignores_explicit_probability_skips() -> None:
+    injection = _injection_payload()
+    injection["injections"].append(
+        {
+            **injection["injections"][0],
+            "occurrence_id": "skipped@5",
+            "iteration": 5,
+            "status": "skipped_probability",
+            "injection_succeeded": False,
+        }
+    )
+
+    evaluation = compare_payloads(injection, _localization_payload())
+
+    assert evaluation["summary"]["passed"]
+    assert len(evaluation["evaluations"]) == 1
+
+
 @pytest.mark.parametrize(
     ("changes", "mismatch"),
     [

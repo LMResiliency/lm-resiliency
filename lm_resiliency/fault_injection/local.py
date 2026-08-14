@@ -178,7 +178,7 @@ class LocalFaultExecutor:
         self._context = context
         self._rank = rank
         self._history: dict[tuple[Any, ...], _History] = {}
-        self._observer_handles: list[Any] = []
+        self._observer_handles: dict[tuple[Any, ...], list[Any]] = {}
         self._active_keys: set[tuple[Any, ...]] = set()
 
     def supports(self, fault: FaultSpec) -> bool:
@@ -193,8 +193,27 @@ class LocalFaultExecutor:
             return surface in _MODULE_DELAY_SURFACES
         return False
 
-    def prepare_history(self, faults: tuple[FaultSpec, ...]) -> None:
-        """Install observers required by stale and duplicate actions."""
+    def validate_targets(self, faults: tuple[FaultSpec, ...]) -> None:
+        """Resolve local targets without installing hooks or cloning tensors."""
+        for fault in faults:
+            if fault.target.execution_rank != self._rank or not self.supports(fault):
+                continue
+            if fault.target.surface in {
+                FaultSurface.WEIGHT,
+                FaultSurface.BIAS,
+                FaultSurface.GRADIENT,
+                FaultSurface.OPTIMIZER_STATE,
+            }:
+                self._context.resolve_parameter(
+                    fault.target,
+                    parameter_name=_parameter_name(fault),
+                )
+            else:
+                self._context.resolve_module(fault.target)
+
+    def sync_history(self, faults: tuple[FaultSpec, ...]) -> None:
+        """Collect stale-state history only around upcoming scheduled faults."""
+        desired: dict[tuple[Any, ...], FaultSpec] = {}
         for fault in faults:
             if fault.target.execution_rank != self._rank:
                 continue
@@ -203,31 +222,31 @@ class LocalFaultExecutor:
             if not self.supports(fault):
                 continue
             key = _target_key(fault)
+            desired.setdefault(key, fault)
+
+        for key in set(self._history) - set(desired):
+            for handle in self._observer_handles.pop(key, ()):
+                handle.remove()
+            self._history.pop(key, None)
+
+        for key, fault in desired.items():
             if key in self._history:
                 continue
             self._history[key] = _History()
             self._install_history_observer(fault, key)
 
-    def refresh_state_history(self, faults: tuple[FaultSpec, ...]) -> None:
-        """Capture state surfaces after a completed optimizer iteration."""
-        for fault in faults:
-            if fault.target.execution_rank != self._rank:
-                continue
-            if fault.type not in {FailureType.STALE_STATE, FailureType.DUPLICATE}:
-                continue
+        for key, fault in desired.items():
             if fault.target.surface not in {
                 FaultSurface.WEIGHT,
                 FaultSurface.BIAS,
                 FaultSurface.OPTIMIZER_STATE,
             }:
                 continue
-            key = _target_key(fault)
-            history = self._history.setdefault(key, _History())
             try:
                 tensor = self._state_tensor(fault)
             except LookupError:
                 continue
-            history.observe(tensor)
+            self._history[key].observe(tensor)
 
     def activate(
         self,
@@ -271,8 +290,9 @@ class LocalFaultExecutor:
         return effect
 
     def close(self) -> None:
-        for handle in self._observer_handles:
-            handle.remove()
+        for handles in self._observer_handles.values():
+            for handle in handles:
+                handle.remove()
         self._observer_handles.clear()
         self._history.clear()
         self._active_keys.clear()
@@ -492,7 +512,7 @@ class LocalFaultExecutor:
                     history.observe(tensor)
                 return None
 
-            self._observer_handles.append(
+            self._observer_handles.setdefault(key, []).append(
                 module.register_forward_pre_hook(observe_input, with_kwargs=True)
             )
             return
@@ -509,7 +529,7 @@ class LocalFaultExecutor:
                     history.observe(tensor)
                 return None
 
-            self._observer_handles.append(
+            self._observer_handles.setdefault(key, []).append(
                 module.register_forward_hook(
                     observe_output,
                     with_kwargs=True,
@@ -527,7 +547,9 @@ class LocalFaultExecutor:
                 history.observe(gradient)
                 return None
 
-            self._observer_handles.append(parameter.register_hook(observe_gradient))
+            self._observer_handles.setdefault(key, []).append(
+                parameter.register_hook(observe_gradient)
+            )
 
 
 def _transform_tree(

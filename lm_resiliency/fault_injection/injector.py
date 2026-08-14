@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import random
 import time
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from lm_resiliency.fault_injection.config import (
     FailureType,
     FaultCampaign,
     FaultIncident,
+    FaultSpec,
     RetriggerPolicy,
 )
 from lm_resiliency.fault_injection.executors import (
@@ -141,8 +143,8 @@ class FaultInjectionSession:
 
         try:
             self._validate_capabilities()
-            self._local.prepare_history(self._faults)
-            self._local.refresh_state_history(self._faults)
+            self._local.validate_targets(self._faults)
+            self._local.sync_history(self._history_faults_for(self._current_iteration))
             self._context.register_step_callback(self._on_step_complete)
             register_automatic_cleanup(self)
             if not _defer_activation:
@@ -308,8 +310,8 @@ class FaultInjectionSession:
                 active.complete()
         self._discard_completed()
         self._completed_iterations = finished
-        self._local.refresh_state_history(self._faults)
         self._current_iteration = finished + 1
+        self._local.sync_history(self._history_faults_for(self._current_iteration))
         self._enter_iteration(self._current_iteration)
 
     def _enter_iteration(self, iteration: int) -> None:
@@ -552,6 +554,15 @@ class FaultInjectionSession:
     def _discard_completed(self) -> None:
         self._active = [active for active in self._active if not active.done]
 
+    def _history_faults_for(self, iteration: int) -> tuple[FaultSpec, ...]:
+        return tuple(
+            fault
+            for incident in self.campaign.incidents
+            if incident.trigger.matches(iteration) or incident.trigger.matches(iteration + 1)
+            for fault in incident.faults
+            if fault.type in {FailureType.STALE_STATE, FailureType.DUPLICATE}
+        )
+
 
 def enable_fault_injection(
     target: Any,
@@ -574,22 +585,47 @@ def enable_fault_injection(
     if not dist.is_available() or not dist.is_initialized() or dist.get_world_size() <= 1:
         return FaultInjectionSession(target, optimizer, **arguments)
 
+    world_size = dist.get_world_size()
     arguments["_defer_activation"] = True
     session: FaultInjectionSession | None = None
     local_error: Exception | None = None
+    campaign_identity: str | None = None
     try:
+        _validate_distributed_target_ranks(campaign, world_size)
+        campaign_identity = _campaign_identity(campaign)
         session = FaultInjectionSession(target, optimizer, **arguments)
     except Exception as error:
         local_error = error
 
     error_summary = None if local_error is None else f"{type(local_error).__name__}: {local_error}"
-    gathered_errors: list[str | None] = [None] * dist.get_world_size()
-    dist.all_gather_object(gathered_errors, error_summary)
-    failures = [
-        f"rank {failed_rank}: {error}"
-        for failed_rank, error in enumerate(gathered_errors)
-        if error is not None
-    ]
+    preparation = {
+        "error": error_summary,
+        "campaign_identity": campaign_identity,
+        "current_iteration": None if session is None else session.current_iteration,
+    }
+    gathered_preparations: list[dict[str, Any] | None] = [None] * world_size
+    dist.all_gather_object(gathered_preparations, preparation)
+    failures: list[str] = []
+    for prepared_rank, prepared in enumerate(gathered_preparations):
+        if not isinstance(prepared, Mapping):
+            failures.append(
+                f"rank {prepared_rank} returned invalid fault injection preparation state"
+            )
+        elif prepared["error"] is not None:
+            failures.append(f"rank {prepared_rank}: {prepared['error']}")
+    if not failures:
+        reference = gathered_preparations[0]
+        assert isinstance(reference, Mapping)
+        for prepared_rank, prepared in enumerate(gathered_preparations[1:], start=1):
+            assert isinstance(prepared, Mapping)
+            if prepared["campaign_identity"] != reference["campaign_identity"]:
+                failures.append(f"rank {prepared_rank} campaign manifest differs from rank 0")
+            if prepared["current_iteration"] != reference["current_iteration"]:
+                failures.append(
+                    f"rank {prepared_rank} current_iteration "
+                    f"{prepared['current_iteration']} differs from rank 0 "
+                    f"{reference['current_iteration']}"
+                )
     if failures:
         cleanup_error: Exception | None = None
         if session is not None:
@@ -632,6 +668,31 @@ def _add_exception_note(error: Exception, note: str) -> None:
         error.__notes__ = [note]
     else:
         notes.append(note)
+
+
+def _campaign_identity(campaign: FaultCampaign) -> str:
+    manifest = json.dumps(
+        campaign.to_dict(),
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(manifest.encode("utf-8")).hexdigest()
+
+
+def _validate_distributed_target_ranks(campaign: FaultCampaign, world_size: int) -> None:
+    invalid = sorted(
+        {
+            fault.target.execution_rank
+            for incident in campaign.incidents
+            for fault in incident.faults
+            if fault.target.execution_rank >= world_size
+        }
+    )
+    if invalid:
+        raise ValueError(
+            f"campaign targets global ranks outside world size {world_size}: {invalid}"
+        )
 
 
 def _distributed_rank() -> int:
@@ -711,8 +772,8 @@ def _evaluate_occurrence(
     detected = bool(result is not None and result.detected)
     reported_ranks = () if result is None else result.failed_ranks
     reported_resources = () if result is None else result.failed_resources
-    ranks_match = not expected_ranks or set(expected_ranks).issubset(reported_ranks)
-    resources_match = not expected_resources or set(expected_resources).issubset(reported_resources)
+    ranks_match = set(expected_ranks) == set(reported_ranks)
+    resources_match = set(expected_resources) == set(reported_resources)
     unexpected_ranks = tuple(rank for rank in reported_ranks if rank not in expected_ranks)
     unexpected_resources = tuple(
         resource for resource in reported_resources if resource not in expected_resources
