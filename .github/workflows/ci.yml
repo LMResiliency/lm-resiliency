@@ -78,6 +78,14 @@ jobs:
             python: "3.10"
             numpy: "1.26.4"
             torch: "2.10.0"
+          - name: python-3.11-torch-2.11
+            python: "3.11"
+            numpy: "1.26.4"
+            torch: "2.11.0"
+          - name: torch-2.12
+            python: "3.12"
+            numpy: "2.5.1"
+            torch: "2.12.0"
           - name: primary
             python: "3.12"
             numpy: "2.5.1"
@@ -171,3 +179,26 @@ jobs:
           name: distributions
           path: dist/*
           if-no-files-found: error
+
+  required:
+    name: CI Required
+    if: always()
+    needs:
+      - quality
+      - unit
+      - package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Verify required CI
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          UNIT_RESULT: ${{ needs.unit.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+        run: |
+          printf 'quality=%s\nunit=%s\npackage=%s\n' \
+            "$QUALITY_RESULT" "$UNIT_RESULT" "$PACKAGE_RESULT"
+          test "$QUALITY_RESULT" = "success"
+          test "$UNIT_RESULT" = "success"
+          test "$PACKAGE_RESULT" = "success"
