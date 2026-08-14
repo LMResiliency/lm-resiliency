@@ -2415,6 +2415,8 @@ def validate_restart_plan(
     trusted_certifications: Sequence[CheckpointCertification],
     restart_acks: Sequence[RestartAck],
     authenticated_ack_agent_ids: Mapping[str, str],
+    authenticated_ack_received_unix_ms: Mapping[str, int],
+    source_assignment: RankAssignment,
     current_assignment: RankAssignment,
     now_unix_ms: int,
     eligible_node_ids: Sequence[str],
@@ -2528,6 +2530,24 @@ def validate_restart_plan(
         raise ProtocolValidationError(
             "RecoveryManifest.topology_digest: does not match restart plan"
         )
+    if source_assignment.run_id != manifest.run_id:
+        raise ProtocolValidationError("source_assignment.run_id: does not match recovery manifest")
+    if source_assignment.generation != manifest.source_generation:
+        raise ProtocolValidationError(
+            "source_assignment.generation: does not match recovery manifest"
+        )
+    if source_assignment.topology_digest != manifest.topology_digest:
+        raise ProtocolValidationError(
+            "source_assignment.topology_digest: does not match recovery manifest"
+        )
+    source_world_size = source_assignment.active_nodes * source_assignment.local_world_size
+    if source_world_size != plan.expected_world_size:
+        raise ProtocolValidationError("source_assignment: world size does not match restart plan")
+    source_owner_by_rank = {
+        rank: source_assignment.slot_to_node_id[slot]
+        for slot, (first_rank, last_rank) in source_assignment.slot_to_rank_range.items()
+        for rank in range(first_rank, last_rank)
+    }
     if plan.recovery_mode == "recovery_verified" and manifest.trust != "recovery_verified":
         raise ProtocolValidationError(
             "RecoveryManifest.trust: verified recovery requires a verified manifest"
@@ -2581,6 +2601,16 @@ def validate_restart_plan(
         )
         for node_id, agent_id in authenticated_ack_agent_ids.items()
     }
+    if not isinstance(authenticated_ack_received_unix_ms, Mapping):
+        raise ProtocolValidationError("authenticated_ack_received_unix_ms: expected an object")
+    authenticated_ack_receipts = {
+        _string(node_id, "authenticated_ack_received_unix_ms.key"): _integer(
+            received_unix_ms,
+            f"authenticated_ack_received_unix_ms[{node_id!r}]",
+            minimum=1,
+        )
+        for node_id, received_unix_ms in authenticated_ack_received_unix_ms.items()
+    }
     ack_by_node: dict[str, RestartAck] = {}
     for index, ack in enumerate(_sequence(restart_acks, "restart_acks")):
         if not isinstance(ack, RestartAck):
@@ -2607,10 +2637,24 @@ def validate_restart_plan(
             raise ProtocolValidationError(
                 f"restart_acks[{index}].agent_id: does not match authenticated transport sender"
             )
+        received_unix_ms = authenticated_ack_receipts.get(ack.node_id)
+        if received_unix_ms is None:
+            raise ProtocolValidationError(
+                f"restart_acks[{index}]: missing authenticated receipt time"
+            )
+        if received_unix_ms > intent.prepare_deadline_unix_ms:
+            raise ProtocolValidationError(
+                f"restart_acks[{index}]: received after restart intent deadline"
+            )
         ack_by_node[ack.node_id] = ack
     if set(authenticated_ack_agents) != set(ack_by_node):
         raise ProtocolValidationError(
             "authenticated_ack_agent_ids: bindings must exactly match submitted acknowledgements"
+        )
+    if set(authenticated_ack_receipts) != set(ack_by_node):
+        raise ProtocolValidationError(
+            "authenticated_ack_received_unix_ms: receipts must exactly match "
+            "submitted acknowledgements"
         )
     entries = {entry.owner_global_rank: entry for entry in manifest.rank_copies}
     required_ranks = set(range(plan.expected_world_size))
@@ -2638,6 +2682,16 @@ def validate_restart_plan(
                 certified_inventory_event_ids,
             )
             and copy.holder_kind in compatible_holder_kinds
+            and (
+                copy.holder_kind == "durable"
+                or (
+                    copy.holder_kind == "owner"
+                    and copy.holder_node_id == source_owner_by_rank[rank]
+                )
+                or (
+                    copy.holder_kind == "peer" and copy.holder_node_id != source_owner_by_rank[rank]
+                )
+            )
             and copy.checkpoint_id == plan.checkpoint_id
             and (copy.storage_kind in {"shared", "remote"} or copy.holder_node_id in assigned_nodes)
         ]

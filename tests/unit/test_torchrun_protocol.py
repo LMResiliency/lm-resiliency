@@ -189,14 +189,23 @@ def _ack(
 def _manifest(
     *,
     trust: str = "latest",
-    holder_kind: str = "owner",
+    holder_kind: str | None = None,
     checkpoint_step: int = 40,
     ranks: tuple[int, ...] = (0, 1, 2, 3),
     incomplete_rank: int | None = None,
     holder_overrides: dict[int, str] | None = None,
+    holder_kind_overrides: dict[int, str] | None = None,
     durable_checkpoint_id: str = "durable-40",
 ) -> RecoveryManifest:
     holder_overrides = holder_overrides or {}
+    holder_kind_overrides = holder_kind_overrides or {}
+
+    def rank_holder_kind(rank: int) -> str:
+        return holder_kind_overrides.get(
+            rank,
+            holder_kind or ("owner" if rank < 2 else "peer"),
+        )
+
     return RecoveryManifest(
         manifest_id="manifest-40",
         run_id=RUN_ID,
@@ -214,9 +223,11 @@ def _manifest(
                             rank,
                             "node-a",
                         ),
-                        holder_kind=holder_kind,
+                        holder_kind=rank_holder_kind(rank),
                         checkpoint_step=checkpoint_step,
-                        checkpoint_id=(durable_checkpoint_id if holder_kind == "durable" else None),
+                        checkpoint_id=(
+                            durable_checkpoint_id if rank_holder_kind(rank) == "durable" else None
+                        ),
                         complete=rank != incomplete_rank,
                     ),
                 ),
@@ -281,15 +292,18 @@ def _validate(
     trusted_certifications: tuple[CheckpointCertification, ...] | None = None,
     restart_acks: tuple[RestartAck, ...] | None = None,
     authenticated_ack_agent_ids: dict[str, str] | None = None,
+    authenticated_ack_received_unix_ms: dict[str, int] | None = None,
+    source_assignment: RankAssignment | None = None,
     now_unix_ms: int = 1_900_000_000_000,
     eligible_node_ids: tuple[str, ...] = ("node-a", "node-spare"),
 ) -> None:
     selected_plan = plan or _plan()
+    selected_intent = intent or _intent()
     selected_manifest = manifest or _manifest()
     selected_acks = (_ack(),) if restart_acks is None else restart_acks
     validate_restart_plan(
         selected_plan,
-        intent or _intent(),
+        selected_intent,
         selected_manifest,
         inventory_events=(
             (_inventory_event(selected_manifest),) if inventory_events is None else inventory_events
@@ -305,6 +319,12 @@ def _validate(
             if authenticated_ack_agent_ids is None
             else authenticated_ack_agent_ids
         ),
+        authenticated_ack_received_unix_ms=(
+            {ack.node_id: selected_intent.prepare_deadline_unix_ms - 1 for ack in selected_acks}
+            if authenticated_ack_received_unix_ms is None
+            else authenticated_ack_received_unix_ms
+        ),
+        source_assignment=source_assignment or _current_assignment(),
         current_assignment=current_assignment or _current_assignment(),
         now_unix_ms=now_unix_ms,
         eligible_node_ids=eligible_node_ids,
@@ -563,6 +583,12 @@ def test_restart_plan_rejects_local_copy_on_departing_holder():
             2: "node-b",
             3: "node-b",
         },
+        holder_kind_overrides={
+            0: "peer",
+            1: "peer",
+            2: "owner",
+            3: "owner",
+        },
     )
 
     with pytest.raises(ProtocolValidationError, match="no complete eligible copy"):
@@ -583,6 +609,13 @@ def test_restart_plan_rejects_local_copy_on_departing_holder():
             ),
             authenticated_ack_agent_ids={"node-b": "agent-b"},
             eligible_node_ids=("node-a", "node-b", "node-spare"),
+        )
+
+
+def test_restart_plan_rejects_owner_copy_held_by_another_node():
+    with pytest.raises(ProtocolValidationError, match="no complete eligible copy"):
+        _validate(
+            manifest=_manifest(holder_kind="owner"),
         )
 
 
@@ -1036,6 +1069,13 @@ def test_restart_ack_must_match_authenticated_agent():
     with pytest.raises(ProtocolValidationError, match="authenticated transport sender"):
         _validate(
             authenticated_ack_agent_ids={"node-a": "agent-other"},
+        )
+
+
+def test_restart_ack_must_arrive_by_prepare_deadline():
+    with pytest.raises(ProtocolValidationError, match="received after"):
+        _validate(
+            authenticated_ack_received_unix_ms={"node-a": 2_000_000_000_001},
         )
 
 

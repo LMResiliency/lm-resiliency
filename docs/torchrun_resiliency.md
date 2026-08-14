@@ -690,7 +690,10 @@ recovery-verified source or fail the restart.
 The manager transport authenticates the acknowledgement sender. The
 coordinator checks the acknowledgement's run, node, and agent incarnation
 against that authenticated identity and requires the agent to match the
-inventory reporter. Payload identity fields alone are not authentication.
+inventory reporter. The coordinator also records receipt time outside the
+worker payload and rejects acknowledgements received after
+`prepare_deadline_unix_ms`. Payload identity fields and timestamps alone are
+not authentication.
 
 For a crashed or unreachable node, no preparation is assumed.
 
@@ -976,6 +979,12 @@ not by themselves prove that a destination has the bytes. Version 1 requires
 such transfers to materialize as authenticated shared or remote copy
 provenance before plan commit; a future local-destination transfer record may
 extend this without weakening the holder rule.
+
+The coordinator resolves every rank through the immutable `RankAssignment` for
+the manifest's `source_generation`. An `owner` copy must be held by the node
+that owned that rank in that generation; a `peer` copy must be held elsewhere.
+The source assignment's run, generation, topology digest, and world size must
+match the manifest and plan.
 
 Preferred source order:
 
