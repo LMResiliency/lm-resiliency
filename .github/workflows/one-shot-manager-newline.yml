@@ -1,0 +1,43 @@
+name: One-shot manager newline repair
+
+on:
+  push:
+    branches:
+      - agent/harden-checkpoint-deserialization
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out PR branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: agent/harden-checkpoint-deserialization
+
+      - name: Ensure final newline
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("lm_resiliency/checkpointing/manager.py")
+          data = path.read_bytes()
+          if not data.endswith(b"\n"):
+              path.write_bytes(data + b"\n")
+          PY
+
+      - name: Commit repair when needed
+        run: |
+          if git diff --quiet -- lm_resiliency/checkpointing/manager.py; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lm_resiliency/checkpointing/manager.py
+          git commit -m "Add final newline to checkpoint manager"
+          git push origin HEAD:agent/harden-checkpoint-deserialization
