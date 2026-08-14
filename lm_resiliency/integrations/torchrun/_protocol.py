@@ -650,10 +650,11 @@ class HardwareFaultReport:
         )
         _string(self.resource_id, "HardwareFaultReport.resource_id")
         _string(self.metric, "HardwareFaultReport.metric")
-        if isinstance(self.value, bool) or not isinstance(self.value, (int, float)):
-            raise ProtocolValidationError("HardwareFaultReport.value: expected a number")
-        if not math.isfinite(float(self.value)):
-            raise ProtocolValidationError("HardwareFaultReport.value: must be finite")
+        object.__setattr__(
+            self,
+            "value",
+            _finite_float(self.value, "HardwareFaultReport.value"),
+        )
         if self.severity != "fatal":
             raise ProtocolValidationError("HardwareFaultReport.severity: expected 'fatal'")
         _string(self.message, "HardwareFaultReport.message")
@@ -690,9 +691,6 @@ class HardwareFaultReport:
             raise ProtocolValidationError(
                 f"HardwareFaultReport: unknown fields {sorted(unknown)!r}"
             )
-        raw_value = value["value"]
-        if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
-            raise ProtocolValidationError("HardwareFaultReport.value: expected a number")
         return cls(
             kind=_choice(value["kind"], "HardwareFaultReport.kind", {"hardware"}),  # type: ignore[arg-type]
             resource_kind=_choice(
@@ -705,7 +703,7 @@ class HardwareFaultReport:
                 "HardwareFaultReport.resource_id",
             ),
             metric=_string(value["metric"], "HardwareFaultReport.metric"),
-            value=float(raw_value),
+            value=_finite_float(value["value"], "HardwareFaultReport.value"),
             severity=_choice(  # type: ignore[arg-type]
                 value["severity"],
                 "HardwareFaultReport.severity",
@@ -713,6 +711,18 @@ class HardwareFaultReport:
             ),
             message=_string(value["message"], "HardwareFaultReport.message"),
         )
+
+
+def _finite_float(value: object, path: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ProtocolValidationError(f"{path}: expected a number")
+    try:
+        normalized = float(value)
+    except (OverflowError, ValueError) as error:
+        raise ProtocolValidationError(f"{path}: must be a finite float") from error
+    if not math.isfinite(normalized):
+        raise ProtocolValidationError(f"{path}: must be finite")
+    return normalized
 
 
 def _fault_report(value: object, path: str) -> Mapping[str, Any]:
@@ -2370,6 +2380,7 @@ def validate_event_reporter(
     *,
     agent_identity: AgentIdentity,
     resource_to_node_id: Mapping[str, str],
+    resource_to_kind: Mapping[str, str],
 ) -> None:
     """Validate a report against committed rank and infrastructure identities."""
     if not isinstance(
@@ -2404,6 +2415,16 @@ def validate_event_reporter(
         )
         for resource_id, node_id in resource_to_node_id.items()
     }
+    if not isinstance(resource_to_kind, Mapping):
+        raise ProtocolValidationError("resource_to_kind: expected an object")
+    resource_kinds = {
+        _string(resource_id, "resource_to_kind.key"): _choice(
+            resource_kind,
+            f"resource_to_kind[{resource_id!r}]",
+            {"gpu", "node", "nic", "hca", "link"},
+        )
+        for resource_id, resource_kind in resource_to_kind.items()
+    }
     if reporter.gpu_uuid is not None:
         if reporter.gpu_uuid not in agent_identity.resource_ids:
             raise ProtocolValidationError(
@@ -2412,6 +2433,10 @@ def validate_event_reporter(
         if resource_owners.get(reporter.gpu_uuid) != reporter.node_id:
             raise ProtocolValidationError(
                 "WorkerIdentity.gpu_uuid: trusted resource owner does not match reporter"
+            )
+        if resource_kinds.get(reporter.gpu_uuid) != "gpu":
+            raise ProtocolValidationError(
+                "WorkerIdentity.gpu_uuid: trusted resource kind is not gpu"
             )
     if isinstance(event, FaultEvent):
         rank_to_node = {
@@ -2504,6 +2529,11 @@ def validate_event_reporter(
                     "FaultEvent.report.endpoint_id: trusted resource owner does not match "
                     "endpoint rank"
                 )
+            elif resource_kinds.get(endpoint_id) != endpoint_kind:
+                raise ProtocolValidationError(
+                    "FaultEvent.report.endpoint_id: trusted resource kind does not match "
+                    "endpoint kind"
+                )
     if not isinstance(event, FaultEvent) or event.report.get("kind") != "hardware":
         return
     resource_kind = _choice(
@@ -2527,6 +2557,10 @@ def validate_event_reporter(
     if resource_owners.get(resource_id) != reporter.node_id:
         raise ProtocolValidationError(
             "FaultEvent.report.resource_id: trusted resource owner does not match reporter"
+        )
+    if resource_kinds.get(resource_id) != resource_kind:
+        raise ProtocolValidationError(
+            "FaultEvent.report.resource_id: trusted resource kind does not match report"
         )
 
 

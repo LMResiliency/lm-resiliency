@@ -288,6 +288,11 @@ deployment inventory. A worker-provided hostname is diagnostic metadata and
 must not be allowed to choose its own quarantine identity. If no stable node
 identity is available, replacement mode should refuse to start.
 
+The trusted resource inventory maps every resource ID to both its stable node
+owner and resource kind (`gpu`, `nic`, `hca`, `link`, or `node`). Worker
+registration proves that an agent may report a resource; it does not allow the
+worker to relabel a GPU as a NIC or another resource class.
+
 The topology digest covers at least the active world size, local worker count,
 framework parallel dimensions, logical rank-to-parallel-coordinate mapping,
 checkpoint schema, and model configuration needed to interpret rank-local
@@ -336,7 +341,8 @@ Requirements:
   `RankAssignment`; worker-supplied rank arithmetic alone is insufficient.
 - Event admission also binds the worker to its registered `AgentIdentity`.
   Hardware reports are accepted only when the reported node or resource belongs
-  to that agent in the trusted scheduler or infrastructure resource map.
+  to that agent and both its node owner and resource kind match the trusted
+  scheduler or infrastructure inventory.
 - The original `SCOUTFaultReport` is preserved without upgrading its
   attribution. A direct `HealthEvent` is normalized to
   `HardwareFaultReport` without upgrading its resource granularity.

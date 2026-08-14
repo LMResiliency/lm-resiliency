@@ -1001,6 +1001,7 @@ def test_event_reporter_must_match_committed_rank_assignment():
             assignment,
             agent_identity=_agent(),
             resource_to_node_id={"GPU-0": "node-a"},
+            resource_to_kind={"GPU-0": "gpu"},
         )
 
 
@@ -1032,6 +1033,10 @@ def test_hardware_report_resource_must_match_registered_owner():
                 "GPU-0": "node-a",
                 "GPU-1": "node-b",
             },
+            resource_to_kind={
+                "GPU-0": "gpu",
+                "GPU-1": "gpu",
+            },
         )
 
 
@@ -1062,7 +1067,71 @@ def test_hardware_report_accepts_registered_resource_on_reporter_node():
             "GPU-0": "node-a",
             "GPU-1": "node-a",
         },
+        resource_to_kind={
+            "GPU-0": "gpu",
+            "GPU-1": "gpu",
+        },
     )
+
+
+def test_hardware_report_resource_kind_must_match_trusted_inventory():
+    event = FaultEvent(
+        event_id="fault-resource-kind",
+        incident_id="incident-a",
+        run_id=RUN_ID,
+        generation=4,
+        reporter=_worker(),
+        optimizer_step=41,
+        report=HardwareFaultReport(
+            kind="hardware",
+            resource_kind="nic",
+            resource_id="GPU-1",
+            metric="link_down",
+            value=1.0,
+            severity="fatal",
+            message="reported with the wrong resource kind",
+        ),
+    )
+
+    with pytest.raises(ProtocolValidationError, match="resource kind"):
+        validate_event_reporter(
+            event,
+            _current_assignment(),
+            agent_identity=_agent(),
+            resource_to_node_id={
+                "GPU-0": "node-a",
+                "GPU-1": "node-a",
+            },
+            resource_to_kind={
+                "GPU-0": "gpu",
+                "GPU-1": "gpu",
+            },
+        )
+
+
+def test_hardware_report_rejects_oversized_numeric_metric():
+    event = FaultEvent(
+        event_id="fault-oversized-metric",
+        incident_id="incident-a",
+        run_id=RUN_ID,
+        generation=4,
+        reporter=_worker(),
+        optimizer_step=41,
+        report=HardwareFaultReport(
+            kind="hardware",
+            resource_kind="gpu",
+            resource_id="GPU-0",
+            metric="counter",
+            value=1.0,
+            severity="fatal",
+            message="oversized metric",
+        ),
+    )
+    payload = event.to_dict()
+    payload["report"]["value"] = 10**1000
+
+    with pytest.raises(ProtocolValidationError, match="finite float"):
+        FaultEvent.from_json(json.dumps(payload))
 
 
 def test_fault_report_rejects_rank_outside_committed_assignment():
@@ -1082,6 +1151,7 @@ def test_fault_report_rejects_rank_outside_committed_assignment():
             _current_assignment(),
             agent_identity=_agent(),
             resource_to_node_id={"GPU-0": "node-a"},
+            resource_to_kind={"GPU-0": "gpu"},
         )
 
 
@@ -1113,6 +1183,7 @@ def test_fault_report_validates_all_rank_attribution_fields(field, value, messag
             _current_assignment(),
             agent_identity=_agent(),
             resource_to_node_id={"GPU-0": "node-a"},
+            resource_to_kind={"GPU-0": "gpu"},
         )
 
 
@@ -1139,6 +1210,7 @@ def test_fault_report_endpoint_must_match_failed_rank_and_node():
             _current_assignment(),
             agent_identity=_agent(),
             resource_to_node_id={"GPU-0": "node-a"},
+            resource_to_kind={"GPU-0": "gpu"},
         )
 
 
