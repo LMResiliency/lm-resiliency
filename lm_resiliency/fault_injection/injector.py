@@ -55,6 +55,14 @@ class UnsupportedFaultError(ValueError):
     """Raised before training when no configured executor supports a fault."""
 
 
+@dataclass(frozen=True, slots=True)
+class _StagedIncident:
+    incident: FaultIncident
+    attempt: int
+    occurrence_id: str
+    selected: bool
+
+
 @dataclass(slots=True)
 class _ExternalEffect:
     request: FaultExecutionRequest
@@ -163,6 +171,7 @@ class FaultInjectionSession:
             self._local.sync_history(self._history_faults_for(self._current_iteration))
             self._preflight_current_iteration()
             self._context.register_step_callback(self._on_step_complete)
+            self._context.register_state_replacement_callback(self._mark_state_replaced)
             register_automatic_cleanup(self)
             if not _defer_activation:
                 self._commit_journal_binding()
@@ -274,7 +283,7 @@ class FaultInjectionSession:
             return
         if not self._journal_committed:
             raise RuntimeError("campaign journal binding has not been committed")
-        self._enter_iteration(self._current_iteration)
+        self._enter_iteration_consistently(self._current_iteration)
         self._started = True
 
     def _commit_journal_binding(self) -> None:
@@ -314,7 +323,15 @@ class FaultInjectionSession:
         return self
 
     def __exit__(self, _exc_type: Any, _exc: Any, _traceback: Any) -> None:
-        self.close()
+        try:
+            self.close()
+        except Exception as cleanup_error:
+            if _exc is None:
+                raise
+            _add_exception_note(
+                _exc,
+                f"fault injection cleanup also failed: {cleanup_error}",
+            )
 
     def _validate_capabilities(self) -> None:
         unsupported: list[str] = []
@@ -479,7 +496,8 @@ class FaultInjectionSession:
             for fault in incident.faults
         )
         if _distributed_world_size() <= 1:
-            self._enter_iteration(iteration)
+            staged = self._stage_iteration_attempts(iteration, candidates)
+            self._activate_staged_iteration(iteration, staged)
             return
 
         preflight_error: Exception | None = None
@@ -500,9 +518,28 @@ class FaultInjectionSession:
                 )
             raise boundary_error from preflight_error
 
+        staged: tuple[_StagedIncident, ...] = ()
+        persistence_error: Exception | None = None
+        try:
+            staged = self._stage_iteration_attempts(iteration, candidates)
+        except Exception as error:
+            persistence_error = error
+        failures = _gather_rank_errors(persistence_error)
+        if failures:
+            cleanup_error = self._cleanup()
+            boundary_error = RuntimeError(
+                "fault injection attempt persistence failed; " + "; ".join(failures)
+            )
+            if cleanup_error is not None:
+                _add_exception_note(
+                    boundary_error,
+                    f"fault injection cleanup also failed: {cleanup_error}",
+                )
+            raise boundary_error from persistence_error
+
         activation_error: Exception | None = None
         try:
-            self._enter_iteration(iteration)
+            self._activate_staged_iteration(iteration, staged)
         except Exception as error:
             activation_error = error
         if not safe_activation:
@@ -523,43 +560,63 @@ class FaultInjectionSession:
                 )
             raise boundary_error from activation_error
 
-    def _enter_iteration(self, iteration: int) -> None:
+    def _stage_iteration_attempts(
+        self,
+        iteration: int,
+        candidates: tuple[tuple[FaultIncident, int], ...],
+    ) -> tuple[_StagedIncident, ...]:
+        previous_attempts = dict(self._journal.attempts)
+        staged: list[_StagedIncident] = []
+        try:
+            for incident, expected_attempt in candidates:
+                attempt = self._journal.record_attempt(incident.incident_id, iteration)
+                if attempt != expected_attempt:
+                    raise RuntimeError(
+                        f"campaign journal attempt for {incident.incident_id!r} changed "
+                        f"from {expected_attempt} to {attempt} during staging"
+                    )
+                staged.append(
+                    _StagedIncident(
+                        incident=incident,
+                        attempt=attempt,
+                        occurrence_id=_occurrence_id(incident, iteration, attempt),
+                        selected=_probability_selected(
+                            self.campaign.seed,
+                            incident.incident_id,
+                            iteration,
+                            incident.trigger.probability,
+                        ),
+                    )
+                )
+            self._state_store.save(self._journal)
+        except Exception:
+            self._journal.attempts.clear()
+            self._journal.attempts.update(previous_attempts)
+            raise
+        return tuple(staged)
+
+    def _activate_staged_iteration(
+        self,
+        iteration: int,
+        staged: tuple[_StagedIncident, ...],
+    ) -> None:
         active_start = len(self._active)
         try:
-            for incident in self.campaign.incidents:
-                if not incident.trigger.matches(iteration):
-                    continue
-                attempt_count = self._journal.attempt_count(
-                    incident.incident_id,
-                    iteration,
-                )
-                if incident.retrigger is RetriggerPolicy.ONCE and attempt_count >= 1:
-                    continue
-                if incident.retrigger is RetriggerPolicy.MAX_OCCURRENCES and attempt_count >= int(
-                    incident.max_occurrences or 0
-                ):
-                    continue
-                attempt = self._journal.record_attempt(incident.incident_id, iteration)
-                self._state_store.save(self._journal)
-                occurrence_id = _occurrence_id(incident, iteration, attempt)
-                if not _probability_selected(
-                    self.campaign.seed,
-                    incident.incident_id,
-                    iteration,
-                    incident.trigger.probability,
-                ):
+            for item in staged:
+                incident = item.incident
+                if not item.selected:
                     self._record_probability_skip(
                         incident,
-                        occurrence_id,
+                        item.occurrence_id,
                         iteration,
-                        attempt,
+                        item.attempt,
                     )
                     continue
                 self._activate_incident(
                     incident,
-                    occurrence_id,
+                    item.occurrence_id,
                     iteration,
-                    attempt,
+                    item.attempt,
                 )
         except Exception as error:
             cleanup_error: Exception | None = None
@@ -808,6 +865,11 @@ class FaultInjectionSession:
 
     def _discard_completed(self) -> None:
         self._active = [active for active in self._active if not active.done]
+
+    def _mark_state_replaced(self) -> None:
+        for active in self._active:
+            if isinstance(active.effect, LocalFaultEffect) and not active.done:
+                active.effect.mark_state_replaced()
 
     def _history_faults_for(self, iteration: int) -> tuple[FaultSpec, ...]:
         return tuple(

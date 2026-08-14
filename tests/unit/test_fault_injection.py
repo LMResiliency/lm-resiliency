@@ -5,7 +5,8 @@ from __future__ import annotations
 import copy
 import inspect
 import json
-from types import MethodType
+from pathlib import Path
+from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -345,6 +346,81 @@ def test_campaign_parser_rejects_unknown_range_fields() -> None:
         FaultCampaign.from_dict(value)
 
 
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("incidents", 0, "trigger", "at", 0), True),
+        (("incidents", 0, "trigger", "at", 0), 2.5),
+        (("incidents", 0, "trigger", "range", "start"), 2.5),
+        (("incidents", 0, "lifetime", "iterations"), True),
+        (("incidents", 0, "faults", 0, "target", "rank"), 0.5),
+        (("seed",), True),
+    ],
+)
+def test_campaign_parser_rejects_non_integer_integer_fields(
+    path: tuple[object, ...],
+    value: object,
+) -> None:
+    trigger_range = IterationRange(start=2, end=4) if "range" in path else None
+    campaign = _campaign(
+        _incident(
+            at=(2,) if trigger_range is None else (),
+            trigger_range=trigger_range,
+            lifetime=IncidentLifetime(iterations=1),
+        )
+    ).to_dict()
+    current: object = campaign
+    for part in path[:-1]:
+        current = current[part]  # type: ignore[index]
+    current[path[-1]] = value  # type: ignore[index]
+
+    with pytest.raises(TypeError, match="must be an integer"):
+        FaultCampaign.from_dict(campaign)
+
+
+def test_campaign_mappings_are_deeply_immutable_snapshots() -> None:
+    metadata = {"labels": ["nightly"], "nested": {"owner": "resiliency"}}
+    parameters = {
+        "operation": "sign_flip",
+        "nested": {"values": [1, 2]},
+    }
+    campaign = FaultCampaign(
+        name="immutable",
+        incidents=(
+            _incident(
+                faults=(
+                    FaultSpec(
+                        fault_id="immutable-fault",
+                        type=FailureType.TENSOR_CORRUPTION,
+                        target=FaultTarget(
+                            rank=0,
+                            surface=FaultSurface.OUTPUT,
+                            module_path="layers.0",
+                            metadata=metadata,
+                        ),
+                        parameters=parameters,
+                    ),
+                ),
+            ),
+        ),
+        metadata=metadata,
+    )
+    identity = campaign.manifest_identity
+    metadata["labels"].append("mutated")
+    parameters["nested"]["values"].append(3)
+
+    with pytest.raises(TypeError):
+        campaign.metadata["new"] = "value"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        campaign.incidents[0].faults[0].parameters["operation"] = "noise"  # type: ignore[index]
+
+    assert campaign.manifest_identity == identity
+    assert campaign.to_dict()["metadata"]["labels"] == ["nightly"]
+    assert campaign.to_dict()["incidents"][0]["faults"][0]["parameters"]["nested"] == {
+        "values": [1, 2]
+    }
+
+
 def test_temporal_behavior_is_derived_from_schedule() -> None:
     transient = _incident(at=(3,))
     sparse_range = _incident(
@@ -543,6 +619,56 @@ def test_distributed_enablement_arms_iteration_one_after_consensus() -> None:
 
     assert events == [("activate", "process_termination")]
     session.close()
+
+
+def test_distributed_attempt_persistence_precedes_destructive_activation() -> None:
+    class FailingAttemptStore(MemoryCampaignStateStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.saves = 0
+
+        def save(self, journal) -> None:
+            self.saves += 1
+            if self.saves == 2:
+                raise OSError("campaign state disk is unavailable")
+            super().save(journal)
+
+    events: list[tuple[str, str]] = []
+    executor = _recording_executor({FailureType.PROCESS_TERMINATION}, events)
+    model = TinyModel()
+    store = FailingAttemptStore()
+
+    def gather(values, local_value) -> None:
+        if isinstance(local_value, dict):
+            values[:] = [local_value, dict(local_value)]
+        else:
+            values[:] = [local_value, local_value]
+
+    with (
+        patch("lm_resiliency.fault_injection.injector.dist.is_available", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.is_initialized", return_value=True),
+        patch("lm_resiliency.fault_injection.injector.dist.get_world_size", return_value=2),
+        patch("lm_resiliency.fault_injection.injector.dist.get_rank", return_value=0),
+        patch(
+            "lm_resiliency.fault_injection.injector.dist.all_gather_object",
+            side_effect=gather,
+        ),
+        pytest.raises(RuntimeError, match="attempt persistence failed"),
+    ):
+        enable_fault_injection(
+            model,
+            _optimizer(model),
+            campaign=_campaign(
+                _incident(
+                    at=(1,),
+                    faults=(_external_fault(FailureType.PROCESS_TERMINATION),),
+                )
+            ),
+            state_store=store,
+            executors=(executor,),
+        )
+
+    assert events == []
 
 
 def test_distributed_safe_arming_failure_is_propagated_before_return() -> None:
@@ -1475,6 +1601,109 @@ def test_deepspeed_zero3_gradient_hook_uses_original_parameter() -> None:
     session.close()
 
 
+def test_deepspeed_zero12_optimizer_state_uses_master_fragment() -> None:
+    model = TinyModel()
+    parameter = model.layers[0].weight
+    fragment = torch.linspace(1.0, 2.0, parameter.numel())
+
+    class Mapping:
+        optim_fragment = {"exp_avg": fragment}
+
+        def get_optim_state_keys(self):
+            return ("exp_avg",)
+
+        def get_optim_state_fragment(self, key):
+            return self.optim_fragment[key]
+
+    parameter._hp_mapping = Mapping()
+    engine = FakeDeepSpeedEngine(model)
+    baseline = fragment.clone()
+    fault = _corruption(
+        target=_target(surface=FaultSurface.OPTIMIZER_STATE),
+        scope=FaultScope.SINGLE,
+        parameter="weight",
+        state_key="exp_avg",
+    )
+    session = enable_fault_injection(
+        engine,
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="recovery"),
+                faults=(fault,),
+            )
+        ),
+        rank=0,
+    )
+
+    assert not torch.equal(fragment, baseline)
+    session.notify_recovery()
+    torch.testing.assert_close(fragment, baseline)
+    session.close()
+
+
+def test_deepspeed_zero3_optimizer_state_uses_local_master_partition() -> None:
+    model = TinyModel()
+    parameter = nn.Parameter(torch.empty(0))
+    parameter.ds_tensor = torch.ones(4)
+    parameter.ds_id = 7
+    model.layers[0].weight = parameter
+    master = nn.Parameter(torch.ones(8))
+    state = torch.linspace(1.0, 2.0, 8)
+    base_optimizer = SimpleNamespace(state={master: {"exp_avg": state}})
+
+    class Zero3:
+        fp32_partitioned_groups_flat = [master]
+        optimizer = base_optimizer
+        grad_position = {7: (0, 2, 4)}
+
+        def get_param_id(self, _parameter):
+            return 7
+
+        def _swappable_optimizer_subgroup(self, _group_idx):
+            return False
+
+        def _get_fp32_opt_state_partition(
+            self,
+            _parameter,
+            *,
+            release_swap_buffers,
+            optim_state_key,
+        ):
+            assert not release_swap_buffers
+            assert optim_state_key == "exp_avg"
+            return state.narrow(0, 2, 4), 0
+
+    parameter._z3_optimizer = Zero3()
+    engine = FakeDeepSpeedEngine(model)
+    engine.optimizer.optimizer = base_optimizer
+    baseline = state.clone()
+    fault = _corruption(
+        target=_target(surface=FaultSurface.OPTIMIZER_STATE),
+        scope=FaultScope.SINGLE,
+        parameter="weight",
+        state_key="exp_avg",
+    )
+    session = enable_fault_injection(
+        engine,
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="recovery"),
+                faults=(fault,),
+            )
+        ),
+        rank=0,
+    )
+
+    assert torch.equal(state[:2], baseline[:2])
+    assert not torch.equal(state[2:6], baseline[2:6])
+    assert torch.equal(state[6:], baseline[6:])
+    session.notify_recovery()
+    torch.testing.assert_close(state, baseline)
+    session.close()
+
+
 def test_optimizer_state_corruption_and_restoration() -> None:
     model = TinyModel()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.0)
@@ -1505,6 +1734,70 @@ def test_optimizer_state_corruption_and_restoration() -> None:
     session.notify_recovery()
     torch.testing.assert_close(state, baseline)
     session.close()
+
+
+def test_bounded_state_fault_preserves_checkpoint_loaded_replacement() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    replacement = {key: torch.full_like(value, 7.0) for key, value in model.state_dict().items()}
+
+    def load_checkpoint(*_args, **_kwargs) -> None:
+        model.load_state_dict(replacement)
+
+    handle = optimizer.register_step_post_hook(load_checkpoint)
+    fault = _corruption(
+        target=_target(surface=FaultSurface.WEIGHT),
+        scope=FaultScope.SINGLE,
+    )
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(iterations=1),
+                faults=(fault,),
+            )
+        ),
+        rank=0,
+    )
+
+    _step(model, optimizer)
+
+    torch.testing.assert_close(
+        model.layers[0].weight,
+        torch.full_like(model.layers[0].weight, 7.0),
+    )
+    handle.remove()
+    session.close()
+
+
+def test_sparse_state_fault_does_not_use_full_tensor_transform() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    fault = _corruption(
+        target=_target(surface=FaultSurface.WEIGHT),
+        scope=FaultScope.SINGLE,
+    )
+
+    with patch(
+        "lm_resiliency.fault_injection.local._transform_tensor",
+        side_effect=AssertionError("state path must not clone the full tensor"),
+    ):
+        session = enable_fault_injection(
+            model,
+            optimizer,
+            campaign=_campaign(
+                _incident(
+                    at=(1,),
+                    lifetime=IncidentLifetime(until="recovery"),
+                    faults=(fault,),
+                )
+            ),
+            rank=0,
+        )
+        session.notify_recovery()
+        session.close()
 
 
 def test_immediate_optimizer_state_fault_is_preflighted() -> None:
@@ -1812,6 +2105,150 @@ def test_pipeline_global_layer_index_uses_layer_number_metadata() -> None:
     )
 
     assert not torch.equal(chunk.decoder.layers[0].weight, baseline)
+    session.close()
+
+
+def test_pipeline_layer_number_requires_an_unambiguous_base() -> None:
+    class PipelineModule(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.layers = nn.ModuleList([nn.Linear(4, 4), nn.Linear(4, 4)])
+            self.layers[0].layer_number = 12
+            self.layers[1].layer_number = 13
+
+    model = PipelineModule()
+    engine = PipelineEngine(model)
+    target = FaultTarget(
+        rank=0,
+        surface=FaultSurface.WEIGHT,
+        component="transformer_block",
+        index=12,
+    )
+    with pytest.raises(LookupError, match="global layer metadata"):
+        enable_fault_injection(
+            engine,
+            campaign=_campaign(
+                _incident(
+                    at=(1,),
+                    lifetime=IncidentLifetime(until="recovery"),
+                    faults=(_corruption(target=target),),
+                )
+            ),
+            rank=0,
+        )
+
+    explicit = FaultTarget(
+        rank=0,
+        surface=FaultSurface.WEIGHT,
+        component="transformer_block",
+        index=12,
+        metadata={"layer_number_base": 0},
+    )
+    session = enable_fault_injection(
+        engine,
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="recovery"),
+                faults=(_corruption(target=explicit),),
+            )
+        ),
+        rank=0,
+    )
+    session.close()
+
+
+def test_global_expert_index_requires_topology_metadata() -> None:
+    class Experts(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.experts = nn.ModuleList([nn.Linear(4, 4), nn.Linear(4, 4)])
+
+    model = Experts()
+    ambiguous = FaultTarget(
+        rank=0,
+        surface=FaultSurface.WEIGHT,
+        component="expert",
+        index=2,
+    )
+    with pytest.raises(LookupError, match="expert"):
+        enable_fault_injection(
+            model,
+            _optimizer(model),
+            campaign=_campaign(
+                _incident(
+                    at=(1,),
+                    lifetime=IncidentLifetime(until="recovery"),
+                    faults=(_corruption(target=ambiguous),),
+                )
+            ),
+            rank=0,
+        )
+
+    resolved = FaultTarget(
+        rank=0,
+        surface=FaultSurface.WEIGHT,
+        component="expert",
+        index=2,
+        metadata={"expert_parallel_rank": 1, "num_local_experts": 2},
+    )
+    baseline = model.experts[0].weight.detach().clone()
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="recovery"),
+                faults=(_corruption(target=resolved),),
+            )
+        ),
+        rank=0,
+    )
+
+    assert not torch.equal(model.experts[0].weight, baseline)
+    session.close()
+
+
+def test_logical_block_gradient_uses_a_deterministic_nested_parameter() -> None:
+    class Block(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.mlp = nn.Sequential(nn.Linear(4, 4), nn.Linear(4, 4))
+
+        def forward(self, value):
+            return self.mlp(value)
+
+    class Model(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.layers = nn.ModuleList([Block()])
+
+        def forward(self, value):
+            return self.layers[0](value)
+
+    model = Model()
+    optimizer = _optimizer(model)
+    fault = FaultSpec(
+        fault_id="block-gradient",
+        type=FailureType.DROP,
+        target=FaultTarget(
+            rank=0,
+            surface=FaultSurface.GRADIENT,
+            component="transformer_block",
+            index=0,
+        ),
+        parameters={"scope": FaultScope.FULL.value},
+    )
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(_incident(at=(1,), faults=(fault,))),
+        rank=0,
+    )
+    model(torch.ones(2, 4)).sum().backward()
+
+    assert torch.count_nonzero(model.layers[0].mlp[0].bias.grad) == 0
     session.close()
 
 
@@ -2255,6 +2692,42 @@ def test_close_cleans_optimizer_hook_when_external_deactivation_fails() -> None:
     session.close()
 
 
+def test_context_manager_preserves_body_error_when_cleanup_fails() -> None:
+    def activate(_request):
+        return FaultExecutionResult(verified=True, active=True)
+
+    def deactivate(_request, _result):
+        raise RuntimeError("backend cleanup failed")
+
+    executor = CallbackFaultExecutor(
+        name="failing-cleanup",
+        supported_types={FailureType.PROCESS_TERMINATION},
+        activate=activate,
+        deactivate=deactivate,
+        max_safety=SafetyClass.ISOLATED_DESTRUCTIVE,
+    )
+    model = TinyModel()
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="campaign_end"),
+                faults=(_external_fault(FailureType.PROCESS_TERMINATION),),
+            )
+        ),
+        executors=(executor,),
+        rank=0,
+    )
+
+    with pytest.raises(ValueError, match="training failed") as caught:
+        with session:
+            raise ValueError("training failed")
+
+    assert any("cleanup also failed" in note for note in caught.value.__notes__)
+
+
 def test_overlapping_local_faults_roll_back_partial_activation() -> None:
     model = TinyModel()
     optimizer = _optimizer(model)
@@ -2519,6 +2992,44 @@ def test_evaluation_rejects_unknown_and_inconsistent_results() -> None:
             }
         )
     session.close()
+
+
+@pytest.mark.parametrize("latency", [float("nan"), float("inf"), -1.0])
+def test_localization_rejects_invalid_latency(latency: float) -> None:
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        LocalizationResult(
+            occurrence_id="incident@1",
+            detected=True,
+            latency_ms=latency,
+        )
+
+
+def test_localization_rejects_non_json_metadata() -> None:
+    with pytest.raises(TypeError, match="only JSON values"):
+        LocalizationResult(
+            occurrence_id="incident@1",
+            detected=True,
+            metadata={"path": Path("report.json")},
+        )
+
+
+def test_localization_rejects_coerced_numeric_fields() -> None:
+    with pytest.raises(TypeError, match="latency_ms must be a number"):
+        LocalizationResult.from_dict(
+            {
+                "occurrence_id": "incident@1",
+                "detected": True,
+                "latency_ms": "4.5",
+            }
+        )
+    with pytest.raises(TypeError, match="failed_ranks must contain integers"):
+        LocalizationResult.from_dict(
+            {
+                "occurrence_id": "incident@1",
+                "detected": True,
+                "failed_ranks": ["0"],
+            }
+        )
 
 
 def test_close_restores_active_faults_and_optimizer_hook() -> None:

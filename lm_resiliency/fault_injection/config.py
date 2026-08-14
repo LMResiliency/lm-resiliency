@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
+
+from lm_resiliency.fault_injection._json import freeze_json_mapping, thaw_json
 
 SCHEMA_VERSION = 1
 
@@ -236,6 +239,9 @@ class IterationRange:
     every: int = 1
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "start", _strict_int(self.start, "trigger range start"))
+        object.__setattr__(self, "end", _strict_int(self.end, "trigger range end"))
+        object.__setattr__(self, "every", _strict_int(self.every, "trigger range every"))
         if self.start <= 0:
             raise ValueError("trigger range start must be positive")
         if self.end < self.start:
@@ -250,9 +256,9 @@ class IterationRange:
     def from_dict(cls, value: Mapping[str, Any]) -> "IterationRange":
         _reject_unknown_keys(value, _RANGE_KEYS, "trigger range")
         return cls(
-            start=int(value["start"]),
-            end=int(value["end"]),
-            every=int(value.get("every", 1)),
+            start=value["start"],
+            end=value["end"],
+            every=value.get("every", 1),
         )
 
     def to_dict(self) -> dict[str, int]:
@@ -268,7 +274,7 @@ class IncidentTrigger:
     probability: float = 1.0
 
     def __post_init__(self) -> None:
-        normalized_at = tuple(int(iteration) for iteration in self.at)
+        normalized_at = tuple(_strict_int(iteration, "trigger iteration") for iteration in self.at)
         object.__setattr__(self, "at", normalized_at)
         if isinstance(self.range, Mapping):
             object.__setattr__(self, "range", IterationRange.from_dict(self.range))
@@ -280,7 +286,11 @@ class IncidentTrigger:
             raise ValueError("trigger iterations must not contain duplicates")
         if tuple(sorted(self.at)) != self.at:
             raise ValueError("trigger iterations must be sorted")
-        if not 0.0 <= self.probability <= 1.0:
+        if isinstance(self.probability, bool) or not isinstance(self.probability, (int, float)):
+            raise TypeError("trigger probability must be a number")
+        probability = float(self.probability)
+        object.__setattr__(self, "probability", probability)
+        if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
             raise ValueError("trigger probability must be between 0 and 1")
 
     @property
@@ -298,11 +308,11 @@ class IncidentTrigger:
     def from_dict(cls, value: Mapping[str, Any]) -> "IncidentTrigger":
         _reject_unknown_keys(value, _TRIGGER_KEYS, "incident trigger")
         return cls(
-            at=tuple(int(iteration) for iteration in value.get("at", ())),
+            at=tuple(value.get("at", ())),
             range=(
                 None if value.get("range") is None else IterationRange.from_dict(value["range"])
             ),
-            probability=float(value.get("probability", 1.0)),
+            probability=value.get("probability", 1.0),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -323,6 +333,18 @@ class IncidentLifetime:
     until: str | None = None
 
     def __post_init__(self) -> None:
+        if self.matching_calls is not None:
+            object.__setattr__(
+                self,
+                "matching_calls",
+                _strict_int(self.matching_calls, "lifetime matching_calls"),
+            )
+        if self.iterations is not None:
+            object.__setattr__(
+                self,
+                "iterations",
+                _strict_int(self.iterations, "lifetime iterations"),
+            )
         selected = sum(
             value is not None for value in (self.matching_calls, self.iterations, self.until)
         )
@@ -346,9 +368,9 @@ class IncidentLifetime:
         _reject_unknown_keys(value, _LIFETIME_KEYS, "incident lifetime")
         return cls(
             matching_calls=(
-                None if value.get("matching_calls") is None else int(value["matching_calls"])
+                None if value.get("matching_calls") is None else value["matching_calls"]
             ),
-            iterations=(None if value.get("iterations") is None else int(value["iterations"])),
+            iterations=(None if value.get("iterations") is None else value["iterations"]),
             until=value.get("until"),
         )
 
@@ -377,7 +399,20 @@ class FaultTarget:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "surface", FaultSurface(self.surface))
-        object.__setattr__(self, "metadata", dict(self.metadata))
+        if self.rank is not None:
+            object.__setattr__(self, "rank", _strict_int(self.rank, "fault target rank"))
+        object.__setattr__(
+            self,
+            "model_part",
+            _strict_int(self.model_part, "fault target model_part"),
+        )
+        if self.index is not None:
+            object.__setattr__(self, "index", _strict_int(self.index, "fault target index"))
+        object.__setattr__(
+            self,
+            "metadata",
+            freeze_json_mapping(self.metadata, "fault target metadata"),
+        )
         if self.rank is not None and self.rank < 0:
             raise ValueError("fault target rank must be non-negative")
         if self.model_part < 0:
@@ -408,15 +443,15 @@ class FaultTarget:
         _reject_unknown_keys(value, _TARGET_KEYS, "fault target")
         return cls(
             surface=FaultSurface(value["surface"]),
-            rank=None if value.get("rank") is None else int(value["rank"]),
-            model_part=int(value.get("model_part", 0)),
+            rank=None if value.get("rank") is None else value["rank"],
+            model_part=value.get("model_part", 0),
             component=value.get("component"),
-            index=None if value.get("index") is None else int(value["index"]),
+            index=None if value.get("index") is None else value["index"],
             module_path=value.get("module_path"),
             operation=value.get("operation"),
             resource=value.get("resource"),
             path=value.get("path"),
-            metadata=dict(value.get("metadata", {})),
+            metadata=value.get("metadata", {}),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -432,7 +467,7 @@ class FaultTarget:
                 "operation": self.operation,
                 "resource": self.resource,
                 "path": self.path,
-                "metadata": dict(self.metadata),
+                "metadata": thaw_json(self.metadata),
             }.items()
             if value is not None and value != {}
         }
@@ -453,7 +488,11 @@ class FaultSpec:
             object.__setattr__(self, "target", FaultTarget.from_dict(self.target))
         if not isinstance(self.target, FaultTarget):
             raise TypeError("fault target must be a FaultTarget or mapping")
-        object.__setattr__(self, "parameters", dict(self.parameters))
+        object.__setattr__(
+            self,
+            "parameters",
+            freeze_json_mapping(self.parameters, "fault parameters"),
+        )
         if not self.fault_id or not self.fault_id.strip():
             raise ValueError("fault_id must be non-empty")
         self._validate_parameters()
@@ -495,7 +534,7 @@ class FaultSpec:
             fault_id=str(value.get("fault_id", value.get("id", ""))),
             type=FailureType(value["type"]),
             target=FaultTarget.from_dict(value["target"]),
-            parameters=dict(value.get("parameters", {})),
+            parameters=value.get("parameters", {}),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -503,7 +542,7 @@ class FaultSpec:
             "fault_id": self.fault_id,
             "type": self.type.value,
             "target": self.target.to_dict(),
-            "parameters": dict(self.parameters),
+            "parameters": thaw_json(self.parameters),
         }
 
 
@@ -529,6 +568,12 @@ class FaultIncident:
         )
         object.__setattr__(self, "faults", normalized_faults)
         object.__setattr__(self, "retrigger", RetriggerPolicy(self.retrigger))
+        if self.max_occurrences is not None:
+            object.__setattr__(
+                self,
+                "max_occurrences",
+                _strict_int(self.max_occurrences, "max_occurrences"),
+            )
         if not self.incident_id or not self.incident_id.strip():
             raise ValueError("incident_id must be non-empty")
         if not self.faults:
@@ -590,7 +635,7 @@ class FaultIncident:
             faults=tuple(FaultSpec.from_dict(fault) for fault in value["faults"]),
             retrigger=RetriggerPolicy(value.get("retrigger", RetriggerPolicy.ONCE.value)),
             max_occurrences=(
-                None if value.get("max_occurrences") is None else int(value["max_occurrences"])
+                None if value.get("max_occurrences") is None else value["max_occurrences"]
             ),
         )
 
@@ -626,7 +671,17 @@ class FaultCampaign:
         object.__setattr__(self, "incidents", normalized_incidents)
         if isinstance(self.clock, Mapping):
             object.__setattr__(self, "clock", ClockSpec.from_dict(self.clock))
-        object.__setattr__(self, "metadata", dict(self.metadata))
+        object.__setattr__(
+            self,
+            "schema_version",
+            _strict_int(self.schema_version, "campaign schema_version"),
+        )
+        object.__setattr__(self, "seed", _strict_int(self.seed, "campaign seed"))
+        object.__setattr__(
+            self,
+            "metadata",
+            freeze_json_mapping(self.metadata, "campaign metadata"),
+        )
         if self.schema_version != SCHEMA_VERSION:
             raise ValueError(
                 f"unsupported campaign schema_version {self.schema_version}; "
@@ -648,12 +703,12 @@ class FaultCampaign:
     def from_dict(cls, value: Mapping[str, Any]) -> "FaultCampaign":
         _reject_unknown_keys(value, _CAMPAIGN_KEYS, "campaign")
         return cls(
-            schema_version=int(value.get("schema_version", SCHEMA_VERSION)),
+            schema_version=value.get("schema_version", SCHEMA_VERSION),
             name=str(value["name"]),
-            seed=int(value.get("seed", 0)),
+            seed=value.get("seed", 0),
             clock=ClockSpec.from_dict(value.get("clock", {})),
             incidents=tuple(FaultIncident.from_dict(incident) for incident in value["incidents"]),
-            metadata=dict(value.get("metadata", {})),
+            metadata=value.get("metadata", {}),
         )
 
     @classmethod
@@ -671,7 +726,7 @@ class FaultCampaign:
             "seed": self.seed,
             "clock": self.clock.to_dict(),
             "incidents": [incident.to_dict() for incident in self.incidents],
-            "metadata": dict(self.metadata),
+            "metadata": thaw_json(self.metadata),
         }
 
     @property
@@ -709,6 +764,12 @@ def _reject_alias_pair(
 ) -> None:
     if canonical in value and alias in value:
         raise ValueError(f"{label} cannot contain both {canonical!r} and {alias!r}")
+
+
+def _strict_int(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{label} must be an integer")
+    return value
 
 
 __all__ = [

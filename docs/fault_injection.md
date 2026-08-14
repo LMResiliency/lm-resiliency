@@ -191,6 +191,13 @@ parameters.
 | `incidents` | Yes | - | Non-empty array of incident objects. `incident_id` values must be unique in the campaign. |
 | `metadata` | No | `{}` | User-defined experiment metadata such as model, workload, topology, or ticket ID. It does not change execution. |
 
+Integer fields use JSON integers only. Booleans and fractional numbers are not
+coerced into iteration, rank, index, lifetime, retry, seed, or schema values.
+Campaign metadata, target metadata, and fault parameters are validated as
+finite JSON values and captured as deeply immutable snapshots. Mutating the
+caller's source dictionaries after construction cannot change scheduling or the
+manifest identity.
+
 ### Clock
 
 | Field | Values | Meaning |
@@ -286,7 +293,7 @@ injection IDs but the same occurrence ID.
 | `operation` | Executor-specific | - | Runtime operation such as `all_reduce` for a collective fault. |
 | `resource` | Executor-specific | - | Resource selector such as a GPU, NIC, worker, or node identifier. |
 | `path` | Executor-specific | - | Checkpoint or storage path. |
-| `metadata` | No | `{}` | Additional selector data consumed by a custom executor. |
+| `metadata` | No | `{}` | Additional selector data consumed by framework resolution or a custom executor. |
 
 Module surfaces (`input`, `output`, `weight`, `bias`, `gradient`,
 `optimizer_state`, and `compute`) require either `module_path` or `component`.
@@ -296,6 +303,15 @@ For pipeline-sharded Megatron, TorchTitan, or DeepSpeed models, logical
 transformer-layer indices are resolved through global module metadata such as
 `layer_number` or `global_layer_index`. The injector rejects ambiguous
 stage-local numbering instead of binding the same local suffix on every stage.
+Megatron's `layer_number` is interpreted as one-based. Other pipeline
+implementations using `layer_number` must set `metadata.layer_number_base` to
+`0` or `1`, or expose an unambiguous `global_layer_index` or
+`global_layer_idx`.
+
+Expert indices are global. An expert module may expose `global_expert_index` or
+`global_expert_id`. Otherwise the target or model must provide
+`expert_parallel_rank` and `num_local_experts`; the injector maps the local
+module suffix through that topology and rejects ambiguous local numbering.
 
 ### Built-In Parameters
 
@@ -314,9 +330,9 @@ stage-local numbering instead of binding the same local suffix on every stage.
 Stale and duplicate faults retain two observed values only during their
 scheduled collection window. Module and gradient observation starts one
 training iteration before a candidate and is removed at the optimizer boundary
-after the occurrence. State surfaces are snapshotted over the equivalent
-two-boundary window. A stale or duplicate incident scheduled for the first
-iteration fails verification because no prior value exists.
+after the occurrence. State surfaces retain only the selected values over the
+equivalent two-boundary window. A stale or duplicate incident scheduled for the
+first iteration fails verification because no prior value exists.
 
 Weight, bias, and optimizer-state faults with bounded iteration lifetimes are
 retired by removing the injected finite delta from the current tensor. This
@@ -324,6 +340,9 @@ preserves optimizer updates made during the active window. A bounded state fault
 whose injected delta is non-finite is rejected before mutation; represent such
 corruption with an `until` lifetime and recover the workload afterward.
 FSDP2/HSDP `DTensor` state is mutated and verified through the rank-local shard.
+Model and optimizer `load_state_dict()` hooks mark active state as externally
+replaced, so a bounded fault expiring after checkpoint loading does not subtract
+its old delta from recovered values.
 
 Custom executors receive the full `target` and `parameters` objects unchanged.
 They may define additional fields, but should validate those fields before the
@@ -566,7 +585,11 @@ uses the active `OptimizerStep` instruction-map entry, composing with an already
 enabled SCOUT wrapper. Under ZeRO-3, weight and bias effects mutate the
 rank-owned `ds_tensor` partition rather than the zero-sized model placeholder;
 gradient hooks remain attached to the original parameter so they receive the
-materialized backward gradient.
+materialized backward gradient. Optimizer-state effects use the rank-owned FP32
+master-state fragment exposed by ZeRO-1/2 high-precision mappings or the
+ZeRO-3 local partition. ZeRO-3 optimizer offload is rejected because the
+injector cannot safely retain a live swapped state fragment across the fault
+lifetime.
 
 Permanent non-finite mutation of live parameter or optimizer state requires
 checkpoint recovery because the affected values cannot be retired while

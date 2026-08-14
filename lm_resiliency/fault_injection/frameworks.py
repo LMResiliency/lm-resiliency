@@ -58,8 +58,8 @@ class TrainingContext:
             for modules in candidate_modules:
                 resolved = _resolve_logical_module(
                     modules,
-                    component=target.component,
-                    index=target.index,
+                    target=target,
+                    framework=self.framework,
                     require_global_layer_metadata=(
                         self.framework in {"megatron", "torchtitan"}
                         or self.is_pipeline_engine
@@ -120,6 +120,14 @@ class TrainingContext:
     ) -> torch.Tensor:
         """Resolve one optimizer-state tensor associated with the target parameter."""
         parameter = self._resolve_model_parameter(target, parameter_name=parameter_name)
+        if self.framework == "deepspeed":
+            state = _resolve_deepspeed_optimizer_state(
+                self.optimizer,
+                parameter,
+                state_key=state_key,
+            )
+            if state is not None:
+                return state
         for optimizer in _base_optimizers(self.optimizer):
             state = optimizer.state.get(parameter, {})
             if state_key is not None:
@@ -153,7 +161,10 @@ class TrainingContext:
             )
         for parameter in module.parameters(recurse=False):
             return parameter
-        raise LookupError(f"module {type(module).__name__} exposes no direct parameters")
+        nested = sorted(module.named_parameters(recurse=True), key=lambda item: item[0])
+        if nested:
+            return nested[0][1]
+        raise LookupError(f"module {type(module).__name__} exposes no parameters")
 
     def _parameter_storage(
         self,
@@ -203,6 +214,27 @@ class TrainingContext:
                 setattr(owner, attribute, original)
 
         self._cleanups.append(restore)
+
+    def register_state_replacement_callback(self, callback: Callable[[], None]) -> None:
+        """Observe model or optimizer state loads that replace active fault state."""
+        seen: set[int] = set()
+        for model in self.models:
+            for candidate in (model, _unwrap_module(model)):
+                if id(candidate) in seen:
+                    continue
+                seen.add(id(candidate))
+                register = getattr(candidate, "register_load_state_dict_post_hook", None)
+                if callable(register):
+                    handle = register(lambda *_args, **_kwargs: callback())
+                    self._cleanups.append(handle.remove)
+        for optimizer in _base_optimizers(self.optimizer):
+            if id(optimizer) in seen:
+                continue
+            seen.add(id(optimizer))
+            register = getattr(optimizer, "register_load_state_dict_post_hook", None)
+            if callable(register):
+                handle = register(lambda *_args, **_kwargs: callback())
+                self._cleanups.append(handle.remove)
 
     def _register_deepspeed_step_callback(self, callback: Callable[[], None]) -> None:
         owner = self.step_owner
@@ -344,17 +376,26 @@ def resolve_training_context(
 def _resolve_logical_module(
     modules: dict[str, nn.Module],
     *,
-    component: str,
-    index: int | None,
+    target: FaultTarget,
+    framework: str,
     require_global_layer_metadata: bool = False,
 ) -> nn.Module | None:
+    component = target.component
+    if component is None:
+        return None
+    index = target.index
     if component in modules and index is None:
         return modules[component]
     normalized = component.lower().replace("-", "_")
     if _is_layer_component(normalized):
         if index is None:
             raise ValueError(f"logical component {component!r} requires index")
-        metadata_match = _resolve_global_layer_metadata(modules, index)
+        metadata_match = _resolve_global_layer_metadata(
+            modules,
+            index,
+            framework=framework,
+            layer_number_base=target.metadata.get("layer_number_base"),
+        )
         if metadata_match is not None:
             return metadata_match
         if require_global_layer_metadata:
@@ -378,10 +419,7 @@ def _resolve_logical_module(
     if normalized == "expert":
         if index is None:
             raise ValueError("logical component 'expert' requires index")
-        for name, module in modules.items():
-            pieces = name.split(".")
-            if pieces[-1:] == [str(index)] and "expert" in name.lower():
-                return module
+        return _resolve_global_expert(modules, index, target)
     return None
 
 
@@ -393,6 +431,9 @@ def _is_layer_component(component: str) -> bool:
 def _resolve_global_layer_metadata(
     modules: dict[str, nn.Module],
     index: int,
+    *,
+    framework: str,
+    layer_number_base: Any,
 ) -> nn.Module | None:
     direct: list[nn.Module] = []
     numbered: list[tuple[nn.Module, int]] = []
@@ -409,11 +450,148 @@ def _resolve_global_layer_metadata(
         return match
     if not numbered:
         return None
-    base = 0 if any(number == 0 for _, number in numbered) else 1
+    if layer_number_base is None:
+        if framework != "megatron":
+            return None
+        base = 1
+    else:
+        if isinstance(layer_number_base, bool) or not isinstance(layer_number_base, int):
+            raise TypeError("target metadata layer_number_base must be an integer")
+        if layer_number_base not in {0, 1}:
+            raise ValueError("target metadata layer_number_base must be 0 or 1")
+        base = layer_number_base
     return _unique_module(
         [module for module, number in numbered if number - base == index],
         index,
     )
+
+
+def _resolve_global_expert(
+    modules: dict[str, nn.Module],
+    index: int,
+    target: FaultTarget,
+) -> nn.Module | None:
+    direct: list[nn.Module] = []
+    local_candidates: list[tuple[int, nn.Module]] = []
+    for name, module in modules.items():
+        for attribute in ("global_expert_index", "global_expert_id"):
+            value = getattr(module, attribute, None)
+            if isinstance(value, int) and not isinstance(value, bool) and value == index:
+                direct.append(module)
+        pieces = name.split(".")
+        if not pieces or not pieces[-1].isdigit() or "expert" not in name.lower():
+            continue
+        local_candidates.append((int(pieces[-1]), module))
+    match = _unique_module(direct, index)
+    if match is not None:
+        return match
+    if not local_candidates:
+        return None
+    expert_parallel_rank = _target_or_module_int(
+        target,
+        modules,
+        metadata_key="expert_parallel_rank",
+        attributes=("expert_parallel_rank", "expert_model_parallel_rank", "ep_rank"),
+    )
+    num_local_experts = _target_or_module_int(
+        target,
+        modules,
+        metadata_key="num_local_experts",
+        attributes=("num_local_experts",),
+    )
+    if expert_parallel_rank is None or num_local_experts is None:
+        return None
+    if expert_parallel_rank < 0 or num_local_experts <= 0:
+        raise ValueError("expert topology metadata must be non-negative and non-empty")
+    return _unique_module(
+        [
+            module
+            for local_index, module in local_candidates
+            if expert_parallel_rank * num_local_experts + local_index == index
+        ],
+        index,
+    )
+
+
+def _target_or_module_int(
+    target: FaultTarget,
+    modules: dict[str, nn.Module],
+    *,
+    metadata_key: str,
+    attributes: tuple[str, ...],
+) -> int | None:
+    value = target.metadata.get(metadata_key)
+    if value is not None:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"target metadata {metadata_key} must be an integer")
+        return value
+    found = {
+        candidate
+        for module in modules.values()
+        for attribute in attributes
+        if isinstance((candidate := getattr(module, attribute, None)), int)
+        and not isinstance(candidate, bool)
+    }
+    if len(found) > 1:
+        raise LookupError(f"conflicting {metadata_key} values are exposed by the model")
+    return next(iter(found), None)
+
+
+def _resolve_deepspeed_optimizer_state(
+    optimizer: Any,
+    parameter: torch.Tensor,
+    *,
+    state_key: str | None,
+) -> torch.Tensor | None:
+    mapping = getattr(parameter, "_hp_mapping", None)
+    if mapping is not None:
+        if getattr(mapping, "optim_fragment", None) is None:
+            initialize = getattr(optimizer, "_lazy_init_hp_params_optimizer_state", None)
+            if callable(initialize):
+                initialize()
+        keys = (
+            (state_key,)
+            if state_key is not None
+            else tuple(sorted(getattr(mapping, "get_optim_state_keys", lambda: ())()))
+        )
+        for key in keys:
+            try:
+                value = mapping.get_optim_state_fragment(key)
+            except (KeyError, ValueError):
+                continue
+            if isinstance(value, torch.Tensor) and value.numel() > 1:
+                return value
+        return None
+
+    zero_optimizer = getattr(parameter, "_z3_optimizer", None)
+    get_partition = getattr(zero_optimizer, "_get_fp32_opt_state_partition", None)
+    if not callable(get_partition):
+        return None
+    get_param_id = getattr(zero_optimizer, "get_param_id", None)
+    positions = getattr(zero_optimizer, "grad_position", None)
+    flat_groups = getattr(zero_optimizer, "fp32_partitioned_groups_flat", None)
+    base_optimizer = getattr(zero_optimizer, "optimizer", None)
+    if not callable(get_param_id) or not isinstance(positions, dict) or flat_groups is None:
+        return None
+    group_idx, _offset, _numel = positions[get_param_id(parameter)]
+    swappable = getattr(zero_optimizer, "_swappable_optimizer_subgroup", None)
+    if callable(swappable) and swappable(group_idx):
+        raise LookupError("offloaded DeepSpeed ZeRO-3 optimizer state is not supported")
+    flat_parameter = flat_groups[group_idx]
+    state = getattr(base_optimizer, "state", {}).get(flat_parameter, {})
+    keys = (state_key,) if state_key is not None else tuple(sorted(state))
+    for key in keys:
+        value = state.get(key)
+        if not isinstance(value, torch.Tensor) or value.numel() <= 1:
+            continue
+        partition, _ = get_partition(
+            parameter,
+            release_swap_buffers=False,
+            optim_state_key=key,
+        )
+        if isinstance(partition, torch.Tensor) and partition.numel() > 1:
+            return partition
+    return None
 
 
 def _unique_module(candidates: list[nn.Module], index: int) -> nn.Module | None:

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
+
+from lm_resiliency.fault_injection._json import freeze_json_mapping, thaw_json
 
 
 class InjectionStatus(str, Enum):
@@ -85,14 +88,14 @@ class FaultInjectionRecord:
             "framework": self.framework,
             "executor": self.executor,
             "execution_rank": self.execution_rank,
-            "target": dict(self.target),
-            "parameters": dict(self.parameters),
+            "target": thaw_json(self.target),
+            "parameters": thaw_json(self.parameters),
             "status": self.status.value,
             "verified": self.verified,
             "injection_succeeded": self.injection_succeeded,
             "activated_at_ns": self.activated_at_ns,
             "completed_at_ns": self.completed_at_ns,
-            "evidence": dict(self.evidence),
+            "evidence": thaw_json(self.evidence),
             "error": self.error,
         }
 
@@ -111,10 +114,15 @@ class LocalizationResult:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        normalized_ranks: set[int] = set()
+        for rank in self.failed_ranks:
+            if isinstance(rank, bool) or not isinstance(rank, int):
+                raise TypeError("localization failed_ranks must contain integers")
+            normalized_ranks.add(rank)
         object.__setattr__(
             self,
             "failed_ranks",
-            tuple(sorted({int(rank) for rank in self.failed_ranks})),
+            tuple(sorted(normalized_ranks)),
         )
         object.__setattr__(
             self,
@@ -126,7 +134,11 @@ class LocalizationResult:
             "components",
             tuple(sorted({str(component) for component in self.components})),
         )
-        object.__setattr__(self, "metadata", dict(self.metadata))
+        object.__setattr__(
+            self,
+            "metadata",
+            freeze_json_mapping(self.metadata, "localization metadata"),
+        )
         if not self.occurrence_id:
             raise ValueError("localization occurrence_id must be non-empty")
         if not isinstance(self.detected, bool):
@@ -135,8 +147,13 @@ class LocalizationResult:
             raise ValueError("localization failed_ranks must be non-negative")
         if not self.detected and (self.failed_ranks or self.failed_resources or self.components):
             raise ValueError("undetected localization results cannot report failed targets")
-        if self.latency_ms is not None and self.latency_ms < 0:
-            raise ValueError("localization latency_ms must be non-negative")
+        if self.latency_ms is not None:
+            if isinstance(self.latency_ms, bool) or not isinstance(self.latency_ms, (int, float)):
+                raise TypeError("localization latency_ms must be a number")
+            latency_ms = float(self.latency_ms)
+            object.__setattr__(self, "latency_ms", latency_ms)
+            if not math.isfinite(latency_ms) or latency_ms < 0:
+                raise ValueError("localization latency_ms must be finite and non-negative")
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "LocalizationResult":
@@ -147,8 +164,8 @@ class LocalizationResult:
             failed_resources=tuple(value.get("failed_resources", ())),
             kind=value.get("kind"),
             components=tuple(value.get("components", ())),
-            latency_ms=(None if value.get("latency_ms") is None else float(value["latency_ms"])),
-            metadata=dict(value.get("metadata", {})),
+            latency_ms=value.get("latency_ms"),
+            metadata=value.get("metadata", {}),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -160,7 +177,7 @@ class LocalizationResult:
             "kind": self.kind,
             "components": list(self.components),
             "latency_ms": self.latency_ms,
-            "metadata": dict(self.metadata),
+            "metadata": thaw_json(self.metadata),
         }
 
 
@@ -219,11 +236,11 @@ class CampaignReport:
         return {
             "campaign": self.campaign,
             "manifest_identity": self.manifest_identity,
-            "manifest": dict(self.manifest),
+            "manifest": thaw_json(self.manifest),
             "framework": self.framework,
             "rank": self.rank,
             "completed_iterations": self.completed_iterations,
-            "metadata": dict(self.metadata),
+            "metadata": thaw_json(self.metadata),
             "injections": [record.to_dict() for record in self.injections],
             "localizations": [result.to_dict() for result in self.localizations],
             "evaluations": [evaluation.to_dict() for evaluation in self.evaluations],
