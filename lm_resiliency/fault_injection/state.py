@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+_JOURNAL_KEYS = frozenset({"campaign", "manifest_identity", "attempts"})
+
 
 @dataclass(slots=True)
 class CampaignJournal:
@@ -70,12 +72,20 @@ class CampaignJournal:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "CampaignJournal":
+        if not isinstance(value, dict):
+            raise TypeError("campaign state must be an object")
+        unknown = sorted(set(value) - _JOURNAL_KEYS)
+        if unknown:
+            raise ValueError(f"campaign state contains unknown fields: {unknown}")
+        missing = sorted(_JOURNAL_KEYS - set(value))
+        if missing:
+            raise ValueError(f"campaign state is missing required fields: {missing}")
         if not isinstance(value.get("campaign"), str):
             raise TypeError("campaign state campaign must be a string")
         manifest_identity = value.get("manifest_identity")
         if manifest_identity is not None and not isinstance(manifest_identity, str):
             raise TypeError("campaign state manifest_identity must be a string")
-        attempts = value.get("attempts", {})
+        attempts = value["attempts"]
         if not isinstance(attempts, dict):
             raise TypeError("campaign state attempts must be an object")
         return cls(

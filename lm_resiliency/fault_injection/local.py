@@ -74,6 +74,10 @@ _NOISE_STD = {
 }
 
 
+class _NoOpFaultError(RuntimeError):
+    """The selected target already has the requested faulty value."""
+
+
 @dataclass(slots=True)
 class _History:
     previous: torch.Tensor | None = None
@@ -100,6 +104,7 @@ class LocalFaultEffect:
     handles: list[Any] = field(default_factory=list)
     cleanup_callbacks: list[Callable[[bool, bool], None]] = field(default_factory=list)
     state_replaced: bool = False
+    replacement_identity: int | None = None
     done: bool = False
 
     def verify(self, evidence: dict[str, Any]) -> None:
@@ -322,6 +327,7 @@ class LocalFaultExecutor:
             target_key=key,
             on_done=self._active_keys.discard,
             remaining_calls=request.lifetime.matching_calls,
+            replacement_identity=self._replacement_identity(fault),
         )
         try:
             if fault.type is FailureType.DELAY:
@@ -451,6 +457,8 @@ class LocalFaultExecutor:
                 except Exception as error:
                     if not effect.done:
                         effect.fail(error)
+                    if isinstance(error, _NoOpFaultError):
+                        return args, kwargs
                     raise
 
             effect.handles.append(
@@ -472,6 +480,8 @@ class LocalFaultExecutor:
             except Exception as error:
                 if not effect.done:
                     effect.fail(error)
+                if isinstance(error, _NoOpFaultError):
+                    return output
                 raise
 
         effect.handles.append(
@@ -502,6 +512,8 @@ class LocalFaultExecutor:
             except Exception as error:
                 if not effect.done:
                     effect.fail(error)
+                if isinstance(error, _NoOpFaultError):
+                    return gradient
                 raise
 
         effect.handles.append(parameter.register_hook(transform_gradient))
@@ -521,6 +533,28 @@ class LocalFaultExecutor:
             fault.target,
             parameter_name=_parameter_name(fault),
         )
+
+    def _replacement_identity(self, fault: FaultSpec) -> int | None:
+        parameter_name = _parameter_name(fault)
+        if fault.target.surface in {FaultSurface.WEIGHT, FaultSurface.BIAS}:
+            return id(
+                self._context.resolve_gradient_parameter(
+                    fault.target,
+                    parameter_name=parameter_name,
+                )
+            )
+        if fault.target.surface is FaultSurface.OPTIMIZER_STATE:
+            _tensor, owner_identity = self._context.resolve_optimizer_state_with_owner(
+                fault.target,
+                parameter_name=parameter_name,
+                state_key=(
+                    None
+                    if fault.parameters.get("state_key") is None
+                    else str(fault.parameters["state_key"])
+                ),
+            )
+            return owner_identity
+        return None
 
     def _mutate_state_tensor(
         self,
@@ -682,7 +716,7 @@ def _prepare_state_values(
     else:
         raise ValueError(f"unsupported state fault type {request.fault.type.value!r}")
     if _same_tensor_values(original, transformed):
-        raise RuntimeError("fault injection did not change the selected tensor values")
+        raise _NoOpFaultError("fault injection did not change the selected tensor values")
     return indices, original, transformed
 
 
@@ -734,7 +768,7 @@ def _transform_tensor(
         raise ValueError(f"unsupported tensor fault type {fault.type.value!r}")
     after = transformed.detach().view(-1).index_select(0, indices)
     if _same_tensor_values(before, after):
-        raise RuntimeError("fault injection did not change the selected tensor values")
+        raise _NoOpFaultError("fault injection did not change the selected tensor values")
     return _rewrap_local(reference, transformed), int(indices.numel())
 
 

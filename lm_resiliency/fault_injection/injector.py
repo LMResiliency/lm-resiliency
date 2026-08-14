@@ -149,7 +149,12 @@ class FaultInjectionSession:
         elif completed_iterations is None:
             completed = self._context.inferred_completed_iterations
         else:
-            completed = int(completed_iterations)
+            if isinstance(completed_iterations, bool) or not isinstance(
+                completed_iterations,
+                int,
+            ):
+                raise TypeError("completed_iterations must be an integer")
+            completed = completed_iterations
         if completed < 0:
             raise ValueError("completed_iterations must be non-negative")
         self._completed_iterations = completed
@@ -256,6 +261,11 @@ class FaultInjectionSession:
                 occurrence_id,
                 occurrence_records,
                 tuple(by_occurrence.get(occurrence_id, ())),
+                next(
+                    incident
+                    for incident in self.campaign.incidents
+                    if incident.incident_id == occurrence_records[0].incident_id
+                ),
             )
             for occurrence_id, occurrence_records in grouped.items()
         )
@@ -882,13 +892,18 @@ class FaultInjectionSession:
     def _discard_completed(self) -> None:
         self._active = [active for active in self._active if not active.done]
 
-    def _mark_state_replaced(self, state_family: str) -> None:
+    def _mark_state_replaced(
+        self,
+        state_family: str,
+        identities: frozenset[int],
+    ) -> None:
         surfaces = {"weight", "bias"} if state_family == "model" else {"optimizer_state"}
         for active in self._active:
             if (
                 isinstance(active.effect, LocalFaultEffect)
                 and not active.done
                 and active.effect.record.target.get("surface") in surfaces
+                and active.effect.replacement_identity in identities
             ):
                 active.effect.mark_state_replaced()
 
@@ -1176,17 +1191,29 @@ def _evaluate_occurrence(
     occurrence_id: str,
     records: tuple[FaultInjectionRecord, ...],
     results: tuple[LocalizationResult, ...],
+    incident: FaultIncident,
 ) -> FaultEvaluation:
-    expected_ranks = tuple(
-        sorted({rank for record in records if (rank := record.expected_rank) is not None})
-    )
+    expected_ranks = tuple(sorted({fault.target.execution_rank for fault in incident.faults}))
     expected_resources = tuple(
         sorted(
-            {resource for record in records if (resource := record.expected_resource) is not None}
+            {
+                fault.target.resource
+                for fault in incident.faults
+                if fault.target.resource is not None
+            }
         )
     )
     expected_components = {
-        component for record in records if (component := record.expected_component) is not None
+        component
+        for fault in incident.faults
+        if (
+            component := (
+                fault.target.component
+                if fault.target.component is not None
+                else fault.target.module_path
+            )
+        )
+        is not None
     }
     injection_succeeded = bool(records) and all(record.injection_succeeded for record in records)
     detected_results = tuple(result for result in results if result.detected)
@@ -1203,14 +1230,14 @@ def _evaluate_occurrence(
     unexpected_resources = tuple(
         resource for resource in reported_resources if resource not in expected_resources
     )
-    expected_kinds = {record.expected_kind for record in records}
+    expected_kinds = {fault.expected_kind for fault in incident.faults}
     reported_kinds = {result.kind for result in detected_results if result.kind is not None}
     if not reported_kinds and len(expected_kinds) == 1:
         kind_matches: bool | None = None
     else:
         kind_matches = reported_kinds == expected_kinds and all(
-            any(_result_correlates_with_record(result, record) for result in detected_results)
-            for record in records
+            any(_result_correlates_with_fault(result, fault) for result in detected_results)
+            for fault in incident.faults
         )
     reported_components = {
         component for result in detected_results for component in result.components
@@ -1248,19 +1275,18 @@ def _evaluate_occurrence(
     )
 
 
-def _result_correlates_with_record(
+def _result_correlates_with_fault(
     result: LocalizationResult,
-    record: FaultInjectionRecord,
+    fault: FaultSpec,
 ) -> bool:
-    if not result.detected or result.kind != record.expected_kind:
+    if not result.detected or result.kind != fault.expected_kind:
         return False
-    expected_rank = record.expected_rank
-    if expected_rank is not None and expected_rank not in result.failed_ranks:
+    if fault.target.execution_rank not in result.failed_ranks:
         return False
-    expected_resource = record.expected_resource
+    expected_resource = fault.target.resource
     if expected_resource is not None and expected_resource not in result.failed_resources:
         return False
-    expected_component = record.expected_component
+    expected_component = fault.target.component or fault.target.module_path
     return not result.components or (
         expected_component is not None and expected_component in result.components
     )

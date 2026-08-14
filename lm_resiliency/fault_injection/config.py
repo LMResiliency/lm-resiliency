@@ -526,7 +526,14 @@ class FaultSpec:
             if "magnitude" in self.parameters:
                 FaultMagnitude(self.parameters["magnitude"])
             if "factor" in self.parameters:
-                _finite_number(self.parameters["factor"], "tensor_corruption parameters.factor")
+                factor = _finite_number(
+                    self.parameters["factor"],
+                    "tensor_corruption parameters.factor",
+                )
+                if CorruptionOperation(operation) is CorruptionOperation.SCALE and factor == 1.0:
+                    raise ValueError(
+                        "scale corruption parameters.factor must change the target value"
+                    )
             if "std" in self.parameters:
                 standard_deviation = _finite_number(
                     self.parameters["std"],

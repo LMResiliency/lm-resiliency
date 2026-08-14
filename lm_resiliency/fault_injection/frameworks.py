@@ -119,26 +119,41 @@ class TrainingContext:
         state_key: str | None,
     ) -> torch.Tensor:
         """Resolve one optimizer-state tensor associated with the target parameter."""
+        tensor, _owner_identity = self.resolve_optimizer_state_with_owner(
+            target,
+            parameter_name=parameter_name,
+            state_key=state_key,
+        )
+        return tensor
+
+    def resolve_optimizer_state_with_owner(
+        self,
+        target: FaultTarget,
+        *,
+        parameter_name: str | None,
+        state_key: str | None,
+    ) -> tuple[torch.Tensor, int]:
+        """Resolve optimizer state and the optimizer whose load replaces it."""
         parameter = self._resolve_model_parameter(target, parameter_name=parameter_name)
         if self.framework == "deepspeed":
-            state = _resolve_deepspeed_optimizer_state(
+            resolved = _resolve_deepspeed_optimizer_state(
                 self.optimizer,
                 parameter,
                 state_key=state_key,
             )
-            if state is not None:
-                return state
+            if resolved is not None:
+                return resolved
         for optimizer in _base_optimizers(self.optimizer):
             state = optimizer.state.get(parameter, {})
             if state_key is not None:
                 value = state.get(state_key)
                 if isinstance(value, torch.Tensor):
-                    return value
+                    return value, id(optimizer)
                 continue
             for key in sorted(state):
                 value = state[key]
                 if isinstance(value, torch.Tensor) and value.numel() > 1:
-                    return value
+                    return value, id(optimizer)
         suffix = "" if state_key is None else f" {state_key!r}"
         raise LookupError(f"optimizer state tensor{suffix} is unavailable")
 
@@ -215,7 +230,10 @@ class TrainingContext:
 
         self._cleanups.append(restore)
 
-    def register_state_replacement_callback(self, callback: Callable[[str], None]) -> None:
+    def register_state_replacement_callback(
+        self,
+        callback: Callable[[str, frozenset[int]], None],
+    ) -> None:
         """Observe model or optimizer state loads that replace active fault state."""
         seen: set[int] = set()
         for model in self.models:
@@ -223,17 +241,48 @@ class TrainingContext:
                 if id(candidate) in seen:
                     continue
                 seen.add(id(candidate))
-                register = getattr(candidate, "register_load_state_dict_post_hook", None)
-                if callable(register):
-                    handle = register(lambda *_args, **_kwargs: callback("model"))
-                    self._cleanups.append(handle.remove)
+                register_pre = getattr(candidate, "register_load_state_dict_pre_hook", None)
+                register_post = getattr(candidate, "register_load_state_dict_post_hook", None)
+                if callable(register_pre) and callable(register_post):
+                    pending: dict[str, frozenset[int]] = {"identities": frozenset()}
+
+                    def capture_loaded_parameters(
+                        module: nn.Module,
+                        state_dict: dict[str, Any],
+                        prefix: str,
+                        *_args: Any,
+                        _pending: dict[str, frozenset[int]] = pending,
+                        **_kwargs: Any,
+                    ) -> None:
+                        _pending["identities"] = frozenset(
+                            id(parameter)
+                            for name, parameter in module.named_parameters(recurse=True)
+                            if f"{prefix}{name}" in state_dict
+                        )
+
+                    def report_loaded_parameters(
+                        *_args: Any,
+                        _pending: dict[str, frozenset[int]] = pending,
+                        **_kwargs: Any,
+                    ) -> None:
+                        callback("model", _pending["identities"])
+                        _pending["identities"] = frozenset()
+
+                    pre_handle = register_pre(capture_loaded_parameters)
+                    post_handle = register_post(report_loaded_parameters)
+                    self._cleanups.extend((post_handle.remove, pre_handle.remove))
         for optimizer in _base_optimizers(self.optimizer):
             if id(optimizer) in seen:
                 continue
             seen.add(id(optimizer))
             register = getattr(optimizer, "register_load_state_dict_post_hook", None)
             if callable(register):
-                handle = register(lambda *_args, **_kwargs: callback("optimizer"))
+                handle = register(
+                    lambda *_args, _identity=id(optimizer), **_kwargs: callback(
+                        "optimizer",
+                        frozenset({_identity}),
+                    )
+                )
                 self._cleanups.append(handle.remove)
 
     def _register_deepspeed_step_callback(self, callback: Callable[[], None]) -> None:
@@ -411,9 +460,7 @@ def _resolve_logical_module(
     if normalized in {"embedding", "token_embedding"}:
         return _resolve_embedding(modules)
     if normalized in {"output", "lm_head"}:
-        for name, module in modules.items():
-            if name.lower().endswith(("lm_head", "output_layer", "output")):
-                return module
+        return _resolve_output(modules, normalized)
     if normalized == "expert":
         if index is None:
             raise ValueError("logical component 'expert' requires index")
@@ -455,6 +502,31 @@ def _resolve_embedding(modules: dict[str, nn.Module]) -> nn.Module | None:
         return next(iter(unique.values()))[1]
     paths = ", ".join(sorted(name for name, _module in unique.values()))
     raise ValueError(f"logical embedding target is ambiguous; specify module_path from: {paths}")
+
+
+def _resolve_output(
+    modules: dict[str, nn.Module],
+    component: str,
+) -> nn.Module | None:
+    preferred = [
+        (name, module)
+        for name, module in modules.items()
+        if name.lower().split(".")[-1] in {"lm_head", "output_layer"}
+    ]
+    selected = preferred
+    if not selected and component == "output":
+        selected = [
+            (name, module)
+            for name, module in modules.items()
+            if name.lower().split(".")[-1] == "output"
+        ]
+    if not selected:
+        return None
+    unique = {id(module): (name, module) for name, module in selected}
+    if len(unique) == 1:
+        return next(iter(unique.values()))[1]
+    paths = ", ".join(sorted(name for name, _module in unique.values()))
+    raise ValueError(f"logical output target is ambiguous; specify module_path from: {paths}")
 
 
 def _is_layer_component(component: str) -> bool:
@@ -576,7 +648,9 @@ def _resolve_deepspeed_optimizer_state(
     parameter: torch.Tensor,
     *,
     state_key: str | None,
-) -> torch.Tensor | None:
+) -> tuple[torch.Tensor, int] | None:
+    base_optimizers = _base_optimizers(optimizer)
+    default_owner = id(base_optimizers[0]) if base_optimizers else id(optimizer)
     mapping = getattr(parameter, "_hp_mapping", None)
     if mapping is not None:
         if getattr(mapping, "optim_fragment", None) is None:
@@ -594,7 +668,7 @@ def _resolve_deepspeed_optimizer_state(
             except (KeyError, ValueError):
                 continue
             if isinstance(value, torch.Tensor) and value.numel() > 1:
-                return value
+                return value, default_owner
         return None
 
     zero_optimizer = getattr(parameter, "_z3_optimizer", None)
@@ -624,7 +698,7 @@ def _resolve_deepspeed_optimizer_state(
             optim_state_key=key,
         )
         if isinstance(partition, torch.Tensor) and partition.numel() > 1:
-            return partition
+            return partition, id(base_optimizer)
     return None
 
 

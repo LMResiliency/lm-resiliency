@@ -7,7 +7,7 @@ import math
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from lm_resiliency.fault_injection._json import freeze_json_mapping, thaw_json
 
@@ -153,12 +153,12 @@ class LocalizationResult:
         object.__setattr__(
             self,
             "failed_resources",
-            tuple(sorted({str(resource) for resource in self.failed_resources})),
+            _string_sequence(self.failed_resources, "localization failed_resources"),
         )
         object.__setattr__(
             self,
             "components",
-            tuple(sorted({str(component) for component in self.components})),
+            _string_sequence(self.components, "localization components"),
         )
         object.__setattr__(
             self,
@@ -192,9 +192,9 @@ class LocalizationResult:
             occurrence_id=str(value.get("occurrence_id", value.get("injection_id", ""))),
             detected=value["detected"],
             failed_ranks=tuple(value.get("failed_ranks", ())),
-            failed_resources=tuple(value.get("failed_resources", ())),
+            failed_resources=value.get("failed_resources", ()),
             kind=value.get("kind"),
-            components=tuple(value.get("components", ())),
+            components=value.get("components", ()),
             latency_ms=value.get("latency_ms"),
             metadata=value.get("metadata", {}),
         )
@@ -210,6 +210,19 @@ class LocalizationResult:
             "latency_ms": self.latency_ms,
             "metadata": thaw_json(self.metadata),
         }
+
+
+def _string_sequence(value: object, label: str) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise TypeError(f"{label} must be a sequence of strings")
+    normalized: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            raise TypeError(f"{label} must contain strings")
+        if not item.strip():
+            raise ValueError(f"{label} must contain non-empty strings")
+        normalized.add(item)
+    return tuple(sorted(normalized))
 
 
 @dataclass(frozen=True, slots=True)

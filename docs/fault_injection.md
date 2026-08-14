@@ -76,6 +76,8 @@ The default clock uses absolute training-run iterations:
 TorchTitan and DeepSpeed progress is discovered from their training objects.
 Pass `completed_iterations=` when native PyTorch or Megatron is enabled after an
 externally managed resume.
+The value must be a non-negative integer; booleans, strings, and fractional
+values are rejected rather than coerced.
 Use `"origin": "campaign_start"` when iteration numbers should be relative to
 enablement instead.
 
@@ -541,6 +543,8 @@ stale attempts are never applied to an edited manifest.
 Attempt entries use `<incident_id>@<positive_iteration>` keys and strictly
 positive integer counts. Malformed, boolean, fractional, zero, or negative
 restart evidence is rejected rather than normalized.
+The journal object requires exactly `campaign`, `manifest_identity`, and
+`attempts`; missing or unknown fields are rejected.
 
 ## Ground Truth and Evaluation
 
@@ -592,6 +596,8 @@ not report it.
 `kind`, when supplied, must be a non-empty string. Supplying component evidence
 for an occurrence whose injected targets have no expected component is an
 overclaim and fails attribution.
+`failed_resources` and `components` must be arrays of non-empty strings; scalar
+strings and coercible non-string values are rejected.
 Example detection counts also require a report with the expected failure kind;
 an unrelated report at the same iteration is retained as evidence but does not
 count as detecting the injected occurrence. For correlated incidents containing

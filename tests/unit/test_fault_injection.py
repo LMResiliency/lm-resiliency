@@ -58,6 +58,17 @@ class TinyModel(nn.Module):
         return value
 
 
+class OutputResolverModel(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attention = nn.Module()
+        self.attention.output = nn.Linear(4, 4)
+        self.lm_head = nn.Linear(4, 4)
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        return self.lm_head(value)
+
+
 class Wrapper(nn.Module):
     def __init__(self, module: nn.Module) -> None:
         super().__init__()
@@ -501,6 +512,11 @@ def test_fault_parameter_contracts_are_rejected() -> None:
         )
     with pytest.raises(ValueError, match="parameters.value"):
         _corruption(operation=CorruptionOperation.SET_VALUE)
+    with pytest.raises(ValueError, match="factor must change"):
+        _corruption(
+            operation=CorruptionOperation.SCALE,
+            factor=1.0,
+        )
 
 
 @pytest.mark.parametrize(
@@ -1133,6 +1149,61 @@ def test_completed_iterations_aligns_absolute_training_clock() -> None:
     assert output.shape == (2, 4)
     assert session.records[0].iteration == 6
     assert session.completed_iterations == 6
+    session.close()
+
+
+@pytest.mark.parametrize("completed_iterations", [True, 1.5, "1"])
+def test_completed_iterations_rejects_coercion(completed_iterations: object) -> None:
+    model = TinyModel()
+
+    with pytest.raises(TypeError, match="must be an integer"):
+        enable_fault_injection(
+            model,
+            _optimizer(model),
+            campaign=_campaign(_incident(at=(2,))),
+            completed_iterations=completed_iterations,  # type: ignore[arg-type]
+            rank=0,
+        )
+
+
+@pytest.mark.parametrize(
+    "surface",
+    [FaultSurface.INPUT, FaultSurface.OUTPUT, FaultSurface.GRADIENT],
+)
+def test_noop_flow_fault_fails_record_without_aborting_training(
+    surface: FaultSurface,
+) -> None:
+    model = nn.Sequential(nn.Linear(4, 4))
+    with torch.no_grad():
+        model[0].weight.zero_()
+        model[0].bias.zero_()
+    optimizer = _optimizer(model)
+    fault = FaultSpec(
+        fault_id=f"drop-{surface.value}",
+        type=FailureType.DROP,
+        target=FaultTarget(
+            rank=0,
+            surface=surface,
+            module_path="0",
+        ),
+        parameters={"scope": FaultScope.FULL.value},
+    )
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(_incident(at=(1,), faults=(fault,))),
+        rank=0,
+    )
+
+    optimizer.zero_grad()
+    output = model(torch.zeros(2, 4))
+    loss = output.sum() if surface is not FaultSurface.GRADIENT else (output * 0).sum()
+    loss.backward()
+    optimizer.step()
+
+    assert session.records[0].status is InjectionStatus.FAILED
+    assert not session.records[0].verified
+    assert "did not change" in (session.records[0].error or "")
     session.close()
 
 
@@ -1885,6 +1956,36 @@ def test_bounded_state_fault_preserves_checkpoint_loaded_replacement() -> None:
     session.close()
 
 
+def test_partial_model_state_load_does_not_preserve_omitted_fault_target() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    baseline = model.layers[0].weight.detach().clone()
+    replacement = torch.full_like(model.layers[1].weight, 7.0)
+    fault = _corruption(
+        target=_target(surface=FaultSurface.WEIGHT),
+        scope=FaultScope.SINGLE,
+    )
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="recovery"),
+                faults=(fault,),
+            )
+        ),
+        rank=0,
+    )
+
+    model.load_state_dict({"layers.1.weight": replacement}, strict=False)
+    session.notify_recovery()
+
+    torch.testing.assert_close(model.layers[0].weight, baseline)
+    torch.testing.assert_close(model.layers[1].weight, replacement)
+    session.close()
+
+
 def test_optimizer_state_load_does_not_preserve_active_model_fault() -> None:
     model = TinyModel()
     optimizer = _optimizer(model)
@@ -2151,6 +2252,39 @@ def test_logical_embedding_rejects_ambiguous_generic_matches() -> None:
             ),
             rank=0,
         )
+
+
+@pytest.mark.parametrize("component", ["output", "lm_head"])
+def test_logical_output_prefers_terminal_head_over_nested_output(
+    component: str,
+) -> None:
+    model = OutputResolverModel()
+    attention = model.attention.output.weight.detach().clone()
+    head = model.lm_head.weight.detach().clone()
+    fault = _corruption(
+        target=_target(
+            surface=FaultSurface.WEIGHT,
+            module_path=None,
+            component=component,
+        ),
+        scope=FaultScope.SINGLE,
+    )
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(until="recovery"),
+                faults=(fault,),
+            )
+        ),
+        rank=0,
+    )
+
+    torch.testing.assert_close(model.attention.output.weight, attention)
+    assert not torch.equal(model.lm_head.weight, head)
+    session.close()
 
 
 def test_explicit_module_path_precedes_logical_fallback_across_wrappers() -> None:
@@ -2658,6 +2792,23 @@ def test_json_state_store_is_atomic_and_campaign_scoped(tmp_path) -> None:
     assert restored.attempt_count("incident", 10) == 1
     with pytest.raises(ValueError, match="belongs to"):
         store.load("campaign-b")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"campaign": "campaign", "manifest_identity": "identity"},
+        {
+            "campaign": "campaign",
+            "manifest_identity": "identity",
+            "attempts": {},
+            "attemps": {},
+        },
+    ],
+)
+def test_campaign_journal_requires_exact_schema(value: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="required fields|unknown fields"):
+        CampaignJournal.from_dict(value)
 
 
 @pytest.mark.parametrize("count", [-1, 0])
@@ -3172,6 +3323,42 @@ def test_correlated_faults_share_one_occurrence_and_evaluation() -> None:
     session.close()
 
 
+def test_correlated_multi_rank_incident_uses_job_wide_expected_targets() -> None:
+    rank_zero = _corruption(
+        fault_id="rank-zero",
+        target=_target(rank=0),
+    )
+    rank_one = _corruption(
+        fault_id="rank-one",
+        target=_target(rank=1),
+    )
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(_incident(at=(1,), faults=(rank_zero, rank_one))),
+        rank=0,
+    )
+    _step(model, optimizer)
+
+    evaluation = session.evaluate(
+        [
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_ranks=(0, 1),
+                kind="sdc",
+            )
+        ]
+    ).evaluations[0]
+
+    assert evaluation.injection_succeeded
+    assert evaluation.expected_ranks == (0, 1)
+    assert evaluation.localized
+    session.close()
+
+
 def test_mixed_kind_correlated_faults_require_per_kind_target_evidence() -> None:
     events: list[tuple[str, str]] = []
     executor = _recording_executor(
@@ -3482,6 +3669,22 @@ def test_localization_rejects_non_json_metadata() -> None:
             occurrence_id="incident@1",
             detected=True,
             metadata={"path": Path("report.json")},
+        )
+
+
+@pytest.mark.parametrize("field", ["failed_resources", "components"])
+@pytest.mark.parametrize("value", ["node-0", [1], [""]])
+def test_localization_rejects_invalid_string_sequences(
+    field: str,
+    value: object,
+) -> None:
+    with pytest.raises((TypeError, ValueError), match="sequence of strings|contain"):
+        LocalizationResult.from_dict(
+            {
+                "occurrence_id": "incident@1",
+                "detected": True,
+                field: value,
+            }
         )
 
 

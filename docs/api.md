@@ -26,7 +26,7 @@ The stable package-root exports are:
 | Fault reporting | `SCOUTFaultReport`, `SCOUTFaultCallback`, `OrchestrationHooks`, `replay_fault_reports` |
 | Recovery handoff | `RecoveryDecision`, `RecoveryDecisionCallback` |
 | Checkpoint tuning | `estimate_chunk_size` |
-| Fault injection evaluation | `enable_fault_injection`, `FaultCampaign`, `FaultIncident`, `IncidentTrigger`, `IncidentLifetime`, `FaultSpec`, `FaultTarget`, `FailureType`, `FaultSurface`, `CorruptionOperation`, `CallbackFaultExecutor`, `FaultInjectionSession`, `LocalizationResult`, `CampaignReport` |
+| Fault injection evaluation | `enable_fault_injection`, `SCHEMA_VERSION`, `FaultCampaign`, `FaultIncident`, `IncidentTrigger`, `IncidentLifetime`, `IterationRange`, `ClockSpec`, `ClockType`, `ClockOrigin`, `FaultSpec`, `FaultTarget`, `FailureType`, `FaultSurface`, `FaultScope`, `FaultMagnitude`, `CorruptionOperation`, `SafetyClass`, `RetriggerPolicy`, `FaultExecutor`, `CallbackFaultExecutor`, `FaultExecutionRequest`, `FaultExecutionResult`, `UnsupportedFaultError`, `FaultInjectionSession`, `InjectionStatus`, `FaultInjectionRecord`, `LocalizationResult`, `FaultEvaluation`, `CampaignReport`, `CampaignJournal`, `CampaignStateStore`, `MemoryCampaignStateStore`, `JsonCampaignStateStore` |
 
 The stable manager API exports are:
 
