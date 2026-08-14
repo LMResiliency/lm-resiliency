@@ -147,8 +147,7 @@ def test_cpu_gloo_recovery_consensus(tmp_path):
     )
 
     results = [
-        json.loads((result_dir / f"rank-{rank}.json").read_text())
-        for rank in range(world_size)
+        json.loads((result_dir / f"rank-{rank}.json").read_text()) for rank in range(world_size)
     ]
     assert results == [
         {"memory_step": -1, "disk_rejected": True},
