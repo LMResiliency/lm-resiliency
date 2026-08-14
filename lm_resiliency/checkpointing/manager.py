@@ -19,10 +19,8 @@ from lm_resiliency.checkpointing.buffer import BufferPool, SlotState
 from lm_resiliency.checkpointing.config import InMemoryCkptConfig
 from lm_resiliency.checkpointing.copy import AsyncDeviceCopier
 from lm_resiliency.checkpointing.disk import (
-    CheckpointFormatError,
     CheckpointStatus,
     CheckpointStatusStore,
-    ChecksumMismatch,
     DiskSerializer,
 )
 from lm_resiliency.checkpointing.replication import ChunkedGlooBackend, PeerReplicator
@@ -525,7 +523,7 @@ class InMemoryCheckpointManager:
         local_error: Exception | None = None
         try:
             loaded = self._disk.load(step)
-        except (CheckpointFormatError, ChecksumMismatch, OSError) as error:
+        except Exception as error:  # noqa: BLE001 - every rank must reach the validity vote
             local_error = error
 
         all_valid = self._collective_min_step(int(loaded is not None)) == 1

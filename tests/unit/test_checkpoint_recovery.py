@@ -239,6 +239,15 @@ def test_disk_save_rejects_structured_numpy_dtype(tmp_path):
         serializer.save_sync(metadata, [], step=11)
 
 
+def test_disk_save_rejects_numpy_array_subclass(tmp_path):
+    masked = np.ma.array([1.0, 2.0], mask=[False, True])
+    metadata = FlatStateDictMetadata(non_tensor_data={"masked": masked})
+    serializer = DiskSerializer(str(tmp_path), rank=0)
+
+    with pytest.raises(TypeError, match="unsupported checkpoint metadata type: MaskedArray"):
+        serializer.save_sync(metadata, [], step=12)
+
+
 def test_disk_save_rejects_dictionary_subclass(tmp_path):
     metadata = FlatStateDictMetadata(non_tensor_data={"extra": defaultdict(int, attempts=3)})
     serializer = DiskSerializer(str(tmp_path), rank=0)
@@ -304,6 +313,27 @@ def test_load_tensors_collectively_rejects_invalid_local_shard(tmp_path):
         patch.object(manager, "_collective_min_step", return_value=0) as collective,
     ):
         assert manager.load_tensors() is None
+
+    collective.assert_called_once_with(0)
+    manager.close()
+
+
+def test_manager_votes_invalid_after_unexpected_local_load_error(tmp_path):
+    manager = InMemoryCheckpointManager(
+        InMemoryCkptConfig(
+            enable=True,
+            interval=1,
+            disk_flush_interval=0,
+            disk_folder=str(tmp_path),
+        )
+    )
+
+    with (
+        patch.object(manager, "_recovery_steps", return_value=(-1, 15)),
+        patch.object(manager._disk, "load", side_effect=RuntimeError("decoder failed")),
+        patch.object(manager, "_collective_min_step", return_value=0) as collective,
+    ):
+        assert manager.load() is None
 
     collective.assert_called_once_with(0)
     manager.close()

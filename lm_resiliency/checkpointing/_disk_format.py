@@ -221,7 +221,7 @@ def _encode_value(value: Any, *, depth: int) -> dict[str, Any]:
                 contiguous.flatten().view(torch.uint8).numpy().tobytes()
             ).decode("ascii"),
         }
-    if isinstance(value, np.ndarray):
+    if type(value) is np.ndarray:
         if value.dtype.hasobject:
             raise TypeError("object-dtype NumPy arrays are not supported in checkpoint metadata")
         _require_plain_numpy_dtype(value.dtype)
