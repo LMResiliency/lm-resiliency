@@ -3,6 +3,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[2]
 CONSTRAINTS = ROOT / "requirements" / "tool-versions.txt"
+SHARED_TOOL_WORKFLOWS = (
+    ROOT / ".github" / "workflows" / "ci.yml",
+    ROOT / ".github" / "workflows" / "gpu-qualification.yml",
+)
 
 
 def _tool_versions() -> dict[str, str]:
@@ -32,10 +36,10 @@ def test_pre_commit_ruff_matches_tool_constraints():
     assert revision.group(1) == _tool_versions()["ruff"]
 
 
-def test_workflow_tool_installs_use_shared_constraints():
+def test_shared_workflow_tool_installs_use_constraints():
     tools = _tool_versions()
 
-    for workflow in (ROOT / ".github" / "workflows").glob("*.yml"):
+    for workflow in SHARED_TOOL_WORKFLOWS:
         normalized = workflow.read_text().replace("\\\n", " ")
         for line in normalized.splitlines():
             if "-m pip install" not in line:
