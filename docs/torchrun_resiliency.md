@@ -469,6 +469,11 @@ boundary, prepare eligible checkpoint state, and wait for either a committed
 plan or an explicit abort. The stock torchrun agent still considers the worker
 group healthy during this preparation phase.
 
+`suspected_node_ids` is the policy-approved replacement scope for the
+incident. Every listed node must belong to the committed generation and must be
+absent from the next assignment. Policy may additionally quarantine a removed
+node when the evidence supports doing so.
+
 An abort is allowed only before a plan is committed and only when resuming the
 same generation is safe. An SDC, inaccessible node, corrupted checkpoint, or
 lost worker group cannot be aborted back to normal training.
@@ -513,6 +518,8 @@ Before commit, the coordinator validates:
 - the plan is fenced to the same intent ID, run, generation, incidents, and
   reason;
 - the recovery mode is at least as conservative as the intent's minimum;
+- every node in the intent's suspected scope is removed from the next
+  assignment;
 - exactly `min_nodes` active logical slots are assigned;
 - at least one assigned node is new to the active membership, because version
   1 uses standby admission as its healthy-group restart edge;

@@ -2318,6 +2318,18 @@ def validate_restart_plan(
         )
     current_nodes = set(current_assignment.slot_to_node_id.values())
     assigned_nodes = {assignment.node_id for assignment in plan.slot_assignments}
+    suspected_nodes = set(intent.suspected_node_ids)
+    unknown_suspects = sorted(suspected_nodes - current_nodes)
+    if unknown_suspects:
+        raise ProtocolValidationError(
+            "RestartIntent.suspected_node_ids: nodes are not active in the committed "
+            f"generation: {unknown_suspects!r}"
+        )
+    retained_suspects = sorted(suspected_nodes & assigned_nodes)
+    if retained_suspects:
+        raise ProtocolValidationError(
+            f"RestartPlan.slot_assignments: suspected nodes remain assigned: {retained_suspects!r}"
+        )
     current_slots_by_node = {
         node_id: slot for slot, node_id in current_assignment.slot_to_node_id.items()
     }

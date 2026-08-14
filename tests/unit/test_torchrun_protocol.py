@@ -78,7 +78,11 @@ def _agent() -> AgentIdentity:
     )
 
 
-def _intent(*, minimum_recovery_mode: str = "latest") -> RestartIntent:
+def _intent(
+    *,
+    minimum_recovery_mode: str = "latest",
+    suspected_node_ids: tuple[str, ...] = ("node-b",),
+) -> RestartIntent:
     return RestartIntent(
         intent_id="intent-4",
         run_id=RUN_ID,
@@ -86,7 +90,7 @@ def _intent(*, minimum_recovery_mode: str = "latest") -> RestartIntent:
         incident_ids=("incident-a",),
         reason_code="replace_straggler",
         minimum_recovery_mode=minimum_recovery_mode,
-        suspected_node_ids=("node-b",),
+        suspected_node_ids=suspected_node_ids,
         prepare_deadline_unix_ms=2_000_000_000_000,
     )
 
@@ -626,6 +630,7 @@ def test_restart_plan_requires_a_replacement_node():
     with pytest.raises(ProtocolValidationError, match="replacement node"):
         _validate(
             plan=unchanged_plan,
+            intent=_intent(suspected_node_ids=()),
             eligible_node_ids=("node-a", "node-b"),
         )
 
@@ -651,6 +656,33 @@ def test_restart_plan_preserves_surviving_nodes_logical_slots():
 
     with pytest.raises(ProtocolValidationError, match="changed logical slots"):
         _validate(plan=shifted_plan)
+
+
+def test_restart_plan_removes_every_node_suspected_by_intent():
+    wrong_replacement = replace(
+        _plan(),
+        slot_assignments=(
+            SlotAssignment(
+                logical_node_slot=0,
+                node_id="node-spare",
+                first_global_rank=0,
+                local_world_size=2,
+            ),
+            SlotAssignment(
+                logical_node_slot=1,
+                node_id="node-b",
+                first_global_rank=2,
+                local_world_size=2,
+            ),
+        ),
+        quarantined_node_ids=(),
+    )
+
+    with pytest.raises(ProtocolValidationError, match="suspected nodes remain assigned"):
+        _validate(
+            plan=wrong_replacement,
+            eligible_node_ids=("node-b", "node-spare"),
+        )
 
 
 def test_restart_plan_preserves_committed_world_size():
