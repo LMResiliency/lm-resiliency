@@ -228,7 +228,7 @@ class InMemoryCheckpointManager:
         Args:
             tensors: Direct references to parameter/state tensors on GPU.
             step: Current training step.
-            extra: Optional small, picklable non-tensor state to checkpoint alongside
+            extra: Optional small, schema-supported non-tensor state to checkpoint alongside
                 this step's shard (e.g. RNG state for bitwise stochastic-forward recovery).
                 Rides the per-rank non-tensor payload, so it inherits node-local
                 flush and peer replication; ``load_tensors`` returns it back.
@@ -470,14 +470,10 @@ class InMemoryCheckpointManager:
         latest = disk_step
         if latest <= 0:
             return None
-        try:
-            metadata, tensors = self._disk.load(latest)
-        except (CheckpointFormatError, ChecksumMismatch) as e:
-            logger.error(
-                f"Checkpoint validation failed at step {latest}: {e} — "
-                "treating as unrecoverable (falling back to framework recovery)"
-            )
+        loaded = self._load_collectively_validated_disk_shard(latest)
+        if loaded is None:
             return None
+        metadata, tensors = loaded
         state_dict = unflatten(metadata, tensors)
         self._metadata = metadata
         logger.info(f"Loaded checkpoint from {self._disk._folder} at step {latest}")
@@ -511,18 +507,45 @@ class InMemoryCheckpointManager:
         latest = disk_step
         if latest <= 0:
             return None
-        try:
-            metadata, tensors = self._disk.load(latest)
-        except (CheckpointFormatError, ChecksumMismatch) as e:
-            logger.error(
-                f"Checkpoint validation failed at step {latest}: {e} — "
-                "treating as unrecoverable (falling back to framework recovery)"
-            )
+        loaded = self._load_collectively_validated_disk_shard(latest)
+        if loaded is None:
             return None
+        metadata, tensors = loaded
         self._metadata = metadata
         extra = (metadata.non_tensor_data or {}).get(_EXTRA_KEY)
         logger.info(f"Loaded checkpoint tensors from {self._disk._folder} at step {latest}")
         return tensors, latest, extra
+
+    def _load_collectively_validated_disk_shard(
+        self,
+        step: int,
+    ) -> tuple[FlatStateDictMetadata, list[torch.Tensor]] | None:
+        """Load locally, then require every rank to accept its selected shard."""
+        loaded: tuple[FlatStateDictMetadata, list[torch.Tensor]] | None = None
+        local_error: Exception | None = None
+        try:
+            loaded = self._disk.load(step)
+        except (CheckpointFormatError, ChecksumMismatch, OSError) as error:
+            local_error = error
+
+        all_valid = self._collective_min_step(int(loaded is not None)) == 1
+        if all_valid:
+            return loaded
+
+        if local_error is not None:
+            logger.error(
+                "Checkpoint validation failed at step %s: %s — all ranks are "
+                "falling back to framework recovery",
+                step,
+                local_error,
+            )
+        else:
+            logger.error(
+                "A peer rejected its checkpoint shard at step %s — all ranks are "
+                "falling back to framework recovery",
+                step,
+            )
+        return None
 
     @property
     def checkpoint_status(self) -> CheckpointStatus:

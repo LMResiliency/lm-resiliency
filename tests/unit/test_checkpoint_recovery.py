@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+from collections import defaultdict
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -20,7 +22,7 @@ from lm_resiliency.checkpointing.disk import (
     shard_checksums,
 )
 from lm_resiliency.checkpointing.manager import InMemoryCheckpointManager
-from lm_resiliency.checkpointing.state_dict import flatten, unflatten
+from lm_resiliency.checkpointing.state_dict import FlatStateDictMetadata, flatten, unflatten
 from lm_resiliency.detection.c3 import C3Result, C3Status
 from lm_resiliency.detection.layer_replay import replay_result_has_sdc
 
@@ -190,12 +192,47 @@ def test_disk_load_rejects_malformed_schema_before_recovery(tmp_path):
         serializer.load(9)
 
 
+@pytest.mark.parametrize("key_path", [[], ["missing"]])
+def test_disk_load_rejects_tensor_paths_that_do_not_match_skeleton(tmp_path, key_path):
+    metadata, tensors = flatten({"w": torch.ones(2)})
+    serializer = DiskSerializer(str(tmp_path), rank=0)
+    path = serializer.save_sync(metadata, tensors, step=10)
+    raw = torch.load(path, weights_only=True)
+    document = json.loads(raw["metadata_json"])
+    document["tensor_entries"][0]["key_path"] = key_path
+    raw["metadata_json"] = json.dumps(document)
+    torch.save(raw, path)
+
+    with pytest.raises(CheckpointFormatError, match="key_path"):
+        serializer.load(10)
+
+
 def test_disk_save_rejects_unsupported_metadata_instead_of_using_pickle(tmp_path):
     metadata, tensors = flatten({"w": torch.ones(2), "unsafe": object()})
     serializer = DiskSerializer(str(tmp_path), rank=0)
 
     with pytest.raises(TypeError, match="unsupported checkpoint metadata type: object"):
         serializer.save_sync(metadata, tensors, step=10)
+
+
+def test_disk_save_rejects_structured_numpy_dtype(tmp_path):
+    metadata = FlatStateDictMetadata(
+        non_tensor_data={
+            "structured": np.array([(1, 2.0)], dtype=[("index", "<i4"), ("value", "<f4")])
+        }
+    )
+    serializer = DiskSerializer(str(tmp_path), rank=0)
+
+    with pytest.raises(TypeError, match="structured and subarray NumPy dtypes"):
+        serializer.save_sync(metadata, [], step=11)
+
+
+def test_disk_save_rejects_dictionary_subclass(tmp_path):
+    metadata = FlatStateDictMetadata(non_tensor_data={"extra": defaultdict(int, attempts=3)})
+    serializer = DiskSerializer(str(tmp_path), rank=0)
+
+    with pytest.raises(TypeError, match="unsupported checkpoint metadata type: defaultdict"):
+        serializer.save_sync(metadata, [], step=12)
 
 
 def test_manager_treats_unsafe_disk_checkpoint_as_unavailable(tmp_path):
@@ -212,6 +249,51 @@ def test_manager_treats_unsafe_disk_checkpoint_as_unavailable(tmp_path):
     )
 
     assert manager.load() is None
+    manager.close()
+
+
+def test_manager_collectively_rejects_valid_shard_when_peer_is_invalid(tmp_path):
+    manager = InMemoryCheckpointManager(
+        InMemoryCkptConfig(
+            enable=True,
+            interval=1,
+            disk_flush_interval=0,
+            disk_folder=str(tmp_path),
+        )
+    )
+    metadata, tensors = flatten({"w": torch.ones(2)})
+    manager._disk.save_sync(metadata, tensors, step=13)
+
+    with (
+        patch.object(manager, "_recovery_steps", return_value=(-1, 13)),
+        patch.object(manager, "_collective_min_step", return_value=0) as collective,
+    ):
+        assert manager.load() is None
+
+    collective.assert_called_once_with(1)
+    manager.close()
+
+
+def test_load_tensors_collectively_rejects_invalid_local_shard(tmp_path):
+    step_dir = tmp_path / "step-14"
+    step_dir.mkdir()
+    torch.save({"legacy": "payload"}, step_dir / "rank-0.pt")
+    manager = InMemoryCheckpointManager(
+        InMemoryCkptConfig(
+            enable=True,
+            interval=1,
+            disk_flush_interval=0,
+            disk_folder=str(tmp_path),
+        )
+    )
+
+    with (
+        patch.object(manager, "_recovery_steps", return_value=(-1, 14)),
+        patch.object(manager, "_collective_min_step", return_value=0) as collective,
+    ):
+        assert manager.load_tensors() is None
+
+    collective.assert_called_once_with(0)
     manager.close()
 
 

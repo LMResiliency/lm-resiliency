@@ -123,9 +123,13 @@ def decode_metadata(encoded: object) -> FlatStateDictMetadata:
             )
         )
 
+    non_tensor_data = _decode_value(document["non_tensor_data"], depth=0)
+    if type(non_tensor_data) is not dict:
+        raise CheckpointFormatError("checkpoint non_tensor_data must be a dictionary")
+    _validate_tensor_paths(non_tensor_data, entries)
     return FlatStateDictMetadata(
         tensor_entries=entries,
-        non_tensor_data=_decode_value(document["non_tensor_data"], depth=0),
+        non_tensor_data=non_tensor_data,
     )
 
 
@@ -204,6 +208,7 @@ def _encode_value(value: Any, *, depth: int) -> dict[str, Any]:
     if isinstance(value, np.ndarray):
         if value.dtype.hasobject:
             raise TypeError("object-dtype NumPy arrays are not supported in checkpoint metadata")
+        _require_plain_numpy_dtype(value.dtype)
         contiguous = np.ascontiguousarray(value)
         return {
             "kind": "numpy_array",
@@ -214,12 +219,13 @@ def _encode_value(value: Any, *, depth: int) -> dict[str, Any]:
     if isinstance(value, np.generic):
         if value.dtype.hasobject:
             raise TypeError("object-dtype NumPy scalars are not supported in checkpoint metadata")
+        _require_plain_numpy_dtype(value.dtype)
         return {
             "kind": "numpy_scalar",
             "dtype": value.dtype.str,
             "data": base64.b64encode(value.tobytes()).decode("ascii"),
         }
-    if isinstance(value, dict):
+    if type(value) is dict:
         _check_container_size(value, "checkpoint metadata mapping")
         return {
             "kind": "dict",
@@ -384,6 +390,46 @@ def _decode_numpy_dtype(value: object) -> np.dtype:
     if dtype.hasobject:
         raise CheckpointFormatError("object-dtype NumPy values are not allowed")
     return dtype
+
+
+def _require_plain_numpy_dtype(dtype: np.dtype) -> None:
+    if dtype.fields is not None or dtype.subdtype is not None:
+        raise TypeError(
+            "structured and subarray NumPy dtypes are not supported in checkpoint metadata"
+        )
+
+
+def _validate_tensor_paths(
+    skeleton: dict[str, Any],
+    entries: list[TensorEntry],
+) -> None:
+    """Ensure every tensor path identifies an assignable placeholder."""
+    for index, entry in enumerate(entries):
+        label = f"checkpoint tensor_entries[{index}].key_path"
+        if not entry.key_path:
+            raise CheckpointFormatError(f"{label} cannot be empty")
+
+        current: Any = skeleton
+        for offset, key in enumerate(entry.key_path):
+            final = offset == len(entry.key_path) - 1
+            if type(current) is dict:
+                if key not in current:
+                    raise CheckpointFormatError(f"{label} does not exist in the skeleton")
+                child = current[key]
+            elif type(current) in (list, tuple):
+                if type(key) is not int or not 0 <= key < len(current):
+                    raise CheckpointFormatError(f"{label} is invalid for its sequence")
+                if final and type(current) is tuple:
+                    raise CheckpointFormatError(f"{label} targets an immutable tuple slot")
+                child = current[key]
+            else:
+                raise CheckpointFormatError(f"{label} traverses a non-container value")
+
+            if final:
+                if child is not None:
+                    raise CheckpointFormatError(f"{label} does not identify a tensor placeholder")
+                break
+            current = child
 
 
 def _decode_base64(value: object, label: str) -> bytes:
