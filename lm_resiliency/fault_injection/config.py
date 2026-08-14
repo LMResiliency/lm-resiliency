@@ -201,7 +201,10 @@ def minimum_safety(
     surface: FaultSurface | None = None,
 ) -> SafetyClass:
     """Return the minimum isolation required for a failure type."""
-    if failure_type is FailureType.DROP and surface is FaultSurface.COLLECTIVE:
+    if (
+        failure_type in {FailureType.DROP, FailureType.REORDER}
+        and surface is FaultSurface.COLLECTIVE
+    ):
         return SafetyClass.CLUSTER_DESTRUCTIVE
     if failure_type in _CLUSTER_DESTRUCTIVE:
         return SafetyClass.CLUSTER_DESTRUCTIVE

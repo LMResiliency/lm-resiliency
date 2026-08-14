@@ -217,7 +217,7 @@ class TrainingContext:
         if preferred is None and target.surface.value in {"weight", "bias"}:
             preferred = target.surface.value
         if preferred is not None:
-            parameter = getattr(module, preferred, None)
+            parameter = module._parameters.get(preferred)
             if isinstance(parameter, torch.Tensor):
                 return parameter
             raise LookupError(

@@ -134,6 +134,8 @@ class MemoryCampaignStateStore:
         expected: CampaignJournal,
         updated: CampaignJournal,
     ) -> bool:
+        if expected.campaign != updated.campaign:
+            raise ValueError("campaign state compare-and-swap requires one campaign")
         with self._lock:
             current = self._journals.get(expected.campaign)
             current_value = (

@@ -639,9 +639,9 @@ class FaultInjectionSession:
         needs_consensus = _distributed_world_size() > 1 and self._requires_boundary_consensus(
             finished, next_iteration
         )
-        preparation_error: Exception | None = None
+        preparation_error: BaseException | None = None
         try:
-            expiration_error: Exception | None = None
+            expiration_error: BaseException | None = None
             for active in self._active:
                 lifetime = active.incident.lifetime
                 if (
@@ -651,7 +651,7 @@ class FaultInjectionSession:
                 ):
                     try:
                         active.complete()
-                    except Exception as error:
+                    except BaseException as error:
                         if expiration_error is None:
                             expiration_error = error
             self._discard_completed()
@@ -660,7 +660,7 @@ class FaultInjectionSession:
             self._completed_iterations = finished
             self._current_iteration = next_iteration
             self._local.sync_history(self._history_faults_for(self._current_iteration))
-        except Exception as error:
+        except BaseException as error:
             preparation_error = error
         if needs_consensus:
             failures = self._gather_runtime_rank_errors(
@@ -677,6 +677,17 @@ class FaultInjectionSession:
                         boundary_error,
                         f"fault injection cleanup also failed: {cleanup_error}",
                     )
+                if preparation_error is not None and not isinstance(
+                    preparation_error,
+                    Exception,
+                ):
+                    _add_exception_note(preparation_error, str(boundary_error))
+                    if cleanup_error is not None:
+                        _add_exception_note(
+                            preparation_error,
+                            f"fault injection cleanup also failed: {cleanup_error}",
+                        )
+                    raise preparation_error
                 raise boundary_error from preparation_error
         elif preparation_error is not None:
             cleanup_error = self._cleanup()
@@ -731,10 +742,10 @@ class FaultInjectionSession:
                 raise
             return
 
-        preflight_error: Exception | None = None
+        preflight_error: BaseException | None = None
         try:
             self._preflight_iteration(iteration)
-        except Exception as error:
+        except BaseException as error:
             preflight_error = error
         failures = self._gather_runtime_rank_errors(
             preflight_error,
@@ -750,6 +761,14 @@ class FaultInjectionSession:
                     boundary_error,
                     f"fault injection cleanup also failed: {cleanup_error}",
                 )
+            if preflight_error is not None and not isinstance(preflight_error, Exception):
+                _add_exception_note(preflight_error, str(boundary_error))
+                if cleanup_error is not None:
+                    _add_exception_note(
+                        preflight_error,
+                        f"fault injection cleanup also failed: {cleanup_error}",
+                    )
+                raise preflight_error
             raise boundary_error from preflight_error
 
         staged: tuple[_StagedIncident, ...] = ()
@@ -1673,8 +1692,23 @@ def _evaluate_occurrence(
     reported_resources = tuple(
         sorted({resource for result in detected_results for resource in result.failed_resources})
     )
+    expected_rank_resource_pairs = {
+        (fault.target.rank, fault.target.resource)
+        for fault in incident.faults
+        if fault.target.rank is not None and fault.target.resource is not None
+    }
+    reported_rank_resource_pairs = {
+        (rank, resource)
+        for result in detected_results
+        for rank in result.failed_ranks
+        for resource in result.failed_resources
+    }
     ranks_match = set(expected_ranks) == set(reported_ranks)
     resources_match = set(expected_resources) == set(reported_resources)
+    rank_resource_pairs_match = (
+        not expected_rank_resource_pairs
+        or reported_rank_resource_pairs == expected_rank_resource_pairs
+    )
     unexpected_ranks = tuple(rank for rank in reported_ranks if rank not in expected_ranks)
     unexpected_resources = tuple(
         resource for resource in reported_resources if resource not in expected_resources
@@ -1749,6 +1783,7 @@ def _evaluate_occurrence(
         and detected
         and ranks_match
         and resources_match
+        and rank_resource_pairs_match
         and kind_matches is not False
         and component_matches is not False
     )

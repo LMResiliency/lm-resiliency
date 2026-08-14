@@ -382,6 +382,9 @@ selection does not silently skip them in favor of older evidence.
 Weight and bias collision detection is keyed by the resolved parameter storage,
 not by the selector spelling. A `weight` surface with `parameter: "bias"` and a
 direct `bias` surface therefore cannot overlap on the same tensor.
+Parameter-state selectors must name registered model parameters. Registered
+buffers such as BatchNorm running statistics are rejected because checkpoint
+replacement tracking and optimizer ownership apply only to parameters.
 Gradient targets must resolve to a parameter with `requires_grad=True`;
 otherwise enablement fails before the training loop installs a hook.
 
@@ -566,10 +569,10 @@ Safety classes are:
 
 Campaign enablement fails before training when no configured executor supports a
 local fault or when an executor's safety ceiling is insufficient.
-Collective desynchronization expects SCOUT `hang` localization. A `drop` action
-on the `collective` surface is cluster-destructive, so it cannot use a
-safe-in-process executor or participate in an in-band post-activation
-collective.
+Collective desynchronization expects SCOUT `hang` localization. `drop` and
+`reorder` actions on the `collective` surface are cluster-destructive, so they
+cannot use a safe-in-process executor or participate in an in-band
+post-activation collective.
 Unsupported effects are never silently skipped.
 At execution time, the selected executor must return verified evidence.
 An unverifiable activation is marked failed, deactivated when necessary, and is
@@ -658,6 +661,8 @@ old and replacement workers overlap: only one worker may claim a
 file lock, atomic replacement, and a parent-directory `fsync` before
 acknowledging a claim; `MemoryCampaignStateStore` provides the same contract
 within one process.
+Both journals passed to `compare_and_swap` must name the same campaign;
+cross-campaign updates are rejected before storage is modified.
 For a distributed enablement, the initial manifest binding is persisted only
 after every rank agrees on the manifest, training iteration, and persisted
 attempt journal. Divergent per-rank attempt histories fail enablement before any
@@ -666,6 +671,9 @@ Interrupt-class preparation failures participate in the same rank consensus
 before the original interrupt is re-raised. Cleanup preserves the first
 interrupt or error while continuing through every active effect, observer, and
 framework restoration.
+The same rule applies at later optimizer boundaries: interrupt-class preflight
+and safe-effect expiration failures enter rank consensus before the interrupted
+rank re-raises the original signal.
 The journal stores the canonical manifest identity. Reusing a campaign name with
 changed triggers, targets, parameters, or metadata requires a new state file;
 stale attempts are never applied to an edited manifest.
@@ -729,6 +737,9 @@ sets. Extra targets are attribution errors, not successful localization. If a
 localization result also supplies `kind` or `components`, that evidence must
 match the injected fault; omit optional evidence when the resiliency system does
 not report it.
+When an action explicitly identifies both a rank and a resource, localization
+must preserve that rank-resource association. Correct aggregate rank and
+resource sets with the pairs swapped are not successful attribution.
 `kind`, when supplied, must be a non-empty string. Supplying component evidence
 for an occurrence whose injected targets have no expected component is an
 overclaim and fails attribution.

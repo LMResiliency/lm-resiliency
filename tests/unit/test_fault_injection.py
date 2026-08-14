@@ -5378,6 +5378,67 @@ def test_resource_target_with_explicit_rank_requires_both_attribution_dimensions
     session.close()
 
 
+def test_rank_resource_pairs_must_preserve_their_association() -> None:
+    events: list[tuple[str, str]] = []
+    executor = _recording_executor({FailureType.RESOURCE_UNAVAILABLE}, events)
+    faults = (
+        _external_fault(
+            FailureType.RESOURCE_UNAVAILABLE,
+            fault_id="rank-zero-gpu",
+            resource="gpu-0",
+            rank=0,
+        ),
+        _external_fault(
+            FailureType.RESOURCE_UNAVAILABLE,
+            fault_id="rank-one-gpu",
+            resource="gpu-1",
+            rank=1,
+        ),
+    )
+    campaign = _campaign(_incident(at=(1,), faults=faults))
+    model = TinyModel()
+    rank_zero = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=campaign,
+        executors=(executor,),
+        rank=0,
+    )
+    rank_one = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=campaign,
+        executors=(executor,),
+        rank=1,
+    )
+    rank_zero._records.extend(rank_one.records)
+
+    swapped = rank_zero.evaluate(
+        [
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_ranks=(0,),
+                failed_resources=("gpu-1",),
+                kind="process_failure",
+            ),
+            LocalizationResult(
+                occurrence_id="incident@1",
+                detected=True,
+                failed_ranks=(1,),
+                failed_resources=("gpu-0",),
+                kind="process_failure",
+            ),
+        ]
+    ).evaluations[0]
+
+    assert swapped.expected_ranks == (0, 1)
+    assert swapped.expected_resources == ("gpu-0", "gpu-1")
+    assert not swapped.localized
+    rank_zero.close()
+    rank_one.close()
+
+
 def test_correlated_multi_rank_incident_requires_all_action_records() -> None:
     rank_zero = _corruption(
         fault_id="rank-zero",
@@ -6259,6 +6320,44 @@ def test_safe_activation_interrupt_rolls_back_and_reaches_consensus() -> None:
     assert all(not record.injection_succeeded for record in session.records)
 
 
+def test_runtime_preflight_interrupt_reaches_rank_consensus() -> None:
+    model = TinyModel()
+    session = FaultInjectionSession(
+        model,
+        _optimizer(model),
+        campaign=_campaign(_incident(at=(1,))),
+        rank=0,
+        _defer_activation=True,
+    )
+    session._commit_journal_binding()
+    stages: list[tuple[str, BaseException | None]] = []
+
+    def gather(error: BaseException | None, stage: str) -> list[str]:
+        stages.append((stage, error))
+        return ["rank 0: KeyboardInterrupt: stop preflight"]
+
+    with (
+        patch.object(
+            session,
+            "_preflight_iteration",
+            side_effect=KeyboardInterrupt("stop preflight"),
+        ),
+        patch(
+            "lm_resiliency.fault_injection.injector._distributed_world_size",
+            return_value=2,
+        ),
+        patch.object(session, "_gather_runtime_rank_errors", side_effect=gather),
+        pytest.raises(KeyboardInterrupt, match="stop preflight") as caught,
+    ):
+        session._start()
+
+    assert len(stages) == 1
+    assert stages[0][0] == "iteration preflight"
+    assert isinstance(stages[0][1], KeyboardInterrupt)
+    assert any("iteration preflight failed" in note for note in caught.value.__notes__)
+    assert session._closed
+
+
 def test_local_activation_rollback_propagates_cleanup_failure() -> None:
     record = MagicMock()
     effect = LocalFaultEffect(
@@ -6465,6 +6564,68 @@ def test_destructive_expiration_does_not_require_in_band_consensus() -> None:
 
     assert not session._requires_boundary_consensus(2, 3)
     session.close()
+
+
+def test_safe_expiration_interrupt_reaches_boundary_consensus() -> None:
+    stages: list[tuple[str, BaseException | None]] = []
+
+    def activate(_request):
+        return FaultExecutionResult(verified=True, active=True)
+
+    def deactivate(_request, _result):
+        raise KeyboardInterrupt("stop expiration")
+
+    executor = CallbackFaultExecutor(
+        name="interrupting-expiration",
+        supported_types={FailureType.DELAY},
+        activate=activate,
+        deactivate=deactivate,
+        max_safety=SafetyClass.SAFE_IN_PROCESS,
+    )
+    fault = FaultSpec(
+        fault_id="safe-delay",
+        type=FailureType.DELAY,
+        target=FaultTarget(
+            rank=0,
+            surface=FaultSurface.RESOURCE,
+            resource="worker-0",
+        ),
+        parameters={"delay_ms": 1.0},
+    )
+    model = TinyModel()
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(iterations=1),
+                faults=(fault,),
+            )
+        ),
+        executors=(executor,),
+        rank=0,
+    )
+
+    def gather(error: BaseException | None, stage: str) -> list[str]:
+        stages.append((stage, error))
+        return ["rank 0: KeyboardInterrupt: stop expiration"]
+
+    with (
+        patch(
+            "lm_resiliency.fault_injection.injector._distributed_world_size",
+            return_value=2,
+        ),
+        patch.object(session, "_gather_runtime_rank_errors", side_effect=gather),
+        pytest.raises(KeyboardInterrupt, match="stop expiration") as caught,
+    ):
+        session._on_step_complete()
+
+    assert len(stages) == 1
+    assert stages[0][0] == "iteration preparation"
+    assert isinstance(stages[0][1], KeyboardInterrupt)
+    assert any("iteration preparation failed" in note for note in caught.value.__notes__)
+    assert session._closed
 
 
 def test_optimizer_container_discovers_child_optimizers_first() -> None:
@@ -6703,6 +6864,32 @@ def test_frozen_gradient_target_fails_before_training() -> None:
         )
 
 
+def test_parameter_state_fault_rejects_registered_buffer_alias() -> None:
+    model = nn.Sequential(nn.BatchNorm1d(4))
+    fault = _corruption(
+        target=FaultTarget(
+            rank=0,
+            surface=FaultSurface.WEIGHT,
+            module_path="0",
+        ),
+        parameter="running_mean",
+    )
+
+    with pytest.raises(LookupError, match="no tensor parameter"):
+        enable_fault_injection(
+            model,
+            _optimizer(model),
+            campaign=_campaign(
+                _incident(
+                    at=(2,),
+                    lifetime=IncidentLifetime(iterations=1),
+                    faults=(fault,),
+                )
+            ),
+            rank=0,
+        )
+
+
 def test_collective_desync_expects_hang_localization() -> None:
     fault = FaultSpec(
         fault_id="collective-desync",
@@ -6735,6 +6922,39 @@ def test_collective_drop_requires_cluster_destructive_executor() -> None:
 
     assert fault.safety is SafetyClass.CLUSTER_DESTRUCTIVE
     assert not safe_executor.supports(fault)
+
+
+def test_collective_reorder_requires_cluster_destructive_executor() -> None:
+    fault = FaultSpec(
+        fault_id="collective-reorder",
+        type=FailureType.REORDER,
+        target=FaultTarget(
+            rank=0,
+            surface=FaultSurface.COLLECTIVE,
+        ),
+    )
+    safe_executor = CallbackFaultExecutor(
+        name="safe-reorder",
+        supported_types={FailureType.REORDER},
+        activate=lambda _request: FaultExecutionResult(verified=True, active=False),
+        one_shot=True,
+        max_safety=SafetyClass.SAFE_IN_PROCESS,
+    )
+
+    assert fault.safety is SafetyClass.CLUSTER_DESTRUCTIVE
+    assert not safe_executor.supports(fault)
+
+
+def test_memory_state_store_rejects_cross_campaign_compare_and_swap() -> None:
+    store = MemoryCampaignStateStore()
+    expected = CampaignJournal(campaign="campaign-a")
+    updated = CampaignJournal(campaign="campaign-b")
+
+    with pytest.raises(ValueError, match="requires one campaign"):
+        store.compare_and_swap(expected, updated)
+
+    assert store.load("campaign-a").to_dict() == expected.to_dict()
+    assert store.load("campaign-b").to_dict() == updated.to_dict()
 
 
 def test_distributed_partial_attempt_save_restores_successful_rank_journal() -> None:
