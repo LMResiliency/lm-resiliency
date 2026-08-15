@@ -144,6 +144,10 @@ class CoordinatorLeaseHistoryReader:
                 raise CoordinatorLeaseHistoryCorrupt(
                     "coordinator lease was deleted without an authoritative retained tail"
                 )
+            if current is not None and not history:
+                raise CoordinatorLeaseHistoryCorrupt(
+                    "live coordinator lease has no retained value history"
+                )
             if current is not None and history[-1] != current:
                 raise CoordinatorLeaseHistoryCorrupt(
                     "current coordinator lease is absent from its value history"

@@ -462,6 +462,12 @@ def test_coordinator_lease_history_rejects_noninitial_or_incomplete_history():
             run_id="training-run",
         ).read()
 
+    with pytest.raises(CoordinatorLeaseHistoryCorrupt, match="no retained value history"):
+        CoordinatorLeaseHistoryReader(
+            StaticHistoryStore((), current=_entry()),
+            run_id="training-run",
+        ).read()
+
 
 def test_coordinator_lease_history_fails_after_repeatedly_unstable_reads():
     with pytest.raises(CoordinatorLeaseHistoryError, match="changed repeatedly"):
