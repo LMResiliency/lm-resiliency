@@ -229,11 +229,20 @@ class CoordinatorLeaseManager:
                 expires_at_unix_ms=now_unix_ms + self._lease_duration_ms,
             )
             try:
-                entry = self._store.compare_set(
+                entry = self._store.compare_set_before(
                     self._lease_key,
                     expected_revision=expected_revision,
+                    deadline_unix_ms=record.expires_at_unix_ms,
                     value=record.to_json(),
                 )
+            except ControlStoreDeadlineExceeded as error:
+                raise CoordinatorLeaseUnavailable(
+                    "candidate coordinator lease expired at the control store before acquisition"
+                ) from error
+            except ControlStoreClockError as error:
+                raise CoordinatorLeaseClockError(
+                    "authoritative control-store clock moved backward"
+                ) from error
             except ControlStoreConflict:
                 continue
             return HeldCoordinatorLease(

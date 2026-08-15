@@ -175,7 +175,12 @@ def test_control_store_rejects_mutable_values():
 def test_control_store_deadline_guard_is_checked_atomically():
     clock = ManualClock(100)
     store = InMemoryControlStore(clock=clock)
-    created = store.compare_set("run/control", expected_revision=None, value=b"one")
+    created = store.compare_set_before(
+        "run/control",
+        expected_revision=None,
+        deadline_unix_ms=101,
+        value=b"one",
+    )
 
     updated = store.compare_set_before(
         "run/control",
@@ -195,6 +200,21 @@ def test_control_store_deadline_guard_is_checked_atomically():
 
     assert error.value.observed_unix_ms == 101
     assert store.get("run/control") == updated
+
+
+def test_control_store_deadline_guard_rejects_expired_create():
+    clock = ManualClock(100)
+    store = InMemoryControlStore(clock=clock)
+
+    with pytest.raises(ControlStoreDeadlineExceeded):
+        store.compare_set_before(
+            "run/control",
+            expected_revision=None,
+            deadline_unix_ms=100,
+            value=b"expired",
+        )
+
+    assert store.get("run/control") is None
 
 
 def test_control_store_deadline_guard_rejects_backward_clock():

@@ -38,20 +38,23 @@ class ManualClock:
             self.now_unix_ms += duration_ms
 
 
-class ExpireDuringRenewalStore(InMemoryControlStore):
+class ExpireDuringMutationStore(InMemoryControlStore):
     def __init__(self, clock: ManualClock) -> None:
         super().__init__(clock=clock)
         self._manual_clock = clock
+        self.expire_next_mutation = False
 
     def compare_set_before(
         self,
         key: str,
         *,
-        expected_revision: int,
+        expected_revision: int | None,
         deadline_unix_ms: int,
         value: bytes,
     ):
-        self._manual_clock.set(deadline_unix_ms)
+        if self.expire_next_mutation:
+            self._manual_clock.set(deadline_unix_ms)
+            self.expire_next_mutation = False
         return super().compare_set_before(
             key,
             expected_revision=expected_revision,
@@ -161,15 +164,43 @@ def test_early_renewal_still_checks_and_advances_fencing_token():
 
 def test_renewal_cannot_commit_after_store_observes_expiry():
     clock = ManualClock()
-    store = ExpireDuringRenewalStore(clock)
+    store = ExpireDuringMutationStore(clock)
     manager = _manager(store, clock, "coordinator-a")
     lease = manager.acquire()
     clock.set(1_050)
+    store.expire_next_mutation = True
 
     with pytest.raises(CoordinatorLeaseLost, match="expired at the control store"):
         manager.renew(lease)
 
     assert manager.current() == lease
+
+
+def test_initial_acquisition_cannot_commit_an_expired_candidate():
+    clock = ManualClock()
+    store = ExpireDuringMutationStore(clock)
+    manager = _manager(store, clock, "coordinator-a")
+    store.expire_next_mutation = True
+
+    with pytest.raises(CoordinatorLeaseUnavailable, match="expired at the control store"):
+        manager.acquire()
+
+    assert manager.current() is None
+
+
+def test_takeover_cannot_commit_an_expired_candidate():
+    clock = ManualClock()
+    store = ExpireDuringMutationStore(clock)
+    first = _manager(store, clock, "coordinator-a")
+    second = _manager(store, clock, "coordinator-b")
+    stale = first.acquire()
+    clock.set(stale.record.expires_at_unix_ms)
+    store.expire_next_mutation = True
+
+    with pytest.raises(CoordinatorLeaseUnavailable, match="expired at the control store"):
+        second.acquire()
+
+    assert second.current() == stale
 
 
 def test_expired_lease_takeover_fences_old_coordinator():

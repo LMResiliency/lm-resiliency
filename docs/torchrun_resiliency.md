@@ -868,9 +868,11 @@ Expiry is inclusive: at `expires_at_unix_ms` the old holder may no longer renew,
 and a contender may take over. Renewal uses a deadline-guarded compare-and-set
 whose time predicate is evaluated atomically by that authoritative store; a
 client-side precheck alone cannot resurrect a lease after network delay.
-Retrying acquisition with the same active `coordinator_id` is idempotent, so
-the ID must uniquely identify one live process incarnation and must not be
-reused after process restart.
+Initial acquisition and expired-lease takeover use the same atomic guard
+against the candidate lease's new expiry, so store latency cannot commit and
+return an already-expired ownership record. Retrying acquisition with the same
+active `coordinator_id` is idempotent, so the ID must uniquely identify one live
+process incarnation and must not be reused after process restart.
 
 ### Slot-aware rendezvous
 

@@ -88,11 +88,11 @@ class ControlStore(Protocol):
         self,
         key: str,
         *,
-        expected_revision: int,
+        expected_revision: int | None,
         deadline_unix_ms: int,
         value: bytes,
     ) -> ControlStoreEntry:
-        """Replace ``key`` only when its revision matches before the store deadline."""
+        """Create or replace ``key`` when its revision matches before the deadline."""
         ...
 
 
@@ -137,12 +137,12 @@ class InMemoryControlStore:
         self,
         key: str,
         *,
-        expected_revision: int,
+        expected_revision: int | None,
         deadline_unix_ms: int,
         value: bytes,
     ) -> ControlStoreEntry:
         normalized_key = _control_key(key)
-        normalized_revision = _required_revision(expected_revision)
+        normalized_revision = _expected_revision(expected_revision, allow_absent=True)
         normalized_deadline = _positive_integer(
             deadline_unix_ms,
             "deadline_unix_ms",
