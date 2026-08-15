@@ -24,6 +24,10 @@ def _record() -> NodeQuarantineRecord:
         incident_ids=("incident-a", "incident-b"),
         reason_code="attributed_sdc",
         resource_ids=("gpu-b0",),
+        coordinator_id="coordinator-a",
+        lease_id="lease-a",
+        coordinator_lease_duration_ms=30_000,
+        coordinator_fencing_token=7,
     )
 
 
@@ -35,10 +39,13 @@ def test_node_quarantine_record_round_trips_canonical_json():
 
     assert decoded == record
     assert encoded == (
-        b'{"effective_generation":1,"from_generation":0,'
+        b'{"coordinator_fencing_token":7,"coordinator_id":"coordinator-a",'
+        b'"coordinator_lease_duration_ms":30000,"effective_generation":1,'
+        b'"from_generation":0,'
         b'"incident_ids":["incident-a","incident-b"],"intent_id":"intent-a",'
-        b'"node_id":"node-b","plan_id":"plan-a","reason_code":"attributed_sdc",'
-        b'"resource_ids":["gpu-b0"],"run_id":"training-run","schema_version":1}'
+        b'"lease_id":"lease-a","node_id":"node-b","plan_id":"plan-a",'
+        b'"reason_code":"attributed_sdc","resource_ids":["gpu-b0"],'
+        b'"run_id":"training-run","schema_version":2}'
     )
     assert record.digest == hashlib.sha256(encoded).hexdigest()
 
@@ -67,6 +74,10 @@ def test_node_quarantine_record_is_immutable():
         ("incident_ids", ("incident-a", "incident-a"), "unique"),
         ("reason_code", "", "reason_code"),
         ("resource_ids", ("gpu-b0", "gpu-b0"), "unique"),
+        ("coordinator_id", "", "coordinator_id"),
+        ("lease_id", "", "lease_id"),
+        ("coordinator_lease_duration_ms", 0, "coordinator_lease_duration_ms"),
+        ("coordinator_fencing_token", 0, "coordinator_fencing_token"),
     ],
 )
 def test_node_quarantine_record_validates_constructor_fields(field, value, message):
@@ -86,7 +97,7 @@ def test_node_quarantine_record_validates_constructor_fields(field, value, messa
             "unknown fields",
         ),
         (
-            lambda value: value.update({"schema_version": 2}),
+            lambda value: value.update({"schema_version": 1}),
             "unsupported value",
         ),
         (
@@ -122,13 +133,15 @@ def test_node_quarantine_record_rejects_invalid_wire_values(mutate, message):
     [
         b"not-json",
         b"[]",
-        b'{"schema_version":1,"schema_version":1}',
+        b'{"schema_version":2,"schema_version":2}',
         (
-            b'{"effective_generation":1,"from_generation":0,'
+            b'{"coordinator_fencing_token":7,"coordinator_id":"coordinator-a",'
+            b'"coordinator_lease_duration_ms":30000,"effective_generation":1,'
+            b'"from_generation":0,'
             b'"incident_ids":["incident-a"],"intent_id":"intent-a",'
-            b'"node_id":"node-b","node_id":"node-c","plan_id":"plan-a",'
-            b'"reason_code":"sdc","resource_ids":[],"run_id":"training-run",'
-            b'"schema_version":1}'
+            b'"lease_id":"lease-a","node_id":"node-b","node_id":"node-c",'
+            b'"plan_id":"plan-a","reason_code":"sdc","resource_ids":[],'
+            b'"run_id":"training-run","schema_version":2}'
         ),
     ],
 )

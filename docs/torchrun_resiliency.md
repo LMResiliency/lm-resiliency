@@ -283,13 +283,26 @@ framework parallel coordinates stable.
 keys. A quarantine record uses `node_id` and may also contain GPU, NIC, HCA, or
 other resource IDs.
 
-Version 1 persists an immutable whole-node `NodeQuarantineRecord` for every
-excluded node. The record binds the stable run and node identities to the
-committed plan and intent, the failed and effective successor generations, the
-incident set, policy reason, and any affected resource IDs retained as evidence
-scope. The resource list may be empty when evidence supports only node-level
-exclusion; it does not narrow the effect of the record. A node quarantine is
-permanent for the run and must be create-only under the coordinator lease.
+Version 1 behavior persists an immutable whole-node `NodeQuarantineRecord` for
+every excluded node. Record schema version 2 binds the stable run and node
+identities to the committed plan and intent, the failed and effective successor
+generations, the incident set, policy reason, affected resource evidence, and
+the complete coordinator lease identity, duration, and fencing token that
+authorized it. Schema version 1 is rejected rather than interpreted as this
+expanded layout. The resource list may be empty when evidence supports only
+node-level exclusion; it does not narrow the effect of the record. A node
+quarantine is permanent for the run and must be create-only under the
+coordinator lease.
+The quarantine write repository does not expose a standalone commit or read
+operation. It authenticates the held coordinator lease, validates plan/intent
+linkage and trusted resource ownership, then returns create-once writes that the
+coordinator must compose into the same guarded transaction as restart-plan
+publication and generation advancement. No quarantine is authoritative until a
+later combined reader verifies the matching persisted plan, successor
+generation, quarantine record, commit timestamp, and guard provenance from that
+transaction. Resource evidence passed to the repository must already be
+authorized from validated fault evidence; ownership validation prevents that
+evidence from naming another node's resource.
 
 `node_id` must come from a trusted scheduler, cloud instance identity, or
 deployment inventory. A worker-provided hostname is diagnostic metadata and
