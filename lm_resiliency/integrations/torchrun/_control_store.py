@@ -227,6 +227,15 @@ class ControlStore(Protocol):
         """Return the current value, or ``None`` when the key is absent."""
         ...
 
+    def get_history(self, key: str) -> tuple[ControlStoreEntry, ...]:
+        """Return every committed value for ``key`` in mutation order.
+
+        Deletes are represented by revision, mutation, transaction, and
+        lifetime gaps between adjacent value entries rather than synthetic
+        values.
+        """
+        ...
+
     def has_history(self, key: str) -> bool:
         """Return whether ``key`` has ever held a committed value.
 
@@ -306,6 +315,7 @@ class InMemoryControlStore:
     def __init__(self, *, clock: Callable[[], int] | None = None) -> None:
         self._lock = threading.RLock()
         self._entries: dict[str, ControlStoreEntry] = {}
+        self._histories: dict[str, list[ControlStoreEntry]] = {}
         self._last_revisions: dict[str, int] = {}
         self._mutation_sequences: dict[str, int] = {}
         self._value_sequences: dict[str, int] = {}
@@ -318,6 +328,11 @@ class InMemoryControlStore:
         normalized_key = _control_key(key)
         with self._lock:
             return self._entries.get(normalized_key)
+
+    def get_history(self, key: str) -> tuple[ControlStoreEntry, ...]:
+        normalized_key = _control_key(key)
+        with self._lock:
+            return tuple(self._histories.get(normalized_key, ()))
 
     def has_history(self, key: str) -> bool:
         normalized_key = _control_key(key)
@@ -582,6 +597,7 @@ class InMemoryControlStore:
             guard_committed_at_unix_ms=guard_committed_at_unix_ms,
         )
         self._entries[key] = entry
+        self._histories.setdefault(key, []).append(entry)
         return entry
 
     def _next_revision(self, key: str) -> int:

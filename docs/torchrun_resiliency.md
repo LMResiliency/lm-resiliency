@@ -968,7 +968,11 @@ mistake a recreated record for an older value with identical bytes. Higher
 coordinator records add lease fencing and run/schema namespaces in subsequent
 layers rather than weakening this storage primitive. The store also retains a
 durable `has_history(key)` bit after deletion, allowing readers to distinguish a
-never-created authoritative key from one that was removed.
+never-created authoritative key from one that was removed. `get_history(key)`
+returns every committed value entry in mutation order, including overwritten
+values and values from earlier key lifetimes. Deletes do not invent a payload;
+their revision, mutation, transaction, and lifetime effects remain visible as
+gaps between adjacent immutable entries. Failed operations append nothing.
 
 Coordinator state that spans multiple keys uses one guarded store transaction.
 The transaction first checks the coordinator lease revision, then any

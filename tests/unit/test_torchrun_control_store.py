@@ -57,6 +57,7 @@ def test_control_store_create_update_delete_and_recreate():
     assert updated.lifetime_sequence == 1
     assert recreated.lifetime_sequence == 2
     assert store.has_history("run/control")
+    assert store.get_history("run/control") == (created, updated, recreated)
     assert created.revision < updated.revision < tombstone_revision < recreated.revision
 
 
@@ -84,6 +85,25 @@ def test_control_store_retains_key_history_after_delete():
 
     assert store.get("run/control") is None
     assert store.has_history("run/control")
+    assert store.get_history("run/control") == (created,)
+
+
+def test_control_store_history_is_immutable_and_empty_for_unknown_key():
+    store = InMemoryControlStore()
+    assert store.get_history("run/unknown") == ()
+    created = store.compare_set("run/control", expected_revision=None, value=b"one")
+    history = store.get_history("run/control")
+
+    assert history == (created,)
+    with pytest.raises(TypeError):
+        history[0] = created
+    updated = store.compare_set(
+        "run/control",
+        expected_revision=created.revision,
+        value=b"two",
+    )
+    assert history == (created,)
+    assert store.get_history("run/control") == (created, updated)
 
 
 def test_control_store_value_sequence_changes_only_with_value_or_lifetime():
@@ -132,6 +152,7 @@ def test_control_store_rejects_stale_update_and_delete():
     assert update_error.value.actual_revision == updated.revision
     assert delete_error.value.actual_revision == updated.revision
     assert store.get("run/control") == updated
+    assert store.get_history("run/control") == (created, updated)
 
 
 def test_control_store_revision_prevents_delete_recreate_aba():
@@ -205,6 +226,11 @@ def test_control_store_serializes_concurrent_compare_set_updates():
     assert result is not None
     assert result.value == str(workers * updates_per_worker).encode("ascii")
     assert result.revision == 1 + workers * updates_per_worker
+    history = store.get_history("run/counter")
+    assert len(history) == 1 + workers * updates_per_worker
+    assert tuple(entry.revision for entry in history) == tuple(
+        range(1, 2 + workers * updates_per_worker)
+    )
 
 
 @pytest.mark.parametrize("key", ["", " run/control", "run/control ", "run/\x00control"])
@@ -213,6 +239,8 @@ def test_control_store_rejects_invalid_keys(key):
 
     with pytest.raises(ValueError, match="key"):
         store.get(key)
+    with pytest.raises(ValueError, match="key"):
+        store.get_history(key)
 
 
 @pytest.mark.parametrize("revision", [False, 0, -1, "1"])
@@ -230,7 +258,7 @@ def test_control_store_rejects_mutable_values():
         store.compare_set(
             "run/control",
             expected_revision=None,
-            value=bytearray(b"value"),  # type: ignore[arg-type]
+            value=bytearray(b"value"),
         )
 
 
