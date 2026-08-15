@@ -869,6 +869,13 @@ generation must carry a lowercase SHA-256 predecessor digest. A
 `GenerationHeadRecord` contains only the run, generation, and canonical snapshot
 digest. Both records reject missing, unknown, duplicate, or unsupported fields.
 
+The generation-state reader derives snapshot, head, and coordinator-lease keys
+from one run-scoped namespace. It requires the head and snapshot to agree on
+generation, digest, and authoritative commit time, then verifies the complete
+predecessor digest, timestamp, fencing-token, and lease-identity chain back to
+generation zero. Missing or contradictory history is corruption, not an empty
+or partially usable assignment.
+
 Coordinator ownership is stored under a schema-versioned, run-scoped lease key.
 The lease record binds the run, a unique coordinator-process incarnation, a
 unique lease acquisition, and the lease duration. The control store attaches
