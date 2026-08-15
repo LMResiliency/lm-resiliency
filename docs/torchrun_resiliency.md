@@ -293,20 +293,16 @@ expanded layout. The resource list may be empty when evidence supports only
 node-level exclusion; it does not narrow the effect of the record. A node
 quarantine is permanent for the run and must be create-only under the
 coordinator lease.
-The quarantine repository does not expose a standalone commit operation. It
-validates plan/intent linkage and trusted resource ownership, then returns
-create-once writes that the coordinator must compose into the same guarded
-transaction as restart-plan publication and generation advancement. Readers
-accept only first-lifetime, first-value records with complete store-stamped
-coordinator-lease provenance; deletion, recreation, malformed identity, or
-unguarded persistence is corruption. Readers reconstruct the persisted lease
-record and require its digest, fencing token, authoritative grant time, and
-lease window to match the store-stamped guard provenance. Guard mutation, value,
-and key-lifetime sequences must also satisfy the same deletion-aware bounds as
-generation state; contradictory provenance is corruption. Resource evidence
-passed to the repository must already be authorized from validated fault
-evidence; ownership validation prevents that evidence from naming another
-node's resource.
+The quarantine write repository does not expose a standalone commit or read
+operation. It authenticates the held coordinator lease, validates plan/intent
+linkage and trusted resource ownership, then returns create-once writes that the
+coordinator must compose into the same guarded transaction as restart-plan
+publication and generation advancement. No quarantine is authoritative until a
+later combined reader verifies the matching persisted plan, successor
+generation, quarantine record, commit timestamp, and guard provenance from that
+transaction. Resource evidence passed to the repository must already be
+authorized from validated fault evidence; ownership validation prevents that
+evidence from naming another node's resource.
 
 `node_id` must come from a trusted scheduler, cloud instance identity, or
 deployment inventory. A worker-provided hostname is diagnostic metadata and

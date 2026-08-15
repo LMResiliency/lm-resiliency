@@ -1,15 +1,13 @@
-"""Fail-closed quarantine reads and transaction writes for torchrun replacement."""
+"""Authenticated quarantine writes for torchrun replacement transactions."""
 
 from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from types import MappingProxyType
 
 from lm_resiliency.integrations.torchrun._control_store import (
     ControlStore,
-    ControlStoreEntry,
     ControlStoreWrite,
 )
 from lm_resiliency.integrations.torchrun._coordinator_lease import (
@@ -22,37 +20,22 @@ from lm_resiliency.integrations.torchrun._quarantine_records import (
 )
 
 _CONTROL_PREFIX = "lm_resiliency/torchrun/v1"
-_MAX_READ_ATTEMPTS = 8
 
 
-class QuarantineStateError(RuntimeError):
-    """Base error for persisted node-quarantine state."""
+class QuarantineWriteError(RuntimeError):
+    """Base error for preparing node-quarantine transaction writes."""
 
 
-class QuarantineStateCorrupt(QuarantineStateError):
-    """Raised when persisted quarantine state is malformed or contradictory."""
+class QuarantineWriteCorrupt(QuarantineWriteError):
+    """Raised when persisted ownership state is malformed."""
 
 
-class QuarantineLeaseLost(QuarantineStateError):
+class QuarantineLeaseLost(QuarantineWriteError):
     """Raised when quarantine writes use a stale or foreign coordinator lease."""
 
 
-@dataclass(frozen=True, slots=True)
-class StoredNodeQuarantine:
-    """One verified permanent node quarantine and its store provenance."""
-
-    record: NodeQuarantineRecord
-    entry: ControlStoreEntry
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.record, NodeQuarantineRecord):
-            raise TypeError("StoredNodeQuarantine.record must be NodeQuarantineRecord")
-        if not isinstance(self.entry, ControlStoreEntry):
-            raise TypeError("StoredNodeQuarantine.entry must be ControlStoreEntry")
-
-
-class NodeQuarantineRepository:
-    """Prepare plan-authorized writes and read permanent node exclusions."""
+class NodeQuarantineWriteRepository:
+    """Build authenticated create-once writes for a larger plan transaction."""
 
     def __init__(self, store: ControlStore, *, run_id: str) -> None:
         self._store = store
@@ -68,26 +51,6 @@ class NodeQuarantineRepository:
     def quarantine_key(self, node_id: str) -> str:
         return node_quarantine_key(self._run_id, node_id)
 
-    def get(self, node_id: str) -> StoredNodeQuarantine | None:
-        normalized_node_id = _nonempty_string(node_id, "node_id")
-        key = self.quarantine_key(normalized_node_id)
-        for _ in range(_MAX_READ_ATTEMPTS):
-            entry = self._store.get(key)
-            if entry is None:
-                if not self._store.has_history(key):
-                    return None
-                if self._store.get(key) is not None:
-                    continue
-                raise QuarantineStateCorrupt(
-                    f"node quarantine for {normalized_node_id!r} was deleted"
-                )
-            stored = self._decode_entry(entry, node_id=normalized_node_id)
-            if self._store.get(key) == entry:
-                return stored
-        raise QuarantineStateError(
-            f"node quarantine for {normalized_node_id!r} changed repeatedly during read"
-        )
-
     def prepare_plan_writes(
         self,
         plan: RestartPlan,
@@ -97,7 +60,7 @@ class NodeQuarantineRepository:
         authorized_resource_ids_by_node: Mapping[str, Sequence[str]],
         resource_to_node_id: Mapping[str, str],
     ) -> Mapping[str, ControlStoreWrite]:
-        """Build create-once writes from coordinator-authorized fault evidence."""
+        """Build writes for composition with plan and generation publication."""
         self._validate_lease(lease)
         self._validate_plan_intent(plan, intent)
         quarantined_nodes = set(plan.quarantined_node_ids)
@@ -188,99 +151,11 @@ class NodeQuarantineRepository:
         try:
             record = CoordinatorLeaseRecord.from_json(entry.value)
         except (TypeError, ValueError) as error:
-            raise QuarantineStateCorrupt("coordinator lease is malformed") from error
+            raise QuarantineWriteCorrupt("coordinator lease is malformed") from error
         if entry.committed_at_unix_ms is None:
-            raise QuarantineStateCorrupt("coordinator lease has no authoritative grant time")
+            raise QuarantineWriteCorrupt("coordinator lease has no authoritative grant time")
         if record != lease.record or entry.committed_at_unix_ms != lease.granted_at_unix_ms:
             raise QuarantineLeaseLost("coordinator lease handle does not match persisted ownership")
-
-    def _decode_entry(
-        self,
-        entry: ControlStoreEntry,
-        *,
-        node_id: str,
-    ) -> StoredNodeQuarantine:
-        try:
-            record = NodeQuarantineRecord.from_json(entry.value)
-        except (TypeError, ValueError) as error:
-            raise QuarantineStateCorrupt("persisted node quarantine is malformed") from error
-        if record.run_id != self._run_id or record.node_id != node_id:
-            raise QuarantineStateCorrupt("persisted node quarantine belongs to another run or node")
-        if (
-            entry.mutation_sequence != 1
-            or entry.value_sequence != 1
-            or entry.lifetime_sequence != 1
-        ):
-            raise QuarantineStateCorrupt("immutable node quarantine has noninitial store sequences")
-        if entry.committed_at_unix_ms is None:
-            raise QuarantineStateCorrupt(
-                "persisted node quarantine has no authoritative commit time"
-            )
-        if entry.guard_key != self._coordinator_lease_key:
-            raise QuarantineStateCorrupt(
-                "persisted node quarantine was not guarded by the run coordinator lease"
-            )
-        guard_revision = entry.guard_revision
-        guard_value_digest = entry.guard_value_digest
-        guard_mutation_sequence = entry.guard_mutation_sequence
-        guard_value_sequence = entry.guard_value_sequence
-        guard_lifetime_sequence = entry.guard_lifetime_sequence
-        guard_committed_at_unix_ms = entry.guard_committed_at_unix_ms
-        if any(
-            value is None
-            for value in (
-                guard_revision,
-                guard_value_digest,
-                guard_mutation_sequence,
-                guard_value_sequence,
-                guard_lifetime_sequence,
-                guard_committed_at_unix_ms,
-            )
-        ):
-            raise QuarantineStateCorrupt(
-                "persisted node quarantine has incomplete guard provenance"
-            )
-        assert guard_mutation_sequence is not None
-        assert guard_value_sequence is not None
-        assert guard_lifetime_sequence is not None
-        assert guard_revision is not None
-        assert guard_value_digest is not None
-        assert guard_committed_at_unix_ms is not None
-        if guard_mutation_sequence < 2 * guard_lifetime_sequence - 1:
-            raise QuarantineStateCorrupt(
-                "node quarantine guard mutation sequence cannot support its lifetime"
-            )
-        if guard_value_sequence < guard_lifetime_sequence:
-            raise QuarantineStateCorrupt(
-                "node quarantine guard value sequence cannot support its lifetime"
-            )
-        if guard_value_sequence > guard_mutation_sequence - guard_lifetime_sequence + 1:
-            raise QuarantineStateCorrupt(
-                "node quarantine guard value sequence includes deletion mutations"
-            )
-        expected_lease = CoordinatorLeaseRecord(
-            run_id=record.run_id,
-            coordinator_id=record.coordinator_id,
-            lease_id=record.lease_id,
-            lease_duration_ms=record.coordinator_lease_duration_ms,
-        )
-        if guard_revision != record.coordinator_fencing_token:
-            raise QuarantineStateCorrupt(
-                "node quarantine fencing token does not match guard provenance"
-            )
-        if guard_value_digest != hashlib.sha256(expected_lease.to_json()).hexdigest():
-            raise QuarantineStateCorrupt(
-                "node quarantine lease identity does not match guard provenance"
-            )
-        if (
-            entry.committed_at_unix_ms < guard_committed_at_unix_ms
-            or entry.committed_at_unix_ms
-            >= guard_committed_at_unix_ms + record.coordinator_lease_duration_ms
-        ):
-            raise QuarantineStateCorrupt(
-                "node quarantine committed outside its coordinator lease window"
-            )
-        return StoredNodeQuarantine(record=record, entry=entry)
 
 
 def node_quarantine_key(run_id: str, node_id: str) -> str:
@@ -345,10 +220,9 @@ def _nonempty_string(value: object, path: str) -> str:
 
 
 __all__ = [
-    "NodeQuarantineRepository",
+    "NodeQuarantineWriteRepository",
     "QuarantineLeaseLost",
-    "QuarantineStateCorrupt",
-    "QuarantineStateError",
-    "StoredNodeQuarantine",
+    "QuarantineWriteCorrupt",
+    "QuarantineWriteError",
     "node_quarantine_key",
 ]

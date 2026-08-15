@@ -1,4 +1,4 @@
-"""Contract tests for fail-closed torchrun node-quarantine storage."""
+"""Contract tests for authenticated torchrun node-quarantine writes."""
 
 from __future__ import annotations
 
@@ -7,10 +7,7 @@ from dataclasses import replace
 
 import pytest
 
-from lm_resiliency.integrations.torchrun._control_store import (
-    ControlStoreWrite,
-    InMemoryControlStore,
-)
+from lm_resiliency.integrations.torchrun._control_store import InMemoryControlStore
 from lm_resiliency.integrations.torchrun._coordinator_lease import (
     CoordinatorLeaseManager,
     HeldCoordinatorLease,
@@ -24,9 +21,9 @@ from lm_resiliency.integrations.torchrun._quarantine_records import (
     NodeQuarantineRecord,
 )
 from lm_resiliency.integrations.torchrun._quarantine_store import (
-    NodeQuarantineRepository,
+    NodeQuarantineWriteRepository,
     QuarantineLeaseLost,
-    QuarantineStateCorrupt,
+    QuarantineWriteCorrupt,
     node_quarantine_key,
 )
 
@@ -41,24 +38,6 @@ class ManualClock:
     def __call__(self) -> int:
         with self._lock:
             return self.now_unix_ms
-
-
-class TamperedQuarantineReadStore(InMemoryControlStore):
-    def __init__(self, clock: ManualClock) -> None:
-        super().__init__(clock=clock)
-        self.guard_override: tuple[int, int, int] | None = None
-
-    def get(self, key: str):
-        entry = super().get(key)
-        if entry is None or "/node-quarantines/" not in key or self.guard_override is None:
-            return entry
-        mutation_sequence, value_sequence, lifetime_sequence = self.guard_override
-        return replace(
-            entry,
-            guard_mutation_sequence=mutation_sequence,
-            guard_value_sequence=value_sequence,
-            guard_lifetime_sequence=lifetime_sequence,
-        )
 
 
 def _intent(
@@ -117,26 +96,18 @@ def _plan(
     )
 
 
-def _repository(
-    store: InMemoryControlStore,
-    *,
-    run_id: str = RUN_ID,
-) -> NodeQuarantineRepository:
-    return NodeQuarantineRepository(store, run_id=run_id)
-
-
 def _state(
     *,
     run_id: str = RUN_ID,
 ) -> tuple[
     ManualClock,
     InMemoryControlStore,
-    NodeQuarantineRepository,
+    NodeQuarantineWriteRepository,
     HeldCoordinatorLease,
 ]:
     clock = ManualClock()
     store = InMemoryControlStore(clock=clock)
-    repository = _repository(store, run_id=run_id)
+    repository = NodeQuarantineWriteRepository(store, run_id=run_id)
     lease = CoordinatorLeaseManager(
         store,
         run_id=run_id,
@@ -148,7 +119,7 @@ def _state(
 
 
 def _writes(
-    repository: NodeQuarantineRepository,
+    repository: NodeQuarantineWriteRepository,
     lease: HeldCoordinatorLease,
     *,
     plan: RestartPlan | None = None,
@@ -163,7 +134,7 @@ def _writes(
     )
 
 
-def test_plan_writes_are_create_once_and_bind_plan_fields():
+def test_plan_writes_are_create_once_and_bind_authority():
     _, _, repository, lease = _state()
 
     writes = _writes(repository, lease)
@@ -215,11 +186,7 @@ def test_plan_writes_allow_no_quarantine():
         (replace(_plan(), incident_ids=("other-incident",)), _intent(), "incidents"),
         (replace(_plan(), reason_code="other-reason"), _intent(), "reason"),
         (_plan(), _intent(suspected_node_ids=("node-a",)), "outside the intent"),
-        (
-            replace(_plan(), recovery_mode="latest"),
-            _intent(),
-            "weaker",
-        ),
+        (replace(_plan(), recovery_mode="latest"), _intent(), "weaker"),
     ],
 )
 def test_plan_writes_reject_mismatched_plan_and_intent(plan, intent, message):
@@ -291,215 +258,23 @@ def test_plan_writes_reject_stale_coordinator_lease():
         _writes(repository, lease)
 
 
-def test_repository_reads_guarded_quarantine():
-    _, store, repository, lease = _state()
-
-    committed = store.compare_set_many_guarded(
-        _writes(repository, lease),
-        guard_key=repository.coordinator_lease_key,
-        expected_guard_revision=lease.fencing_token,
-        not_before_unix_ms=lease.granted_at_unix_ms,
-        deadline_unix_ms=lease.expires_at_unix_ms,
-    )
-    stored = repository.get("node-b")
-
-    assert stored is not None
-    assert stored.record.node_id == "node-b"
-    assert stored.entry == committed[repository.quarantine_key("node-b")]
-
-
-def test_repository_returns_none_only_for_never_created_quarantine():
-    repository = _repository(InMemoryControlStore())
-
-    assert repository.get("node-b") is None
-
-
-def test_repository_rejects_deleted_quarantine():
-    _, store, repository, lease = _state()
-    committed = store.compare_set_many_guarded(
-        _writes(repository, lease),
-        guard_key=repository.coordinator_lease_key,
-        expected_guard_revision=lease.fencing_token,
-        not_before_unix_ms=lease.granted_at_unix_ms,
-        deadline_unix_ms=lease.expires_at_unix_ms,
-    )
-    entry = committed[repository.quarantine_key("node-b")]
-    store.compare_delete(
-        repository.quarantine_key("node-b"),
-        expected_revision=entry.revision,
-    )
-
-    with pytest.raises(QuarantineStateCorrupt, match="deleted"):
-        repository.get("node-b")
-
-
-@pytest.mark.parametrize(
-    ("value", "message"),
-    [
-        (b"{}", "malformed"),
-        (
-            NodeQuarantineRecord(
-                run_id="other-run",
-                node_id="node-b",
-                plan_id="plan-1",
-                intent_id="intent-0",
-                from_generation=0,
-                effective_generation=1,
-                incident_ids=("incident-a",),
-                reason_code="attributed_sdc",
-                resource_ids=(),
-                coordinator_id="coordinator-a",
-                lease_id="lease-a",
-                coordinator_lease_duration_ms=100,
-                coordinator_fencing_token=1,
-            ).to_json(),
-            "another run or node",
-        ),
-    ],
-)
-def test_repository_rejects_malformed_or_foreign_records(value, message):
-    store = InMemoryControlStore()
-    repository = _repository(store)
-    store.compare_set(
-        repository.quarantine_key("node-b"),
-        expected_revision=None,
-        value=value,
-    )
-
-    with pytest.raises(QuarantineStateCorrupt, match=message):
-        repository.get("node-b")
-
-
-def test_repository_requires_guarded_create_provenance():
-    _, store, repository, lease = _state()
-    write = _writes(repository, lease)[repository.quarantine_key("node-b")]
-    store.compare_set(
-        repository.quarantine_key("node-b"),
-        expected_revision=None,
-        value=write.value,
-    )
-
-    with pytest.raises(QuarantineStateCorrupt, match="commit time"):
-        repository.get("node-b")
-
-
-def test_repository_rejects_quarantine_guarded_by_another_key():
+def test_plan_writes_reject_malformed_persisted_lease():
     clock, store, repository, lease = _state()
-    wrong_guard = store.compare_set_in_window(
-        "other/lease",
-        expected_revision=None,
-        not_before_unix_ms=1_000,
-        deadline_unix_ms=None,
-        value=b"lease",
-    )
-    store.compare_set_many_guarded(
-        _writes(repository, lease),
-        guard_key="other/lease",
-        expected_guard_revision=wrong_guard.revision,
-        not_before_unix_ms=1_000,
-        deadline_unix_ms=1_100,
-    )
-
-    with pytest.raises(QuarantineStateCorrupt, match="run coordinator lease"):
-        repository.get("node-b")
-
-
-def test_repository_authenticates_opaque_coordinator_lease_bytes():
-    clock, store, repository, lease = _state()
-    malformed_guard = store.compare_set_in_window(
+    malformed = store.compare_set_in_window(
         repository.coordinator_lease_key,
         expected_revision=lease.fencing_token,
         not_before_unix_ms=clock.now_unix_ms,
         deadline_unix_ms=lease.expires_at_unix_ms,
-        value=b"malformed-lease",
+        value=b"malformed",
     )
-    record = NodeQuarantineRecord(
-        run_id=RUN_ID,
-        node_id="node-b",
-        plan_id="plan-1",
-        intent_id="intent-0",
-        from_generation=0,
-        effective_generation=1,
-        incident_ids=("incident-a",),
-        reason_code="attributed_sdc",
-        resource_ids=("gpu-b0",),
-        coordinator_id=lease.record.coordinator_id,
-        lease_id=lease.record.lease_id,
-        coordinator_lease_duration_ms=lease.record.lease_duration_ms,
-        coordinator_fencing_token=malformed_guard.revision,
-    )
-    store.compare_set_many_guarded(
-        {
-            repository.quarantine_key("node-b"): ControlStoreWrite(
-                expected_revision=None,
-                value=record.to_json(),
-                require_never_created=True,
-            ),
-        },
-        guard_key=repository.coordinator_lease_key,
-        expected_guard_revision=malformed_guard.revision,
-        not_before_unix_ms=clock.now_unix_ms,
-        deadline_unix_ms=lease.expires_at_unix_ms,
+    fabricated = HeldCoordinatorLease(
+        record=lease.record,
+        fencing_token=malformed.revision,
+        granted_at_unix_ms=malformed.committed_at_unix_ms,
     )
 
-    with pytest.raises(QuarantineStateCorrupt, match="lease identity"):
-        repository.get("node-b")
-
-
-@pytest.mark.parametrize(
-    ("guard_override", "message"),
-    [
-        (
-            (1, 1, 2),
-            "mutation sequence cannot support",
-        ),
-        (
-            (3, 1, 2),
-            "value sequence cannot support",
-        ),
-        (
-            (2, 3, 1),
-            "includes deletion",
-        ),
-    ],
-)
-def test_repository_rejects_contradictory_guard_sequences(
-    guard_override,
-    message,
-):
-    clock = ManualClock()
-    store = TamperedQuarantineReadStore(clock)
-    repository = _repository(store)
-    lease = CoordinatorLeaseManager(
-        store,
-        run_id=RUN_ID,
-        coordinator_id="coordinator-a",
-        lease_duration_ms=100,
-        clock=clock,
-    ).acquire()
-    store.compare_set_many_guarded(
-        _writes(repository, lease),
-        guard_key=repository.coordinator_lease_key,
-        expected_guard_revision=lease.fencing_token,
-        not_before_unix_ms=lease.granted_at_unix_ms,
-        deadline_unix_ms=lease.expires_at_unix_ms,
-    )
-    store.guard_override = guard_override
-
-    with pytest.raises(QuarantineStateCorrupt, match=message):
-        repository.get("node-b")
-
-
-def test_repository_rejects_recreated_quarantine():
-    _, store, repository, lease = _state()
-    key = repository.quarantine_key("node-b")
-    write = _writes(repository, lease)[key]
-    original = store.compare_set(key, expected_revision=None, value=write.value)
-    store.compare_delete(key, expected_revision=original.revision)
-    store.compare_set(key, expected_revision=None, value=write.value)
-
-    with pytest.raises(QuarantineStateCorrupt, match="noninitial"):
-        repository.get("node-b")
+    with pytest.raises(QuarantineWriteCorrupt, match="malformed"):
+        _writes(repository, fabricated)
 
 
 def test_quarantine_keys_are_run_and_node_scoped_without_plaintext_identity():
