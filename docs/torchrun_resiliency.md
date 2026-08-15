@@ -290,6 +290,15 @@ incident set, policy reason, and any affected resource IDs retained as evidence
 scope. The resource list may be empty when evidence supports only node-level
 exclusion; it does not narrow the effect of the record. A node quarantine is
 permanent for the run and must be create-only under the coordinator lease.
+The quarantine repository does not expose a standalone commit operation. It
+validates plan/intent linkage and trusted resource ownership, then returns
+create-once writes that the coordinator must compose into the same guarded
+transaction as restart-plan publication and generation advancement. Readers
+accept only first-lifetime, first-value records with complete store-stamped
+coordinator-lease provenance; deletion, recreation, malformed identity, or
+unguarded persistence is corruption. Resource evidence passed to the repository
+must already be authorized from validated fault evidence; ownership validation
+prevents that evidence from naming another node's resource.
 
 `node_id` must come from a trusted scheduler, cloud instance identity, or
 deployment inventory. A worker-provided hostname is diagnostic metadata and
