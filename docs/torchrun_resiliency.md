@@ -685,7 +685,11 @@ contention remains retryable, and the reader performs no mutation.
 Before the first closure, the same stable observation requires the current
 open head and its linked immutable intent to remain canonical create-once
 records from one guarded transaction; it also requires the lifecycle head and
-initial closure key to have no durable history.
+initial closure key to have no durable history. The guard must be the run's
+canonical coordinator lease with the fencing token and lease digest carried by
+the immutable intent. Closure reads double-collect verified generation and
+coordinator-lease histories around the persisted closure snapshot so failover
+cannot combine old lease authority with a newer generation.
 
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be

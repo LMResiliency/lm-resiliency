@@ -296,6 +296,27 @@ def test_lifecycle_reader_rejects_split_open_transaction_without_lifecycle():
         reader.read()
 
 
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("guard_key", "other-guard"),
+        ("guard_revision", 10_000),
+        ("guard_value_digest", "0" * 64),
+    ],
+)
+def test_lifecycle_reader_rejects_invalid_open_guard_provenance(
+    field: str,
+    replacement: object,
+):
+    _, store, _, _, _, opened, reader = _open_state()
+    changes = {field: replacement}
+    _replace_entry(store, opened.prepared.intent_head_key, **changes)
+    _replace_entry(store, opened.prepared.intent_key, **changes)
+
+    with pytest.raises(RestartIntentLifecycleReadCorrupt, match="lease provenance"):
+        reader.read()
+
+
 def test_lifecycle_reader_reconstructs_verified_closure():
     clock, store, _, _, lease, opened, reader = _open_state()
     records = _commit_closure(clock, store, opened, lease)
@@ -349,6 +370,39 @@ def test_lifecycle_reader_accepts_closure_after_generation_advance():
 
     assert observed is not None
     assert observed.generation_snapshot.record.assignment.generation == 0
+
+
+def test_lifecycle_reader_rejects_mixed_lease_and_generation_histories(
+    monkeypatch,
+):
+    clock, store, lease_manager, generation_manager, lease, opened, reader = _open_state()
+    _commit_closure(clock, store, opened, lease)
+    original_current_with_history = reader._generation_reader.current_with_history
+    triggered = False
+
+    def racing_current_with_history():
+        nonlocal triggered
+        if not triggered:
+            triggered = True
+            current = generation_manager.current()
+            assert current is not None
+            lease_manager.release(lease)
+            replacement = _manager(store, clock, "coordinator-b").acquire()
+            generation_manager.commit_successor(
+                replacement,
+                current,
+                _assignment(generation=1, node_id="node-c"),
+            )
+        return original_current_with_history()
+
+    monkeypatch.setattr(
+        reader._generation_reader,
+        "current_with_history",
+        racing_current_with_history,
+    )
+
+    with pytest.raises(RestartIntentLifecycleReadCorrupt, match="contradictory"):
+        reader.read()
 
 
 def test_lifecycle_reader_retries_atomic_closure_during_read(monkeypatch):

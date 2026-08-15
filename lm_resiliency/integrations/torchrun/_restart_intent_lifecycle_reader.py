@@ -15,6 +15,7 @@ from lm_resiliency.integrations.torchrun._coordinator_lease_history import (
     CoordinatorLeaseHistoryReader,
 )
 from lm_resiliency.integrations.torchrun._generation_reader import (
+    CurrentGeneration,
     GenerationStateCorrupt,
     GenerationStateReader,
     StoredGenerationSnapshot,
@@ -140,25 +141,7 @@ class InitialRestartIntentLifecycleReader:
             intent_key = self.intent_key(lifecycle_head.intent_id)
             closure_observation = self._observe(closure_key)
             intent_observation = self._observe(intent_key)
-            try:
-                lease_history = self._lease_history_reader.read()
-                generation_result = self._generation_reader.current_with_history()
-            except (
-                CoordinatorLeaseHistoryCorrupt,
-                GenerationStateCorrupt,
-            ) as error:
-                raise RestartIntentLifecycleReadCorrupt(
-                    "restart-intent lifecycle dependencies are corrupt"
-                ) from error
-            generation_snapshot = None
-            successor = None
-            if generation_result is not None:
-                _, generation_history = generation_result
-                if lifecycle_head.generation < len(generation_history):
-                    generation_snapshot = generation_history[lifecycle_head.generation]
-                    successor_index = lifecycle_head.generation + 1
-                    if successor_index < len(generation_history):
-                        successor = generation_history[successor_index]
+            lease_history, generation_result = self._read_dependencies()
             if not self._stable(
                 self._intent_head_key,
                 head_observation,
@@ -170,6 +153,21 @@ class InitialRestartIntentLifecycleReader:
                 intent_observation,
             ):
                 continue
+            confirmed_lease_history, confirmed_generation_result = self._read_dependencies()
+            if (
+                lease_history != confirmed_lease_history
+                or generation_result != confirmed_generation_result
+            ):
+                continue
+            generation_snapshot = None
+            successor = None
+            if generation_result is not None:
+                _, generation_history = generation_result
+                if lifecycle_head.generation < len(generation_history):
+                    generation_snapshot = generation_history[lifecycle_head.generation]
+                    successor_index = lifecycle_head.generation + 1
+                    if successor_index < len(generation_history):
+                        successor = generation_history[successor_index]
             return self._authenticate_closure(
                 head_observation,
                 lifecycle_observation,
@@ -268,6 +266,46 @@ class InitialRestartIntentLifecycleReader:
                 "current restart-intent head and immutable intent "
                 "do not share one guarded transaction"
             )
+        guard_provenance = (
+            intent_entry.guard_key,
+            intent_entry.guard_revision,
+            intent_entry.guard_value_digest,
+            intent_entry.guard_committed_at_unix_ms,
+            intent_entry.guard_mutation_sequence,
+            intent_entry.guard_value_sequence,
+            intent_entry.guard_lifetime_sequence,
+        )
+        if any(value is None for value in guard_provenance):
+            raise RestartIntentLifecycleReadCorrupt(
+                "immutable restart intent has incomplete coordinator lease provenance"
+            )
+        if (
+            intent_entry.guard_key != self._generation_reader.coordinator_lease_key
+            or intent_entry.guard_revision != intent.coordinator_fencing_token
+            or intent_entry.guard_value_digest != intent.coordinator_lease_digest
+        ):
+            raise RestartIntentLifecycleReadCorrupt(
+                "immutable restart intent has invalid coordinator lease provenance"
+            )
+
+    def _read_dependencies(
+        self,
+    ) -> tuple[
+        tuple[CoordinatorLeaseAuthority, ...],
+        tuple[CurrentGeneration, tuple[StoredGenerationSnapshot, ...]] | None,
+    ]:
+        try:
+            return (
+                self._lease_history_reader.read(),
+                self._generation_reader.current_with_history(),
+            )
+        except (
+            CoordinatorLeaseHistoryCorrupt,
+            GenerationStateCorrupt,
+        ) as error:
+            raise RestartIntentLifecycleReadCorrupt(
+                "restart-intent lifecycle dependencies are corrupt"
+            ) from error
 
     def _authenticate_closure(
         self,
