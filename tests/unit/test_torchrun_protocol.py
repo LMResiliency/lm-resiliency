@@ -496,6 +496,15 @@ def test_rank_assignment_requires_dense_slots_and_stable_rank_ranges():
         )
 
 
+@pytest.mark.parametrize("invalid_slot", ["²", "1" * 5_000])
+def test_rank_assignment_rejects_unparseable_slot_keys(invalid_slot):
+    value = _current_assignment().to_dict()
+    value["slot_to_node_id"][invalid_slot] = value["slot_to_node_id"].pop("0")
+
+    with pytest.raises(ProtocolValidationError, match="slot keys"):
+        RankAssignment.from_dict(value)
+
+
 def test_restart_plan_and_complete_manifest_validate():
     _validate()
 

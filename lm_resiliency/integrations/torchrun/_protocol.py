@@ -580,8 +580,13 @@ class RankAssignment(_WireRecord):
 def _slot_key(value: object, path: str) -> int:
     if isinstance(value, int) and not isinstance(value, bool):
         return _integer(value, path, minimum=0)
-    if isinstance(value, str) and value.isdigit():
-        return int(value)
+    if isinstance(value, str) and value and value.isascii() and value.isdecimal():
+        try:
+            return int(value)
+        except ValueError as error:
+            raise ProtocolValidationError(
+                f"{path}: slot keys must be parseable non-negative integers"
+            ) from error
     raise ProtocolValidationError(f"{path}: slot keys must be non-negative integers")
 
 
