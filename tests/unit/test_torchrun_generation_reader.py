@@ -785,6 +785,21 @@ def test_generation_reader_rejects_overlapping_in_place_lease_replacement():
         reader.current()
 
 
+def test_generation_reader_rejects_takeover_after_ambiguous_skipped_mutations():
+    records = _history(
+        ("coordinator-a", "lease-a", 100),
+        ("coordinator-b", "lease-b", 50),
+    )
+    reader = _reader_from_history(
+        records,
+        guard_mutation_sequences=(1, 3),
+        guard_grant_times_unix_ms=(1_000, 1_100),
+    )
+
+    with pytest.raises(GenerationStateCorrupt, match="ambiguous skipped mutations"):
+        reader.current()
+
+
 def test_generation_reader_rejects_expired_same_lease_renewal():
     records = _history(
         ("coordinator-a", "lease-a", 1),
@@ -853,6 +868,7 @@ def test_generation_reader_rejects_guard_lifetime_rollback():
     )
     reader = _reader_from_history(
         records,
+        guard_mutation_sequences=(3, 4),
         guard_lifetime_sequences=(2, 1),
     )
 
@@ -881,12 +897,40 @@ def test_generation_reader_rejects_guard_recreation_without_two_mutations():
     )
     reader = _reader_from_history(
         records,
-        guard_mutation_sequences=(1, 2),
+        guard_mutation_sequences=(2, 3),
         guard_lifetime_sequences=(1, 2),
         guard_grant_times_unix_ms=(1_000, 1_100),
     )
 
     with pytest.raises(GenerationStateCorrupt, match="delete-and-recreate"):
+        reader.current()
+
+
+def test_generation_reader_rejects_impossible_initial_guard_lifetime():
+    records = _history(("coordinator-a", "lease-a", 100))
+    reader = _reader_from_history(
+        records,
+        guard_mutation_sequences=(1,),
+        guard_lifetime_sequences=(2,),
+    )
+
+    with pytest.raises(GenerationStateCorrupt, match="cannot support its lifetime"):
+        reader.current()
+
+
+def test_generation_reader_rejects_commit_after_successor_guard_mutation():
+    records = _history(
+        ("coordinator-a", "lease-a", 100),
+        ("coordinator-a", "lease-a", 50),
+    )
+    reader = _reader_from_history(
+        records,
+        guard_mutation_sequences=(1, 2),
+        guard_grant_times_unix_ms=(1_000, 1_050),
+        snapshot_commit_times_unix_ms=(1_090, 1_091),
+    )
+
+    with pytest.raises(GenerationStateCorrupt, match="postdates"):
         reader.current()
 
 

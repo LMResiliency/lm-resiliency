@@ -891,12 +891,15 @@ must not overlap the prior lease's stamped expiry, and one fencing token cannot
 identify multiple guard mutations. Fencing revisions are compared only for
 equality; ordering comes from the store-stamped guard mutation sequence. Each
 guard-key lifetime increase requires at least one delete and one create
-mutation. When generations omit intervening renewals, the mutation distance
-bounds the latest grant time that a valid renewal chain could reach, so skipped
-valid renewals are accepted while resurrection after expiry is rejected. Grant
-times, guard mutations, and key-lifetime sequences cannot move backward.
-Missing or contradictory history is corruption, not an empty or partially
-usable assignment.
+mutation, including before the first persisted generation. When generations
+omit intervening renewals of one lease, the mutation distance bounds the latest
+grant time that a valid renewal chain could reach, so skipped valid renewals are
+accepted while resurrection after expiry is rejected. A same-key takeover with
+unobserved intervening mutations is ambiguous and rejected. An older generation
+commit cannot postdate the next guard mutation that fences it. Grant times,
+guard mutations, and key-lifetime sequences cannot move backward. Missing or
+contradictory history is corruption, not an empty or partially usable
+assignment.
 
 Coordinator ownership is stored under a schema-versioned, run-scoped lease key.
 The lease record binds the run, a unique coordinator-process incarnation, a

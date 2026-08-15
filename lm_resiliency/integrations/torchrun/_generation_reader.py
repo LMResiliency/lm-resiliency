@@ -279,6 +279,13 @@ class GenerationStateReader:
                     "generation snapshot guard lifetime lacks delete-and-recreate mutations"
                 )
             if (
+                guard_mutation_delta > 0
+                and predecessor.committed_at_unix_ms > successor.guard_committed_at_unix_ms
+            ):
+                raise GenerationStateCorrupt(
+                    "generation snapshot commit postdates a successor guard mutation"
+                )
+            if (
                 guard_mutation_delta == 0
                 and predecessor.record.coordinator_fencing_token
                 != successor.record.coordinator_fencing_token
@@ -336,6 +343,14 @@ class GenerationStateReader:
             if (
                 predecessor.record.lease_id != successor.record.lease_id
                 and predecessor.guard_lifetime_sequence == successor.guard_lifetime_sequence
+                and guard_mutation_delta != 1
+            ):
+                raise GenerationStateCorrupt(
+                    "generation snapshot lease replacement has ambiguous skipped mutations"
+                )
+            if (
+                predecessor.record.lease_id != successor.record.lease_id
+                and predecessor.guard_lifetime_sequence == successor.guard_lifetime_sequence
                 and successor.guard_committed_at_unix_ms
                 < (
                     predecessor.guard_committed_at_unix_ms
@@ -379,6 +394,10 @@ class GenerationStateReader:
         if guard_lifetime_sequence is None:
             raise GenerationStateCorrupt(
                 "generation state guard has no authoritative lifetime sequence"
+            )
+        if guard_mutation_sequence < 2 * guard_lifetime_sequence - 1:
+            raise GenerationStateCorrupt(
+                "generation state guard mutation sequence cannot support its lifetime"
             )
         guard_committed_at_unix_ms = entry.guard_committed_at_unix_ms
         if guard_committed_at_unix_ms is None:
