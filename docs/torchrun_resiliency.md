@@ -979,6 +979,13 @@ commit time, unguarded lease storage, and possible mutation/value/lifetime
 sequence lineage. A lease key's mutation count also cannot exceed the
 store-global transaction sequence. Complete history traversal and
 adjacent-transition validation build on this strict value boundary.
+The history reader obtains a stable immutable snapshot, requires the live value
+to be its final retained entry, and validates every adjacent renewal,
+replacement, and delete/recreate transition. Renewals must commit before
+expiry, in-place replacements cannot overlap, no value or lifetime may be
+skipped, and lease identities and fencing tokens cannot recur after
+replacement. Higher layers can therefore reconstruct coordinator authority
+after process loss without trusting process-local observations.
 
 Coordinator state that spans multiple keys uses one guarded store transaction.
 The transaction first checks the coordinator lease revision, then any
