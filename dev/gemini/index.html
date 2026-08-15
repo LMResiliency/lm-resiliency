@@ -204,6 +204,7 @@ config = InMemoryCkptConfig(
     replication_chunk_size=16 * 1024 * 1024,
     disk_flush_interval=100,
     disk_folder=&quot;./checkpoints&quot;,
+    run_id=&quot;training-run-2026-08-15&quot;,
     verify_integrity=False,
     skip_replication_if_hsdp=True,
     pin_memory=True,
@@ -238,6 +239,10 @@ config = InMemoryCkptConfig(
 <td>Node-local checkpoint directory</td>
 </tr>
 <tr>
+<td><code>run_id</code></td>
+<td>Stable identity required to resume this run's node-local files</td>
+</tr>
+<tr>
 <td><code>verify_integrity</code></td>
 <td>Store and verify CRC-32 for serialized shards</td>
 </tr>
@@ -252,6 +257,11 @@ config = InMemoryCkptConfig(
 </tbody>
 </table>
 <p>The unified <code>enable_resiliency(..., interval=N)</code> call overrides the component interval.</p>
+<p>Set <code>run_id</code> to the same non-empty value on every rank and reuse it only for an
+intentional resume. When it is omitted, GEMINI uses <code>LM_RESILIENCY_RUN_ID</code> or
+torchrun's <code>TORCHELASTIC_RUN_ID</code>; without either launcher identity it coordinates
+a fresh ID for the current manager group. A newly constructed job therefore does
+not inherit files from an unrelated job that happened to reuse <code>disk_folder</code>.</p>
 <h2 id="checkpoint-validation">Checkpoint Validation<a class="headerlink" href="#checkpoint-validation" title="Permanent link">&para;</a></h2>
 <p>When GEMINI and SCOUT are enabled together, <code>interval=N</code> is the GEMINI capture frequency and the default interval for each SCOUT recipe class.
 SCOUT runs first.
@@ -319,8 +329,18 @@ With <code>verify_integrity=True</code>, it stores a CRC-32 for each shard and t
 Checksums detect stored-byte corruption; they cannot prove that the source GPU state was numerically correct.
 Enabling integrity verification is therefore a fail-closed configuration change:
 node-local checkpoints written earlier with <code>verify_integrity=False</code> are not eligible for recovery until a new checksummed generation is persisted.</p>
-<p>Node-local files use checkpoint format version 2. Tensors are loaded through PyTorch's <code>weights_only=True</code> path, while reconstruction metadata is represented by a schema-constrained JSON document. The metadata schema supports the built-in containers and scalar types used by framework state, NumPy RNG values, and dense CPU tensors such as PyTorch RNG state. GEMINI validates the payload fields, metadata types, tensor count, shapes, dtypes, reconstruction paths, and optional CRC values before recovery can apply state. Unsupported caller-owned metadata fails the checkpoint write instead of falling back to unrestricted pickle deserialization.</p>
+<p>Node-local files use checkpoint format version 3. Files and status sidecars live
+under an opaque run/topology namespace. Every shard also records the exact run
+ID, topology fingerprint, owner rank, and step; the loader checks all four before
+recovery can apply state. The topology fingerprint covers world size, checkpoint
+group ranks, and the replication assignment, and all checkpoint ranks agree on
+the run/topology contract collectively during manager construction.</p>
+<p>Tensors are loaded through PyTorch's <code>weights_only=True</code> path, while reconstruction metadata is represented by a schema-constrained JSON document. The metadata schema supports the built-in containers and scalar types used by framework state, NumPy RNG values, and dense CPU tensors such as PyTorch RNG state. GEMINI validates the payload fields, metadata types, tensor count, shapes, dtypes, reconstruction paths, identity, and optional CRC values before recovery can apply state. Unsupported caller-owned metadata fails the checkpoint write instead of falling back to unrestricted pickle deserialization.</p>
 <p>The original <code>0.1.0</code> node-local format used unrestricted pickle metadata and is intentionally not loadable by newer versions. Complete an in-progress <code>0.1.0</code> recovery before upgrading, or use the framework-owned durable checkpoint as the upgrade boundary. Node-local GEMINI files remain a fast restart tier rather than a cross-version interchange format.</p>
+<p>Version 2 node-local files did not bind state to a run or topology and are not
+silently assigned to a version 3 run. Resume them with the release that wrote
+them and publish a framework-owned durable checkpoint, then upgrade and begin a
+version 3 run from that durable boundary.</p>
 <p>Safe deserialization prevents a replaced file from invoking arbitrary pickle globals, but it does not establish who produced the tensor values. Treat the checkpoint directory as training-state storage: restrict filesystem ownership and write permissions to the training job, avoid following untrusted symlinks or copying files from untrusted sources, and use framework-owned durable checkpoints when stronger provenance is required. CRC-32 detects accidental byte corruption only; an attacker able to replace a shard can also replace its checksum.</p>
 <p><code>SIGTERM</code> and <code>SIGINT</code> handlers synchronously flush the newest recoverable state during the scheduler grace period and then chain to the previous handler.
 <code>SIGKILL</code>, power loss, and complete node loss cannot be handled locally.
@@ -400,7 +420,7 @@ Framework integrations call the manager at safe optimizer boundaries and include
 <p>These values measure the synchronization-visible portion of asynchronous capture.
 They do not infer overhead from small differences between independent end-to-end step-time runs.
 Hardware, state layout, capture cadence, and available copy or network overlap can change the result.
-The reproducible <a href="https://github.com/LMResiliency/lm-resiliency/blob/e411f4c48c469e7bc1b8a49adcc96b4f0a2132e4/benchmarks/README.md">healthy-path benchmark</a> records current-package baseline, GEMINI, SCOUT, and combined measurements and applies explicit scheduled-run thresholds.
+The reproducible <a href="https://github.com/LMResiliency/lm-resiliency/blob/50082d26d10e83b4ed4a503a606fc5767d46db4a/benchmarks/README.md">healthy-path benchmark</a> records current-package baseline, GEMINI, SCOUT, and combined measurements and applies explicit scheduled-run thresholds.
 The table above remains historical evidence for its stated A100 workload and is not a baseline for different benchmark shapes or hardware.</p>
 <h2 id="boundaries">Boundaries<a class="headerlink" href="#boundaries" title="Permanent link">&para;</a></h2>
 <ul>
@@ -409,7 +429,7 @@ The table above remains historical evidence for its stated A100 workload and is 
 <li><code>replication_jump</code> assumes a compatible rank placement and must be validated for the deployment.</li>
 <li>Integrity checks detect corruption after capture, not corruption already present in source state.</li>
 <li>Safe weights-only loading prevents arbitrary pickle execution but does not authenticate tensor values or their source.</li>
-<li>Node-local checkpoint format version 2 does not load the unrestricted-pickle format written by <code>0.1.0</code>.</li>
+<li>Node-local checkpoint format version 3 rejects legacy files without run/topology identity.</li>
 <li>Signal-triggered flush requires a catchable signal and sufficient termination grace time.</li>
 <li>Manager policy, relaunch, placement, and physical replacement remain external.</li>
 </ul>
