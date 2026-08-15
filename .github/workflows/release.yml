@@ -160,7 +160,7 @@ jobs:
           cd "$RUNNER_TEMP"
           "$smoke_env/bin/python" -c \
             'import lm_resiliency, sys; optional = {"deepspeed", "megatron", "torchtitan", "triton"}; assert not optional.intersection(sys.modules); print(lm_resiliency.__file__)'
-          "$smoke_env/bin/python" "$GITHUB_WORKSPACE/examples/quickstart.py" \
+          CUDA_VISIBLE_DEVICES="" "$smoke_env/bin/lm-resiliency-quickstart" \
             --steps 2 \
             --interval 1 \
             --checkpoint-dir "$RUNNER_TEMP/release-quickstart"
@@ -264,6 +264,10 @@ jobs:
             sleep 10
           done
           python -m pip check
+          CUDA_VISIBLE_DEVICES="" lm-resiliency-quickstart \
+            --steps 2 \
+            --interval 1 \
+            --checkpoint-dir "$RUNNER_TEMP/lm-resiliency-testpypi-quickstart"
           cd "$RUNNER_TEMP"
           python -c "import lm_resiliency; print(lm_resiliency.__file__)"
 

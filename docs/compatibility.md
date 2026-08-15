@@ -42,7 +42,7 @@ Contract tests require every declared Python and PyTorch minor series to appear 
 ## API Compatibility
 
 Stable exports from `lm_resiliency`, `lm_resiliency.manager_api`, and explicit framework integration entry points remain backward compatible across `0.1.x` patch releases.
-The documented `lm-resiliency-discover-moe-regimes` command and its existing options follow the same patch-release compatibility policy.
+The documented `lm-resiliency-quickstart` and `lm-resiliency-discover-moe-regimes` commands and their existing options follow the same patch-release compatibility policy.
 Removing or changing a stable interface requires a new minor release and migration notes.
 Objects under `lm_resiliency.experimental` and unlisted module paths may change in any `0.x` release.
 The exact stable exports are listed in the [API guide](api.md#public-api-stability) and enforced by contract tests.
