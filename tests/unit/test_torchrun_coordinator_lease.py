@@ -62,6 +62,53 @@ class ExpireDuringMutationStore(InMemoryControlStore):
             value=value,
         )
 
+    def compare_set_in_window(
+        self,
+        key: str,
+        *,
+        expected_revision: int | None,
+        not_before_unix_ms: int,
+        deadline_unix_ms: int,
+        value: bytes,
+    ):
+        if self.expire_next_mutation:
+            self._manual_clock.set(deadline_unix_ms)
+            self.expire_next_mutation = False
+        return super().compare_set_in_window(
+            key,
+            expected_revision=expected_revision,
+            not_before_unix_ms=not_before_unix_ms,
+            deadline_unix_ms=deadline_unix_ms,
+            value=value,
+        )
+
+
+class RegressDuringMutationStore(InMemoryControlStore):
+    def __init__(self, clock: ManualClock) -> None:
+        super().__init__(clock=clock)
+        self._manual_clock = clock
+        self.regress_next_mutation_to: int | None = None
+
+    def compare_set_in_window(
+        self,
+        key: str,
+        *,
+        expected_revision: int | None,
+        not_before_unix_ms: int,
+        deadline_unix_ms: int,
+        value: bytes,
+    ):
+        if self.regress_next_mutation_to is not None:
+            self._manual_clock.set(self.regress_next_mutation_to)
+            self.regress_next_mutation_to = None
+        return super().compare_set_in_window(
+            key,
+            expected_revision=expected_revision,
+            not_before_unix_ms=not_before_unix_ms,
+            deadline_unix_ms=deadline_unix_ms,
+            value=value,
+        )
+
 
 def _manager(
     store: InMemoryControlStore,
@@ -119,8 +166,11 @@ def test_coordinator_lease_acquire_is_exclusive_and_idempotent():
 
     lease = first.acquire()
 
-    assert first.acquire() == lease
-    assert first.current() == lease
+    retry = first.acquire()
+
+    assert retry.record == lease.record
+    assert retry.fencing_token > lease.fencing_token
+    assert first.current() == retry
     assert lease.record.coordinator_id == "coordinator-a"
     assert lease.record.expires_at_unix_ms == 1_100
     with pytest.raises(CoordinatorLeaseUnavailable, match="coordinator-a"):
@@ -201,6 +251,47 @@ def test_takeover_cannot_commit_an_expired_candidate():
         second.acquire()
 
     assert second.current() == stale
+
+
+def test_takeover_requires_old_lease_expiry_at_store_time():
+    clock = ManualClock()
+    store = RegressDuringMutationStore(clock)
+    first = _manager(store, clock, "coordinator-a")
+    second = _manager(store, clock, "coordinator-b")
+    stale = first.acquire()
+    clock.set(1_200)
+    store.regress_next_mutation_to = 1_050
+
+    with pytest.raises(CoordinatorLeaseClockError, match="precedes"):
+        second.acquire()
+
+    assert second.current() == stale
+
+
+def test_initial_acquisition_rejects_store_clock_regression():
+    clock = ManualClock(1_200)
+    store = RegressDuringMutationStore(clock)
+    manager = _manager(store, clock, "coordinator-a")
+    store.regress_next_mutation_to = 1_050
+
+    with pytest.raises(CoordinatorLeaseClockError, match="precedes"):
+        manager.acquire()
+
+    assert manager.current() is None
+
+
+def test_renewal_rejects_store_clock_regression():
+    clock = ManualClock()
+    store = RegressDuringMutationStore(clock)
+    manager = _manager(store, clock, "coordinator-a")
+    lease = manager.acquire()
+    clock.set(1_050)
+    store.regress_next_mutation_to = 1_025
+
+    with pytest.raises(CoordinatorLeaseClockError, match="precedes"):
+        manager.renew(lease)
+
+    assert manager.current() == lease
 
 
 def test_expired_lease_takeover_fences_old_coordinator():

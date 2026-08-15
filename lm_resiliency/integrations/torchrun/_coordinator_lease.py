@@ -16,6 +16,7 @@ from lm_resiliency.integrations.torchrun._control_store import (
     ControlStoreConflict,
     ControlStoreDeadlineExceeded,
     ControlStoreEntry,
+    ControlStoreTooEarly,
 )
 
 _CONTROL_PREFIX = "lm_resiliency/torchrun/v1"
@@ -214,13 +215,38 @@ class CoordinatorLeaseManager:
             current = self.current()
             if current is not None and current.record.expires_at_unix_ms > now_unix_ms:
                 if current.record.coordinator_id == self._coordinator_id:
-                    return current
+                    try:
+                        entry = self._store.compare_set_in_window(
+                            self._lease_key,
+                            expected_revision=current.fencing_token,
+                            not_before_unix_ms=now_unix_ms,
+                            deadline_unix_ms=current.record.expires_at_unix_ms,
+                            value=current.record.to_json(),
+                        )
+                    except ControlStoreDeadlineExceeded as error:
+                        raise CoordinatorLeaseUnavailable(
+                            "existing coordinator lease expired at the control store "
+                            "during acquisition"
+                        ) from error
+                    except ControlStoreTooEarly as error:
+                        raise CoordinatorLeaseClockError(
+                            "control-store time precedes the coordinator acquisition observation"
+                        ) from error
+                    except ControlStoreClockError as error:
+                        raise CoordinatorLeaseClockError(
+                            "authoritative control-store clock moved backward"
+                        ) from error
+                    except ControlStoreConflict:
+                        continue
+                    return HeldCoordinatorLease(
+                        record=current.record,
+                        fencing_token=entry.revision,
+                    )
                 raise CoordinatorLeaseUnavailable(
                     "coordinator lease is held by "
                     f"{current.record.coordinator_id!r} until "
                     f"{current.record.expires_at_unix_ms}"
                 )
-            expected_revision = None if current is None else current.fencing_token
             record = CoordinatorLeaseRecord(
                 run_id=self._run_id,
                 coordinator_id=self._coordinator_id,
@@ -229,15 +255,33 @@ class CoordinatorLeaseManager:
                 expires_at_unix_ms=now_unix_ms + self._lease_duration_ms,
             )
             try:
-                entry = self._store.compare_set_before(
-                    self._lease_key,
-                    expected_revision=expected_revision,
-                    deadline_unix_ms=record.expires_at_unix_ms,
-                    value=record.to_json(),
-                )
+                if current is None:
+                    entry = self._store.compare_set_in_window(
+                        self._lease_key,
+                        expected_revision=None,
+                        not_before_unix_ms=record.acquired_at_unix_ms,
+                        deadline_unix_ms=record.expires_at_unix_ms,
+                        value=record.to_json(),
+                    )
+                else:
+                    entry = self._store.compare_set_in_window(
+                        self._lease_key,
+                        expected_revision=current.fencing_token,
+                        not_before_unix_ms=max(
+                            current.record.expires_at_unix_ms,
+                            record.acquired_at_unix_ms,
+                        ),
+                        deadline_unix_ms=record.expires_at_unix_ms,
+                        value=record.to_json(),
+                    )
             except ControlStoreDeadlineExceeded as error:
                 raise CoordinatorLeaseUnavailable(
                     "candidate coordinator lease expired at the control store before acquisition"
+                ) from error
+            except ControlStoreTooEarly as error:
+                raise CoordinatorLeaseClockError(
+                    "control-store time precedes the coordinator acquisition observation "
+                    "or existing lease expiry"
                 ) from error
             except ControlStoreClockError as error:
                 raise CoordinatorLeaseClockError(
@@ -265,15 +309,20 @@ class CoordinatorLeaseManager:
             expires_at_unix_ms=requested_expiry,
         )
         try:
-            entry = self._store.compare_set_before(
+            entry = self._store.compare_set_in_window(
                 self._lease_key,
                 expected_revision=lease.fencing_token,
+                not_before_unix_ms=now_unix_ms,
                 deadline_unix_ms=lease.record.expires_at_unix_ms,
                 value=record.to_json(),
             )
         except ControlStoreDeadlineExceeded as error:
             raise CoordinatorLeaseLost(
                 "coordinator lease expired at the control store before renewal"
+            ) from error
+        except ControlStoreTooEarly as error:
+            raise CoordinatorLeaseClockError(
+                "control-store time precedes the coordinator renewal observation"
             ) from error
         except ControlStoreClockError as error:
             raise CoordinatorLeaseClockError(

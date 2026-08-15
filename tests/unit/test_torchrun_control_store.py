@@ -12,6 +12,7 @@ from lm_resiliency.integrations.torchrun._control_store import (
     ControlStoreConflict,
     ControlStoreDeadlineExceeded,
     ControlStoreEntry,
+    ControlStoreTooEarly,
     InMemoryControlStore,
 )
 
@@ -235,6 +236,50 @@ def test_control_store_deadline_guard_rejects_backward_clock():
             expected_revision=updated.revision,
             deadline_unix_ms=200,
             value=b"stale-clock",
+        )
+
+    assert store.get("run/control") == updated
+
+
+def test_control_store_time_window_uses_one_authoritative_sample():
+    clock = ManualClock(100)
+    store = InMemoryControlStore(clock=clock)
+    created = store.compare_set_in_window(
+        "run/control",
+        expected_revision=None,
+        not_before_unix_ms=100,
+        deadline_unix_ms=103,
+        value=b"one",
+    )
+
+    with pytest.raises(ControlStoreTooEarly) as early_error:
+        store.compare_set_in_window(
+            "run/control",
+            expected_revision=created.revision,
+            not_before_unix_ms=101,
+            deadline_unix_ms=103,
+            value=b"early",
+        )
+    assert early_error.value.observed_unix_ms == 100
+    assert store.get("run/control") == created
+
+    clock.now_unix_ms = 101
+    updated = store.compare_set_in_window(
+        "run/control",
+        expected_revision=created.revision,
+        not_before_unix_ms=101,
+        deadline_unix_ms=103,
+        value=b"two",
+    )
+    clock.now_unix_ms = 103
+
+    with pytest.raises(ControlStoreDeadlineExceeded):
+        store.compare_set_in_window(
+            "run/control",
+            expected_revision=updated.revision,
+            not_before_unix_ms=101,
+            deadline_unix_ms=103,
+            value=b"expired",
         )
 
     assert store.get("run/control") == updated

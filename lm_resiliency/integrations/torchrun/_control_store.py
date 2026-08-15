@@ -44,6 +44,19 @@ class ControlStoreDeadlineExceeded(ControlStoreError):
         )
 
 
+class ControlStoreTooEarly(ControlStoreError):
+    """Raised when a conditional mutation precedes its store-side start time."""
+
+    def __init__(self, key: str, not_before_unix_ms: int, observed_unix_ms: int) -> None:
+        self.key = key
+        self.not_before_unix_ms = not_before_unix_ms
+        self.observed_unix_ms = observed_unix_ms
+        super().__init__(
+            f"control-store time for {key!r} was {observed_unix_ms}; "
+            f"mutation is not valid before {not_before_unix_ms}"
+        )
+
+
 class ControlStoreClockError(ControlStoreError):
     """Raised when the authoritative store clock moves backward."""
 
@@ -93,6 +106,18 @@ class ControlStore(Protocol):
         value: bytes,
     ) -> ControlStoreEntry:
         """Create or replace ``key`` when its revision matches before the deadline."""
+        ...
+
+    def compare_set_in_window(
+        self,
+        key: str,
+        *,
+        expected_revision: int | None,
+        not_before_unix_ms: int,
+        deadline_unix_ms: int,
+        value: bytes,
+    ) -> ControlStoreEntry:
+        """Create or replace ``key`` within an inclusive-start, exclusive-end window."""
         ...
 
 
@@ -151,6 +176,45 @@ class InMemoryControlStore:
         with self._lock:
             self._require_revision(normalized_key, normalized_revision)
             now_unix_ms = self._store_now_unix_ms()
+            if now_unix_ms >= normalized_deadline:
+                raise ControlStoreDeadlineExceeded(
+                    normalized_key,
+                    normalized_deadline,
+                    now_unix_ms,
+                )
+            return self._set_entry(normalized_key, normalized_value)
+
+    def compare_set_in_window(
+        self,
+        key: str,
+        *,
+        expected_revision: int | None,
+        not_before_unix_ms: int,
+        deadline_unix_ms: int,
+        value: bytes,
+    ) -> ControlStoreEntry:
+        normalized_key = _control_key(key)
+        normalized_revision = _expected_revision(expected_revision, allow_absent=True)
+        normalized_not_before = _positive_integer(
+            not_before_unix_ms,
+            "not_before_unix_ms",
+        )
+        normalized_deadline = _positive_integer(
+            deadline_unix_ms,
+            "deadline_unix_ms",
+        )
+        if normalized_not_before >= normalized_deadline:
+            raise ValueError("not_before_unix_ms must be before deadline_unix_ms")
+        normalized_value = _control_value(value)
+        with self._lock:
+            self._require_revision(normalized_key, normalized_revision)
+            now_unix_ms = self._store_now_unix_ms()
+            if now_unix_ms < normalized_not_before:
+                raise ControlStoreTooEarly(
+                    normalized_key,
+                    normalized_not_before,
+                    now_unix_ms,
+                )
             if now_unix_ms >= normalized_deadline:
                 raise ControlStoreDeadlineExceeded(
                     normalized_key,
@@ -226,4 +290,5 @@ __all__ = [
     "ControlStoreEntry",
     "ControlStoreError",
     "InMemoryControlStore",
+    "ControlStoreTooEarly",
 ]
