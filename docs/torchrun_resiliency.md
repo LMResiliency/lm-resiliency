@@ -953,8 +953,12 @@ The prepared-write authority is one verified durable coordinator-lease value.
 Its commit lower bound must follow the receipt, intent opening, and lease grant;
 its exclusive deadline is bounded by both the restart-intent deadline and the
 lease expiry. This immutable value still performs no store reads or writes.
-The next layer authenticates the authority against durable lease history before
-constructing it.
+The authentication value binds the receipt to the exact committed intent,
+authenticated agent registration, active generation membership, and one
+coordinator-lease authority. It also rejects a receipt that predates the
+authoritative intent-opening commit. This value performs no store reads or
+writes. A following read-only layer constructs it from stable durable state
+before the preparation layer selects a bounded commit window.
 
 For a crashed or unreachable node, no preparation is assumed.
 
