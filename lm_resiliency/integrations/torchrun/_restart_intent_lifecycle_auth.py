@@ -256,6 +256,11 @@ class AuthenticatedInitialRestartIntentClosure:
             snapshot.transaction_sequence <= generation.transaction_sequence
             or snapshot.committed_at_unix_ms < generation.lease.granted_at_unix_ms
             or snapshot.committed_at_unix_ms >= generation.lease.expires_at_unix_ms
+            or not self._commit_precedes_next_authority(
+                generation,
+                transaction_sequence=snapshot.transaction_sequence,
+                committed_at_unix_ms=snapshot.committed_at_unix_ms,
+            )
         ):
             raise ValueError(
                 "AuthenticatedInitialRestartIntentClosure generation is outside its lease window"
@@ -272,8 +277,16 @@ class AuthenticatedInitialRestartIntentClosure:
             )
             or (
                 self.immediate_successor is not None
-                and state.opening_transaction_sequence
-                >= self.immediate_successor.transaction_sequence
+                and (
+                    state.opening_transaction_sequence
+                    >= self.immediate_successor.transaction_sequence
+                    or state.opened_at_unix_ms > self.immediate_successor.committed_at_unix_ms
+                )
+            )
+            or not self._commit_precedes_next_authority(
+                opening,
+                transaction_sequence=state.opening_transaction_sequence,
+                committed_at_unix_ms=state.opened_at_unix_ms,
             )
         ):
             raise ValueError(
@@ -284,11 +297,32 @@ class AuthenticatedInitialRestartIntentClosure:
             <= max(state.opening_transaction_sequence, closing.transaction_sequence)
             or state.closed_at_unix_ms < closing.lease.granted_at_unix_ms
             or state.closed_at_unix_ms >= closing.lease.expires_at_unix_ms
+            or not self._commit_precedes_next_authority(
+                closing,
+                transaction_sequence=state.closing_transaction_sequence,
+                committed_at_unix_ms=state.closed_at_unix_ms,
+            )
         ):
             raise ValueError(
                 "AuthenticatedInitialRestartIntentClosure closure is outside its "
                 "causal lease window"
             )
+
+    def _commit_precedes_next_authority(
+        self,
+        authority: CoordinatorLeaseAuthority,
+        *,
+        transaction_sequence: int,
+        committed_at_unix_ms: int,
+    ) -> bool:
+        authority_index = self.lease_history.index(authority)
+        if authority_index + 1 == len(self.lease_history):
+            return True
+        successor = self.lease_history[authority_index + 1]
+        return (
+            transaction_sequence < successor.transaction_sequence
+            and committed_at_unix_ms <= successor.lease.granted_at_unix_ms
+        )
 
 
 __all__ = ["AuthenticatedInitialRestartIntentClosure"]

@@ -274,6 +274,19 @@ def test_authenticated_closure_accepts_immediate_generation_successor():
                 run_id=RUN_ID,
             ).read(),
         )
+    with pytest.raises(ValueError, match="opening is outside"):
+        AuthenticatedInitialRestartIntentClosure(
+            state=fixture.state,
+            generation_snapshot=fixture.generation,
+            immediate_successor=replace(
+                successor,
+                committed_at_unix_ms=fixture.state.opened_at_unix_ms - 1,
+            ),
+            lease_history=CoordinatorLeaseHistoryReader(
+                fixture.store,
+                run_id=RUN_ID,
+            ).read(),
+        )
 
 
 def test_authenticated_closure_rejects_wrong_generation_or_successor():
@@ -336,6 +349,71 @@ def test_authenticated_closure_rejects_generation_outside_lease_window():
             ),
             immediate_successor=None,
             lease_history=fixture.lease_history,
+        )
+
+
+def test_authenticated_closure_bounds_old_authority_by_next_mutation():
+    fixture = _fixture(closing_mode="renewed")
+    next_authority = fixture.lease_history[1]
+
+    with pytest.raises(ValueError, match="generation is outside"):
+        AuthenticatedInitialRestartIntentClosure(
+            state=fixture.state,
+            generation_snapshot=replace(
+                fixture.generation,
+                transaction_sequence=next_authority.transaction_sequence,
+            ),
+            immediate_successor=None,
+            lease_history=fixture.lease_history,
+        )
+
+    state = replace(
+        fixture.state,
+        intent_entry=replace(
+            fixture.state.intent_entry,
+            transaction_sequence=next_authority.transaction_sequence,
+        ),
+        open_head_entry=replace(
+            fixture.state.open_head_entry,
+            transaction_sequence=next_authority.transaction_sequence,
+        ),
+    )
+    with pytest.raises(ValueError, match="opening is outside"):
+        AuthenticatedInitialRestartIntentClosure(
+            state=state,
+            generation_snapshot=fixture.generation,
+            immediate_successor=None,
+            lease_history=fixture.lease_history,
+        )
+
+    fixture = _fixture()
+    fixture.clock.set(1_020)
+    fixture.lease_manager.renew(fixture.opening_lease)
+    lease_history = CoordinatorLeaseHistoryReader(
+        fixture.store,
+        run_id=RUN_ID,
+    ).read()
+    state = replace(
+        fixture.state,
+        closed_head_entry=replace(
+            fixture.state.closed_head_entry,
+            transaction_sequence=lease_history[-1].transaction_sequence,
+        ),
+        lifecycle_entry=replace(
+            fixture.state.lifecycle_entry,
+            transaction_sequence=lease_history[-1].transaction_sequence,
+        ),
+        lifecycle_head_entry=replace(
+            fixture.state.lifecycle_head_entry,
+            transaction_sequence=lease_history[-1].transaction_sequence,
+        ),
+    )
+    with pytest.raises(ValueError, match="closure is outside"):
+        AuthenticatedInitialRestartIntentClosure(
+            state=state,
+            generation_snapshot=fixture.generation,
+            immediate_successor=None,
+            lease_history=lease_history,
         )
 
 
