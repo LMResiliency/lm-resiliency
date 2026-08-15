@@ -1099,7 +1099,11 @@ guard-key lifetime sequence, and authoritative guard commit time, or publishes
 none. The value sequence changes whenever the guarded bytes change or the key is
 recreated, but remains stable across same-value renewals. This is the primitive
 used to create an immutable generation snapshot and advance the generation head
-without allowing a stale or expired coordinator to commit either half alone.</p>
+without allowing a stale or expired coordinator to commit either half alone.
+Create-once transaction targets may additionally require that the key has no
+prior committed history, not merely that it is currently absent. This prevents
+a deleted immutable quarantine or snapshot key from being recreated inside an
+otherwise valid atomic commit.</p>
 <p>Persisted generation state uses strict versioned records.
 <code>GenerationSnapshotRecord</code> schema version 2 contains the immutable
 <code>RankAssignment</code>, the previous snapshot digest, and the complete coordinator
