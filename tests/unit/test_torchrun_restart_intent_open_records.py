@@ -8,6 +8,10 @@ from typing import Any, cast
 
 import pytest
 
+from lm_resiliency.integrations.torchrun._coordinator_lease import (
+    CoordinatorLeaseRecord,
+    HeldCoordinatorLease,
+)
 from lm_resiliency.integrations.torchrun._generation_reader import (
     CurrentGeneration,
     StoredGenerationSnapshot,
@@ -33,7 +37,10 @@ RUN_DIGEST = hashlib.sha256(RUN_ID.encode("utf-8")).hexdigest()
 RUN_PREFIX = f"lm_resiliency/torchrun/v1/runs/{RUN_DIGEST}"
 
 
-def _intent() -> RestartIntent:
+def _intent(
+    *,
+    suspected_node_ids: tuple[str, ...] = ("node-b",),
+) -> RestartIntent:
     return RestartIntent(
         intent_id="intent-a",
         run_id=RUN_ID,
@@ -41,7 +48,7 @@ def _intent() -> RestartIntent:
         incident_ids=("incident-a",),
         reason_code="attributed_sdc",
         minimum_recovery_mode="recovery_verified",
-        suspected_node_ids=("node-b",),
+        suspected_node_ids=suspected_node_ids,
         prepare_deadline_unix_ms=1_050,
     )
 
@@ -100,13 +107,21 @@ def _prepared() -> PreparedInitialRestartIntentOpen:
         record=record,
         head=head,
         current=current,
+        lease=HeldCoordinatorLease(
+            record=CoordinatorLeaseRecord(
+                run_id=RUN_ID,
+                coordinator_id="coordinator-a",
+                lease_id="lease-a",
+                lease_duration_ms=100,
+            ),
+            fencing_token=7,
+            granted_at_unix_ms=1_000,
+        ),
         intent_key=f"{RUN_PREFIX}/restart-intents/{intent_digest}",
         intent_head_key=f"{RUN_PREFIX}/restart-intent-head",
         coordinator_lease_key=f"{RUN_PREFIX}/coordinator-lease",
-        expected_guard_revision=7,
         generation_head_key=f"{RUN_PREFIX}/generation-head",
         generation_snapshot_key=f"{RUN_PREFIX}/generations/0",
-        coordinator_lease_granted_at_unix_ms=1_000,
         not_before_unix_ms=1_000,
         deadline_unix_ms=1_050,
     )
@@ -141,13 +156,13 @@ def test_prepared_initial_open_is_immutable():
     "changes",
     [
         {"head": replace(_prepared().head, intent_id="other")},
-        {"expected_guard_revision": 8},
+        {"lease": replace(_prepared().lease, fencing_token=8)},
         {"intent_key": "other"},
         {"intent_head_key": "other"},
         {"coordinator_lease_key": "other"},
         {"generation_head_key": "other"},
         {"generation_snapshot_key": "other"},
-        {"coordinator_lease_granted_at_unix_ms": 1_001},
+        {"lease": replace(_prepared().lease, granted_at_unix_ms=1_001)},
         {"not_before_unix_ms": 999},
         {"deadline_unix_ms": 1_051},
     ],
@@ -166,6 +181,8 @@ def test_prepared_initial_open_requires_expected_record_types():
         replace(prepared, head={})
     with pytest.raises(TypeError, match="CurrentGeneration"):
         replace(prepared, current={})
+    with pytest.raises(TypeError, match="HeldCoordinatorLease"):
+        replace(prepared, lease={})
 
 
 def test_prepared_initial_open_binds_exact_generation_snapshot():
@@ -185,11 +202,38 @@ def test_prepared_initial_open_binds_exact_generation_snapshot():
         )
 
 
+def test_prepared_initial_open_rejects_suspects_outside_generation():
+    prepared = _prepared()
+    record = replace(
+        prepared.record,
+        intent=_intent(suspected_node_ids=("node-c",)),
+    )
+    head = replace(
+        prepared.head,
+        intent_digest=record.digest,
+    )
+
+    with pytest.raises(ValueError, match="outside"):
+        replace(prepared, record=record, head=head)
+
+
+def test_prepared_initial_open_binds_complete_held_lease():
+    prepared = _prepared()
+    longer_lease = replace(
+        prepared.lease,
+        record=replace(
+            prepared.lease.record,
+            lease_duration_ms=1_000,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="lease does not authorize"):
+        replace(prepared, lease=longer_lease)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("expected_guard_revision", False),
-        ("coordinator_lease_granted_at_unix_ms", 0),
         ("not_before_unix_ms", 0),
         ("deadline_unix_ms", 0),
     ],

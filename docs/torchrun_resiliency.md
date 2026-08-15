@@ -597,7 +597,10 @@ transactions are separate control-plane components. A frozen
 current-intent head, exact generation revisions, coordinator fencing token,
 canonical run-scoped keys, and lease/intent commit window. It exposes immutable
 create-once writes and side-effect-free generation conditions but performs no
-store reads or mutations.
+store reads or mutations. The descriptor carries the complete held coordinator
+lease and requires the intent record to match its identity, duration, fencing
+token, and authoritative grant time. A later preparer authenticates that handle
+against persisted ownership before constructing the descriptor.
 
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be

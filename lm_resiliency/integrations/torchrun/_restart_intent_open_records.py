@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from lm_resiliency.integrations.torchrun._control_store import ControlStoreWrite
+from lm_resiliency.integrations.torchrun._coordinator_lease import HeldCoordinatorLease
 from lm_resiliency.integrations.torchrun._generation_reader import CurrentGeneration
 from lm_resiliency.integrations.torchrun._restart_intent_records import (
     RestartIntentHeadRecord,
@@ -24,13 +25,12 @@ class PreparedInitialRestartIntentOpen:
     record: RestartIntentRecord
     head: RestartIntentHeadRecord
     current: CurrentGeneration
+    lease: HeldCoordinatorLease
     intent_key: str
     intent_head_key: str
     coordinator_lease_key: str
-    expected_guard_revision: int
     generation_head_key: str
     generation_snapshot_key: str
-    coordinator_lease_granted_at_unix_ms: int
     not_before_unix_ms: int
     deadline_unix_ms: int
 
@@ -41,6 +41,8 @@ class PreparedInitialRestartIntentOpen:
             raise TypeError("PreparedInitialRestartIntentOpen.head must be RestartIntentHeadRecord")
         if not isinstance(self.current, CurrentGeneration):
             raise TypeError("PreparedInitialRestartIntentOpen.current must be CurrentGeneration")
+        if not isinstance(self.lease, HeldCoordinatorLease):
+            raise TypeError("PreparedInitialRestartIntentOpen.lease must be HeldCoordinatorLease")
         if (
             self.head.run_id != self.record.intent.run_id
             or self.head.generation != self.record.intent.generation
@@ -59,6 +61,23 @@ class PreparedInitialRestartIntentOpen:
             raise ValueError(
                 "PreparedInitialRestartIntentOpen generation does not identify its intent record"
             )
+        active_nodes = set(assignment.slot_to_node_id.values())
+        unknown_nodes = sorted(set(self.record.intent.suspected_node_ids) - active_nodes)
+        if unknown_nodes:
+            raise ValueError(
+                "PreparedInitialRestartIntentOpen suspects nodes outside its "
+                f"generation: {unknown_nodes!r}"
+            )
+        if (
+            self.lease.record.run_id != self.record.intent.run_id
+            or self.lease.record.coordinator_id != self.record.coordinator_id
+            or self.lease.record.lease_id != self.record.lease_id
+            or self.lease.record.lease_duration_ms != self.record.coordinator_lease_duration_ms
+            or self.lease.fencing_token != self.record.coordinator_fencing_token
+        ):
+            raise ValueError(
+                "PreparedInitialRestartIntentOpen lease does not authorize its intent record"
+            )
         run_digest = hashlib.sha256(self.record.intent.run_id.encode("utf-8")).hexdigest()
         run_prefix = f"{_CONTROL_PREFIX}/runs/{run_digest}"
         intent_digest = hashlib.sha256(self.record.intent.intent_id.encode("utf-8")).hexdigest()
@@ -75,26 +94,18 @@ class PreparedInitialRestartIntentOpen:
             if getattr(self, path) != expected_key:
                 raise ValueError(f"PreparedInitialRestartIntentOpen.{path} is not canonical")
         for path, integer_value in (
-            ("expected_guard_revision", self.expected_guard_revision),
             ("generation_head_revision", self.current.head_revision),
             ("generation_snapshot_revision", self.current.snapshot.revision),
             (
                 "generation_snapshot_committed_at_unix_ms",
                 self.current.snapshot.committed_at_unix_ms,
             ),
-            (
-                "coordinator_lease_granted_at_unix_ms",
-                self.coordinator_lease_granted_at_unix_ms,
-            ),
+            ("coordinator_lease_granted_at_unix_ms", self.lease.granted_at_unix_ms),
             ("not_before_unix_ms", self.not_before_unix_ms),
             ("deadline_unix_ms", self.deadline_unix_ms),
         ):
             _positive_integer(integer_value, f"PreparedInitialRestartIntentOpen.{path}")
-        if self.expected_guard_revision != self.record.coordinator_fencing_token:
-            raise ValueError(
-                "PreparedInitialRestartIntentOpen guard revision does not match its intent record"
-            )
-        if self.not_before_unix_ms < self.coordinator_lease_granted_at_unix_ms:
+        if self.not_before_unix_ms < self.lease.granted_at_unix_ms:
             raise ValueError(
                 "PreparedInitialRestartIntentOpen cannot precede its coordinator lease grant"
             )
@@ -106,15 +117,16 @@ class PreparedInitialRestartIntentOpen:
             raise ValueError(
                 "PreparedInitialRestartIntentOpen.not_before_unix_ms must precede its deadline"
             )
-        lease_expiry_unix_ms = (
-            self.coordinator_lease_granted_at_unix_ms + self.record.coordinator_lease_duration_ms
-        )
-        if self.deadline_unix_ms > lease_expiry_unix_ms:
+        if self.deadline_unix_ms > self.lease.expires_at_unix_ms:
             raise ValueError(
                 "PreparedInitialRestartIntentOpen deadline exceeds its coordinator lease"
             )
         if self.deadline_unix_ms > self.record.intent.prepare_deadline_unix_ms:
             raise ValueError("PreparedInitialRestartIntentOpen deadline exceeds its restart intent")
+
+    @property
+    def expected_guard_revision(self) -> int:
+        return self.lease.fencing_token
 
     @property
     def writes(self) -> Mapping[str, ControlStoreWrite]:
