@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Protocol
@@ -288,6 +288,7 @@ class ControlStore(Protocol):
         not_before_unix_ms: int,
         deadline_unix_ms: int,
         conditions: Mapping[str, int | None] | None = None,
+        never_created_conditions: Collection[str] | None = None,
     ) -> Mapping[str, ControlStoreEntry]:
         """Atomically publish writes while a guard and read conditions hold.
 
@@ -443,18 +444,41 @@ class InMemoryControlStore:
         not_before_unix_ms: int,
         deadline_unix_ms: int,
         conditions: Mapping[str, int | None] | None = None,
+        never_created_conditions: Collection[str] | None = None,
     ) -> Mapping[str, ControlStoreEntry]:
         normalized_writes = _control_writes(writes)
         normalized_conditions = _control_conditions(conditions)
+        normalized_never_created_conditions = _control_key_collection(
+            never_created_conditions,
+            "never_created_conditions",
+        )
         normalized_guard_key = _control_key(guard_key)
         if normalized_guard_key in normalized_writes:
             raise ValueError("guard_key must not also be a transaction target")
         if normalized_guard_key in normalized_conditions:
             raise ValueError("guard_key must not also be a transaction condition")
+        if normalized_guard_key in normalized_never_created_conditions:
+            raise ValueError("guard_key must not also be a never-created condition")
         overlapping_keys = sorted(set(normalized_writes) & set(normalized_conditions))
         if overlapping_keys:
             raise ValueError(
                 f"transaction conditions must not also be targets: {overlapping_keys!r}"
+            )
+        overlapping_never_created_targets = sorted(
+            set(normalized_writes) & normalized_never_created_conditions
+        )
+        if overlapping_never_created_targets:
+            raise ValueError(
+                "never-created conditions must not also be targets: "
+                f"{overlapping_never_created_targets!r}"
+            )
+        overlapping_conditions = sorted(
+            set(normalized_conditions) & normalized_never_created_conditions
+        )
+        if overlapping_conditions:
+            raise ValueError(
+                "never-created conditions must not also be revision conditions: "
+                f"{overlapping_conditions!r}"
             )
         normalized_guard_revision = _required_revision(expected_guard_revision)
         normalized_not_before = _positive_integer(
@@ -473,6 +497,10 @@ class InMemoryControlStore:
             guard_value_digest = hashlib.sha256(guard_entry.value).hexdigest()
             for key, expected_revision in normalized_conditions.items():
                 self._require_revision(key, expected_revision)
+            for key in sorted(normalized_never_created_conditions):
+                self._require_revision(key, None)
+                if key in self._last_revisions:
+                    raise ControlStoreHistoryConflict(key)
             for key, write in normalized_writes.items():
                 self._require_revision(key, write.expected_revision)
                 if write.require_never_created and key in self._last_revisions:
@@ -625,6 +653,17 @@ def _control_conditions(
     if len(result) != len(value):
         raise ValueError("condition keys must be unique")
     return dict(sorted(result.items()))
+
+
+def _control_key_collection(value: object, path: str) -> frozenset[str]:
+    if value is None:
+        return frozenset()
+    if isinstance(value, (str, bytes)) or not isinstance(value, Collection):
+        raise TypeError(f"{path} must be a collection of control-store keys")
+    normalized_keys = tuple(_control_key(key) for key in value)
+    if len(set(normalized_keys)) != len(normalized_keys):
+        raise ValueError(f"{path} keys must be unique")
+    return frozenset(normalized_keys)
 
 
 def _expected_revision(value: object, *, allow_absent: bool) -> int | None:

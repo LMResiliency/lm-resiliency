@@ -7,7 +7,10 @@ from dataclasses import replace
 
 import pytest
 
-from lm_resiliency.integrations.torchrun._control_store import InMemoryControlStore
+from lm_resiliency.integrations.torchrun._control_store import (
+    ControlStoreHistoryConflict,
+    InMemoryControlStore,
+)
 from lm_resiliency.integrations.torchrun._coordinator_lease import (
     CoordinatorLeaseManager,
 )
@@ -121,6 +124,7 @@ def test_prepare_initial_open_authenticates_and_builds_descriptor_without_writes
     assert prepared.lease == lease
     assert prepared.not_before_unix_ms == 1_000
     assert prepared.deadline_unix_ms == 1_050
+    assert prepared.never_created_conditions == frozenset({preparer.lifecycle_head_key})
     assert store.get(prepared.intent_head_key) is None
     assert store.get(prepared.intent_key) is None
 
@@ -299,6 +303,48 @@ def test_prepare_initial_open_rejects_deadlines_elapsed_after_state_commit():
         )
 
 
+def test_prepare_initial_open_rejects_first_clock_sample_before_lease_grant():
+    _, store, _, _, _, lease, current = _state()
+    preparer = RestartIntentOpenPreparer(
+        store,
+        run_id=RUN_ID,
+        clock=ManualClock(999),
+    )
+
+    with pytest.raises(RestartIntentOpenPreparationClockError, match="lease grant"):
+        preparer.prepare_initial_open(lease, current, _intent())
+
+
+def test_prepare_initial_open_classifies_store_time_deadline_as_elapsed():
+    store_clock = ManualClock()
+    store = InMemoryControlStore(clock=store_clock)
+    lease_manager = CoordinatorLeaseManager(
+        store,
+        run_id=RUN_ID,
+        coordinator_id="coordinator-a",
+        lease_duration_ms=100,
+        clock=store_clock,
+    )
+    lease = lease_manager.acquire()
+    store_clock.set(1_020)
+    generation_manager = GenerationStateManager(store, run_id=RUN_ID)
+    generation_manager.initialize(lease, _assignment())
+    current = generation_manager.current()
+    assert current is not None
+    preparer = RestartIntentOpenPreparer(
+        store,
+        run_id=RUN_ID,
+        clock=ManualClock(1_010),
+    )
+
+    with pytest.raises(RestartIntentOpenPreparationDeadlineElapsed, match="elapsed"):
+        preparer.prepare_initial_open(
+            lease,
+            current,
+            _intent(prepare_deadline_unix_ms=1_015),
+        )
+
+
 def test_prepare_initial_open_uses_observed_time_as_transaction_lower_bound():
     clock, _, _, _, preparer, lease, current = _state()
     clock.set(1_020)
@@ -306,6 +352,35 @@ def test_prepare_initial_open_uses_observed_time_as_transaction_lower_bound():
     prepared = preparer.prepare_initial_open(lease, current, _intent())
 
     assert prepared.not_before_unix_ms == 1_020
+
+
+def test_prepared_initial_open_fences_lifecycle_history_at_transaction():
+    _, store, _, _, preparer, lease, current = _state()
+    prepared = preparer.prepare_initial_open(lease, current, _intent())
+    lifecycle_head = store.compare_set(
+        preparer.lifecycle_head_key,
+        expected_revision=None,
+        value=b"closed",
+    )
+    store.compare_delete(
+        preparer.lifecycle_head_key,
+        expected_revision=lifecycle_head.revision,
+    )
+
+    with pytest.raises(ControlStoreHistoryConflict) as error:
+        store.compare_set_many_guarded(
+            prepared.writes,
+            guard_key=prepared.coordinator_lease_key,
+            expected_guard_revision=prepared.expected_guard_revision,
+            not_before_unix_ms=prepared.not_before_unix_ms,
+            deadline_unix_ms=prepared.deadline_unix_ms,
+            conditions=prepared.conditions,
+            never_created_conditions=prepared.never_created_conditions,
+        )
+
+    assert error.value.key == preparer.lifecycle_head_key
+    assert store.get(prepared.intent_key) is None
+    assert store.get(prepared.intent_head_key) is None
 
 
 def test_prepare_initial_open_rejects_backward_clock():

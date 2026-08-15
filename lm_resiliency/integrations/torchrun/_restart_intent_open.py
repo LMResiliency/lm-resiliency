@@ -106,16 +106,20 @@ class RestartIntentOpenPreparer:
         self._validate_intent(intent, current)
         self._require_never_opened()
         now_unix_ms = self._now_unix_ms()
+        if now_unix_ms < lease.granted_at_unix_ms:
+            raise RestartIntentOpenPreparationClockError(
+                "restart-intent preparation clock precedes the authoritative lease grant"
+            )
         not_before_unix_ms = max(
             lease.granted_at_unix_ms,
             current.snapshot.committed_at_unix_ms,
             now_unix_ms,
         )
-        if lease.expires_at_unix_ms <= now_unix_ms:
+        if lease.expires_at_unix_ms <= not_before_unix_ms:
             raise RestartIntentOpenPreparationLeaseLost(
                 "coordinator lease expired before restart-intent preparation"
             )
-        if intent.prepare_deadline_unix_ms <= now_unix_ms:
+        if intent.prepare_deadline_unix_ms <= not_before_unix_ms:
             raise RestartIntentOpenPreparationDeadlineElapsed(
                 "restart-intent preparation deadline has already elapsed"
             )
@@ -139,6 +143,7 @@ class RestartIntentOpenPreparer:
             lease=lease,
             intent_key=self.intent_key(intent.intent_id),
             intent_head_key=self._intent_head_key,
+            lifecycle_head_key=self._lifecycle_head_key,
             coordinator_lease_key=self.coordinator_lease_key,
             generation_head_key=self.generation_head_key,
             generation_snapshot_key=self._generation_reader.snapshot_key(intent.generation),

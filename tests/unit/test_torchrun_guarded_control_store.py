@@ -311,6 +311,62 @@ def test_guarded_transaction_can_condition_on_key_absence():
     assert store.get("run/restart-intent-head") is None
 
 
+def test_guarded_transaction_can_require_condition_to_have_no_history():
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    guard = _guard(store)
+
+    committed = store.compare_set_many_guarded(
+        {
+            "run/restart-intents/intent-a": ControlStoreWrite(
+                expected_revision=None,
+                value=b"intent-a",
+            ),
+        },
+        guard_key="run/coordinator-lease",
+        expected_guard_revision=guard.revision,
+        not_before_unix_ms=1_000,
+        deadline_unix_ms=1_100,
+        never_created_conditions={"run/restart-intent-lifecycle-head"},
+    )
+
+    assert committed["run/restart-intents/intent-a"].value == b"intent-a"
+    assert store.get("run/restart-intent-lifecycle-head") is None
+
+
+def test_guarded_transaction_rejects_deleted_never_created_condition():
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    guard = _guard(store)
+    lifecycle_head = store.compare_set(
+        "run/restart-intent-lifecycle-head",
+        expected_revision=None,
+        value=b"closed",
+    )
+    store.compare_delete(
+        "run/restart-intent-lifecycle-head",
+        expected_revision=lifecycle_head.revision,
+    )
+
+    with pytest.raises(ControlStoreHistoryConflict) as error:
+        store.compare_set_many_guarded(
+            {
+                "run/restart-intents/intent-a": ControlStoreWrite(
+                    expected_revision=None,
+                    value=b"intent-a",
+                ),
+            },
+            guard_key="run/coordinator-lease",
+            expected_guard_revision=guard.revision,
+            not_before_unix_ms=1_000,
+            deadline_unix_ms=1_100,
+            never_created_conditions={"run/restart-intent-lifecycle-head"},
+        )
+
+    assert error.value.key == "run/restart-intent-lifecycle-head"
+    assert store.get("run/restart-intents/intent-a") is None
+
+
 def test_guarded_transaction_can_require_target_to_have_no_history():
     store = InMemoryControlStore(clock=ManualClock())
     guard = _guard(store)
@@ -510,6 +566,43 @@ def test_guarded_transaction_rejects_invalid_write_sets():
             not_before_unix_ms=1,
             deadline_unix_ms=2,
             conditions={"run/restart-intent-head": False},
+        )
+    with pytest.raises(ValueError, match="never-created condition"):
+        store.compare_set_many_guarded(
+            _generation_writes(),
+            guard_key="run/coordinator-lease",
+            expected_guard_revision=guard.revision,
+            not_before_unix_ms=1,
+            deadline_unix_ms=2,
+            never_created_conditions={"run/coordinator-lease"},
+        )
+    with pytest.raises(ValueError, match="must not also be targets"):
+        store.compare_set_many_guarded(
+            _generation_writes(),
+            guard_key="run/coordinator-lease",
+            expected_guard_revision=guard.revision,
+            not_before_unix_ms=1,
+            deadline_unix_ms=2,
+            never_created_conditions={"run/generation-head"},
+        )
+    with pytest.raises(ValueError, match="revision conditions"):
+        store.compare_set_many_guarded(
+            _generation_writes(),
+            guard_key="run/coordinator-lease",
+            expected_guard_revision=guard.revision,
+            not_before_unix_ms=1,
+            deadline_unix_ms=2,
+            conditions={"run/restart-intent-lifecycle-head": None},
+            never_created_conditions={"run/restart-intent-lifecycle-head"},
+        )
+    with pytest.raises(TypeError, match="collection"):
+        store.compare_set_many_guarded(
+            _generation_writes(),
+            guard_key="run/coordinator-lease",
+            expected_guard_revision=guard.revision,
+            not_before_unix_ms=1,
+            deadline_unix_ms=2,
+            never_created_conditions="run/restart-intent-lifecycle-head",
         )
 
 
