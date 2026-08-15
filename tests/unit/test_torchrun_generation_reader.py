@@ -1005,15 +1005,33 @@ def test_generation_reader_rejects_impossible_initial_guard_lifetime():
         reader.current()
 
 
-def test_generation_reader_rejects_initial_value_sequence_beyond_mutations():
+def test_generation_reader_rejects_initial_value_sequence_advanced_by_delete():
     records = _history(("coordinator-a", "lease-a", 100))
     reader = _reader_from_history(
         records,
-        guard_mutation_sequences=(1,),
-        guard_value_sequences=(2,),
+        guard_mutation_sequences=(3,),
+        guard_value_sequences=(3,),
+        guard_lifetime_sequences=(2,),
     )
 
-    with pytest.raises(GenerationStateCorrupt, match="exceeds its mutations"):
+    with pytest.raises(GenerationStateCorrupt, match="includes deletion mutations"):
+        reader.current()
+
+
+def test_generation_reader_rejects_value_delta_advanced_by_delete():
+    records = _history(
+        ("coordinator-a", "lease-a", 100),
+        ("coordinator-b", "lease-b", 50),
+    )
+    reader = _reader_from_history(
+        records,
+        guard_mutation_sequences=(3, 5),
+        guard_value_sequences=(1, 3),
+        guard_lifetime_sequences=(1, 2),
+        guard_grant_times_unix_ms=(1_000, 1_100),
+    )
+
+    with pytest.raises(GenerationStateCorrupt, match="include deletion mutations"):
         reader.current()
 
 

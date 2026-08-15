@@ -305,9 +305,9 @@ class GenerationStateReader:
                 raise GenerationStateCorrupt(
                     "generation snapshot guard lifetime lacks a new value sequence"
                 )
-            if guard_value_delta > guard_mutation_delta:
+            if guard_value_delta > guard_mutation_delta - guard_lifetime_delta:
                 raise GenerationStateCorrupt(
-                    "generation snapshot guard values advance faster than mutations"
+                    "generation snapshot guard values include deletion mutations"
                 )
             if (
                 guard_mutation_delta > 0
@@ -462,9 +462,9 @@ class GenerationStateReader:
             raise GenerationStateCorrupt(
                 "generation state guard value sequence cannot support its lifetime"
             )
-        if guard_value_sequence > guard_mutation_sequence:
+        if guard_value_sequence > guard_mutation_sequence - guard_lifetime_sequence + 1:
             raise GenerationStateCorrupt(
-                "generation state guard value sequence exceeds its mutations"
+                "generation state guard value sequence includes deletion mutations"
             )
         guard_committed_at_unix_ms = entry.guard_committed_at_unix_ms
         if guard_committed_at_unix_ms is None:
