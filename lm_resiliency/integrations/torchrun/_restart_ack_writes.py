@@ -39,6 +39,8 @@ class RestartAckWriteRecords:
             raise ValueError(
                 "RestartAckWriteRecords receipt does not answer its committed restart intent"
             )
+        if self.receipt.received_at_unix_ms < self.opened.committed_at_unix_ms:
+            raise ValueError("RestartAckWriteRecords receipt predates its committed restart intent")
         acknowledgement = self.receipt.acknowledgement
         active_nodes = set(
             self.opened.prepared.current.snapshot.record.assignment.slot_to_node_id.values()

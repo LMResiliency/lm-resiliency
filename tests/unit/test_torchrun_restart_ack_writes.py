@@ -217,6 +217,18 @@ def test_restart_ack_write_records_require_exact_committed_intent():
         replace(records, receipt=changed_receipt)
 
 
+def test_restart_ack_write_records_reject_receipt_before_intent_opened():
+    _, records = _records()
+    backdated_receipt = replace(
+        records.receipt,
+        registration_granted_at_unix_ms=records.receipt.registration_granted_at_unix_ms - 1,
+        received_at_unix_ms=records.opened.committed_at_unix_ms - 1,
+    )
+
+    with pytest.raises(ValueError, match="predates"):
+        replace(records, receipt=backdated_receipt)
+
+
 def test_restart_ack_write_records_reject_inactive_sender_node():
     clock, store, opened = _open_state()
     receipt = _receipt(
