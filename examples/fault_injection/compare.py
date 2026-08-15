@@ -899,7 +899,7 @@ def _expected_targets_for_layer(
 def _reported_targets_for_layer(
     reports: Sequence[Mapping[str, Any]],
     layer: int,
-) -> dict[str, list[int] | list[str]]:
+) -> dict[str, Any]:
     matching = tuple(
         report
         for report in reports
@@ -924,6 +924,7 @@ def _reported_targets_for_layer(
                 )
             }
         ),
+        "rank_resource_pairs": _reported_rank_resource_pairs(matching),
     }
 
 
@@ -974,7 +975,7 @@ def _action_target_detected(
 
 def _targets_for_actions(
     actions: Sequence[Mapping[str, Any]],
-) -> dict[str, list[int] | list[str]]:
+) -> dict[str, Any]:
     return {
         "ranks": sorted(
             {
@@ -989,6 +990,12 @@ def _targets_for_actions(
                 for action in actions
                 if (resource := _expected_action_resource(action)) is not None
             }
+        ),
+        "rank_resource_pairs": _sorted_rank_resource_pairs(
+            (expected_rank, expected_resource)
+            for action in actions
+            if (expected_rank := _expected_action_rank(action)) is not None
+            and (expected_resource := _expected_action_resource(action)) is not None
         ),
     }
 

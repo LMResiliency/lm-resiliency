@@ -3397,6 +3397,97 @@ def test_megatron_clock_ignores_skipped_optimizer_updates() -> None:
     session.close()
 
 
+def test_megatron_optimizer_state_resolves_chained_master_parameter() -> None:
+    model = TinyModel().half()
+    target_parameter = model.layers[0].weight
+    unrelated_parameter = nn.Parameter(torch.zeros_like(target_parameter, dtype=torch.float32))
+    target_main = nn.Parameter(target_parameter.detach().float().clone())
+    unrelated_base = torch.optim.Adam([unrelated_parameter])
+    target_base = torch.optim.Adam([target_main])
+    expected = torch.full_like(target_main, 0.25)
+    target_base.state[target_main]["exp_avg"] = expected
+
+    class MixedPrecisionOptimizer:
+        def __init__(self, model_parameter, main_parameter, base):
+            self.float16_groups = [[model_parameter]]
+            self.fp32_from_float16_groups = [[main_parameter]]
+            self.optimizer = base
+
+    class ChainedOptimizer:
+        def __init__(self):
+            self.chained_optimizers = [
+                MixedPrecisionOptimizer(
+                    nn.Parameter(torch.zeros_like(target_parameter)),
+                    unrelated_parameter,
+                    unrelated_base,
+                ),
+                MixedPrecisionOptimizer(target_parameter, target_main, target_base),
+            ]
+
+        def step(self):
+            return True, None, None
+
+    context = resolve_training_context([Wrapper(model)], ChainedOptimizer())
+
+    resolved = context.resolve_optimizer_state(
+        _target(surface=FaultSurface.OPTIMIZER_STATE),
+        parameter_name="weight",
+        state_key="exp_avg",
+    )
+
+    assert resolved is expected
+
+
+def test_megatron_master_resync_is_not_retired_twice() -> None:
+    model = TinyModel().half()
+    model_parameter = model.layers[0].weight
+    main_parameter = nn.Parameter(model_parameter.detach().float().clone())
+    base_optimizer = torch.optim.SGD([main_parameter], lr=0.0)
+
+    class MixedPrecisionOptimizer:
+        def __init__(self):
+            self.float16_groups = [[model_parameter]]
+            self.fp32_from_float16_groups = [[main_parameter]]
+            self.optimizer = base_optimizer
+
+        def step(self):
+            with torch.no_grad():
+                main_parameter.sub_(0.125)
+                model_parameter.copy_(main_parameter)
+            return True, None, None
+
+    optimizer = MixedPrecisionOptimizer()
+    session = enable_fault_injection(
+        [Wrapper(model)],
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(iterations=1),
+                faults=(
+                    _corruption(
+                        target=_target(surface=FaultSurface.WEIGHT),
+                        operation=CorruptionOperation.SCALE,
+                        scope=FaultScope.FULL,
+                        factor=2.0,
+                    ),
+                ),
+            )
+        ),
+        rank=0,
+    )
+
+    assert not torch.equal(model_parameter, main_parameter.to(model_parameter.dtype))
+    optimizer.step()
+
+    torch.testing.assert_close(
+        model_parameter,
+        main_parameter.to(model_parameter.dtype),
+    )
+    assert session.records[0].status is InjectionStatus.COMPLETED
+    session.close()
+
+
 def test_deepspeed_pipeline_uses_optimizer_instruction_map() -> None:
     engine = PipelineEngine(TinyModel())
     original_map = engine._INSTRUCTION_MAP
@@ -6944,6 +7035,65 @@ def test_staged_activation_surfaces_external_rollback_cleanup_failure() -> None:
         ("deactivate", "first"),
     ]
     assert any("rollback cleanup failed" in note for note in caught.value.__notes__)
+
+
+def test_staged_activation_continues_rollback_after_interrupt() -> None:
+    events: list[tuple[str, str]] = []
+
+    def activate(request):
+        events.append(("activate", request.fault.fault_id))
+        if request.fault.fault_id == "fourth":
+            raise RuntimeError("later activation failed")
+        return FaultExecutionResult(verified=True, active=True)
+
+    def deactivate(request, _result):
+        events.append(("deactivate", request.fault.fault_id))
+        if request.fault.fault_id == "third":
+            raise KeyboardInterrupt("stop rollback")
+        return None
+
+    executor = CallbackFaultExecutor(
+        name="interrupting-rollback",
+        supported_types={FailureType.RESOURCE_UNAVAILABLE},
+        activate=activate,
+        deactivate=deactivate,
+        max_safety=SafetyClass.CLUSTER_DESTRUCTIVE,
+    )
+    faults = tuple(
+        _external_fault(
+            FailureType.RESOURCE_UNAVAILABLE,
+            fault_id=fault_id,
+            resource=f"gpu-{index}",
+        )
+        for index, fault_id in enumerate(("first", "second", "third", "fourth"))
+    )
+    model = TinyModel()
+
+    with pytest.raises(RuntimeError, match="later activation failed") as caught:
+        enable_fault_injection(
+            model,
+            _optimizer(model),
+            campaign=_campaign(
+                _incident(
+                    at=(1,),
+                    lifetime=IncidentLifetime(until="campaign_end"),
+                    faults=faults,
+                )
+            ),
+            executors=(executor,),
+            rank=0,
+        )
+
+    assert events == [
+        ("activate", "first"),
+        ("activate", "second"),
+        ("activate", "third"),
+        ("activate", "fourth"),
+        ("deactivate", "third"),
+        ("deactivate", "second"),
+        ("deactivate", "first"),
+    ]
+    assert any("stop rollback" in note for note in caught.value.__notes__)
 
 
 def test_close_continues_after_interrupt_class_deactivation_failure() -> None:

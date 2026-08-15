@@ -795,6 +795,13 @@ class LocalFaultExecutor:
         )
         _validate_state_retirement(original, transformed, request)
         retirement_delta = transformed - original
+        optimizer_resynchronized = request.fault.target.surface in {
+            FaultSurface.WEIGHT,
+            FaultSurface.BIAS,
+        } and self._context.model_parameter_is_optimizer_resynchronized(
+            request.fault.target,
+            parameter_name=_parameter_name(request.fault),
+        )
         _synchronize_state_mutation(tensor)
         with torch.no_grad():
             _write_linear(tensor, changed_indices, transformed)
@@ -812,7 +819,9 @@ class LocalFaultExecutor:
                 already_restored = _elementwise_same(current, original)
                 still_injected = _elementwise_same(current, transformed)
                 preserve = (
-                    ~still_injected if preserve_replaced_state else torch.zeros_like(still_injected)
+                    ~still_injected
+                    if preserve_replaced_state or optimizer_resynchronized
+                    else torch.zeros_like(still_injected)
                 )
                 restore_exact = still_injected & ~already_restored & ~preserve
                 if bool(torch.any(restore_exact).item()):

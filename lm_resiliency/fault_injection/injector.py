@@ -1023,13 +1023,13 @@ class FaultInjectionSession:
         active_start: int,
         record_start: int,
         error: BaseException,
-    ) -> Exception | None:
-        cleanup_error: Exception | None = None
+    ) -> BaseException | None:
+        cleanup_error: BaseException | None = None
         for active in reversed(self._active[active_start:]):
             if not active.done:
                 try:
                     active.rollback(error)
-                except Exception as caught:
+                except BaseException as caught:
                     if cleanup_error is None:
                         cleanup_error = caught
         del self._active[active_start:]
@@ -1080,12 +1080,12 @@ class FaultInjectionSession:
                     if not active.done:
                         self._active.append(active)
         except BaseException as error:
-            cleanup_error: Exception | None = None
+            cleanup_error: BaseException | None = None
             for active in reversed(activated):
                 if not active.done:
                     try:
                         active.rollback(error)
-                    except Exception as caught:
+                    except BaseException as caught:
                         if cleanup_error is None:
                             cleanup_error = caught
             self._discard_completed()

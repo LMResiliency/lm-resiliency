@@ -193,7 +193,13 @@ class TrainingContext:
             )
             if resolved is not None:
                 return resolved
-        for optimizer in _base_optimizers(self.optimizer):
+        optimizers = _base_optimizers(self.optimizer)
+        if self.framework == "megatron":
+            mapped = _resolve_megatron_optimizer_parameter(self.optimizer, parameter)
+            if mapped is not None:
+                parameter, optimizer = mapped
+                optimizers = (optimizer,)
+        for optimizer in optimizers:
             state = optimizer.state.get(parameter, {})
             if state_key is not None:
                 value = state.get(state_key)
@@ -206,6 +212,19 @@ class TrainingContext:
                     return value, id(optimizer), str(key)
         suffix = "" if state_key is None else f" {state_key!r}"
         raise LookupError(f"optimizer state tensor{suffix} is unavailable")
+
+    def model_parameter_is_optimizer_resynchronized(
+        self,
+        target: FaultTarget,
+        *,
+        parameter_name: str | None,
+    ) -> bool:
+        """Return whether the optimizer replaces this model parameter after each step."""
+        if self.framework != "megatron":
+            return False
+        parameter = self._resolve_model_parameter(target, parameter_name=parameter_name)
+        mapped = _resolve_megatron_optimizer_parameter(self.optimizer, parameter)
+        return mapped is not None and mapped[0] is not parameter
 
     def _resolve_model_parameter(
         self,
@@ -889,6 +908,76 @@ def _base_optimizers(value: Any) -> tuple[torch.optim.Optimizer, ...]:
 
     visit(value)
     return tuple(found)
+
+
+def _resolve_megatron_optimizer_parameter(
+    optimizer: Any,
+    model_parameter: torch.Tensor,
+) -> tuple[torch.Tensor, torch.optim.Optimizer] | None:
+    """Map a Megatron model parameter to the master parameter owning optimizer state."""
+    candidates: list[Any] = []
+    seen: set[int] = set()
+
+    def visit(candidate: Any) -> None:
+        if candidate is None or id(candidate) in seen:
+            return
+        seen.add(id(candidate))
+        candidates.append(candidate)
+        for attribute in ("optimizers", "chained_optimizers"):
+            children = getattr(candidate, attribute, None)
+            if children is None or isinstance(children, (str, bytes)):
+                continue
+            try:
+                for child in children:
+                    visit(child)
+            except TypeError:
+                pass
+        for attribute in ("optimizer", "_inner", "optim"):
+            visit(getattr(candidate, attribute, None))
+
+    visit(optimizer)
+    pairs = (
+        ("float16_groups", "fp32_from_float16_groups"),
+        ("model_float16_groups", "shard_fp32_from_float16_groups"),
+        ("model_fp32_groups", "shard_fp32_groups"),
+    )
+    for candidate in candidates:
+        for model_attribute, main_attribute in pairs:
+            model_groups = getattr(candidate, model_attribute, None)
+            main_groups = getattr(candidate, main_attribute, None)
+            if model_groups is None or main_groups is None:
+                continue
+            for model_group, main_group in zip(model_groups, main_groups):
+                for current, main in zip(model_group, main_group):
+                    if current is not model_parameter or not isinstance(main, torch.Tensor):
+                        continue
+                    owner = _optimizer_owning_parameter(candidate, main)
+                    if owner is None:
+                        owner = _optimizer_owning_parameter(optimizer, main)
+                    if owner is not None:
+                        return main, owner
+    direct = getattr(model_parameter, "main_param", None)
+    if isinstance(direct, torch.Tensor):
+        owner = _optimizer_owning_parameter(optimizer, direct)
+        if owner is not None:
+            return direct, owner
+    return None
+
+
+def _optimizer_owning_parameter(
+    optimizer: Any,
+    parameter: torch.Tensor,
+) -> torch.optim.Optimizer | None:
+    for candidate in _base_optimizers(optimizer):
+        if parameter in candidate.state:
+            return candidate
+        if any(
+            current is parameter
+            for group in candidate.param_groups
+            for current in group.get("params", ())
+        ):
+            return candidate
+    return None
 
 
 def _require_module(value: Any, label: str) -> nn.Module:

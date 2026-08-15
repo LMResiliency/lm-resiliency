@@ -413,6 +413,10 @@ remain hard validation failures.
 Optimizer entries such as Adam moments may not exist until the first optimizer
 step. History setup defers those unresolved entries and retries at later
 optimizer boundaries instead of rejecting campaign enablement prematurely.
+Megatron mixed-precision and distributed optimizers key those entries by FP32
+main parameters rather than the model FP16/BF16 parameters. The framework
+adapter resolves the corresponding main parameter, including members of a
+chained optimizer, before selecting optimizer state.
 For state surfaces, an incident at iteration N is armed after iteration N-1
 completes. It applies the snapshot from before iteration N-1, making the target
 one completed optimizer update behind its current state. The latest snapshot is
@@ -427,6 +431,9 @@ If the target still equals the injected value at retirement, the executor
 copies the original selected values exactly instead of subtracting a rounded
 low-precision delta. Delta subtraction is reserved for values changed by
 training while the effect was active.
+Megatron optimizers may replace a model FP16/BF16 parameter from its distinct
+FP32 main parameter after the update. That resynchronized value is preserved at
+retirement instead of having the injected delta subtracted a second time.
 FSDP2/HSDP `DTensor` state is mutated and verified through the rank-local shard.
 Model `load_state_dict()` marks only active weight and bias state as externally
 replaced; optimizer `load_state_dict()` marks only optimizer-state effects.
@@ -636,6 +643,9 @@ interrupt is re-raised.
 An interrupt-class failure raised during safe activation participates in that
 same all-rank failure consensus. Newly armed effects are rolled back on every
 rank before the interrupted rank re-raises its original exception.
+If one correlated effect's rollback raises an interrupt-class error, rollback
+continues through every earlier effect. The original activation failure remains
+primary and the first cleanup failure is attached as secondary context.
 Single-rank and intentionally non-consensus preparation failures follow the
 same cleanup rule.
 
@@ -782,8 +792,9 @@ must preserve that rank-resource association. Correct aggregate rank and
 resource sets with the pairs swapped are not successful attribution.
 The standalone comparator applies the same association per failure kind.
 Positive SCOUT `layer_id` evidence is also associated with the failed ranks and
-resources in the same report; swapping correct layer IDs between targets is not
-successful localization.
+resources in the same report, including exact rank-resource pairs. Swapping
+correct pair sets between layers is not successful localization even when each
+layer has the correct independent rank and resource projections.
 `kind`, when supplied, must be a non-empty string. Supplying component evidence
 for an occurrence whose injected targets have no expected component is an
 overclaim and fails attribution.
