@@ -210,6 +210,118 @@ class RestartIntentHeadRecord:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class RestartIntentLifecycleRecord:
+    """Last closed intent and the coordinator lease that closed it."""
+
+    SCHEMA_VERSION: ClassVar[int] = 1
+
+    closed_intent: RestartIntentHeadRecord
+    coordinator_id: str
+    lease_id: str
+    coordinator_lease_duration_ms: int
+    coordinator_fencing_token: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.closed_intent, RestartIntentHeadRecord):
+            raise TypeError(
+                "RestartIntentLifecycleRecord.closed_intent must be RestartIntentHeadRecord"
+            )
+        _nonempty_string(
+            self.coordinator_id,
+            "RestartIntentLifecycleRecord.coordinator_id",
+        )
+        _nonempty_string(
+            self.lease_id,
+            "RestartIntentLifecycleRecord.lease_id",
+        )
+        _positive_integer(
+            self.coordinator_lease_duration_ms,
+            "RestartIntentLifecycleRecord.coordinator_lease_duration_ms",
+        )
+        _positive_integer(
+            self.coordinator_fencing_token,
+            "RestartIntentLifecycleRecord.coordinator_fencing_token",
+        )
+
+    @property
+    def coordinator_lease_digest(self) -> str:
+        record = CoordinatorLeaseRecord(
+            run_id=self.closed_intent.run_id,
+            coordinator_id=self.coordinator_id,
+            lease_id=self.lease_id,
+            lease_duration_ms=self.coordinator_lease_duration_ms,
+        )
+        return hashlib.sha256(record.to_json()).hexdigest()
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.SCHEMA_VERSION,
+            "closed_intent": self.closed_intent.to_dict(),
+            "coordinator_id": self.coordinator_id,
+            "lease_id": self.lease_id,
+            "coordinator_lease_duration_ms": self.coordinator_lease_duration_ms,
+            "coordinator_fencing_token": self.coordinator_fencing_token,
+        }
+
+    def to_json(self) -> bytes:
+        return _canonical_json(self.to_dict())
+
+    @classmethod
+    def from_json(cls, encoded: bytes) -> RestartIntentLifecycleRecord:
+        value = _json_object(encoded, cls.__name__)
+        _fields(
+            value,
+            path=cls.__name__,
+            required={
+                "schema_version",
+                "closed_intent",
+                "coordinator_id",
+                "lease_id",
+                "coordinator_lease_duration_ms",
+                "coordinator_fencing_token",
+            },
+        )
+        _schema_version(
+            value["schema_version"],
+            cls.__name__,
+            expected=cls.SCHEMA_VERSION,
+        )
+        closed_intent_value = value["closed_intent"]
+        if not isinstance(closed_intent_value, Mapping):
+            raise ValueError("RestartIntentLifecycleRecord.closed_intent must be an object")
+        nested_schema_version = closed_intent_value.get("schema_version")
+        if (
+            isinstance(nested_schema_version, bool)
+            or not isinstance(nested_schema_version, int)
+            or nested_schema_version != RestartIntentHeadRecord.SCHEMA_VERSION
+        ):
+            raise ValueError("RestartIntentLifecycleRecord.closed_intent is invalid")
+        try:
+            closed_intent = RestartIntentHeadRecord.from_json(_canonical_json(closed_intent_value))
+        except ValueError as error:
+            raise ValueError("RestartIntentLifecycleRecord.closed_intent is invalid") from error
+        return cls(
+            closed_intent=closed_intent,
+            coordinator_id=_nonempty_string(
+                value["coordinator_id"],
+                "RestartIntentLifecycleRecord.coordinator_id",
+            ),
+            lease_id=_nonempty_string(
+                value["lease_id"],
+                "RestartIntentLifecycleRecord.lease_id",
+            ),
+            coordinator_lease_duration_ms=_positive_integer(
+                value["coordinator_lease_duration_ms"],
+                "RestartIntentLifecycleRecord.coordinator_lease_duration_ms",
+            ),
+            coordinator_fencing_token=_positive_integer(
+                value["coordinator_fencing_token"],
+                "RestartIntentLifecycleRecord.coordinator_fencing_token",
+            ),
+        )
+
+
 def _canonical_json(value: Mapping[str, object]) -> bytes:
     return json.dumps(
         value,
@@ -301,5 +413,6 @@ def _reject_duplicate_object_fields(
 
 __all__ = [
     "RestartIntentHeadRecord",
+    "RestartIntentLifecycleRecord",
     "RestartIntentRecord",
 ]
