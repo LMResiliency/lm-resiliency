@@ -200,6 +200,8 @@ def _encode_value(value: Any, *, depth: int) -> dict[str, Any]:
     if type(value) is bytearray:
         return {"kind": "bytearray", "value": base64.b64encode(value).decode("ascii")}
     if isinstance(value, torch.Size):
+        if any(dimension < 0 for dimension in value):
+            raise TypeError("torch.Size checkpoint metadata cannot contain negative dimensions")
         return {"kind": "torch_size", "value": list(value)}
     if isinstance(value, torch.dtype):
         return {"kind": "torch_dtype", "value": _encode_dtype(value)}

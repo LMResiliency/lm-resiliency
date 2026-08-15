@@ -310,6 +310,10 @@ class DiskSerializer:
                 raise CheckpointFormatError(
                     f"{load_path}: checkpoint tensor {index} must be a plain torch.Tensor"
                 )
+            if tensor.device.type != "cpu":
+                raise CheckpointFormatError(
+                    f"{load_path}: checkpoint tensor {index} must be materialized on CPU"
+                )
             if tensor.layout is not torch.strided or tensor.is_quantized:
                 raise CheckpointFormatError(
                     f"{load_path}: checkpoint tensor {index} must be dense, strided, and non-quantized"

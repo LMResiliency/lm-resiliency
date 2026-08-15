@@ -45,6 +45,14 @@ def test_disk_save_rejects_requires_grad_tensor_metadata(tmp_path):
         serializer.save_sync(metadata, [], step=20)
 
 
+def test_disk_save_rejects_negative_torch_size_metadata(tmp_path):
+    metadata = FlatStateDictMetadata(non_tensor_data={"shape": torch.Size([-1, 768])})
+    serializer = DiskSerializer(str(tmp_path), rank=0)
+
+    with pytest.raises(TypeError, match="cannot contain negative dimensions"):
+        serializer.save_sync(metadata, [], step=20)
+
+
 def test_disk_save_rejects_numpy_scalar_subclass(tmp_path):
     metadata = FlatStateDictMetadata(non_tensor_data={"tagged": _TaggedFloat(1.5)})
     serializer = DiskSerializer(str(tmp_path), rank=0)
@@ -66,6 +74,18 @@ def test_disk_load_rejects_sparse_payload_tensor(tmp_path):
     torch.save(payload, path)
 
     with pytest.raises(CheckpointFormatError, match="dense, strided, and non-quantized"):
+        serializer.load(22)
+
+
+def test_disk_load_rejects_meta_payload_tensor(tmp_path):
+    metadata, tensors = flatten({"weight": torch.ones(2)})
+    serializer = DiskSerializer(str(tmp_path), rank=0)
+    path = serializer.save_sync(metadata, tensors, step=22)
+    payload = torch.load(path, weights_only=True)
+    payload["tensors"][0] = torch.empty(2, device="meta")
+    torch.save(payload, path)
+
+    with pytest.raises(CheckpointFormatError, match="must be materialized on CPU"):
         serializer.load(22)
 
 
