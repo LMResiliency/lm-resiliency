@@ -50,11 +50,22 @@ jobs:
             --artifact-dir "$RUNNER_TEMP/gpu-qualification" \
             --minimum-gpus 2
 
+      - name: Run healthy-path performance regression
+        run: |
+          python benchmarks/run_healthy_path.py \
+            --device cuda \
+            --world-size 2 \
+            --output-dir "$RUNNER_TEMP/gpu-qualification/healthy-path" \
+            --enforce
+
       - name: Publish job summary
         if: always()
         run: |
           if test -f "$RUNNER_TEMP/gpu-qualification/summary.md"; then
             cat "$RUNNER_TEMP/gpu-qualification/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if test -f "$RUNNER_TEMP/gpu-qualification/healthy-path/summary.md"; then
+            cat "$RUNNER_TEMP/gpu-qualification/healthy-path/summary.md" >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Upload qualification evidence
