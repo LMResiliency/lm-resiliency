@@ -30,6 +30,7 @@ from lm_resiliency.integrations.torchrun._restart_intent_records import (
     RestartIntentClosedHeadRecord,
     RestartIntentHeadRecord,
     RestartIntentLifecycleHeadRecord,
+    RestartIntentLifecycleRecord,
     RestartIntentRecord,
 )
 
@@ -74,6 +75,10 @@ class RestartIntentOpenStateReader:
         intent_digest = hashlib.sha256(normalized_intent_id.encode("utf-8")).hexdigest()
         return f"{self._run_prefix}/restart-intents/{intent_digest}"
 
+    def closure_key(self, closure_index: int) -> str:
+        normalized_index = _positive_integer(closure_index, "closure_index")
+        return f"{self._run_prefix}/restart-intent-closures/{normalized_index}"
+
     def read(self) -> CommittedInitialRestartIntentOpen | None:
         """Return one stable, verified opening or ``None`` when none is current."""
 
@@ -105,11 +110,26 @@ class RestartIntentOpenStateReader:
                 )
             head = self._decode_head(head_entry)
             if isinstance(head, RestartIntentClosedHeadRecord):
+                closure_key = self.closure_key(head.closure_index)
+                closure_entry = self._store.get(closure_key)
+                closure_has_history = self._store.has_history(closure_key)
+                if not self._state_is_stable(
+                    head_entry,
+                    head_has_history,
+                    lifecycle_entry,
+                    lifecycle_has_history,
+                    closure_key=closure_key,
+                    closure_entry=closure_entry,
+                    closure_has_history=closure_has_history,
+                ):
+                    continue
                 self._validate_closed_state(
                     head,
                     head_entry,
                     lifecycle_entry,
                     lifecycle_has_history,
+                    closure_entry,
+                    closure_has_history,
                 )
                 return None
             if lifecycle_entry is not None or lifecycle_has_history:
@@ -257,9 +277,15 @@ class RestartIntentOpenStateReader:
         head_entry: ControlStoreEntry,
         lifecycle_entry: ControlStoreEntry | None,
         lifecycle_has_history: bool,
+        closure_entry: ControlStoreEntry | None,
+        closure_has_history: bool,
     ) -> None:
         if lifecycle_entry is None or not lifecycle_has_history:
             raise RestartIntentOpenStateCorrupt("closed restart-intent head has no lifecycle state")
+        if closure_entry is None or not closure_has_history:
+            raise RestartIntentOpenStateCorrupt(
+                "closed restart-intent head has no immutable closure record"
+            )
         try:
             lifecycle = RestartIntentLifecycleHeadRecord.from_json(lifecycle_entry.value)
         except (TypeError, ValueError) as error:
@@ -268,6 +294,16 @@ class RestartIntentOpenStateReader:
             ) from error
         if lifecycle_entry.value != lifecycle.to_json():
             raise RestartIntentOpenStateCorrupt("restart-intent lifecycle head is noncanonical")
+        try:
+            closure = RestartIntentLifecycleRecord.from_json(closure_entry.value)
+        except (TypeError, ValueError) as error:
+            raise RestartIntentOpenStateCorrupt(
+                "immutable restart-intent closure record is malformed"
+            ) from error
+        if closure_entry.value != closure.to_json():
+            raise RestartIntentOpenStateCorrupt(
+                "immutable restart-intent closure record is noncanonical"
+            )
         if (
             lifecycle.run_id != closed.run_id
             or lifecycle.closure_index != closed.closure_index
@@ -279,12 +315,24 @@ class RestartIntentOpenStateReader:
                 "closed restart-intent head does not match its lifecycle head"
             )
         if (
+            closure.closed_intent.run_id != lifecycle.run_id
+            or closure.closed_intent.generation != lifecycle.generation
+            or closure.closed_intent.intent_id != lifecycle.intent_id
+            or closure.digest != lifecycle.lifecycle_digest
+        ):
+            raise RestartIntentOpenStateCorrupt(
+                "restart-intent lifecycle head does not match its closure record"
+            )
+        if (
             head_entry.mutation_sequence != 2
             or head_entry.value_sequence != 2
             or head_entry.lifetime_sequence != 1
             or lifecycle_entry.mutation_sequence != 1
             or lifecycle_entry.value_sequence != 1
             or lifecycle_entry.lifetime_sequence != 1
+            or closure_entry.mutation_sequence != 1
+            or closure_entry.value_sequence != 1
+            or closure_entry.lifetime_sequence != 1
         ):
             raise RestartIntentOpenStateCorrupt(
                 "restart-intent closure has invalid store sequences"
@@ -292,9 +340,15 @@ class RestartIntentOpenStateReader:
         if (
             head_entry.committed_at_unix_ms is None
             or lifecycle_entry.committed_at_unix_ms is None
+            or closure_entry.committed_at_unix_ms is None
             or head_entry.committed_at_unix_ms != lifecycle_entry.committed_at_unix_ms
+            or head_entry.committed_at_unix_ms != closure_entry.committed_at_unix_ms
             or head_entry.transaction_sequence != lifecycle_entry.transaction_sequence
+            or head_entry.transaction_sequence != closure_entry.transaction_sequence
             or _guard_provenance(head_entry) != _guard_provenance(lifecycle_entry)
+            or _guard_provenance(head_entry) != _guard_provenance(closure_entry)
+            or closure.coordinator_fencing_token != head_entry.guard_revision
+            or closure.coordinator_lease_digest != head_entry.guard_value_digest
         ):
             raise RestartIntentOpenStateCorrupt(
                 "restart-intent closure records do not share one guarded transaction"
@@ -370,6 +424,9 @@ class RestartIntentOpenStateReader:
         intent_key: str | None = None,
         intent_entry: ControlStoreEntry | None = None,
         intent_has_history: bool | None = None,
+        closure_key: str | None = None,
+        closure_entry: ControlStoreEntry | None = None,
+        closure_has_history: bool | None = None,
     ) -> bool:
         if (
             self._store.get(self._intent_head_key) != head_entry
@@ -378,11 +435,14 @@ class RestartIntentOpenStateReader:
             or self._store.has_history(self._lifecycle_head_key) != lifecycle_has_history
         ):
             return False
-        if intent_key is None:
-            return True
-        return (
-            self._store.get(intent_key) == intent_entry
-            and self._store.has_history(intent_key) == intent_has_history
+        if intent_key is not None and (
+            self._store.get(intent_key) != intent_entry
+            or self._store.has_history(intent_key) != intent_has_history
+        ):
+            return False
+        return closure_key is None or (
+            self._store.get(closure_key) == closure_entry
+            and self._store.has_history(closure_key) == closure_has_history
         )
 
 
@@ -412,6 +472,12 @@ def _guard_provenance(entry: ControlStoreEntry) -> tuple[object, ...]:
 def _nonempty_string(value: object, path: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{path} must be a non-empty string")
+    return value
+
+
+def _positive_integer(value: object, path: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{path} must be a positive integer")
     return value
 
 

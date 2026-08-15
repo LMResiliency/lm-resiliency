@@ -376,6 +376,54 @@ def test_open_reader_rejects_unverified_lifecycle_state(tamper):
         reader.read()
 
 
+@pytest.mark.parametrize("tamper", ["deleted", "value", "link", "metadata"])
+def test_open_reader_rejects_unverified_immutable_closure(tamper):
+    clock, store, _, _, lease, opened, reader = _state()
+    records = _closure_records(opened, lease)
+    clock.set(1_010)
+    committed = store.compare_set_many_guarded(
+        records.writes,
+        guard_key=opened.prepared.coordinator_lease_key,
+        expected_guard_revision=lease.fencing_token,
+        not_before_unix_ms=1_010,
+        deadline_unix_ms=lease.expires_at_unix_ms,
+        conditions=records.conditions,
+    )
+    closure_entry = committed[records.closure_key]
+    if tamper == "deleted":
+        store.compare_delete(
+            records.closure_key,
+            expected_revision=closure_entry.revision,
+        )
+    elif tamper == "value":
+        store._entries[records.closure_key] = replace(
+            closure_entry,
+            value=b"invalid",
+        )
+    elif tamper == "link":
+        store._entries[records.closure_key] = replace(
+            closure_entry,
+            value=replace(
+                records.lifecycle,
+                closed_intent=replace(
+                    records.lifecycle.closed_intent,
+                    intent_id="intent-b",
+                ),
+            ).to_json(),
+        )
+    else:
+        store._entries[records.closure_key] = replace(
+            closure_entry,
+            transaction_sequence=closure_entry.transaction_sequence + 1,
+        )
+
+    with pytest.raises(
+        RestartIntentOpenStateCorrupt,
+        match="closure|lifecycle|transaction",
+    ):
+        reader.read()
+
+
 @pytest.mark.parametrize(
     "dependency_error",
     [
