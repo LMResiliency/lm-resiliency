@@ -309,6 +309,15 @@ node identity; it does not by itself make the node standby-eligible, admit it to
 a generation, or authorize resources absent from the trusted infrastructure
 inventory.
 
+The registration manager stores one live record per run and stable node ID.
+Retrying registration for the same immutable agent identity renews the existing
+registration ID; a different agent or changed environment remains blocked until
+the current registration expires. Renewal and release authenticate the complete
+held record, fencing revision, and authoritative grant time before issuing a
+store-time-guarded mutation. Expiry takeover creates a new registration ID and
+fencing token. Registration keys are independently scoped by hashed run and node
+identity, so agents on different nodes do not contend.
+
 ## API: lm-resiliency to the coordinator
 
 The current `OrchestrationHooks` callbacks are the starting point. The torchrun
