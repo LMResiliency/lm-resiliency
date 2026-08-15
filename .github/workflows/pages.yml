@@ -1,0 +1,58 @@
+name: Deploy GitHub Pages
+
+on:
+  workflow_run:
+    workflows:
+      - Documentation
+      - Release
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy staged documentation
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Check out staged documentation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: gh-pages
+          path: pages-site
+
+      - name: Reject symbolic links in staged site
+        shell: bash
+        run: |
+          if find pages-site -path pages-site/.git -prune -o -type l -print -quit | grep -q .; then
+            echo "Staged documentation must not contain symbolic links" >&2
+            exit 1
+          fi
+          rm -rf pages-site/.git
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: pages-site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
