@@ -531,7 +531,15 @@ class FaultInjectionSession:
 
     def _preflight_iteration(self, iteration: int) -> None:
         requests = self._requests_for_iteration(iteration)
-        self._local.validate_activations(requests)
+        required_history_occurrences = frozenset(
+            _occurrence_id(incident, iteration, attempt)
+            for incident, attempt in self._selected_incidents_for_iteration(iteration)
+            if incident.safety is not SafetyClass.SAFE_IN_PROCESS
+        )
+        self._local.validate_activations(
+            requests,
+            required_history_occurrences=required_history_occurrences,
+        )
         for request in requests:
             if self._local.supports(request.fault):
                 continue

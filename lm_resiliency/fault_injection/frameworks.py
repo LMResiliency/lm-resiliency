@@ -36,6 +36,7 @@ class TrainingContext:
     inferred_completed_iterations: int
     is_pipeline_engine: bool = False
     step_counter_attribute: str | None = None
+    successful_optimizer_steps: int = 0
     _cleanups: list[Callable[[], None]] = field(default_factory=list)
 
     def resolve_module(self, target: FaultTarget) -> nn.Module:
@@ -298,6 +299,7 @@ class TrainingContext:
                 _notify_failed_step(callback, error)
                 raise
             if self.framework != "megatron" or _megatron_update_succeeded(result):
+                self.successful_optimizer_steps += 1
                 callback(None)
             return result
 
@@ -441,6 +443,7 @@ class TrainingContext:
                 raise
             after = int(getattr(owner, counter_attribute))
             for _ in range(max(0, after - before)):
+                self.successful_optimizer_steps += 1
                 callback(None)
             return result
 
@@ -480,6 +483,7 @@ class TrainingContext:
             except BaseException as error:
                 _notify_failed_step(callback, error)
                 raise
+            self.successful_optimizer_steps += 1
             callback(None)
             return result
 

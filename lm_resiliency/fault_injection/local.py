@@ -337,6 +337,8 @@ class LocalFaultExecutor:
     def validate_activations(
         self,
         requests: tuple[FaultExecutionRequest, ...],
+        *,
+        required_history_occurrences: frozenset[str] = frozenset(),
     ) -> None:
         """Validate immediately armed local effects without mutating training state."""
         seen: set[tuple[Any, ...]] = set()
@@ -363,6 +365,8 @@ class LocalFaultExecutor:
                     history,
                 )
             except _UnavailableHistoryError:
+                if request.occurrence_id in required_history_occurrences:
+                    raise
                 continue
             _validate_state_retirement(original, transformed, request)
 
@@ -514,8 +518,7 @@ class LocalFaultExecutor:
         fault = request.fault
         tensor = self._state_tensor(fault)
         if request.lifetime.matching_calls is None:
-            restoration, affected = self._mutate_state_tensor(tensor, request)
-            effect.cleanup_callbacks.append(restoration)
+            affected = self._mutate_state_tensor(tensor, request, effect)
             effect.verify({"affected_elements": affected})
             return
 
@@ -533,10 +536,10 @@ class LocalFaultExecutor:
                     return None
                 try:
                     if restoration is None:
-                        restoration, affected = self._mutate_state_tensor(tensor, request)
-                        effect.cleanup_callbacks.append(restoration)
+                        affected = self._mutate_state_tensor(tensor, request, effect)
+                        restoration = effect.cleanup_callbacks[-1]
                         effect.verify({"affected_elements": affected})
-                except Exception as error:
+                except BaseException as error:
                     if not effect.done:
                         effect.fail(error)
                     raise
@@ -767,14 +770,21 @@ class LocalFaultExecutor:
     def _schedule_target_key(self, fault: FaultSpec) -> tuple[Any, ...]:
         if fault.target.surface is not FaultSurface.OPTIMIZER_STATE:
             return self._resolved_target_key(fault)
+        try:
+            return self._resolved_target_key(fault)
+        except LookupError:
+            pass
         parameter = self._context.resolve_model_parameter(
             fault.target,
             parameter_name=_parameter_name(fault),
         )
+        state_key = fault.parameters.get("state_key")
         return (
             fault.target.execution_rank,
             FaultSurface.OPTIMIZER_STATE.value,
             id(parameter),
+            None,
+            None if state_key is None else str(state_key),
         )
 
     def _history_key(self, fault: FaultSpec) -> tuple[Any, ...]:
@@ -785,7 +795,8 @@ class LocalFaultExecutor:
         self,
         tensor: torch.Tensor,
         request: FaultExecutionRequest,
-    ) -> tuple[Callable[[bool, bool], None], int]:
+        effect: LocalFaultEffect,
+    ) -> int:
         tensor = _local_shard(tensor)
         history = self._history.get(self._history_key(request.fault))
         changed_indices, original, transformed = _prepare_state_values(
@@ -795,16 +806,14 @@ class LocalFaultExecutor:
         )
         _validate_state_retirement(original, transformed, request)
         retirement_delta = transformed - original
-        optimizer_resynchronized = request.fault.target.surface in {
+        optimizer_resynchronizes = request.fault.target.surface in {
             FaultSurface.WEIGHT,
             FaultSurface.BIAS,
         } and self._context.model_parameter_is_optimizer_resynchronized(
             request.fault.target,
             parameter_name=_parameter_name(request.fault),
         )
-        _synchronize_state_mutation(tensor)
-        with torch.no_grad():
-            _write_linear(tensor, changed_indices, transformed)
+        activation_optimizer_step = self._context.successful_optimizer_steps
 
         def restore(
             preserve_replaced_state: bool,
@@ -818,11 +827,16 @@ class LocalFaultExecutor:
                 finite = torch.isfinite(retirement_delta)
                 already_restored = _elementwise_same(current, original)
                 still_injected = _elementwise_same(current, transformed)
-                preserve = (
-                    ~still_injected
-                    if preserve_replaced_state or optimizer_resynchronized
-                    else torch.zeros_like(still_injected)
+                optimizer_resynchronized = (
+                    optimizer_resynchronizes
+                    and self._context.successful_optimizer_steps > activation_optimizer_step
                 )
+                if optimizer_resynchronized:
+                    preserve = torch.ones_like(still_injected)
+                elif preserve_replaced_state:
+                    preserve = ~still_injected
+                else:
+                    preserve = torch.zeros_like(still_injected)
                 restore_exact = still_injected & ~already_restored & ~preserve
                 if bool(torch.any(restore_exact).item()):
                     current[restore_exact] = original[restore_exact]
@@ -834,7 +848,11 @@ class LocalFaultExecutor:
                     current[restore_nonfinite] = original[restore_nonfinite]
                 _write_linear(tensor, changed_indices, current)
 
-        return restore, int(changed_indices.numel())
+        effect.cleanup_callbacks.append(restore)
+        _synchronize_state_mutation(tensor)
+        with torch.no_grad():
+            _write_linear(tensor, changed_indices, transformed)
+        return int(changed_indices.numel())
 
     def _install_history_observer(
         self,
@@ -1242,7 +1260,62 @@ def _incident_windows_may_overlap(
 
     left_start, left_end = _incident_window_bounds(left)
     right_start, right_end = _incident_window_bounds(right)
-    return left_start <= right_end and right_start <= left_end
+    if left_start > right_end or right_start > left_end:
+        return False
+
+    left_duration = _incident_iteration_duration(left)
+    right_duration = _incident_iteration_duration(right)
+    if left_duration is None or right_duration is None:
+        return True
+    if left.trigger.range is None or right.trigger.range is None:
+        return True
+
+    offset_low = -(right_duration - 1)
+    offset_high = left_duration - 1
+    if offset_high - offset_low <= 10_000:
+        return any(
+            _bounded_progressions_intersect(
+                left.trigger.range.start,
+                left.trigger.range.end,
+                left.trigger.range.every,
+                right.trigger.range.start - offset,
+                right.trigger.range.end - offset,
+                right.trigger.range.every,
+            )
+            for offset in range(offset_low, offset_high + 1)
+        )
+    return True
+
+
+def _bounded_progressions_intersect(
+    left_start: int,
+    left_end: int,
+    left_step: int,
+    right_start: int,
+    right_end: int,
+    right_step: int,
+) -> bool:
+    """Return whether two finite arithmetic progressions share a value."""
+    low = max(left_start, right_start)
+    high = min(left_end, right_end)
+    if low > high:
+        return False
+    divisor = math.gcd(left_step, right_step)
+    difference = right_start - left_start
+    if difference % divisor:
+        return False
+    left_reduced = left_step // divisor
+    right_reduced = right_step // divisor
+    multiplier = 0
+    if right_reduced > 1:
+        multiplier = (
+            (difference // divisor) * pow(left_reduced, -1, right_reduced)
+        ) % right_reduced
+    candidate = left_start + left_step * multiplier
+    period = left_step * right_reduced
+    if candidate < low:
+        candidate += ((low - candidate + period - 1) // period) * period
+    return candidate <= high
 
 
 def _candidate_window_hits_incident(

@@ -53,6 +53,7 @@ from lm_resiliency.fault_injection.local import (
     LocalFaultExecutor,
     _History,
     _observe_history,
+    _write_linear,
 )
 from lm_resiliency.fault_injection.state import CampaignJournal
 from lm_resiliency.integrations._common import notify_checkpoint_tensor_load
@@ -7993,3 +7994,183 @@ def test_unselected_stale_candidates_do_not_install_history(
     assert session._history_faults_for(1) == ()
     assert session._local._history == {}
     session.close()
+
+
+def test_equal_valued_megatron_master_resynchronization_is_preserved() -> None:
+    model = TinyModel().bfloat16()
+    model_parameter = model.layers[0].weight
+    main_parameter = nn.Parameter(model_parameter.detach().float().clone())
+    base_optimizer = torch.optim.SGD([main_parameter], lr=0.0)
+
+    class MixedPrecisionOptimizer:
+        def __init__(self):
+            self.float16_groups = [[model_parameter]]
+            self.fp32_from_float16_groups = [[main_parameter]]
+            self.optimizer = base_optimizer
+
+        def step(self):
+            with torch.no_grad():
+                main_parameter.fill_(0.125)
+                model_parameter.copy_(main_parameter)
+            return True, None, None
+
+    optimizer = MixedPrecisionOptimizer()
+    session = enable_fault_injection(
+        [Wrapper(model)],
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(iterations=1),
+                faults=(
+                    _corruption(
+                        target=_target(surface=FaultSurface.WEIGHT),
+                        operation=CorruptionOperation.SET_VALUE,
+                        scope=FaultScope.FULL,
+                        value=0.125,
+                    ),
+                ),
+            )
+        ),
+        rank=0,
+    )
+
+    optimizer.step()
+
+    torch.testing.assert_close(
+        model_parameter,
+        main_parameter.to(model_parameter.dtype),
+    )
+    assert torch.all(model_parameter == torch.tensor(0.125, dtype=model_parameter.dtype))
+    session.close()
+
+
+def test_optimizer_state_schedule_distinguishes_explicit_state_entries() -> None:
+    model = TinyModel()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.0)
+    _step(model, optimizer)
+    faults = tuple(
+        _corruption(
+            fault_id=f"corrupt-{state_key}",
+            target=_target(surface=FaultSurface.OPTIMIZER_STATE),
+            parameter="weight",
+            state_key=state_key,
+        )
+        for state_key in ("exp_avg", "exp_avg_sq")
+    )
+    context = resolve_training_context(model, optimizer)
+    executor = LocalFaultExecutor(context, rank=0)
+
+    executor.validate_schedule(
+        (
+            _incident(
+                at=(2,),
+                lifetime=IncidentLifetime(iterations=1),
+                faults=faults,
+            ),
+        )
+    )
+
+    executor.close()
+    context.close()
+
+
+def test_large_disjoint_periodic_schedules_do_not_collide() -> None:
+    model = TinyModel()
+    context = resolve_training_context(model, _optimizer(model))
+    executor = LocalFaultExecutor(context, rank=0)
+    target = _target(surface=FaultSurface.WEIGHT)
+
+    executor.validate_schedule(
+        (
+            _incident(
+                incident_id="odd",
+                trigger_range=IterationRange(start=1, end=100_001, every=2),
+                lifetime=IncidentLifetime(iterations=1),
+                faults=(_corruption(fault_id="odd-weight", target=target),),
+            ),
+            _incident(
+                incident_id="even",
+                trigger_range=IterationRange(start=2, end=100_000, every=2),
+                lifetime=IncidentLifetime(iterations=1),
+                faults=(_corruption(fault_id="even-weight", target=target),),
+            ),
+        )
+    )
+
+    executor.close()
+    context.close()
+
+
+def test_destructive_correlated_incident_requires_local_history_before_activation() -> None:
+    events: list[tuple[str, str]] = []
+    executor = _recording_executor(
+        {FailureType.EXCEPTION},
+        events,
+        max_safety=SafetyClass.ISOLATED_DESTRUCTIVE,
+    )
+    stale = FaultSpec(
+        fault_id="stale-weight",
+        type=FailureType.STALE_STATE,
+        target=_target(surface=FaultSurface.WEIGHT),
+        parameters={"scope": FaultScope.FULL.value},
+    )
+    model = TinyModel()
+
+    with pytest.raises(RuntimeError, match="no prior observed value"):
+        enable_fault_injection(
+            model,
+            _optimizer(model),
+            campaign=_campaign(
+                _incident(
+                    at=(1,),
+                    lifetime=IncidentLifetime(iterations=1),
+                    faults=(stale, _external_fault(FailureType.EXCEPTION)),
+                )
+            ),
+            executors=(executor,),
+            rank=0,
+        )
+
+    assert events == []
+
+
+def test_state_mutation_interrupt_restores_after_the_write_started() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    baseline = model.layers[0].weight.detach().clone()
+    interrupted = False
+
+    def write_then_interrupt(tensor, indices, values) -> None:
+        nonlocal interrupted
+        _write_linear(tensor, indices, values)
+        if not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt("stop during state write")
+
+    with (
+        patch(
+            "lm_resiliency.fault_injection.local._write_linear",
+            side_effect=write_then_interrupt,
+        ),
+        pytest.raises(KeyboardInterrupt, match="stop during state write"),
+    ):
+        enable_fault_injection(
+            model,
+            optimizer,
+            campaign=_campaign(
+                _incident(
+                    at=(1,),
+                    lifetime=IncidentLifetime(iterations=1),
+                    faults=(
+                        _corruption(
+                            target=_target(surface=FaultSurface.WEIGHT),
+                            scope=FaultScope.FULL,
+                        ),
+                    ),
+                )
+            ),
+            rank=0,
+        )
+
+    torch.testing.assert_close(model.layers[0].weight, baseline)
