@@ -846,6 +846,14 @@ keys must be namespaced separately from worker-group bootstrap keys. Production
 deployments should use a durable external service if the rendezvous endpoint is
 not sufficiently available or persistent.
 
+The internal control-store boundary exposes opaque byte values with per-key
+compare-and-set revisions. Creation requires the key to be absent; replacement
+and deletion require the exact current revision. Revisions never repeat for a
+key, including after deletion and recreation, so a delayed coordinator cannot
+mistake a recreated record for an older value with identical bytes. Higher
+coordinator records add lease fencing and run/schema namespaces in subsequent
+layers rather than weakening this storage primitive.
+
 ### Slot-aware rendezvous
 
 `SlotAwareRendezvousHandler` implements the existing `RendezvousHandler`
