@@ -43,6 +43,24 @@ class ManualClock:
             return self.now_unix_ms
 
 
+class TamperedQuarantineReadStore(InMemoryControlStore):
+    def __init__(self, clock: ManualClock) -> None:
+        super().__init__(clock=clock)
+        self.guard_override: tuple[int, int, int] | None = None
+
+    def get(self, key: str):
+        entry = super().get(key)
+        if entry is None or "/node-quarantines/" not in key or self.guard_override is None:
+            return entry
+        mutation_sequence, value_sequence, lifetime_sequence = self.guard_override
+        return replace(
+            entry,
+            guard_mutation_sequence=mutation_sequence,
+            guard_value_sequence=value_sequence,
+            guard_lifetime_sequence=lifetime_sequence,
+        )
+
+
 def _intent(
     *,
     run_id: str = RUN_ID,
@@ -425,6 +443,50 @@ def test_repository_authenticates_opaque_coordinator_lease_bytes():
     )
 
     with pytest.raises(QuarantineStateCorrupt, match="lease identity"):
+        repository.get("node-b")
+
+
+@pytest.mark.parametrize(
+    ("guard_override", "message"),
+    [
+        (
+            (1, 1, 2),
+            "mutation sequence cannot support",
+        ),
+        (
+            (3, 1, 2),
+            "value sequence cannot support",
+        ),
+        (
+            (2, 3, 1),
+            "includes deletion",
+        ),
+    ],
+)
+def test_repository_rejects_contradictory_guard_sequences(
+    guard_override,
+    message,
+):
+    clock = ManualClock()
+    store = TamperedQuarantineReadStore(clock)
+    repository = _repository(store)
+    lease = CoordinatorLeaseManager(
+        store,
+        run_id=RUN_ID,
+        coordinator_id="coordinator-a",
+        lease_duration_ms=100,
+        clock=clock,
+    ).acquire()
+    store.compare_set_many_guarded(
+        _writes(repository, lease),
+        guard_key=repository.coordinator_lease_key,
+        expected_guard_revision=lease.fencing_token,
+        not_before_unix_ms=lease.granted_at_unix_ms,
+        deadline_unix_ms=lease.expires_at_unix_ms,
+    )
+    store.guard_override = guard_override
+
+    with pytest.raises(QuarantineStateCorrupt, match=message):
         repository.get("node-b")
 
 

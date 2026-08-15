@@ -220,16 +220,43 @@ class NodeQuarantineRepository:
             raise QuarantineStateCorrupt(
                 "persisted node quarantine was not guarded by the run coordinator lease"
             )
-        if (
-            entry.guard_revision is None
-            or entry.guard_value_digest is None
-            or entry.guard_mutation_sequence is None
-            or entry.guard_value_sequence is None
-            or entry.guard_lifetime_sequence is None
-            or entry.guard_committed_at_unix_ms is None
+        guard_revision = entry.guard_revision
+        guard_value_digest = entry.guard_value_digest
+        guard_mutation_sequence = entry.guard_mutation_sequence
+        guard_value_sequence = entry.guard_value_sequence
+        guard_lifetime_sequence = entry.guard_lifetime_sequence
+        guard_committed_at_unix_ms = entry.guard_committed_at_unix_ms
+        if any(
+            value is None
+            for value in (
+                guard_revision,
+                guard_value_digest,
+                guard_mutation_sequence,
+                guard_value_sequence,
+                guard_lifetime_sequence,
+                guard_committed_at_unix_ms,
+            )
         ):
             raise QuarantineStateCorrupt(
                 "persisted node quarantine has incomplete guard provenance"
+            )
+        assert guard_mutation_sequence is not None
+        assert guard_value_sequence is not None
+        assert guard_lifetime_sequence is not None
+        assert guard_revision is not None
+        assert guard_value_digest is not None
+        assert guard_committed_at_unix_ms is not None
+        if guard_mutation_sequence < 2 * guard_lifetime_sequence - 1:
+            raise QuarantineStateCorrupt(
+                "node quarantine guard mutation sequence cannot support its lifetime"
+            )
+        if guard_value_sequence < guard_lifetime_sequence:
+            raise QuarantineStateCorrupt(
+                "node quarantine guard value sequence cannot support its lifetime"
+            )
+        if guard_value_sequence > guard_mutation_sequence - guard_lifetime_sequence + 1:
+            raise QuarantineStateCorrupt(
+                "node quarantine guard value sequence includes deletion mutations"
             )
         expected_lease = CoordinatorLeaseRecord(
             run_id=record.run_id,
@@ -237,18 +264,18 @@ class NodeQuarantineRepository:
             lease_id=record.lease_id,
             lease_duration_ms=record.coordinator_lease_duration_ms,
         )
-        if entry.guard_revision != record.coordinator_fencing_token:
+        if guard_revision != record.coordinator_fencing_token:
             raise QuarantineStateCorrupt(
                 "node quarantine fencing token does not match guard provenance"
             )
-        if entry.guard_value_digest != hashlib.sha256(expected_lease.to_json()).hexdigest():
+        if guard_value_digest != hashlib.sha256(expected_lease.to_json()).hexdigest():
             raise QuarantineStateCorrupt(
                 "node quarantine lease identity does not match guard provenance"
             )
         if (
-            entry.committed_at_unix_ms < entry.guard_committed_at_unix_ms
+            entry.committed_at_unix_ms < guard_committed_at_unix_ms
             or entry.committed_at_unix_ms
-            >= entry.guard_committed_at_unix_ms + record.coordinator_lease_duration_ms
+            >= guard_committed_at_unix_ms + record.coordinator_lease_duration_ms
         ):
             raise QuarantineStateCorrupt(
                 "node quarantine committed outside its coordinator lease window"

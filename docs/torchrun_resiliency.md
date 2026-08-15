@@ -301,7 +301,9 @@ accept only first-lifetime, first-value records with complete store-stamped
 coordinator-lease provenance; deletion, recreation, malformed identity, or
 unguarded persistence is corruption. Readers reconstruct the persisted lease
 record and require its digest, fencing token, authoritative grant time, and
-lease window to match the store-stamped guard provenance. Resource evidence
+lease window to match the store-stamped guard provenance. Guard mutation, value,
+and key-lifetime sequences must also satisfy the same deletion-aware bounds as
+generation state; contradictory provenance is corruption. Resource evidence
 passed to the repository must already be authorized from validated fault
 evidence; ownership validation prevents that evidence from naming another
 node's resource.
