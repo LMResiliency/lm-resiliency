@@ -583,8 +583,12 @@ separate control-plane components. `RestartIntentLifecycleReader` provides the
 read-only observation boundary: it validates the exact committed generation,
 the permanent lifecycle record, the referenced create-once intent and
 generation snapshot, and the distinct opening and closing lease provenance.
-It returns the lifecycle record with its opaque store revision for use as a
-future transaction condition and never mutates control-plane state.
+Store-global transaction sequences must prove the strict causal order
+`generation snapshot < intent creation < lifecycle closure`, even when all
+three commits share one millisecond and one unchanged coordinator lease. The
+reader returns the lifecycle record with its opaque store revision and
+transaction sequence for future control-plane conditions and never mutates
+control-plane state.
 
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be

@@ -269,6 +269,7 @@ def test_current_verifies_closed_intent_and_closing_lease():
     assert observed.record == lifecycle
     assert observed.revision == committed.revision
     assert observed.committed_at_unix_ms == 1_000
+    assert observed.transaction_sequence == committed.transaction_sequence
 
 
 def test_current_accepts_closure_under_renewed_lease():
@@ -478,6 +479,72 @@ def test_current_rejects_intent_committed_before_its_snapshot():
     assert current is not None
 
     with pytest.raises(RestartIntentLifecycleCorrupt, match="predates"):
+        reader.current(current)
+
+
+def test_current_rejects_intent_transaction_before_snapshot_at_same_time():
+    clock = ManualClock()
+    store = EntryOverrideStore(clock=clock)
+    (
+        _,
+        _,
+        _,
+        generation_manager,
+        reader,
+        lease,
+        current,
+    ) = _state(clock=clock, store=store)
+    record, _, lifecycle = _records(current, lease, lease)
+    _commit_intent(store, generation_manager, reader, current, lease, record)
+    _commit_lifecycle(store, reader, lease, lifecycle)
+    intent_entry = store.get(reader.intent_key(record.intent.intent_id))
+    snapshot_key = generation_manager.snapshot_key(0)
+    snapshot_entry = store.get(snapshot_key)
+    head_entry = store.get(generation_manager.head_key)
+    assert intent_entry is not None
+    assert snapshot_entry is not None
+    assert head_entry is not None
+    later_sequence = intent_entry.transaction_sequence + 1
+    store.overrides[snapshot_key] = replace(
+        snapshot_entry,
+        transaction_sequence=later_sequence,
+    )
+    store.overrides[generation_manager.head_key] = replace(
+        head_entry,
+        transaction_sequence=later_sequence,
+    )
+    current = generation_manager.current()
+    assert current is not None
+
+    with pytest.raises(RestartIntentLifecycleCorrupt, match="predates"):
+        reader.current(current)
+
+
+def test_current_rejects_closure_transaction_before_intent_at_same_time():
+    clock = ManualClock()
+    store = EntryOverrideStore(clock=clock)
+    (
+        _,
+        _,
+        _,
+        generation_manager,
+        reader,
+        lease,
+        current,
+    ) = _state(clock=clock, store=store)
+    record, _, lifecycle = _records(current, lease, lease)
+    _commit_intent(store, generation_manager, reader, current, lease, record)
+    _commit_lifecycle(store, reader, lease, lifecycle)
+    intent_entry = store.get(reader.intent_key(record.intent.intent_id))
+    lifecycle_entry = store.get(reader.lifecycle_key)
+    assert intent_entry is not None
+    assert lifecycle_entry is not None
+    store.overrides[reader.lifecycle_key] = replace(
+        lifecycle_entry,
+        transaction_sequence=intent_entry.transaction_sequence,
+    )
+
+    with pytest.raises(RestartIntentLifecycleCorrupt, match="predates intent opening"):
         reader.current(current)
 
 

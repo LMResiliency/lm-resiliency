@@ -41,6 +41,7 @@ class StoredRestartIntentLifecycle:
     record: RestartIntentLifecycleRecord
     revision: int
     committed_at_unix_ms: int
+    transaction_sequence: int
 
     def __post_init__(self) -> None:
         if not isinstance(self.record, RestartIntentLifecycleRecord):
@@ -55,12 +56,17 @@ class StoredRestartIntentLifecycle:
             self.committed_at_unix_ms,
             "StoredRestartIntentLifecycle.committed_at_unix_ms",
         )
+        _positive_integer(
+            self.transaction_sequence,
+            "StoredRestartIntentLifecycle.transaction_sequence",
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class _GuardProvenance:
     revision: int
     value_digest: str
+    transaction_sequence: int
     mutation_sequence: int
     value_sequence: int
     lifetime_sequence: int
@@ -163,7 +169,10 @@ class RestartIntentLifecycleReader:
             raise RestartIntentLifecycleCorrupt(
                 "closed restart intent does not identify its generation snapshot"
             )
-        if opening_provenance.committed_at_unix_ms < snapshot.committed_at_unix_ms:
+        if (
+            opening_provenance.committed_at_unix_ms < snapshot.committed_at_unix_ms
+            or opening_provenance.transaction_sequence <= snapshot.transaction_sequence
+        ):
             raise RestartIntentLifecycleCorrupt(
                 "closed restart intent predates its generation snapshot"
             )
@@ -188,6 +197,7 @@ class RestartIntentLifecycleReader:
             record=record,
             revision=entry.revision,
             committed_at_unix_ms=closing_provenance.committed_at_unix_ms,
+            transaction_sequence=closing_provenance.transaction_sequence,
         )
 
     def _decode_closed_intent(
@@ -267,6 +277,7 @@ def _guarded_provenance(
     return _GuardProvenance(
         revision=guard_revision_value,
         value_digest=guard_value_digest_value,
+        transaction_sequence=entry.transaction_sequence,
         mutation_sequence=guard_mutation_sequence,
         value_sequence=guard_value_sequence,
         lifetime_sequence=guard_lifetime_sequence,
@@ -280,7 +291,8 @@ def _validate_provenance_order(
     closing: _GuardProvenance,
 ) -> None:
     if (
-        closing.mutation_sequence < opening.mutation_sequence
+        closing.transaction_sequence <= opening.transaction_sequence
+        or closing.mutation_sequence < opening.mutation_sequence
         or closing.value_sequence < opening.value_sequence
         or closing.lifetime_sequence < opening.lifetime_sequence
         or closing.guard_committed_at_unix_ms < opening.guard_committed_at_unix_ms
