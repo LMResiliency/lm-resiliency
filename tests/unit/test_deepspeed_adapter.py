@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import torch
 import torch.nn as nn
 
@@ -136,7 +138,8 @@ class TestDeepSpeedAdapterStage2:
             backup,
         ]
 
-    def test_load_checkpoint_tensors_restores(self):
+    @patch("lm_resiliency.integrations.deepspeed.adapter.notify_checkpoint_tensor_load")
+    def test_load_checkpoint_tensors_restores(self, notify_checkpoint_tensor_load):
         tensors = self.adapter.collect_checkpoint_tensors()
         saved = [t.clone() for t in tensors]
 
@@ -149,6 +152,7 @@ class TestDeepSpeedAdapterStage2:
         live = self.adapter.collect_checkpoint_tensors()
         for live_t, saved_t in zip(live, saved):
             assert torch.allclose(live_t.float(), saved_t.float())
+        notify_checkpoint_tensor_load.assert_called_once_with(self.adapter)
 
     def test_tensor_count_stage2(self):
         """Stage 2: 2 bf16_flat + 2 fp32_partitions + optimizer state tensors."""

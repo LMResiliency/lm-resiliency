@@ -234,6 +234,8 @@ The following measurements used eight A100-SXM4-80GB GPUs and approximately 1 bi
 These values measure the synchronization-visible portion of asynchronous capture.
 They do not infer overhead from small differences between independent end-to-end step-time runs.
 Hardware, state layout, capture cadence, and available copy or network overlap can change the result.
+The reproducible [healthy-path benchmark](../benchmarks/README.md) records current-package baseline, GEMINI, SCOUT, and combined measurements and applies explicit scheduled-run thresholds.
+The table above remains historical evidence for its stated A100 workload and is not a baseline for different benchmark shapes or hardware.
 
 ## Boundaries
 

@@ -11,7 +11,8 @@ def _run_example(checkpoint_dir: Path, *, steps: int) -> dict:
     completed = subprocess.run(
         [
             sys.executable,
-            "examples/quickstart.py",
+            "-m",
+            "lm_resiliency.quickstart",
             "--steps",
             str(steps),
             "--interval",

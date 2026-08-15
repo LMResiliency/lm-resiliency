@@ -1,0 +1,1489 @@
+{
+  "clock": {
+    "origin": "training_run",
+    "type": "training_iteration"
+  },
+  "incidents": [
+    {
+      "faults": [
+        {
+          "fault_id": "rank-0-output-sign-flip",
+          "parameters": {
+            "operation": "sign_flip",
+            "scope": "100%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 0,
+            "surface": "output"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "output-sign-flip",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          4
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-1-output-set-zero",
+          "parameters": {
+            "operation": "set_value",
+            "scope": "100%",
+            "value": 0.0
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 1,
+            "surface": "output"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "output-set-zero",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          5
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-2-output-set-one",
+          "parameters": {
+            "operation": "set_value",
+            "scope": "10%",
+            "value": 1.0
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 2,
+            "surface": "output"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "output-set-one",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          6
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-3-output-scale-up",
+          "parameters": {
+            "factor": 10.0,
+            "operation": "scale",
+            "scope": "10%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 3,
+            "surface": "output"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "output-scale-up",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          7
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-4-output-scale-down",
+          "parameters": {
+            "factor": 0.1,
+            "operation": "scale",
+            "scope": "10%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 4,
+            "surface": "output"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "output-scale-down",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          8
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-5-output-noise",
+          "parameters": {
+            "operation": "noise",
+            "scope": "10%",
+            "std": 1.0
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 5,
+            "surface": "output"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "output-noise",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          9
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-6-output-single-bitflip",
+          "parameters": {
+            "magnitude": "large",
+            "operation": "single_bitflip",
+            "scope": "single"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 6,
+            "surface": "output"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "output-single-bitflip",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          10
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-7-output-multi-bitflip",
+          "parameters": {
+            "magnitude": "large",
+            "operation": "multi_bitflip",
+            "scope": "row"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 7,
+            "surface": "output"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "output-multi-bitflip",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          11
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-0-input-sign-flip",
+          "parameters": {
+            "operation": "sign_flip",
+            "scope": "100%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 0,
+            "surface": "input"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "input-sign-flip",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          12
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-1-input-set-zero",
+          "parameters": {
+            "operation": "set_value",
+            "scope": "1%",
+            "value": 0.0
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 1,
+            "surface": "input"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "input-set-zero",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          13
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-2-input-set-one",
+          "parameters": {
+            "operation": "set_value",
+            "scope": "1%",
+            "value": 1.0
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 2,
+            "surface": "input"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "input-set-one",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          14
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-3-input-scale-up",
+          "parameters": {
+            "factor": 2.0,
+            "operation": "scale",
+            "scope": "10%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 3,
+            "surface": "input"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "input-scale-up",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          15
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-4-input-scale-down",
+          "parameters": {
+            "factor": 0.5,
+            "operation": "scale",
+            "scope": "10%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 4,
+            "surface": "input"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "input-scale-down",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          16
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-5-input-noise",
+          "parameters": {
+            "operation": "noise",
+            "scope": "row",
+            "std": 1.0
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 5,
+            "surface": "input"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "input-noise",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          17
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-6-input-single-bitflip",
+          "parameters": {
+            "magnitude": "medium",
+            "operation": "single_bitflip",
+            "scope": "single"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 6,
+            "surface": "input"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "input-single-bitflip",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          18
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-7-input-multi-bitflip",
+          "parameters": {
+            "magnitude": "medium",
+            "operation": "multi_bitflip",
+            "scope": "row"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 7,
+            "surface": "input"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "input-multi-bitflip",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          19
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-0-output-stale_state",
+          "parameters": {
+            "scope": "100%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 0,
+            "surface": "output"
+          },
+          "type": "stale_state"
+        }
+      ],
+      "incident_id": "output-stale_state",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          20
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-1-output-duplicate",
+          "parameters": {
+            "scope": "100%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 1,
+            "surface": "output"
+          },
+          "type": "duplicate"
+        }
+      ],
+      "incident_id": "output-duplicate",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          21
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-2-output-drop",
+          "parameters": {
+            "scope": "100%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 2,
+            "surface": "output"
+          },
+          "type": "drop"
+        }
+      ],
+      "incident_id": "output-drop",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          22
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-3-output-reorder",
+          "parameters": {},
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 3,
+            "surface": "output"
+          },
+          "type": "reorder"
+        }
+      ],
+      "incident_id": "output-reorder",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          23
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-4-input-stale_state",
+          "parameters": {
+            "scope": "100%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 4,
+            "surface": "input"
+          },
+          "type": "stale_state"
+        }
+      ],
+      "incident_id": "input-stale_state",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          24
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-5-input-duplicate",
+          "parameters": {
+            "scope": "100%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 5,
+            "surface": "input"
+          },
+          "type": "duplicate"
+        }
+      ],
+      "incident_id": "input-duplicate",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          25
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-6-input-drop",
+          "parameters": {
+            "scope": "100%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 6,
+            "surface": "input"
+          },
+          "type": "drop"
+        }
+      ],
+      "incident_id": "input-drop",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          26
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-7-input-reorder",
+          "parameters": {},
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 7,
+            "surface": "input"
+          },
+          "type": "reorder"
+        }
+      ],
+      "incident_id": "input-reorder",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          27
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-0-compute-delay",
+          "parameters": {
+            "delay_ms": 1000.0
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 0,
+            "surface": "compute"
+          },
+          "type": "delay"
+        }
+      ],
+      "incident_id": "compute-delay",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          28
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-1-input-delay",
+          "parameters": {
+            "delay_ms": 1000.0
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 1,
+            "surface": "input"
+          },
+          "type": "delay"
+        }
+      ],
+      "incident_id": "input-delay",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          29
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-2-output-delay",
+          "parameters": {
+            "delay_ms": 1000.0
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 2,
+            "surface": "output"
+          },
+          "type": "delay"
+        }
+      ],
+      "incident_id": "output-delay",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          30
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-0-correlated-output-sign-flip",
+          "parameters": {
+            "operation": "sign_flip",
+            "scope": "100%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 0,
+            "surface": "output"
+          },
+          "type": "tensor_corruption"
+        },
+        {
+          "fault_id": "rank-1-correlated-output-sign-flip",
+          "parameters": {
+            "operation": "sign_flip",
+            "scope": "100%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 1,
+            "surface": "output"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "correlated-two-rank-output-corruption",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          31
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-2-correlated-input-drop",
+          "parameters": {
+            "scope": "100%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 2,
+            "surface": "input"
+          },
+          "type": "drop"
+        },
+        {
+          "fault_id": "rank-3-correlated-input-drop",
+          "parameters": {
+            "scope": "100%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 3,
+            "surface": "input"
+          },
+          "type": "drop"
+        },
+        {
+          "fault_id": "rank-4-correlated-input-drop",
+          "parameters": {
+            "scope": "100%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 4,
+            "surface": "input"
+          },
+          "type": "drop"
+        }
+      ],
+      "incident_id": "correlated-three-rank-input-drop",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          32
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-5-correlated-compute-delay",
+          "parameters": {
+            "delay_ms": 1000.0
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 5,
+            "surface": "compute"
+          },
+          "type": "delay"
+        },
+        {
+          "fault_id": "rank-6-correlated-compute-delay",
+          "parameters": {
+            "delay_ms": 1000.0
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 6,
+            "surface": "compute"
+          },
+          "type": "delay"
+        },
+        {
+          "fault_id": "rank-7-correlated-compute-delay",
+          "parameters": {
+            "delay_ms": 1000.0
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 7,
+            "surface": "compute"
+          },
+          "type": "delay"
+        }
+      ],
+      "incident_id": "correlated-three-rank-compute-delay",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          33
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-5-intermittent-output-sign-flip",
+          "parameters": {
+            "operation": "sign_flip",
+            "scope": "100%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 5,
+            "surface": "output"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "intermittent-output-corruption",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          34,
+          36,
+          38
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-6-permanent-output-scale",
+          "parameters": {
+            "factor": 10.0,
+            "operation": "scale",
+            "scope": "100%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "rank": 6,
+            "surface": "output"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "permanent-output-corruption-until-recovery",
+      "lifetime": {
+        "until": "recovery"
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          39
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-0-weight-sign-flip",
+          "parameters": {
+            "operation": "sign_flip",
+            "parameter": "weight",
+            "scope": "10%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "module_path": "layers.0.mlp.0",
+            "rank": 0,
+            "surface": "weight"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "weight-corruption",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          41
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-1-bias-scale",
+          "parameters": {
+            "factor": 10.0,
+            "operation": "scale",
+            "parameter": "bias",
+            "scope": "100%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "module_path": "layers.0.mlp.0",
+            "rank": 1,
+            "surface": "bias"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "bias-corruption",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          43
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-2-gradient-noise",
+          "parameters": {
+            "operation": "noise",
+            "parameter": "weight",
+            "scope": "10%",
+            "std": 1.0
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "module_path": "layers.0.mlp.0",
+            "rank": 2,
+            "surface": "gradient"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "gradient-corruption",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          45
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-3-optimizer-state-sign-flip",
+          "parameters": {
+            "operation": "sign_flip",
+            "parameter": "weight",
+            "scope": "10%",
+            "state_key": "exp_avg"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "module_path": "layers.0.mlp.0",
+            "rank": 3,
+            "surface": "optimizer_state"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "optimizer-state-corruption",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          47
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-4-weight-stale_state",
+          "parameters": {
+            "parameter": "weight",
+            "scope": "100%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "module_path": "layers.0.mlp.0",
+            "rank": 4,
+            "surface": "weight"
+          },
+          "type": "stale_state"
+        }
+      ],
+      "incident_id": "weight-stale_state",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          49
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-5-bias-stale_state",
+          "parameters": {
+            "parameter": "bias",
+            "scope": "100%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "module_path": "layers.0.mlp.0",
+            "rank": 5,
+            "surface": "bias"
+          },
+          "type": "stale_state"
+        }
+      ],
+      "incident_id": "bias-stale_state",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          51
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-6-gradient-stale_state",
+          "parameters": {
+            "parameter": "weight",
+            "scope": "100%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "module_path": "layers.0.mlp.0",
+            "rank": 6,
+            "surface": "gradient"
+          },
+          "type": "stale_state"
+        }
+      ],
+      "incident_id": "gradient-stale_state",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          53
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-7-optimizer_state-stale_state",
+          "parameters": {
+            "parameter": "weight",
+            "scope": "100%",
+            "state_key": "exp_avg"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "module_path": "layers.0.mlp.0",
+            "rank": 7,
+            "surface": "optimizer_state"
+          },
+          "type": "stale_state"
+        }
+      ],
+      "incident_id": "optimizer_state-stale_state",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          55
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-0-weight-duplicate",
+          "parameters": {
+            "parameter": "weight",
+            "scope": "100%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "module_path": "layers.0.mlp.0",
+            "rank": 0,
+            "surface": "weight"
+          },
+          "type": "duplicate"
+        }
+      ],
+      "incident_id": "weight-duplicate",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          57
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-1-bias-duplicate",
+          "parameters": {
+            "parameter": "bias",
+            "scope": "100%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "module_path": "layers.0.mlp.0",
+            "rank": 1,
+            "surface": "bias"
+          },
+          "type": "duplicate"
+        }
+      ],
+      "incident_id": "bias-duplicate",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          59
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-2-gradient-duplicate",
+          "parameters": {
+            "parameter": "weight",
+            "scope": "100%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "module_path": "layers.0.mlp.0",
+            "rank": 2,
+            "surface": "gradient"
+          },
+          "type": "duplicate"
+        }
+      ],
+      "incident_id": "gradient-duplicate",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          61
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-3-optimizer_state-duplicate",
+          "parameters": {
+            "parameter": "weight",
+            "scope": "100%",
+            "state_key": "exp_avg"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "module_path": "layers.0.mlp.0",
+            "rank": 3,
+            "surface": "optimizer_state"
+          },
+          "type": "duplicate"
+        }
+      ],
+      "incident_id": "optimizer_state-duplicate",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          63
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-4-gradient-drop",
+          "parameters": {
+            "parameter": "weight",
+            "scope": "100%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "module_path": "layers.0.mlp.0",
+            "rank": 4,
+            "surface": "gradient"
+          },
+          "type": "drop"
+        }
+      ],
+      "incident_id": "gradient-drop",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          65
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "rank-5-gradient-reorder",
+          "parameters": {
+            "parameter": "weight"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "model_part": 0,
+            "module_path": "layers.0.mlp.0",
+            "rank": 5,
+            "surface": "gradient"
+          },
+          "type": "reorder"
+        }
+      ],
+      "incident_id": "gradient-reorder",
+      "lifetime": {
+        "iterations": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          67
+        ],
+        "probability": 1.0
+      }
+    }
+  ],
+  "metadata": {
+    "purpose": "Systematic built-in local fault and SCOUT localization matrix",
+    "workload": "examples.fault_injection.pytorch",
+    "world_size": 8
+  },
+  "name": "pytorch-8gpu-systematic-faults",
+  "schema_version": 1,
+  "seed": 17
+}

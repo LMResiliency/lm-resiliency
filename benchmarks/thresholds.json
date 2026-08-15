@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "metrics": {
+    "throughput_tokens_per_second": {
+      "direction": "higher",
+      "maximum_regression_percent": {
+        "gemini": 5.0,
+        "scout": 3.0,
+        "combined": 7.5
+      }
+    },
+    "step_latency_p95_ms": {
+      "direction": "lower",
+      "maximum_regression_percent": {
+        "gemini": 10.0,
+        "scout": 7.5,
+        "combined": 15.0
+      }
+    }
+  }
+}

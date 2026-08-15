@@ -26,6 +26,7 @@ The stable package-root exports are:
 | Fault reporting | `SCOUTFaultReport`, `SCOUTFaultCallback`, `OrchestrationHooks`, `replay_fault_reports` |
 | Recovery handoff | `RecoveryDecision`, `RecoveryDecisionCallback` |
 | Checkpoint tuning | `estimate_chunk_size` |
+| Fault injection evaluation | `enable_fault_injection`, `SCHEMA_VERSION`, `FaultCampaign`, `FaultIncident`, `IncidentTrigger`, `IncidentLifetime`, `IterationRange`, `ClockSpec`, `ClockType`, `ClockOrigin`, `FaultSpec`, `FaultTarget`, `FailureType`, `FaultSurface`, `FaultScope`, `FaultMagnitude`, `CorruptionOperation`, `SafetyClass`, `RetriggerPolicy`, `FaultExecutor`, `CallbackFaultExecutor`, `FaultExecutionRequest`, `FaultExecutionResult`, `UnsupportedFaultError`, `FaultInjectionSession`, `InjectionStatus`, `FaultInjectionRecord`, `LocalizationResult`, `FaultEvaluation`, `CampaignReport`, `CampaignJournal`, `CampaignStateStore`, `MemoryCampaignStateStore`, `JsonCampaignStateStore` |
 
 The stable manager API exports are:
 
@@ -121,6 +122,67 @@ resiliency = enable_resiliency(engine, interval=10)
 ```
 
 Unsupported arguments for the selected adapter raise `TypeError`.
+
+## Evaluate Fault Localization
+
+The fault injection evaluation kit binds a declarative campaign to PyTorch,
+TorchTitan, Megatron Core, or DeepSpeed training objects:
+
+```python
+from lm_resiliency import (
+    CorruptionOperation,
+    FailureType,
+    FaultCampaign,
+    FaultIncident,
+    FaultScope,
+    FaultSpec,
+    FaultSurface,
+    FaultTarget,
+    IncidentLifetime,
+    IncidentTrigger,
+    enable_fault_injection,
+)
+
+campaign = FaultCampaign(
+    name="output-sdc",
+    incidents=(
+        FaultIncident(
+            incident_id="hidden-sdc",
+            trigger=IncidentTrigger(at=(20,)),
+            lifetime=IncidentLifetime(matching_calls=1),
+            faults=(
+                FaultSpec(
+                    fault_id="hidden-sign-flip",
+                    type=FailureType.TENSOR_CORRUPTION,
+                    target=FaultTarget(
+                        rank=0,
+                        module_path="layers.2",
+                        surface=FaultSurface.OUTPUT,
+                    ),
+                    parameters={
+                        "operation": CorruptionOperation.SIGN_FLIP.value,
+                        "scope": FaultScope.FULL.value,
+                    },
+                ),
+            ),
+        ),
+    ),
+)
+faults = enable_fault_injection(model, optimizer, campaign=campaign)
+```
+
+The framework optimizer boundary advances the `training_iteration` clock
+automatically; the training loop remains unchanged.
+The injector records verified ground truth independently of SCOUT and GEMINI,
+then `faults.evaluate(...)` compares neutral localization results with expected
+ranks, resources, and components.
+Custom `CampaignStateStore` implementations must provide atomic
+`compare_and_swap(expected, updated)` in addition to `load()` and `save()`, so
+overlapping old and replacement workers cannot both claim a restart-stable
+occurrence.
+See [Fault injection evaluation](fault_injection.md) for manifests, framework
+targets, permanent and intermittent schedules, destructive executors, scoring,
+and safety boundaries.
 
 ## Native PyTorch
 
@@ -578,6 +640,7 @@ See [MoE execution regimes](moe_execution_regimes.md#build-and-audit-the-catalog
 ## Related Guides
 
 - [Production-loop examples](../examples/README.md)
+- [Fault injection evaluation](fault_injection.md)
 - [GEMINI](gemini.md)
 - [SCOUT](scout.md)
 - [MoE execution regimes](moe_execution_regimes.md)

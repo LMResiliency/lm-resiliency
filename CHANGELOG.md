@@ -9,12 +9,14 @@ The project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 
 - A runnable CPU quick-start example with a complete native PyTorch training loop and GEMINI checkpoint resume.
 - A scheduled and maintainer-dispatched two-GPU qualification workflow with machine-readable revision, environment, topology, command, log, and checksum evidence.
+- A framework-neutral fault injection evaluation kit with incident schedules, automatic training-iteration hooks, verified ground truth, capability-checked executors, neutral localization scoring, and a systematic eight-GPU DDP/SCOUT evaluation matrix.
 
 ### Changed
 
 - Quick Start installs the core package from PyPI before introducing optional framework integrations.
 - Release publishing now requires a protected default-branch tag, revalidates source and exact artifact digests, uses a pinned build/audit toolchain, emits build provenance, and publishes draft-populated immutable GitHub releases.
 - GEMINI node-local checkpoints now use a versioned, schema-validated, weights-only format that rejects arbitrary pickle globals. The unrestricted-pickle format written by `0.1.0` is intentionally not loadable after this change.
+- The release Quick Start now runs an entry point shipped in the installed wheel instead of an example from the moving `main` branch.
 
 ## [0.1.0] - 2026-08-12
 
