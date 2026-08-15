@@ -881,8 +881,10 @@ cannot change coordinator identity, lease duration, or store-stamped guard-key
 lifetime. Every snapshot entry must retain store-stamped mutation sequence `1`,
 while the head mutation sequence must equal `generation + 1`; this rejects
 replacement, recreation, extra rewrites, and rollback. Every generation commit
-must fall within the stamped lease grant and duration. Missing or contradictory
-history is corruption, not an empty or partially usable assignment.
+must fall within the stamped lease grant and duration. The head must remain in
+its first store-key lifetime, and a stable immediate successor snapshot beyond
+the head is contradictory state. Missing or contradictory history is
+corruption, not an empty or partially usable assignment.
 
 Coordinator ownership is stored under a schema-versioned, run-scoped lease key.
 The lease record binds the run, a unique coordinator-process incarnation, a

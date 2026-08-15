@@ -79,6 +79,21 @@ class GenerationStateReader:
             result = self._read_current_history()
             if result is not None:
                 current, _ = result
+                successor_key = self.snapshot_key(current.snapshot.record.assignment.generation + 1)
+                if self._store.get(successor_key) is not None:
+                    observed_head = self._store.get(self._head_key)
+                    if (
+                        observed_head is not None
+                        and observed_head.revision != current.head_revision
+                    ):
+                        continue
+                    if observed_head is None:
+                        raise GenerationStateCorrupt(
+                            "generation head disappeared while checking its successor"
+                        )
+                    raise GenerationStateCorrupt(
+                        "generation snapshot is newer than the generation head"
+                    )
                 return current
             if self._store.get(generation_zero_key) is None:
                 return None
@@ -190,6 +205,8 @@ class GenerationStateReader:
     ) -> None:
         if head.snapshot_digest != snapshot.record.digest:
             raise GenerationStateCorrupt("generation head snapshot digest does not match")
+        if head_entry.lifetime_sequence != 1:
+            raise GenerationStateCorrupt("generation head was deleted and recreated")
         if head_entry.mutation_sequence != head.generation + 1:
             raise GenerationStateCorrupt(
                 "generation head mutation sequence does not match its generation"

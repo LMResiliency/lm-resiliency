@@ -266,6 +266,44 @@ def test_generation_reader_retries_concurrent_initialization(monkeypatch):
     assert reader.get(0) == current.snapshot
 
 
+def test_generation_reader_retries_concurrent_head_advance(monkeypatch):
+    _, store, lease, reader = _state()
+    generation_zero = _commit(
+        store,
+        reader,
+        lease,
+        generation=0,
+        previous_snapshot_digest=None,
+        expected_head_revision=None,
+    )
+    snapshot_zero = GenerationSnapshotRecord.from_json(
+        generation_zero[reader.snapshot_key(0)].value
+    )
+    original_get = store.get
+    triggered = False
+
+    def racing_get(key):
+        nonlocal triggered
+        if key == reader.snapshot_key(1) and not triggered:
+            triggered = True
+            _commit(
+                store,
+                reader,
+                lease,
+                generation=1,
+                previous_snapshot_digest=snapshot_zero.digest,
+                expected_head_revision=generation_zero[reader.head_key].revision,
+            )
+        return original_get(key)
+
+    monkeypatch.setattr(store, "get", racing_get)
+
+    current = reader.current()
+
+    assert current is not None
+    assert current.snapshot.record.assignment.generation == 1
+
+
 def test_generation_reader_reads_current_and_historical_snapshots():
     clock, store, lease, reader = _state()
     generation_zero = _commit(
@@ -354,6 +392,8 @@ def test_generation_reader_rejects_snapshots_outside_committed_head():
         deadline_unix_ms=None,
         value=orphan_one.to_json(),
     )
+    with pytest.raises(GenerationStateCorrupt, match="newer than"):
+        reader.current()
     with pytest.raises(GenerationStateCorrupt, match="newer than"):
         reader.get(1)
 
@@ -591,6 +631,77 @@ def test_generation_reader_rejects_same_timestamp_head_rollback():
     )
 
     with pytest.raises(GenerationStateCorrupt, match="mutation sequence"):
+        reader.current()
+
+
+def test_generation_reader_rejects_recreated_generation_head_lifetime():
+    _, store, lease, reader = _state()
+    generation_zero = _commit(
+        store,
+        reader,
+        lease,
+        generation=0,
+        previous_snapshot_digest=None,
+        expected_head_revision=None,
+    )
+    snapshot_zero = GenerationSnapshotRecord.from_json(
+        generation_zero[reader.snapshot_key(0)].value
+    )
+    snapshot_one = _snapshot(
+        1,
+        previous_snapshot_digest=snapshot_zero.digest,
+        coordinator_id=lease.record.coordinator_id,
+        lease_id=lease.record.lease_id,
+        fencing_token=lease.fencing_token,
+    )
+    store.compare_set_many_guarded(
+        {
+            reader.snapshot_key(1): ControlStoreWrite(
+                expected_revision=None,
+                value=snapshot_one.to_json(),
+            )
+        },
+        guard_key=reader.coordinator_lease_key,
+        expected_guard_revision=lease.fencing_token,
+        not_before_unix_ms=lease.granted_at_unix_ms,
+        deadline_unix_ms=lease.expires_at_unix_ms,
+    )
+    store.compare_delete(
+        reader.head_key,
+        expected_revision=generation_zero[reader.head_key].revision,
+    )
+    snapshot_two = _snapshot(
+        2,
+        previous_snapshot_digest=snapshot_one.digest,
+        coordinator_id=lease.record.coordinator_id,
+        lease_id=lease.record.lease_id,
+        fencing_token=lease.fencing_token,
+    )
+    head_two = GenerationHeadRecord(
+        run_id=RUN_ID,
+        generation=2,
+        snapshot_digest=snapshot_two.digest,
+    )
+    committed = store.compare_set_many_guarded(
+        {
+            reader.head_key: ControlStoreWrite(
+                expected_revision=None,
+                value=head_two.to_json(),
+            ),
+            reader.snapshot_key(2): ControlStoreWrite(
+                expected_revision=None,
+                value=snapshot_two.to_json(),
+            ),
+        },
+        guard_key=reader.coordinator_lease_key,
+        expected_guard_revision=lease.fencing_token,
+        not_before_unix_ms=lease.granted_at_unix_ms,
+        deadline_unix_ms=lease.expires_at_unix_ms,
+    )
+    assert committed[reader.head_key].mutation_sequence == 3
+    assert committed[reader.head_key].lifetime_sequence == 2
+
+    with pytest.raises(GenerationStateCorrupt, match="deleted and recreated"):
         reader.current()
 
 
