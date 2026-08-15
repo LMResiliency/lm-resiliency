@@ -579,7 +579,12 @@ the last closed intent head to the coordinator lease that performed closure;
 that lease may be a renewal of the lease that opened the intent. The record
 schemas do not define a store mutation API. Lease-fenced intent creation,
 lifecycle observation and closure, and other lifecycle transitions are
-separate control-plane components.
+separate control-plane components. `RestartIntentLifecycleReader` provides the
+read-only observation boundary: it validates the exact committed generation,
+the permanent lifecycle record, the referenced create-once intent and
+generation snapshot, and the distinct opening and closing lease provenance.
+It returns the lifecycle record with its opaque store revision for use as a
+future transaction condition and never mutates control-plane state.
 
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be
