@@ -600,7 +600,11 @@ create-once writes and side-effect-free generation conditions but performs no
 store reads or mutations. The descriptor carries the complete held coordinator
 lease and requires the intent record to match its identity, duration, fencing
 token, and authoritative grant time. A later preparer authenticates that handle
-against persisted ownership before constructing the descriptor.
+against persisted ownership before constructing the descriptor. The initial
+preparer also revalidates the exact generation, intent scope, never-opened
+lifecycle state, and remaining lease/intent window. It performs no mutation;
+the following execution component owns the guarded transaction and verifies
+the returned store metadata.
 
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be
