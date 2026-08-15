@@ -585,8 +585,14 @@ latest closure by run, positive closure index, generation, intent ID, and
 closure-record digest. The head is the only mutable lifecycle pointer; later
 readers require its store mutation and value sequences to equal the closure
 index so replaying an older A record after B cannot appear to roll lifecycle
-state back. Atomic current-intent closure and lifecycle-head advancement are
-separate control-plane components.
+state back. A strict `RestartIntentClosedHeadRecord` is the durable closed value
+for the current-intent key. It binds the closure index, generation, and intent
+identity to the canonical lifecycle-head digest. A future closure transaction
+atomically replaces the open current-intent head with this marker while
+advancing the lifecycle head and creating the immutable closure record. The
+next intent replaces the marker instead of relying on deletion, so a restarted
+reader can prove closure from persisted state. Atomic opening and closure
+transactions are separate control-plane components.
 
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be
