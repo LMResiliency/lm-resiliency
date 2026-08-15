@@ -119,6 +119,7 @@ class InitialRestartIntentLifecycleReader:
                     return None
                 intent_key = self.intent_key(open_head.intent_id)
                 intent_observation = self._observe(intent_key)
+                generation_result = self._read_generation()
                 if not self._stable(
                     self._intent_head_key,
                     head_observation,
@@ -130,10 +131,18 @@ class InitialRestartIntentLifecycleReader:
                     intent_observation,
                 ):
                     continue
-                self._validate_open_intent(
+                confirmed_generation_result = self._read_generation()
+                if generation_result != confirmed_generation_result:
+                    continue
+                intent = self._validate_open_intent(
                     open_head,
                     head_observation,
                     intent_observation,
+                )
+                self._validate_open_generation(
+                    intent,
+                    intent_observation,
+                    generation_result,
                 )
                 return None
             lifecycle_head = self._decode_lifecycle_head(lifecycle_observation)
@@ -233,7 +242,7 @@ class InitialRestartIntentLifecycleReader:
         head: RestartIntentHeadRecord,
         head_observation: _ObservedKey,
         intent_observation: _ObservedKey,
-    ) -> None:
+    ) -> RestartIntentRecord:
         head_entry = _required_entry(head_observation, "current restart-intent head")
         intent_entry = _immutable_entry(intent_observation, "immutable restart intent")
         if (
@@ -261,6 +270,10 @@ class InitialRestartIntentLifecycleReader:
             raise RestartIntentLifecycleReadCorrupt(
                 "current restart-intent head does not identify its immutable record"
             )
+        if head_entry.committed_at_unix_ms is None or intent_entry.committed_at_unix_ms is None:
+            raise RestartIntentLifecycleReadCorrupt(
+                "current restart-intent opening has no authoritative commit time"
+            )
         if _transaction_provenance(head_entry) != _transaction_provenance(intent_entry):
             raise RestartIntentLifecycleReadCorrupt(
                 "current restart-intent head and immutable intent "
@@ -287,6 +300,38 @@ class InitialRestartIntentLifecycleReader:
             raise RestartIntentLifecycleReadCorrupt(
                 "immutable restart intent has invalid coordinator lease provenance"
             )
+        return intent
+
+    def _validate_open_generation(
+        self,
+        intent: RestartIntentRecord,
+        intent_observation: _ObservedKey,
+        generation_result: (tuple[CurrentGeneration, tuple[StoredGenerationSnapshot, ...]] | None),
+    ) -> None:
+        if generation_result is None:
+            raise RestartIntentLifecycleReadCorrupt(
+                "open restart intent exists without committed generation state"
+            )
+        current, _ = generation_result
+        snapshot = current.snapshot
+        if (
+            snapshot.record.assignment.generation != intent.intent.generation
+            or snapshot.record.digest != intent.generation_snapshot_digest
+        ):
+            raise RestartIntentLifecycleReadCorrupt(
+                "current generation does not match the open restart intent"
+            )
+        intent_entry = _required_entry(intent_observation, "immutable restart intent")
+        committed_at_unix_ms = intent_entry.committed_at_unix_ms
+        if committed_at_unix_ms is None:
+            raise AssertionError("validated restart intent lost its commit time")
+        if (
+            intent_entry.transaction_sequence <= snapshot.transaction_sequence
+            or committed_at_unix_ms < snapshot.committed_at_unix_ms
+        ):
+            raise RestartIntentLifecycleReadCorrupt(
+                "open restart intent does not follow its current generation"
+            )
 
     def _read_dependencies(
         self,
@@ -295,14 +340,19 @@ class InitialRestartIntentLifecycleReader:
         tuple[CurrentGeneration, tuple[StoredGenerationSnapshot, ...]] | None,
     ]:
         try:
-            return (
-                self._lease_history_reader.read(),
-                self._generation_reader.current_with_history(),
-            )
-        except (
-            CoordinatorLeaseHistoryCorrupt,
-            GenerationStateCorrupt,
-        ) as error:
+            lease_history = self._lease_history_reader.read()
+        except CoordinatorLeaseHistoryCorrupt as error:
+            raise RestartIntentLifecycleReadCorrupt(
+                "restart-intent lifecycle dependencies are corrupt"
+            ) from error
+        return lease_history, self._read_generation()
+
+    def _read_generation(
+        self,
+    ) -> tuple[CurrentGeneration, tuple[StoredGenerationSnapshot, ...]] | None:
+        try:
+            return self._generation_reader.current_with_history()
+        except GenerationStateCorrupt as error:
             raise RestartIntentLifecycleReadCorrupt(
                 "restart-intent lifecycle dependencies are corrupt"
             ) from error

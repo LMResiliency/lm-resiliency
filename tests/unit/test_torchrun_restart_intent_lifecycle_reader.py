@@ -38,6 +38,7 @@ from lm_resiliency.integrations.torchrun._restart_intent_open_execution import (
 )
 from lm_resiliency.integrations.torchrun._restart_intent_records import (
     RestartIntentClosedHeadRecord,
+    RestartIntentHeadRecord,
     RestartIntentLifecycleHeadRecord,
     RestartIntentLifecycleRecord,
 )
@@ -314,6 +315,50 @@ def test_lifecycle_reader_rejects_invalid_open_guard_provenance(
     _replace_entry(store, opened.prepared.intent_key, **changes)
 
     with pytest.raises(RestartIntentLifecycleReadCorrupt, match="lease provenance"):
+        reader.read()
+
+
+def test_lifecycle_reader_rejects_open_entries_without_commit_times():
+    _, store, _, _, _, opened, reader = _open_state()
+    _replace_entry(
+        store,
+        opened.prepared.intent_head_key,
+        committed_at_unix_ms=None,
+    )
+    _replace_entry(
+        store,
+        opened.prepared.intent_key,
+        committed_at_unix_ms=None,
+    )
+
+    with pytest.raises(RestartIntentLifecycleReadCorrupt, match="commit time"):
+        reader.read()
+
+
+def test_lifecycle_reader_rejects_invalid_open_generation_binding():
+    _, store, _, _, _, opened, reader = _open_state()
+    record = replace(
+        opened.prepared.record,
+        generation_snapshot_digest="0" * 64,
+    )
+    head = RestartIntentHeadRecord(
+        run_id=RUN_ID,
+        generation=record.intent.generation,
+        intent_id=record.intent.intent_id,
+        intent_digest=record.digest,
+    )
+    _replace_entry(
+        store,
+        opened.prepared.intent_head_key,
+        value=head.to_json(),
+    )
+    _replace_entry(
+        store,
+        opened.prepared.intent_key,
+        value=record.to_json(),
+    )
+
+    with pytest.raises(RestartIntentLifecycleReadCorrupt, match="generation"):
         reader.read()
 
 
