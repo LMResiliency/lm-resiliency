@@ -260,6 +260,7 @@ def test_authenticated_closure_accepts_immediate_generation_successor():
     )
 
     assert authenticated.immediate_successor == successor
+    assert authenticated.successor_authority == authenticated.generation_authority
 
     with pytest.raises(ValueError, match="opening is outside"):
         AuthenticatedInitialRestartIntentClosure(
@@ -274,7 +275,7 @@ def test_authenticated_closure_accepts_immediate_generation_successor():
                 run_id=RUN_ID,
             ).read(),
         )
-    with pytest.raises(ValueError, match="opening is outside"):
+    with pytest.raises(ValueError, match="successor is outside"):
         AuthenticatedInitialRestartIntentClosure(
             state=fixture.state,
             generation_snapshot=fixture.generation,
@@ -282,6 +283,70 @@ def test_authenticated_closure_accepts_immediate_generation_successor():
                 successor,
                 committed_at_unix_ms=fixture.state.opened_at_unix_ms - 1,
             ),
+            lease_history=CoordinatorLeaseHistoryReader(
+                fixture.store,
+                run_id=RUN_ID,
+            ).read(),
+        )
+
+
+def test_authenticated_closure_authenticates_successor_lease_authority():
+    fixture = _fixture()
+    current = fixture.generation_manager.current()
+    assert current is not None
+    fixture.clock.set(1_020)
+    fixture.generation_manager.commit_successor(
+        fixture.opening_lease,
+        current,
+        _assignment(generation=1, node_id="node-c"),
+    )
+    successor = GenerationStateReader(fixture.store, run_id=RUN_ID).get(1)
+    assert successor is not None
+    lease_history = CoordinatorLeaseHistoryReader(
+        fixture.store,
+        run_id=RUN_ID,
+    ).read()
+
+    with pytest.raises(ValueError, match="successor authority is absent"):
+        AuthenticatedInitialRestartIntentClosure(
+            state=fixture.state,
+            generation_snapshot=fixture.generation,
+            immediate_successor=replace(
+                successor,
+                guard_mutation_sequence=successor.guard_mutation_sequence + 1,
+            ),
+            lease_history=lease_history,
+        )
+    with pytest.raises(ValueError, match="successor is outside its lease window"):
+        AuthenticatedInitialRestartIntentClosure(
+            state=fixture.state,
+            generation_snapshot=fixture.generation,
+            immediate_successor=replace(
+                successor,
+                transaction_sequence=lease_history[0].transaction_sequence,
+            ),
+            lease_history=lease_history,
+        )
+
+
+def test_authenticated_closure_rejects_successor_that_retains_suspect():
+    fixture = _fixture()
+    current = fixture.generation_manager.current()
+    assert current is not None
+    fixture.clock.set(1_020)
+    fixture.generation_manager.commit_successor(
+        fixture.opening_lease,
+        current,
+        _assignment(generation=1),
+    )
+    successor = GenerationStateReader(fixture.store, run_id=RUN_ID).get(1)
+    assert successor is not None
+
+    with pytest.raises(ValueError, match="successor retains suspected nodes"):
+        AuthenticatedInitialRestartIntentClosure(
+            state=fixture.state,
+            generation_snapshot=fixture.generation,
+            immediate_successor=successor,
             lease_history=CoordinatorLeaseHistoryReader(
                 fixture.store,
                 run_id=RUN_ID,
@@ -312,6 +377,60 @@ def test_authenticated_closure_rejects_wrong_generation_or_successor():
             state=fixture.state,
             generation_snapshot=fixture.generation,
             immediate_successor=fixture.generation,
+            lease_history=fixture.lease_history,
+        )
+
+
+def test_authenticated_closure_rejects_suspects_outside_generation():
+    fixture = _fixture()
+    intent = replace(
+        fixture.state.intent.intent,
+        suspected_node_ids=("node-z",),
+    )
+    record = replace(fixture.state.intent, intent=intent)
+    open_head = replace(fixture.state.open_head, intent_digest=record.digest)
+    lifecycle = replace(fixture.state.lifecycle, closed_intent=open_head)
+    lifecycle_head = replace(
+        fixture.state.lifecycle_head,
+        lifecycle_digest=lifecycle.digest,
+    )
+    closed_head = replace(
+        fixture.state.closed_head,
+        lifecycle_head_digest=lifecycle_head.digest,
+    )
+    state = PersistedInitialRestartIntentClosure(
+        intent=record,
+        open_head=open_head,
+        closed_head=closed_head,
+        lifecycle=lifecycle,
+        lifecycle_head=lifecycle_head,
+        intent_entry=replace(
+            fixture.state.intent_entry,
+            value=record.to_json(),
+        ),
+        open_head_entry=replace(
+            fixture.state.open_head_entry,
+            value=open_head.to_json(),
+        ),
+        closed_head_entry=replace(
+            fixture.state.closed_head_entry,
+            value=closed_head.to_json(),
+        ),
+        lifecycle_entry=replace(
+            fixture.state.lifecycle_entry,
+            value=lifecycle.to_json(),
+        ),
+        lifecycle_head_entry=replace(
+            fixture.state.lifecycle_head_entry,
+            value=lifecycle_head.to_json(),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="suspects nodes outside"):
+        AuthenticatedInitialRestartIntentClosure(
+            state=state,
+            generation_snapshot=fixture.generation,
+            immediate_successor=None,
             lease_history=fixture.lease_history,
         )
 

@@ -667,11 +667,38 @@ closing authorities, requires them to occur in order, requires generation and
 intent opening to precede the immediate successor generation in both
 transaction and store time, and verifies that generation creation, intent
 opening, and closure each committed inside their authoritative lease windows
-and before the next durable lease mutation. Construction is fail closed and
-performs no control-store reads or mutations. Because retained value history
-does not identify the intervening delete transaction, an authority followed by
-a delete-and-recreate lifetime cannot authenticate an earlier commit; that
-case remains rejected until the store provides a durable deletion tombstone.
+and before the next durable lease mutation. When an immediate successor
+exists, its exact guard must also resolve to durable lease history and its
+generation commit must fall inside that authority's lease window. Construction
+is fail closed and performs no control-store reads or mutations. Because
+retained value history does not identify the intervening delete transaction,
+an authority followed by a delete-and-recreate lifetime cannot authenticate an
+earlier commit; that case remains rejected until the store provides a durable
+deletion tombstone.
+
+A read-only `InitialRestartIntentLifecycleReader` observes that first closure
+separately. It takes stable snapshots of the current-intent head, its retained
+open predecessor, immutable intent, immutable closure record, and lifecycle
+head; requires durable history for every observed key; obtains the referenced
+generation and verified coordinator-lease history through their existing
+readers; then constructs `PersistedInitialRestartIntentClosure` and
+`AuthenticatedInitialRestartIntentClosure`. Missing, rewritten, split,
+noncanonical, or contradictory state fails closed. Retryable dependency-read
+contention remains retryable, and the reader performs no mutation.
+Before the first closure, the same stable observation requires the current
+open head and its linked immutable intent to remain canonical create-once
+records from one guarded transaction; it also requires the lifecycle head and
+initial closure key to have no durable history. The guard must be the run's
+canonical coordinator lease with the fencing token and lease digest carried by
+the immutable intent. Both opening entries require authoritative commit times,
+must follow the current generation, must bind its exact snapshot digest, and
+must name one exact authority in durable lease history whose grant, expiry, and
+fencing sequences bound the opening before the next lease mutation. The
+generation's own guard must resolve to one durable authority and satisfy the
+same causal lease bounds. Every suspected node must belong to that generation.
+Both pre-closure and closure reads double-collect verified generation and
+coordinator-lease histories around the persisted state so failover cannot
+combine old lease authority with a newer generation.
 
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be
