@@ -150,6 +150,8 @@ def _snapshot(
 
 def _reader_from_history(
     records: tuple[GenerationSnapshotRecord, ...],
+    *,
+    head_committed_at_offset_ms: int = 0,
 ) -> GenerationStateReader:
     store = StaticControlStore()
     reader = GenerationStateReader(store, run_id=RUN_ID)
@@ -173,7 +175,8 @@ def _reader_from_history(
     store.entries[reader.head_key] = ControlStoreEntry(
         value=head.to_json(),
         revision=len(records),
-        committed_at_unix_ms=1_000 + latest.assignment.generation,
+        committed_at_unix_ms=(1_000 + latest.assignment.generation + head_committed_at_offset_ms),
+        mutation_sequence=len(records),
         guard_key=reader.coordinator_lease_key,
         guard_revision=latest.coordinator_fencing_token,
         guard_value_digest=latest.coordinator_lease_digest,
@@ -500,7 +503,7 @@ def test_generation_reader_rejects_replaced_snapshot_key():
 
 
 def test_generation_reader_rejects_head_digest_or_timestamp_substitution():
-    clock, store, lease, reader = _state()
+    _, store, lease, reader = _state()
     committed = _commit(
         store,
         reader,
@@ -515,7 +518,7 @@ def test_generation_reader_rejects_head_digest_or_timestamp_substitution():
         generation=0,
         snapshot_digest="f" * 64,
     )
-    updated = store.compare_set_many_guarded(
+    store.compare_set_many_guarded(
         {
             reader.head_key: ControlStoreWrite(
                 expected_revision=head_entry.revision,
@@ -530,27 +533,55 @@ def test_generation_reader_rejects_head_digest_or_timestamp_substitution():
     with pytest.raises(GenerationStateCorrupt, match="digest"):
         reader.current()
 
-    clock.set(1_010)
-    original = GenerationHeadRecord(
+    snapshot_zero = GenerationSnapshotRecord.from_json(committed[reader.snapshot_key(0)].value)
+    timestamp_reader = _reader_from_history(
+        (snapshot_zero,),
+        head_committed_at_offset_ms=1,
+    )
+    with pytest.raises(GenerationStateCorrupt, match="timestamps"):
+        timestamp_reader.current()
+
+
+def test_generation_reader_rejects_same_timestamp_head_rollback():
+    _, store, lease, reader = _state()
+    generation_zero = _commit(
+        store,
+        reader,
+        lease,
+        generation=0,
+        previous_snapshot_digest=None,
+        expected_head_revision=None,
+    )
+    snapshot_zero = GenerationSnapshotRecord.from_json(
+        generation_zero[reader.snapshot_key(0)].value
+    )
+    generation_one = _commit(
+        store,
+        reader,
+        lease,
+        generation=1,
+        previous_snapshot_digest=snapshot_zero.digest,
+        expected_head_revision=generation_zero[reader.head_key].revision,
+    )
+    rollback = GenerationHeadRecord(
         run_id=RUN_ID,
         generation=0,
-        snapshot_digest=GenerationSnapshotRecord.from_json(
-            committed[reader.snapshot_key(0)].value
-        ).digest,
+        snapshot_digest=snapshot_zero.digest,
     )
     store.compare_set_many_guarded(
         {
             reader.head_key: ControlStoreWrite(
-                expected_revision=updated[reader.head_key].revision,
-                value=original.to_json(),
+                expected_revision=generation_one[reader.head_key].revision,
+                value=rollback.to_json(),
             )
         },
         guard_key=reader.coordinator_lease_key,
         expected_guard_revision=lease.fencing_token,
-        not_before_unix_ms=1_010,
+        not_before_unix_ms=lease.granted_at_unix_ms,
         deadline_unix_ms=lease.expires_at_unix_ms,
     )
-    with pytest.raises(GenerationStateCorrupt, match="timestamps"):
+
+    with pytest.raises(GenerationStateCorrupt, match="mutation sequence"):
         reader.current()
 
 

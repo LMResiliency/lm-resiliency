@@ -43,9 +43,9 @@ def test_control_store_create_update_delete_and_recreate():
     assert created.value == b"one"
     assert updated.value == b"two"
     assert store.get("run/control") == recreated
-    assert created.is_initial_creation
-    assert not updated.is_initial_creation
-    assert not recreated.is_initial_creation
+    assert created.mutation_sequence == 1
+    assert updated.mutation_sequence == 2
+    assert recreated.mutation_sequence == 4
     assert created.revision < updated.revision < tombstone_revision < recreated.revision
 
 
@@ -335,9 +335,9 @@ def test_control_store_entry_rejects_invalid_guard_provenance(
             guard_committed_at_unix_ms=0,
         )
 
-    with pytest.raises(TypeError):
+    with pytest.raises(ValueError):
         ControlStoreEntry(
             value=b"value",
             revision=1,
-            is_initial_creation=1,  # type: ignore[arg-type]
+            mutation_sequence=0,
         )

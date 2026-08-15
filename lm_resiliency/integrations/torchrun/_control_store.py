@@ -70,7 +70,7 @@ class ControlStoreEntry:
     value: bytes
     revision: int
     committed_at_unix_ms: int | None = None
-    is_initial_creation: bool = True
+    mutation_sequence: int = 1
     guard_key: str | None = None
     guard_revision: int | None = None
     guard_value_digest: str | None = None
@@ -79,8 +79,11 @@ class ControlStoreEntry:
     def __post_init__(self) -> None:
         object.__setattr__(self, "value", _control_value(self.value))
         object.__setattr__(self, "revision", _required_revision(self.revision))
-        if not isinstance(self.is_initial_creation, bool):
-            raise TypeError("is_initial_creation must be a boolean")
+        object.__setattr__(
+            self,
+            "mutation_sequence",
+            _positive_integer(self.mutation_sequence, "mutation_sequence"),
+        )
         if self.committed_at_unix_ms is not None:
             object.__setattr__(
                 self,
@@ -217,6 +220,7 @@ class InMemoryControlStore:
         self._lock = threading.RLock()
         self._entries: dict[str, ControlStoreEntry] = {}
         self._last_revisions: dict[str, int] = {}
+        self._mutation_sequences: dict[str, int] = {}
         self._clock = clock or _system_unix_ms
         self._last_now_unix_ms = 0
 
@@ -403,13 +407,12 @@ class InMemoryControlStore:
         guard_value_digest: str | None = None,
         guard_committed_at_unix_ms: int | None = None,
     ) -> ControlStoreEntry:
-        is_initial_creation = key not in self._last_revisions
         revision = self._next_revision(key)
         entry = ControlStoreEntry(
             value=value,
             revision=revision,
             committed_at_unix_ms=committed_at_unix_ms,
-            is_initial_creation=is_initial_creation,
+            mutation_sequence=self._mutation_sequences[key],
             guard_key=guard_key,
             guard_revision=guard_revision,
             guard_value_digest=guard_value_digest,
@@ -421,6 +424,7 @@ class InMemoryControlStore:
     def _next_revision(self, key: str) -> int:
         revision = self._last_revisions.get(key, 0) + 1
         self._last_revisions[key] = revision
+        self._mutation_sequences[key] = self._mutation_sequences.get(key, 0) + 1
         return revision
 
     def _store_now_unix_ms(self) -> int:
