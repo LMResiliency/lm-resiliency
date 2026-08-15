@@ -230,6 +230,31 @@ def test_lifecycle_reader_rejects_closed_head_without_lifecycle():
         reader.read()
 
 
+def test_lifecycle_reader_rejects_rewritten_open_head_without_lifecycle():
+    _, store, _, _, _, opened, reader = _open_state()
+    store.compare_set(
+        opened.prepared.intent_head_key,
+        expected_revision=opened.head_entry.revision,
+        value=opened.prepared.head.to_json(),
+    )
+
+    with pytest.raises(RestartIntentLifecycleReadCorrupt, match="initial creation"):
+        reader.read()
+
+
+def test_lifecycle_reader_rejects_orphaned_closure_without_lifecycle_head():
+    _, store, _, _, lease, opened, reader = _open_state()
+    records = _records(opened, lease)
+    store.compare_set(
+        records.closure_key,
+        expected_revision=None,
+        value=records.lifecycle.to_json(),
+    )
+
+    with pytest.raises(RestartIntentLifecycleReadCorrupt, match="without a lifecycle"):
+        reader.read()
+
+
 def test_lifecycle_reader_reconstructs_verified_closure():
     clock, store, _, _, lease, opened, reader = _open_state()
     records = _commit_closure(clock, store, opened, lease)

@@ -60,6 +60,7 @@ class InitialRestartIntentLifecycleReader:
         self._run_prefix = f"{_CONTROL_PREFIX}/runs/{run_digest}"
         self._intent_head_key = f"{self._run_prefix}/restart-intent-head"
         self._lifecycle_head_key = f"{self._run_prefix}/restart-intent-lifecycle-head"
+        self._initial_closure_key = f"{self._run_prefix}/restart-intent-closures/1"
         self._generation_reader = GenerationStateReader(store, run_id=self._run_id)
         self._lease_history_reader = CoordinatorLeaseHistoryReader(
             store,
@@ -97,9 +98,20 @@ class InitialRestartIntentLifecycleReader:
             ):
                 continue
             if lifecycle_observation.entry is None:
+                closure_observation = self._observe(self._initial_closure_key)
+                if not self._stable(
+                    self._intent_head_key,
+                    head_observation,
+                    self._lifecycle_head_key,
+                    lifecycle_observation,
+                    self._initial_closure_key,
+                    closure_observation,
+                ):
+                    continue
                 self._validate_absent_lifecycle(
                     head_observation,
                     lifecycle_observation,
+                    closure_observation,
                 )
                 return None
             lifecycle_head = self._decode_lifecycle_head(lifecycle_observation)
@@ -154,9 +166,14 @@ class InitialRestartIntentLifecycleReader:
         self,
         head: _ObservedKey,
         lifecycle: _ObservedKey,
+        closure: _ObservedKey,
     ) -> None:
         if lifecycle.has_history or lifecycle.history:
             raise RestartIntentLifecycleReadCorrupt("restart-intent lifecycle head was deleted")
+        if closure.entry is not None or closure.has_history or closure.history:
+            raise RestartIntentLifecycleReadCorrupt(
+                "restart-intent closure exists without a lifecycle head"
+            )
         if head.entry is None:
             if head.has_history or head.history:
                 raise RestartIntentLifecycleReadCorrupt("current restart-intent head was deleted")
@@ -177,6 +194,15 @@ class InitialRestartIntentLifecycleReader:
             raise RestartIntentLifecycleReadCorrupt(
                 "closed restart-intent head has no lifecycle state"
             ) from open_error
+        if (
+            head.history != (head.entry,)
+            or head.entry.mutation_sequence != 1
+            or head.entry.value_sequence != 1
+            or head.entry.lifetime_sequence != 1
+        ):
+            raise RestartIntentLifecycleReadCorrupt(
+                "live restart-intent head is not an immutable initial creation"
+            )
         if open_head.run_id != self._run_id or head.entry.value != open_head.to_json():
             raise RestartIntentLifecycleReadCorrupt(
                 "current restart-intent head is noncanonical or belongs to another run"
