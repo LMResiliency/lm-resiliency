@@ -660,6 +660,15 @@ coordinator-lease guard keys, shared opening and closure transactions, and
 causal transaction order. Generation and durable lease-history authentication
 remain the responsibility of the lifecycle reader that constructs this value.
 
+A frozen `AuthenticatedInitialRestartIntentClosure` value binds that decoded
+closure to the referenced immutable generation and verified durable
+coordinator-lease history. It resolves the exact generation, opening, and
+closing authorities, requires them to occur in order, requires generation and
+intent opening to precede the immediate successor generation, and verifies
+that generation creation, intent opening, and closure each committed inside
+their authoritative lease windows. Construction is fail closed and performs
+no control-store reads or mutations.
+
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be
 absent from the next assignment. Policy may additionally quarantine a removed
