@@ -112,6 +112,14 @@ class TamperedTransactionResultStore(InMemoryControlStore):
                 committed[head_key],
                 transaction_sequence=2,
             )
+        elif self._tamper == "guard_lineage":
+            for key in (intent_key, head_key):
+                committed[key] = replace(
+                    committed[key],
+                    guard_mutation_sequence=1,
+                    guard_value_sequence=1,
+                    guard_lifetime_sequence=1,
+                )
         else:
             raise AssertionError(f"unsupported tamper {self._tamper!r}")
         return committed
@@ -147,6 +155,7 @@ def _state(
     store_tamper: str | None = None,
     preparation_clock: ManualClock | None = None,
     prepare_deadline_unix_ms: int = 1_050,
+    renew_before_prepare: bool = False,
 ):
     store_clock = ManualClock()
     if store_tamper is None:
@@ -174,6 +183,9 @@ def _state(
     generation_manager.initialize(lease, _assignment())
     current = generation_manager.current()
     assert current is not None
+    if renew_before_prepare:
+        store_clock.set(1_010)
+        lease = lease_manager.renew(lease)
     prepared = preparer.prepare_initial_open(
         lease,
         current,
@@ -202,6 +214,18 @@ def test_execute_initial_open_commits_and_verifies_both_records():
     assert committed.committed_at_unix_ms == 1_000
     assert committed.transaction_sequence > current.snapshot.transaction_sequence
     assert committed.intent_entry.transaction_sequence == committed.head_entry.transaction_sequence
+
+
+def test_execute_initial_open_accepts_lease_renewed_after_generation_commit():
+    _, _, _, _, executor, _, current, prepared = _state(renew_before_prepare=True)
+
+    committed = executor.execute_initial_open(prepared)
+
+    assert committed.intent_entry.guard_mutation_sequence > current.snapshot.guard_mutation_sequence
+    assert committed.intent_entry.guard_value_sequence == current.snapshot.guard_value_sequence
+    assert (
+        committed.intent_entry.guard_lifetime_sequence == current.snapshot.guard_lifetime_sequence
+    )
 
 
 def test_execute_initial_open_rejects_changed_generation():
@@ -297,10 +321,14 @@ def test_execute_initial_open_rejects_store_time_before_preparation():
         "guard_digest",
         "commit_time",
         "generation_order",
+        "guard_lineage",
     ],
 )
 def test_execute_initial_open_rejects_tampered_transaction_results(tamper):
-    _, _, _, _, executor, _, _, prepared = _state(store_tamper=tamper)
+    _, _, _, _, executor, _, _, prepared = _state(
+        store_tamper=tamper,
+        renew_before_prepare=tamper == "guard_lineage",
+    )
 
     with pytest.raises(RestartIntentOpenExecutionCorrupt, match="transaction"):
         executor.execute_initial_open(prepared)
