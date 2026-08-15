@@ -300,6 +300,15 @@ checkpoint schema, and model configuration needed to interpret rank-local
 state. It is separate from `environment_digest`, which describes whether a node
 is eligible to run the same software and hardware workload.
 
+Each live agent persists a strict, versioned `AgentRegistrationRecord` that
+contains its complete immutable `AgentIdentity`, a unique registration lifetime
+ID, and the registration lease duration. The control-store revision is the
+opaque fencing token, and the store-stamped commit time plus duration determines
+expiry. Registration proves that one agent incarnation is live on a trusted
+node identity; it does not by itself make the node standby-eligible, admit it to
+a generation, or authorize resources absent from the trusted infrastructure
+inventory.
+
 ## API: lm-resiliency to the coordinator
 
 The current `OrchestrationHooks` callbacks are the starting point. The torchrun
