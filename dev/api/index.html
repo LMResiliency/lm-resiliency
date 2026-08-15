@@ -739,7 +739,10 @@ if step &gt;= 0 and destination is not None:
 </code></pre>
 <p><code>copy_checkpoint_to</code> copies flushed local and peer shards.
 Import <code>make_transfer</code> from <code>lm_resiliency.manager_api</code> when endpoint-addressed manager transfer is required.
-The <code>"torch_dist"</code> and <code>"nixl"</code> backends share the <code>CheckpointTransfer</code> contract.</p>
+The <code>"torch_dist"</code> and <code>"nixl"</code> backends share the <code>CheckpointTransfer</code> contract.
+Every transfer is keyed, bounded by <code>timeout_s</code>, and validates endpoint, tensor layout, byte count, and per-chunk checksums before applying received buffers.
+<code>TorchDistTransfer</code> uses a dedicated Gloo pair group even when the training world uses NCCL; both endpoints create the same pair in coordinated order, or the manager may pass an already-created dedicated Gloo <code>process_group</code>.
+NIXL is one-sided while the torch-distributed backend requires both endpoints to participate, so <code>make_transfer("nixl", ...)</code> fails if NIXL is unavailable unless the manager explicitly sets <code>allow_backend_fallback=True</code> after arranging the two-sided protocol.</p>
 <p>Launcher retry, placement, replacement, and quarantine policy remain outside this repository.</p>
 <h2 id="monitor-hardware-health">Monitor Hardware Health<a class="headerlink" href="#monitor-hardware-health" title="Permanent link">&para;</a></h2>
 <p>The optional hardware-health API complements replay and out-of-band consensus with direct telemetry for permanent or imminent device failures.
@@ -829,7 +832,7 @@ Import low-level checkpoint managers, replay detectors, topology objects, and co
 See <a href="../moe_execution_regimes/#build-and-audit-the-catalog">MoE execution regimes</a> for the command and catalog-qualification requirements.</p>
 <h2 id="related-guides">Related Guides<a class="headerlink" href="#related-guides" title="Permanent link">&para;</a></h2>
 <ul>
-<li><a href="https://github.com/LMResiliency/lm-resiliency/blob/866e29877d82cc99015491b224a81b3f0e5c6350/examples/README.md">Production-loop examples</a></li>
+<li><a href="https://github.com/LMResiliency/lm-resiliency/blob/d305aa0b122e859a5685bb1682d59cf6fd1e6141/examples/README.md">Production-loop examples</a></li>
 <li><a href="../fault_injection/">Fault injection evaluation</a></li>
 <li><a href="../gemini/">GEMINI</a></li>
 <li><a href="../scout/">SCOUT</a></li>

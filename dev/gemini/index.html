@@ -178,7 +178,9 @@ The default selects one visible node width so paired ranks normally reside on di
 Validate this assumption when rank placement is not contiguous by node.</p>
 <p>The built-in replication path uses a dedicated Gloo process group.
 It is validated for correctness over TCP and is not a line-rate RDMA implementation.
-Production deployments can use manager-driven Torch Distributed or NIXL transfer APIs for replacement workflows, but automatic checkpoint replication currently uses Gloo.</p>
+Production deployments can use manager-driven Torch Distributed or NIXL transfer APIs for replacement workflows, but automatic checkpoint replication currently uses Gloo.
+Manager-driven transfers bind a key to endpoint and tensor metadata, verify per-chunk checksums, and use bounded waits.
+The torch-distributed backend communicates on a dedicated Gloo group and requires both endpoints; fallback from one-sided NIXL is therefore explicit rather than automatic.</p>
 <p><code>replication_chunk_size</code> limits the largest in-flight transfer unit.
 Choose it from measured training communication slack rather than assuming a fixed network rate:</p>
 <pre><code class="language-python">from lm_resiliency import estimate_chunk_size
@@ -395,7 +397,7 @@ Framework integrations call the manager at safe optimizer boundaries and include
 <p>These values measure the synchronization-visible portion of asynchronous capture.
 They do not infer overhead from small differences between independent end-to-end step-time runs.
 Hardware, state layout, capture cadence, and available copy or network overlap can change the result.
-The reproducible <a href="https://github.com/LMResiliency/lm-resiliency/blob/866e29877d82cc99015491b224a81b3f0e5c6350/benchmarks/README.md">healthy-path benchmark</a> records current-package baseline, GEMINI, SCOUT, and combined measurements and applies explicit scheduled-run thresholds.
+The reproducible <a href="https://github.com/LMResiliency/lm-resiliency/blob/d305aa0b122e859a5685bb1682d59cf6fd1e6141/benchmarks/README.md">healthy-path benchmark</a> records current-package baseline, GEMINI, SCOUT, and combined measurements and applies explicit scheduled-run thresholds.
 The table above remains historical evidence for its stated A100 workload and is not a baseline for different benchmark shapes or hardware.</p>
 <h2 id="boundaries">Boundaries<a class="headerlink" href="#boundaries" title="Permanent link">&para;</a></h2>
 <ul>
