@@ -91,6 +91,24 @@ class TestOpTracker(unittest.TestCase):
 
     def test_shm_name(self):
         self.assertEqual(_shm_name(99), "scout_op_tracker_rank_99")
+        self.assertEqual(_shm_name(99, "opaque-channel"), "opaque-channel")
+
+    def test_live_owner_collision_does_not_attach_or_unlink(self):
+        name = "scout_test_owner_collision"
+        owner = OpTracker(rank=102, shm_name=name, owner_token=b"a" * 16)
+        try:
+            with self.assertRaisesRegex(FileExistsError, "owned by live process"):
+                OpTracker(rank=102, shm_name=name, owner_token=b"b" * 16)
+
+            wrong_reader = OpTrackerReader(
+                rank=102,
+                shm_name=name,
+                owner_token=b"b" * 16,
+            )
+            with self.assertRaisesRegex(RuntimeError, "ownership token mismatch"):
+                wrong_reader.attach()
+        finally:
+            owner.close()
 
 
 class TestOpTrackerReader(unittest.TestCase):

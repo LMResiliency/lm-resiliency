@@ -42,6 +42,46 @@ def test_readiness_wait_reports_early_child_exit():
         service.wait_until_ready(timeout_s=0.0)
 
 
+def test_health_check_reports_post_start_child_exit():
+    service = _unstarted_service()
+    service._ready_event.set()
+    service._process = Mock(is_alive=Mock(return_value=False), exitcode=23)
+
+    with pytest.raises(RuntimeError, match="exited unexpectedly with code 23"):
+        service.ensure_healthy()
+
+
+def test_supervisor_publishes_child_failure_to_callback_queue():
+    callback = Mock()
+    service = OOBHangService(
+        global_rank=3,
+        peer_ranks=[2, 3],
+        config=OOBHangConfig(),
+        report_callback=callback,
+    )
+    process = Mock(exitcode=9)
+
+    service._supervise_child(process)
+
+    report = service._report_queue.get(timeout=1.0)
+    assert report["kind"] == "oob_daemon_failure"
+    assert report["failed_ranks"] == [3]
+    assert report["exit_code"] == 9
+    service._report_queue.close()
+
+
+def test_tracker_channel_is_namespaced_by_run_generation_process_and_rank(monkeypatch):
+    monkeypatch.setenv("LM_RUN_ID", "job-a")
+    monkeypatch.setenv("TORCHELASTIC_RESTART_COUNT", "4")
+
+    rank_zero = OOBHangService(global_rank=0, peer_ranks=[0, 1], config=OOBHangConfig())
+    rank_one = OOBHangService(global_rank=1, peer_ranks=[0, 1], config=OOBHangConfig())
+    assert rank_zero.tracker_name != rank_one.tracker_name
+    assert rank_zero.tracker_name.startswith("scout_op_")
+    assert "job-a" not in rank_zero.tracker_name
+    assert rank_zero.tracker_token != rank_one.tracker_token
+
+
 def test_tcp_rendezvous_owns_a_store_instead_of_reusing_torchrun_agent_store():
     timeout = timedelta(seconds=10)
     store = object()

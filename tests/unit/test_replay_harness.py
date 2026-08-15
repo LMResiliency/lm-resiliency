@@ -13,7 +13,10 @@ from lm_resiliency.detection.layer_replay import (
     StragglerDetail,
     _slow_outlier_bitmap,
 )
-from lm_resiliency.detection.optimizer_step import OptimizerReplayBatch
+from lm_resiliency.detection.optimizer_step import (
+    OptimizerReplayBatch,
+    OptimizerStepCheckUnsupported,
+)
 from lm_resiliency.detection.replay_harness import (
     ModelReplayHarness,
     ReplayHarnessConfig,
@@ -360,7 +363,7 @@ class TestHookCapture:
         assert harness._activation is not None
         assert torch.equal(harness._activation, tokens + 1)
 
-    def test_scheduled_moe_replay_skips_stale_expert_capture(self):
+    def test_scheduled_moe_replay_reports_stale_expert_capture_as_inconclusive(self):
         model = RoutedExpertModel()
         harness = ModelReplayHarness(
             model,
@@ -378,7 +381,11 @@ class TestHookCapture:
 
         # The selected expert received no tokens on the scheduled step. SCOUT must
         # not replay the previous step's expert invocation as though it were current.
-        assert harness.step() is None
+        result = harness.step()
+        assert result is not None
+        assert result.replay_mode == "readiness_incomplete"
+        assert result.c3_results["replay_readiness"].status is C3Status.INCONCLUSIVE
+        assert not result.completed_scheduled_cycle
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -649,7 +656,7 @@ class TestDenseRecipes:
         assert scheduled is not None
         assert scheduled.checked_recipe_ids == ["hidden"]
 
-    def test_scheduled_dense_check_without_current_evidence_is_skipped(self):
+    def test_scheduled_dense_check_without_current_evidence_is_inconclusive(self):
         model = LlamaLikeModel(num_layers=2, hidden_dim=32)
         harness = ModelReplayHarness(
             model,
@@ -662,7 +669,87 @@ class TestDenseRecipes:
             layers=model.layers,
         )
 
-        assert harness.step() is None
+        result = harness.step()
+
+        assert result is not None
+        assert result.replay_mode == "readiness_incomplete"
+        assert result.c3_results["replay_readiness"].status is C3Status.INCONCLUSIVE
+        assert not result.completed_scheduled_cycle
+
+    def test_asymmetric_dense_readiness_blocks_every_recipe_collective(self):
+        model = LlamaLikeModel(num_layers=2, hidden_dim=32)
+        harness = ModelReplayHarness(
+            model,
+            config=ReplayHarnessConfig(
+                check_interval=1,
+                embedding_check_interval=0,
+                output_check_interval=0,
+                optimizer_check_interval=0,
+                rotate_layers=False,
+            ),
+            layers=model.layers,
+        )
+        model(torch.randint(0, 100, (2, 8)))
+        detector = self._detector()
+        harness._detector = detector
+        harness._schedule_readiness = C3Result(C3Status.AGREE, [0, 0], [1, 1])
+
+        with patch.object(
+            harness,
+            "_compare_replay_readiness",
+            return_value=C3Result(C3Status.INCONCLUSIVE, [0, 0], [1, 0]),
+        ):
+            result = harness.step()
+
+        assert result is not None
+        assert result.c3_results["replay_readiness"].status is C3Status.INCONCLUSIVE
+        detector.replay_invocation.assert_not_called()
+        detector.compare_tensor_groups.assert_not_called()
+
+    def test_schedule_disagreement_blocks_before_local_due_gating(self):
+        model = LlamaLikeModel(num_layers=2, hidden_dim=32)
+        harness = ModelReplayHarness(
+            model,
+            config=ReplayHarnessConfig(check_interval=10),
+            layers=model.layers,
+        )
+
+        with patch.object(
+            harness,
+            "_compare_replay_readiness",
+            return_value=C3Result(C3Status.INCONCLUSIVE, [0, 0], [11, 12]),
+        ):
+            result = harness.step()
+
+        assert result is not None
+        assert harness.step_count == 1
+        assert result.c3_results["replay_readiness"].status is C3Status.INCONCLUSIVE
+        assert not result.completed_scheduled_cycle
+
+    def test_optimizer_capture_failure_is_agreed_before_c3_replay(self):
+        model = LlamaLikeModel(num_layers=2, hidden_dim=32)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
+        harness = ModelReplayHarness(
+            model,
+            config=ReplayHarnessConfig(
+                check_interval=1,
+                embedding_check_interval=0,
+                hidden_check_interval=0,
+                output_check_interval=0,
+                optimizer_check_interval=1,
+            ),
+            layers=model.layers,
+        )
+
+        with patch(
+            "lm_resiliency.detection.replay_harness.collect_updated_weights",
+            side_effect=OptimizerStepCheckUnsupported("unsupported layout"),
+        ):
+            result = harness.step(optimizer=optimizer)
+
+        assert result is not None
+        assert result.c3_results["replay_readiness"].status is C3Status.INCONCLUSIVE
+        assert harness._detector is None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1017,18 +1104,46 @@ class TestHookRemoval:
 
             assert service_cls.call_args.kwargs["report_callback"] is oob_callback
             service_cls.return_value.start.assert_called_once()
+            service_cls.return_value.wait_until_ready.assert_called_once()
             instrumentation_cls.assert_called_once_with(
                 model,
                 model.layers,
                 1,
                 progress_event=service_cls.return_value.progress_event,
+                tracker_name=service_cls.return_value.tracker_name,
+                tracker_token=service_cls.return_value.tracker_token,
             )
             dataloader = harness.instrument_dataloader([1, 2])
             assert dataloader._scout_detection_interval == 7
+            harness.mark_step_boundary()
+            service_cls.return_value.ensure_healthy.assert_called_once()
             harness.remove_hooks()
 
         service_cls.return_value.close.assert_called_once()
         instrumentation_cls.return_value.close.assert_called_once()
+
+    def test_oob_startup_failure_cleans_up_partial_instrumentation(self):
+        model = LlamaLikeModel(num_layers=2, hidden_dim=32)
+
+        with (
+            patch.object(dist, "is_initialized", return_value=True),
+            patch.object(dist, "get_world_size", return_value=2),
+            patch.object(dist, "get_rank", return_value=0),
+            patch(
+                "lm_resiliency.detection.replay_harness.HangInstrumentation"
+            ) as instrumentation_cls,
+            patch("lm_resiliency.detection.replay_harness.OOBHangService") as service_cls,
+        ):
+            service_cls.return_value.wait_until_ready.side_effect = TimeoutError("not ready")
+            with pytest.raises(TimeoutError, match="not ready"):
+                ModelReplayHarness(
+                    model,
+                    config=ReplayHarnessConfig(check_interval=7),
+                    layers=model.layers,
+                )
+
+        instrumentation_cls.return_value.close.assert_called_once()
+        service_cls.return_value.close.assert_called_once()
 
     def test_remove_hooks(self):
         model = LlamaLikeModel(num_layers=4, hidden_dim=32)

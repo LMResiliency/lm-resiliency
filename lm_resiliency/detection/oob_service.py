@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import logging
 import multiprocessing
 import os
 import queue
 import re
+import secrets
 import signal
 import threading
 import traceback
@@ -64,18 +66,35 @@ class OOBHangService:
         self._progress_event = self._context.Event()
         self._ready_event = self._context.Event()
         self._process: multiprocessing.Process | None = None
+        self._tracker_name = _tracker_channel_name(global_rank, peer_ranks)
+        self._tracker_token = secrets.token_bytes(16)
         self._report_callback = report_callback
         self._report_queue = self._context.Queue() if report_callback is not None else None
         self._report_thread: threading.Thread | None = None
+        self._monitor_thread: threading.Thread | None = None
+        self._failure: RuntimeError | None = None
+        self._closing = False
 
     @property
     def progress_event(self):
         """Local training-to-daemon progress notification."""
         return self._progress_event
 
+    @property
+    def tracker_name(self) -> str:
+        """Opaque shared-memory channel passed to the training-side tracker."""
+        return self._tracker_name
+
+    @property
+    def tracker_token(self) -> bytes:
+        """Ownership token required by both publisher and daemon reader."""
+        return self._tracker_token
+
     def start(self) -> None:
         if self._process is not None:
             return
+        self._closing = False
+        self._failure = None
         if self._report_queue is not None:
             self._report_thread = threading.Thread(
                 target=self._dispatch_reports,
@@ -84,7 +103,7 @@ class OOBHangService:
             )
             self._report_thread.start()
         self._ready_event.clear()
-        self._process = self._context.Process(
+        process = self._context.Process(
             target=_daemon_main,
             args=(
                 self._global_rank,
@@ -93,11 +112,29 @@ class OOBHangService:
                 self._progress_event,
                 self._ready_event,
                 self._report_queue,
+                self._tracker_name,
+                self._tracker_token,
             ),
             name=f"scout-oob-rank-{self._global_rank}",
             daemon=True,
         )
-        self._process.start()
+        try:
+            process.start()
+        except BaseException:
+            if self._report_queue is not None:
+                self._report_queue.put(None)
+            if self._report_thread is not None:
+                self._report_thread.join(timeout=2.0)
+                self._report_thread = None
+            raise
+        self._process = process
+        self._monitor_thread = threading.Thread(
+            target=self._supervise_child,
+            args=(process,),
+            name=f"scout-oob-supervisor-rank-{self._global_rank}",
+            daemon=True,
+        )
+        self._monitor_thread.start()
 
     def wait_until_ready(self, timeout_s: float | None = None) -> None:
         """Wait until the child has joined its independent process group."""
@@ -111,8 +148,19 @@ class OOBHangService:
                     f"SCOUT OOB daemon exited before readiness with code {process.exitcode}"
                 )
             raise TimeoutError(f"SCOUT OOB daemon was not ready within {timeout:.1f}s")
+        self.ensure_healthy(require_ready=True)
+
+    def ensure_healthy(self, *, require_ready: bool = True) -> None:
+        """Raise when the supervised child is unavailable or exited."""
+        process = self._process
+        if process is None:
+            raise RuntimeError("SCOUT OOB service has not been started")
+        if self._failure is not None:
+            raise self._failure
+        if require_ready and not self._ready_event.is_set():
+            raise RuntimeError("SCOUT OOB daemon has not reported readiness")
         if not process.is_alive():
-            raise RuntimeError(f"SCOUT OOB daemon exited at readiness with code {process.exitcode}")
+            raise RuntimeError(f"SCOUT OOB daemon exited unexpectedly with code {process.exitcode}")
 
     @property
     def pid(self) -> int | None:
@@ -127,21 +175,46 @@ class OOBHangService:
         return self._process.exitcode if self._process is not None else None
 
     def close(self) -> None:
+        self._closing = True
         process = self._process
         self._process = None
-        if process is None:
-            return
-        if process.is_alive():
-            process.terminate()
-        process.join(timeout=5.0)
-        if process.is_alive():
-            process.kill()
-            process.join(timeout=2.0)
+        if process is not None:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=5.0)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=2.0)
+            if self._monitor_thread is not None:
+                self._monitor_thread.join(timeout=2.0)
+                self._monitor_thread = None
         if self._report_queue is not None:
             self._report_queue.put(None)
         if self._report_thread is not None:
             self._report_thread.join(timeout=2.0)
             self._report_thread = None
+
+    def _supervise_child(self, process: multiprocessing.Process) -> None:
+        process.join()
+        if self._closing:
+            return
+        failure = RuntimeError(
+            f"SCOUT OOB daemon for rank {self._global_rank} exited unexpectedly "
+            f"with code {process.exitcode}"
+        )
+        self._failure = failure
+        report: SCOUTFaultReport = {
+            "failed_ranks": [self._global_rank],
+            "kind": "oob_daemon_failure",
+            "scope": "rank",
+            "sources": ["oob_daemon"],
+            "exit_code": process.exitcode,
+            "reason": str(failure),
+        }
+        if self._report_queue is not None:
+            self._report_queue.put(report)
+        else:
+            logger.critical("%s", failure)
 
     def _dispatch_reports(self) -> None:
         assert self._report_queue is not None
@@ -166,6 +239,8 @@ def _daemon_main(
     progress_event,
     ready_event,
     report_queue,
+    tracker_name: str,
+    tracker_token: bytes,
 ) -> None:
     _set_parent_death_signal()
     local_rank = peer_ranks.index(global_rank)
@@ -198,6 +273,8 @@ def _daemon_main(
             checkpoint_io_latency_threshold_s=config.checkpoint_io_latency_threshold_s,
             checkpoint_io_min_slowdown_ratio=config.checkpoint_io_min_slowdown_ratio,
             checkpoint_io_confirmation_rounds=config.checkpoint_io_confirmation_rounds,
+            tracker_name=tracker_name,
+            tracker_token=tracker_token,
         )
         _write_daemon_status(config, global_rank, "ready")
         ready_event.set()
@@ -304,6 +381,27 @@ def _group_port(peer_ranks: list[int]) -> int:
     base = int(os.environ.get("LM_SCOUT_OOB_PORT", int(os.environ.get("MASTER_PORT", 29500)) + 100))
     group_hash = sum((index + 1) * (rank + 1) for index, rank in enumerate(peer_ranks))
     return 1024 + ((base - 1024 + group_hash) % (65535 - 1024))
+
+
+def _tracker_channel_name(global_rank: int, peer_ranks: list[int]) -> str:
+    run_id = (
+        os.environ.get("TORCHELASTIC_RUN_ID")
+        or os.environ.get("LM_RUN_ID")
+        or os.environ.get("SLURM_JOB_ID")
+        or f"{os.environ.get('MASTER_ADDR', 'local')}:{os.environ.get('MASTER_PORT', 'none')}"
+    )
+    generation = os.environ.get("TORCHELASTIC_RESTART_COUNT", "0")
+    identity = "|".join(
+        (
+            run_id,
+            generation,
+            str(os.getpid()),
+            str(global_rank),
+            ",".join(str(rank) for rank in peer_ranks),
+        )
+    )
+    digest = hashlib.blake2s(identity.encode("utf-8"), digest_size=16).hexdigest()
+    return f"scout_op_{digest}"
 
 
 def _rendezvous_method(

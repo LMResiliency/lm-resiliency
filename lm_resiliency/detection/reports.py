@@ -46,6 +46,8 @@ class SCOUTFaultReport(TypedDict, total=False):
     slow_groups: list[str]
     healthy_groups: list[str]
     confidence: float
+    exit_code: int | None
+    reason: str
 
 
 SCOUTFaultCallback = Callable[[SCOUTFaultReport], None]

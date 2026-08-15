@@ -50,6 +50,8 @@ Validate this assumption when rank placement is not contiguous by node.
 The built-in replication path uses a dedicated Gloo process group.
 It is validated for correctness over TCP and is not a line-rate RDMA implementation.
 Production deployments can use manager-driven Torch Distributed or NIXL transfer APIs for replacement workflows, but automatic checkpoint replication currently uses Gloo.
+Manager-driven transfers bind a key to endpoint and tensor metadata, verify per-chunk checksums, and use bounded waits.
+The torch-distributed backend communicates on a dedicated Gloo group and requires both endpoints; fallback from one-sided NIXL is therefore explicit rather than automatic.
 
 `replication_chunk_size` limits the largest in-flight transfer unit.
 Choose it from measured training communication slack rather than assuming a fixed network rate:
@@ -156,13 +158,18 @@ SDC. An SDC in one group therefore rejects the candidate on every rank.
 ## Persistence and Recovery
 
 GEMINI serializes only completed slots.
+Each shard is written to a same-directory temporary file, flushed, and atomically renamed before it becomes visible to recovery.
+Restart mirrors use the same publication rule.
+Temporary files left by a terminated writer are ignored and removed before the next write to that shard, while latest-mode recovery walks older generations until it finds the newest shard set that every rank can load and validate.
 At a dense accepted boundary, it persists the latest local CPU checkpoint and received peer replica as recovery-verified.
 At a dynamic recipe-cycle boundary, it persists them as the new candidate and records candidate and recovery-verified steps separately.
 Each rank owns its status sidecar; several workers on one node never update the same mutable trust record.
 A persisted peer shard carries the corresponding peer status so recovery can reconstruct the verified generation after node loss.
 If newer status cannot be established, recovery selects the common verified step conservatively.
-With `verify_integrity=True`, it stores a CRC-32 for each shard and treats a checksum failure as an unavailable shard.
+With `verify_integrity=True`, it stores a CRC-32 for each shard and treats a checksum failure or missing checksum metadata as an unavailable shard.
 Checksums detect stored-byte corruption; they cannot prove that the source GPU state was numerically correct.
+Enabling integrity verification is therefore a fail-closed configuration change:
+node-local checkpoints written earlier with `verify_integrity=False` are not eligible for recovery until a new checksummed generation is persisted.
 
 Node-local files use checkpoint format version 3. Files and status sidecars live
 under an opaque run/topology namespace. Every shard also records the exact run

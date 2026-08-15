@@ -402,6 +402,7 @@ class ModelReplayHarness:
         self._activation: torch.Tensor | None = None
         self._grad_output: torch.Tensor | None = None
         self._step_count = 0
+        self._schedule_readiness: C3Result | None = None
         self._last_result: ReplayResult | None = None
         self._captured_inputs_owned = False
         self._captured_step: int | None = None
@@ -475,6 +476,192 @@ class ModelReplayHarness:
             return False
         interval = self._dense_recipe_interval(recipe_id)
         return interval > 0 and step % interval == 0
+
+    def _compare_replay_readiness(
+        self,
+        contract: dict[str, Any],
+        *,
+        locally_ready: bool,
+    ) -> C3Result:
+        """Agree one compact pre-replay contract before recipe collectives."""
+        if (
+            not dist.is_available()
+            or not dist.is_initialized()
+            or dist.get_world_size(self._group) == 1
+        ):
+            status = C3Status.AGREE if locally_ready else C3Status.INCONCLUSIVE
+            return C3Result(status, [0], [int(locally_ready)])
+
+        result = self._get_detector().compare_structure(contract)
+        if locally_ready and result.status is C3Status.AGREE:
+            return result
+        return C3Result(
+            C3Status.INCONCLUSIVE,
+            [0] * len(result.bitmap),
+            result.evidence,
+        )
+
+    def _dense_replay_readiness(
+        self,
+        *,
+        scheduled: bool,
+        optimizer_step_tensors: OptimizerStepEvidence | None,
+    ) -> C3Result:
+        due_recipes = [
+            recipe_id
+            for recipe_id in ("embedding", "hidden", "output", "optimizer")
+            if self._dense_recipe_due(recipe_id, scheduled=scheduled)
+        ]
+        recipes: list[dict[str, Any]] = []
+        locally_ready = bool(due_recipes)
+        for recipe_id in due_recipes:
+            if recipe_id == "hidden":
+                invocation = self._invocation
+                capture_step = self._captured_step
+                layer_id: int | str = self._target_layer_index
+                module = self._target_layer
+                ready = invocation is not None and (
+                    not scheduled or capture_step == self._step_count
+                )
+            elif recipe_id in ("embedding", "output"):
+                invocation = self._dense_recipe_invocations.get(recipe_id)
+                capture_step = self._dense_recipe_capture_steps.get(recipe_id)
+                layer_id = -1 if recipe_id == "embedding" else len(self._layers)
+                module = self._dense_recipe_modules.get(recipe_id)
+                ready = (
+                    module is not None
+                    and invocation is not None
+                    and (not scheduled or capture_step == self._step_count)
+                )
+            else:
+                invocation = None
+                capture_step = self._step_count
+                layer_id = "optimizer"
+                module = None
+                ready = optimizer_step_tensors is not None
+            locally_ready = locally_ready and ready
+            recipes.append(
+                {
+                    "recipe_id": recipe_id,
+                    "ready": ready,
+                    "capture_step": capture_step,
+                    "layer_id": layer_id,
+                    "module_type": (
+                        None
+                        if module is None
+                        else f"{type(module).__module__}.{type(module).__qualname__}"
+                    ),
+                    "invocation": _invocation_shape_contract(invocation),
+                    "optimizer_evidence": (
+                        _optimizer_evidence_contract(optimizer_step_tensors)
+                        if recipe_id == "optimizer"
+                        else None
+                    ),
+                }
+            )
+        contract = {
+            "kind": "scout-replay-readiness",
+            "version": 1,
+            "step": self._step_count,
+            "scheduled": scheduled,
+            "shape_plan": self.replay_shape_plan_id,
+            "shape_id": "captured",
+            "recipes": recipes,
+            "all_to_all": _all_to_all_readiness_contract(
+                self._config.all_to_all_policy,
+                self._all_to_all_replay_recipes,
+            ),
+        }
+        return self._compare_replay_readiness(contract, locally_ready=locally_ready)
+
+    def _ensure_schedule_readiness(self) -> C3Result:
+        """Validate the immutable cadence contract once before local due gating."""
+        if self._schedule_readiness is not None:
+            return self._schedule_readiness
+        contract = {
+            "kind": "scout-replay-schedule",
+            "version": 1,
+            "dense": self._is_dense_catalog,
+            "shape_plan": self.replay_shape_plan_id,
+            "shape_ids": tuple(shape.shape_id for shape in self.replay_shapes),
+            "layer_count": len(self._layers),
+            "intervals": {
+                "base": self._config.check_interval,
+                "embedding": self._dense_recipe_interval("embedding"),
+                "hidden": self._dense_recipe_interval("hidden"),
+                "output": self._dense_recipe_interval("output"),
+                "optimizer": self._dense_recipe_interval("optimizer"),
+            },
+            "dense_modules": {
+                recipe_id: f"{type(module).__module__}.{type(module).__qualname__}"
+                for recipe_id, module in sorted(self._dense_recipe_modules.items())
+            },
+            "all_to_all_policy": (
+                None
+                if self._config.all_to_all_policy is None
+                else (
+                    f"{type(self._config.all_to_all_policy).__module__}."
+                    f"{type(self._config.all_to_all_policy).__qualname__}"
+                )
+            ),
+        }
+        self._schedule_readiness = self._compare_replay_readiness(
+            contract,
+            locally_ready=True,
+        )
+        return self._schedule_readiness
+
+    def _dynamic_replay_readiness(self) -> C3Result:
+        invocation = self._invocation
+        locally_ready = (
+            invocation is not None
+            and self._activation is not None
+            and self._captured_step == self._step_count
+        )
+        shape = self.current_replay_shape
+        contract = {
+            "kind": "scout-replay-readiness",
+            "version": 1,
+            "step": self._step_count,
+            "scheduled": True,
+            "shape_plan": self.replay_shape_plan_id,
+            "shape_id": shape.shape_id,
+            "shape": shape.dimensions,
+            "layer_id": self._target_layer_index,
+            "ready": locally_ready,
+            "capture_step": self._captured_step,
+            "invocation": _invocation_shape_contract(invocation),
+            "all_to_all": _all_to_all_readiness_contract(
+                self._config.all_to_all_policy,
+                self._all_to_all_replay_recipes,
+            ),
+        }
+        return self._compare_replay_readiness(contract, locally_ready=locally_ready)
+
+    def _prepare_optimizer_step_evidence(
+        self,
+        optimizer: torch.optim.Optimizer | None,
+        *,
+        allow_local_dtensor_shards: bool,
+        optimizer_step_tensors: OptimizerStepEvidence | None,
+    ) -> OptimizerStepEvidence | None:
+        if optimizer_step_tensors is not None:
+            return optimizer_step_tensors
+        if self._optimizer_step_check_disabled or optimizer is None:
+            return None
+        try:
+            return collect_updated_weights(
+                optimizer,
+                list(self._target_layer.parameters()),
+                allow_local_dtensor_shards=allow_local_dtensor_shards,
+            )
+        except OptimizerStepCheckUnsupported as exc:
+            self._optimizer_step_check_disabled = True
+            logger.warning(
+                "SCOUT optimizer-step verification disabled: %s. Layer replay remains enabled.",
+                exc,
+            )
+            return None
 
     def _optimizer_step_hook(self, optimizer, args, kwargs) -> None:
         """Post-step hook: auto-triggers detection at the configured interval."""
@@ -635,8 +822,18 @@ class ModelReplayHarness:
 
         Returns ReplayResult if detection ran this step, None otherwise.
         """
+        self._ensure_oob_healthy()
         self._step_count += 1
         self._snapshot_all_to_all_recipes()
+        schedule_readiness = self._ensure_schedule_readiness()
+        if schedule_readiness.status is not C3Status.AGREE:
+            result = self._incomplete_replay_result(
+                schedule_readiness,
+                dense=self._is_dense_catalog,
+            )
+            if self._hang_instrumentation is not None:
+                self._hang_instrumentation.step_boundary()
+            return result
         result = None
         if self._is_dense_catalog:
             if any(
@@ -653,16 +850,18 @@ class ModelReplayHarness:
         elif (
             self._config.check_interval > 0 and self._step_count % self._config.check_interval == 0
         ):
-            if self._captured_step == self._step_count and self.has_capture:
+            readiness = self._dynamic_replay_readiness()
+            if readiness.status is C3Status.AGREE:
                 check = self.check_shape_cycle if complete_shape_cycle else self.check
                 result = check(
                     optimizer=optimizer or self._optimizer,
                     allow_local_dtensor_shards=allow_local_dtensor_shards,
                     optimizer_step_tensors=optimizer_step_tensors,
                 )
+                result.c3_results["replay_readiness"] = readiness
             else:
-                logger.debug("SCOUT scheduled replay skipped: selected layer has no capture")
-        if result is not None:
+                result = self._incomplete_replay_result(readiness, dense=False)
+        if result is not None and _replay_readiness_allows_execution(result):
             self._attach_all_to_all_replay(result)
         if self._hang_instrumentation is not None:
             self._hang_instrumentation.step_boundary()
@@ -670,6 +869,7 @@ class ModelReplayHarness:
 
     def mark_step_boundary(self) -> None:
         """Publish an externally counted step without running scheduled replay."""
+        self._ensure_oob_healthy()
         if self._hang_instrumentation is not None:
             self._hang_instrumentation.step_boundary()
 
@@ -688,17 +888,6 @@ class ModelReplayHarness:
         """
         self._snapshot_all_to_all_recipes()
         if self._is_dense_catalog:
-            if (
-                self._invocation is None
-                and not self._dense_recipe_invocations
-                and optimizer_step_tensors is None
-                and optimizer is None
-                and self._optimizer is None
-            ):
-                raise RuntimeError(
-                    "No activation captured yet. Ensure at least one forward pass "
-                    "has run before calling check()."
-                )
             result = self._check_dense_recipes(
                 optimizer=optimizer,
                 allow_local_dtensor_shards=allow_local_dtensor_shards,
@@ -708,7 +897,8 @@ class ModelReplayHarness:
             )
             if result is None:
                 raise RuntimeError("No activation captured for an enabled dense replay recipe")
-            self._attach_all_to_all_replay(result)
+            if _replay_readiness_allows_execution(result):
+                self._attach_all_to_all_replay(result)
             return result
 
         if self._activation is None or self._invocation is None:
@@ -739,38 +929,22 @@ class ModelReplayHarness:
         scheduled: bool,
         rotate_hidden: bool,
     ) -> ReplayResult | None:
-        has_module_evidence = False
-        for recipe_id in ("embedding", "hidden", "output"):
-            if not self._dense_recipe_due(recipe_id, scheduled=scheduled):
-                continue
-            if recipe_id == "hidden":
-                has_module_evidence = self._invocation is not None and (
-                    not scheduled or self._captured_step == self._step_count
-                )
-            else:
-                has_module_evidence = (
-                    recipe_id in self._dense_recipe_modules
-                    and recipe_id in self._dense_recipe_invocations
-                    and (
-                        not scheduled
-                        or self._dense_recipe_capture_steps.get(recipe_id) == self._step_count
-                    )
-                )
-            if has_module_evidence:
-                break
-        optimizer_due = self._dense_recipe_due("optimizer", scheduled=scheduled)
-        has_optimizer_evidence = optimizer_due and (
-            optimizer_step_tensors is not None
-            or (
-                not self._optimizer_step_check_disabled
-                and (optimizer is not None or self._optimizer is not None)
+        optimizer = optimizer or self._optimizer
+        prepared_optimizer_evidence = optimizer_step_tensors
+        if self._dense_recipe_due("optimizer", scheduled=scheduled):
+            prepared_optimizer_evidence = self._prepare_optimizer_step_evidence(
+                optimizer,
+                allow_local_dtensor_shards=allow_local_dtensor_shards,
+                optimizer_step_tensors=optimizer_step_tensors,
             )
+        readiness = self._dense_replay_readiness(
+            scheduled=scheduled,
+            optimizer_step_tensors=prepared_optimizer_evidence,
         )
-        if not has_module_evidence and not has_optimizer_evidence:
-            if scheduled:
-                logger.debug("SCOUT scheduled dense replay skipped: no current evidence")
-                return None
-            raise RuntimeError("No activation captured for an enabled dense replay recipe")
+        if readiness.status is not C3Status.AGREE:
+            if not scheduled and readiness.evidence == [0]:
+                raise RuntimeError("No activation captured for an enabled dense replay recipe")
+            return self._incomplete_replay_result(readiness, dense=True)
 
         detector = self._get_detector()
         results: list[ReplayResult] = []
@@ -817,9 +991,9 @@ class ModelReplayHarness:
         if self._dense_recipe_due("optimizer", scheduled=scheduled):
             optimizer_results = self._compare_optimizer_step(
                 detector,
-                optimizer or self._optimizer,
+                optimizer,
                 allow_local_dtensor_shards=allow_local_dtensor_shards,
-                optimizer_step_tensors=optimizer_step_tensors,
+                optimizer_step_tensors=prepared_optimizer_evidence,
             )
 
         if not results and not optimizer_results:
@@ -867,6 +1041,7 @@ class ModelReplayHarness:
         aggregate.completed_shape_cycle = True
         aggregate.completed_scheduled_cycle = True
         aggregate.dense_replay = True
+        aggregate.c3_results["replay_readiness"] = readiness
         self._last_result = aggregate
         if (
             rotate_hidden
@@ -875,6 +1050,35 @@ class ModelReplayHarness:
         ):
             self._rotate_target_layer()
         return aggregate
+
+    def _incomplete_replay_result(
+        self,
+        readiness: C3Result,
+        *,
+        dense: bool,
+    ) -> ReplayResult:
+        peer_ranks = self._peer_group.peer_ranks
+        width = len(peer_ranks)
+        shape = self.current_replay_shape
+        return ReplayResult(
+            sdc_bitmap=[0] * width,
+            straggler_bitmap=[0] * width,
+            replay_time_ms=0.0,
+            layer_id=self._target_layer_index,
+            peer_ranks=peer_ranks,
+            replay_times_ms=[0.0] * width,
+            replay_mode="readiness_incomplete",
+            spatial_straggler_bitmap=[0] * width,
+            replay_shape_id="captured" if dense else shape.shape_id,
+            replay_shape=None if dense else shape.dimensions,
+            checked_shape_ids=[],
+            checked_shapes=[],
+            shape_cycle_size=1 if dense else len(self.replay_shapes),
+            completed_shape_cycle=False,
+            completed_scheduled_cycle=False,
+            dense_replay=dense,
+            c3_results={"replay_readiness": readiness},
+        )
 
     def _replay_dense_module(
         self,
@@ -918,7 +1122,8 @@ class ModelReplayHarness:
             )
             if result is None:
                 raise RuntimeError("No activation captured for an enabled dense replay recipe")
-            self._attach_all_to_all_replay(result)
+            if _replay_readiness_allows_execution(result):
+                self._attach_all_to_all_replay(result)
             return result
 
         if self._activation is None or self._invocation is None:
@@ -1299,8 +1504,22 @@ class ModelReplayHarness:
             self._layers,
             global_rank,
             progress_event=self._oob_service.progress_event,
+            tracker_name=self._oob_service.tracker_name,
+            tracker_token=self._oob_service.tracker_token,
         )
-        self._oob_service.start()
+        try:
+            self._oob_service.start()
+            self._oob_service.wait_until_ready()
+        except BaseException:
+            self._hang_instrumentation.close()
+            self._hang_instrumentation = None
+            self._oob_service.close()
+            self._oob_service = None
+            raise
+
+    def _ensure_oob_healthy(self) -> None:
+        if self._oob_service is not None:
+            self._oob_service.ensure_healthy()
 
     @property
     def last_result(self) -> ReplayResult | None:
@@ -1577,6 +1796,115 @@ def _aggregate_shape_cycle(
 def _capture_tensor(value: torch.Tensor, *, clone: bool) -> torch.Tensor:
     captured = value.detach()
     return captured.clone() if clone else captured
+
+
+def _value_shape_contract(value: Any) -> dict[str, Any]:
+    leaves, spec = tree_flatten(value)
+    metadata: list[object] = []
+    for leaf in leaves:
+        if isinstance(leaf, torch.Tensor):
+            local = leaf.to_local() if type(leaf).__name__ == "DTensor" else leaf
+            metadata.append(
+                {
+                    "kind": "tensor",
+                    "shape": tuple(local.shape),
+                    "dtype": str(local.dtype),
+                    "device": local.device.type,
+                    "requires_grad": bool(local.requires_grad),
+                }
+            )
+        elif leaf is None or type(leaf) in (bool, int, float, str, bytes):
+            metadata.append({"kind": type(leaf).__name__, "value": leaf})
+        else:
+            metadata.append(
+                {
+                    "kind": "object",
+                    "type": f"{type(leaf).__module__}.{type(leaf).__qualname__}",
+                }
+            )
+    return {"tree": repr(spec), "leaves": metadata}
+
+
+def _invocation_shape_contract(invocation: ReplayInvocation | None) -> dict[str, Any] | None:
+    if invocation is None:
+        return None
+    return {
+        "inputs": _value_shape_contract((invocation.args, invocation.kwargs)),
+        "input_requires_grad": tuple(invocation.input_requires_grad),
+        "grad_output": (
+            None
+            if invocation.grad_output is None
+            else _value_shape_contract(invocation.grad_output)
+        ),
+        "autocast_enabled": invocation.autocast_enabled,
+        "autocast_device_type": invocation.autocast_device_type,
+        "autocast_dtype": (
+            None if invocation.autocast_dtype is None else str(invocation.autocast_dtype)
+        ),
+    }
+
+
+def _optimizer_evidence_contract(
+    evidence: OptimizerStepEvidence | None,
+) -> dict[str, Any] | None:
+    if evidence is None:
+        return None
+    if isinstance(evidence, OptimizerReplayBatch):
+        return {
+            "kind": "replay_batch",
+            "recipes": [
+                {
+                    "optimizer_type": (
+                        f"{type(recipe.optimizer).__module__}.{type(recipe.optimizer).__qualname__}"
+                    ),
+                    "status": recipe.status,
+                    "capture": recipe.capture is not None,
+                    "length": None if recipe.capture is None else recipe.capture.length,
+                }
+                for recipe in evidence.recipes
+            ],
+        }
+    return {
+        "kind": "tensor_groups",
+        "groups": {
+            name: _value_shape_contract(tensors) for name, tensors in sorted(evidence.items())
+        },
+    }
+
+
+def _all_to_all_readiness_contract(
+    policy: object | None,
+    recipes: Sequence[AllToAllReplayRecipe],
+) -> dict[str, Any]:
+    return {
+        "policy": (
+            None if policy is None else f"{type(policy).__module__}.{type(policy).__qualname__}"
+        ),
+        "recipes": [
+            {
+                "sequence": recipe.sequence,
+                "collective": recipe.collective,
+                "group_ranks": recipe.group_ranks,
+                "inputs": tuple(
+                    (spec.shape, str(spec.dtype), spec.numel, spec.element_size)
+                    for spec in recipe.inputs
+                ),
+                "outputs": tuple(
+                    (spec.shape, str(spec.dtype), spec.numel, spec.element_size)
+                    for spec in recipe.outputs
+                ),
+                "input_split_sizes": recipe.input_split_sizes,
+                "output_split_sizes": recipe.output_split_sizes,
+                "async_op": recipe.async_op,
+            }
+            for recipe in recipes
+        ],
+    }
+
+
+def _replay_readiness_allows_execution(result: ReplayResult) -> bool:
+    readiness = result.c3_results.get("replay_readiness")
+    return readiness is None or readiness.status is C3Status.AGREE
 
 
 def _autocast_state(device_type: str) -> tuple[bool, torch.dtype | None]:

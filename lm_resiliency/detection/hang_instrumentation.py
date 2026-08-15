@@ -241,9 +241,16 @@ class HangInstrumentation:
         rank: int,
         *,
         progress_event: Any | None = None,
+        tracker_name: str | None = None,
+        tracker_token: bytes | None = None,
     ) -> None:
         del model
-        self._tracker = OpTracker(rank, progress_event=progress_event)
+        self._tracker = OpTracker(
+            rank,
+            progress_event=progress_event,
+            shm_name=tracker_name,
+            owner_token=tracker_token,
+        )
         self._hooks: list[Any] = []
         self._saved_collectives: dict[str, Any] = {}
         self._collective_wrappers: dict[str, Any] = {}

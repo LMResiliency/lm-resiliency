@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import tempfile
 import threading
 import zlib
@@ -45,6 +46,84 @@ class ChecksumMismatch(Exception):
 
 class CheckpointIdentityMismatch(ValueError):
     """Raised when trust metadata belongs to another run or topology."""
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _cleanup_dead_process_temps(path: Path) -> None:
+    """Remove abandoned temp files while leaving live writers untouched."""
+    prefix = f".{path.name}.pid-"
+    for temporary in path.parent.glob(f"{prefix}*.tmp"):
+        pid_text = temporary.name[len(prefix) :].split(".", 1)[0]
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if pid == os.getpid():
+            continue
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+        except PermissionError:
+            continue
+
+
+def _atomic_torch_save(payload: object, path: Path) -> None:
+    """Durably replace ``path`` without exposing a partially written archive."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _fsync_directory(path.parent.parent)
+    _cleanup_dead_process_temps(path)
+    descriptor, temporary = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.pid-{os.getpid()}.",
+        suffix=".tmp",
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            torch.save(payload, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def atomic_copy_file(source: Path, destination: Path) -> None:
+    """Durably copy a checkpoint file without exposing partial destination bytes."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _fsync_directory(destination.parent.parent)
+    _cleanup_dead_process_temps(destination)
+    descriptor, temporary = tempfile.mkstemp(
+        dir=destination.parent,
+        prefix=f".{destination.name}.pid-{os.getpid()}.",
+        suffix=".tmp",
+    )
+    os.close(descriptor)
+    try:
+        shutil.copy2(source, temporary)
+        with open(temporary, "rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+        _fsync_directory(destination.parent)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,7 +390,7 @@ class DiskSerializer:
                 step_dir = self._folder / f"step-{step}"
                 step_dir.mkdir(parents=True, exist_ok=True)
                 save_path = step_dir / f"rank-{self._rank}.pt"
-                torch.save(
+                _atomic_torch_save(
                     _checkpoint_payload(
                         metadata,
                         tensors_copy,
@@ -364,7 +443,7 @@ class DiskSerializer:
         save_path = step_dir / f"rank-{target_rank}.pt"
         tensors_copy = [t.clone() for t in tensors]
         checksums = shard_checksums(tensors_copy) if self._integrity else None
-        torch.save(
+        _atomic_torch_save(
             _checkpoint_payload(
                 metadata,
                 tensors_copy,
@@ -422,33 +501,50 @@ class DiskSerializer:
                     f"{load_path}: checkpoint tensor {index} must be dense, strided, and non-quantized"
                 )
         if self._integrity:
-            if stored is not None:
-                actual = shard_checksums(tensors)
-                if actual != stored:
-                    bad = sum(1 for a, b in zip(actual, stored) if a != b) + abs(
-                        len(actual) - len(stored)
-                    )
-                    raise ChecksumMismatch(f"{load_path}: {bad} shard chunk(s) failed checksum")
+            if stored is None:
+                raise ChecksumMismatch(
+                    f"{load_path}: integrity verification is enabled but the checkpoint "
+                    "does not contain checksums"
+                )
+            actual = shard_checksums(tensors)
+            if actual != stored:
+                bad = sum(1 for a, b in zip(actual, stored) if a != b) + abs(
+                    len(actual) - len(stored)
+                )
+                raise ChecksumMismatch(f"{load_path}: {bad} shard chunk(s) failed checksum")
         return metadata, tensors
 
     def has_rank(self, step: int, rank: int) -> bool:
         """Whether a shard file for the given step and rank exists on this node."""
         return (self._folder / f"step-{step}" / f"rank-{rank}.pt").exists()
 
-    def find_latest_on_disk(self) -> int:
-        """Scan the checkpoint folder and return the latest step, or -1."""
+    def find_steps_on_disk(
+        self,
+        rank: int | None = None,
+        *,
+        before_step: int | None = None,
+    ) -> list[int]:
+        """Return published shard generations in descending order."""
         if not self._folder.exists():
-            return -1
+            return []
 
-        latest = -1
+        target_rank = self._rank if rank is None else rank
+        steps: list[int] = []
         for entry in self._folder.iterdir():
             match = _STEP_DIR_PATTERN.fullmatch(entry.name)
-            if match and entry.is_dir():
-                rank_file = entry / f"rank-{self._rank}.pt"
-                if rank_file.exists():
-                    step = int(match.group(1))
-                    latest = max(latest, step)
-        return latest
+            if not match or not entry.is_dir():
+                continue
+            step = int(match.group(1))
+            if before_step is not None and step >= before_step:
+                continue
+            if (entry / f"rank-{target_rank}.pt").is_file():
+                steps.append(step)
+        return sorted(steps, reverse=True)
+
+    def find_latest_on_disk(self, *, before_step: int | None = None) -> int:
+        """Scan the checkpoint folder and return the latest step, or -1."""
+        steps = self.find_steps_on_disk(before_step=before_step)
+        return steps[0] if steps else -1
 
     def cleanup_older_than(self, keep_step: int) -> None:
         """Remove disk checkpoints older than keep_step."""
