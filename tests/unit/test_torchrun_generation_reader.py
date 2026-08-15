@@ -789,6 +789,20 @@ def test_generation_reader_rejects_lease_grant_time_rollback():
         reader.current()
 
 
+def test_generation_reader_rejects_guard_lifetime_rollback():
+    records = _history(
+        ("coordinator-a", "lease-a", 1),
+        ("coordinator-b", "lease-b", 2),
+    )
+    reader = _reader_from_history(
+        records,
+        guard_lifetime_sequences=(2, 1),
+    )
+
+    with pytest.raises(GenerationStateCorrupt, match="guard lifetimes move backward"):
+        reader.current()
+
+
 def test_generation_reader_rejects_one_guard_revision_with_two_grant_times():
     records = _history(
         ("coordinator-a", "lease-a", 1),

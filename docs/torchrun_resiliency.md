@@ -886,9 +886,9 @@ its first store-key lifetime, and a stable immediate successor snapshot beyond
 the head is contradictory state for every read API. Replacing a lease in place
 must not overlap the prior lease's stamped expiry, and one fencing token cannot
 identify multiple grant times or key lifetimes. Renewing the same lease identity
-must occur before its prior expiry, and grant times cannot move backward.
-Missing or contradictory history is corruption, not an empty or partially
-usable assignment.
+must occur before its prior expiry, and grant times or key-lifetime sequences
+cannot move backward. Missing or contradictory history is corruption, not an
+empty or partially usable assignment.
 
 Coordinator ownership is stored under a schema-versioned, run-scoped lease key.
 The lease record binds the run, a unique coordinator-process incarnation, a

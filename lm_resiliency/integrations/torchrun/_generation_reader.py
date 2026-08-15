@@ -255,6 +255,8 @@ class GenerationStateReader:
                 raise GenerationStateCorrupt("generation snapshot commit timestamps move backward")
             if predecessor.guard_committed_at_unix_ms > successor.guard_committed_at_unix_ms:
                 raise GenerationStateCorrupt("generation snapshot lease grant times move backward")
+            if predecessor.guard_lifetime_sequence > successor.guard_lifetime_sequence:
+                raise GenerationStateCorrupt("generation snapshot guard lifetimes move backward")
             if (
                 predecessor.record.coordinator_fencing_token
                 > successor.record.coordinator_fencing_token
