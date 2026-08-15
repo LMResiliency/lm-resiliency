@@ -56,6 +56,7 @@ class TamperedTransactionResultStore(InMemoryControlStore):
         expected_guard_revision: int,
         not_before_unix_ms: int,
         deadline_unix_ms: int,
+        conditions: Mapping[str, int | None] | None = None,
     ) -> Mapping[str, ControlStoreEntry]:
         committed = dict(
             super().compare_set_many_guarded(
@@ -64,6 +65,7 @@ class TamperedTransactionResultStore(InMemoryControlStore):
                 expected_guard_revision=expected_guard_revision,
                 not_before_unix_ms=not_before_unix_ms,
                 deadline_unix_ms=deadline_unix_ms,
+                conditions=conditions,
             )
         )
         head_key = next(key for key in committed if key.endswith("/generation-head"))

@@ -220,6 +220,93 @@ def test_guarded_transaction_rejects_target_conflict_without_partial_writes():
     assert store.get("run/generations/0") is None
 
 
+def test_guarded_transaction_commits_when_revision_conditions_hold():
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    guard = _guard(store)
+    head = store.compare_set(
+        "run/generation-head",
+        expected_revision=None,
+        value=b"generation-0",
+    )
+
+    committed = store.compare_set_many_guarded(
+        {
+            "run/restart-intents/intent-a": ControlStoreWrite(
+                expected_revision=None,
+                value=b"intent-a",
+                require_never_created=True,
+            ),
+        },
+        guard_key="run/coordinator-lease",
+        expected_guard_revision=guard.revision,
+        not_before_unix_ms=1_000,
+        deadline_unix_ms=1_100,
+        conditions={"run/generation-head": head.revision},
+    )
+
+    assert store.get("run/generation-head") == head
+    assert committed["run/restart-intents/intent-a"].value == b"intent-a"
+
+
+def test_guarded_transaction_rejects_condition_conflict_without_partial_writes():
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    guard = _guard(store)
+    stale_head = store.compare_set(
+        "run/generation-head",
+        expected_revision=None,
+        value=b"generation-0",
+    )
+    current_head = store.compare_set(
+        "run/generation-head",
+        expected_revision=stale_head.revision,
+        value=b"generation-1",
+    )
+
+    with pytest.raises(ControlStoreConflict) as error:
+        store.compare_set_many_guarded(
+            {
+                "run/restart-intents/intent-a": ControlStoreWrite(
+                    expected_revision=None,
+                    value=b"intent-a",
+                ),
+            },
+            guard_key="run/coordinator-lease",
+            expected_guard_revision=guard.revision,
+            not_before_unix_ms=1_000,
+            deadline_unix_ms=1_100,
+            conditions={"run/generation-head": stale_head.revision},
+        )
+
+    assert error.value.key == "run/generation-head"
+    assert error.value.actual_revision == current_head.revision
+    assert store.get("run/restart-intents/intent-a") is None
+
+
+def test_guarded_transaction_can_condition_on_key_absence():
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    guard = _guard(store)
+
+    committed = store.compare_set_many_guarded(
+        {
+            "run/restart-intents/intent-a": ControlStoreWrite(
+                expected_revision=None,
+                value=b"intent-a",
+            ),
+        },
+        guard_key="run/coordinator-lease",
+        expected_guard_revision=guard.revision,
+        not_before_unix_ms=1_000,
+        deadline_unix_ms=1_100,
+        conditions={"run/restart-intent-head": None},
+    )
+
+    assert committed["run/restart-intents/intent-a"].value == b"intent-a"
+    assert store.get("run/restart-intent-head") is None
+
+
 def test_guarded_transaction_can_require_target_to_have_no_history():
     store = InMemoryControlStore(clock=ManualClock())
     guard = _guard(store)
@@ -359,6 +446,42 @@ def test_guarded_transaction_rejects_invalid_write_sets():
             expected_guard_revision=guard.revision,
             not_before_unix_ms=1,
             deadline_unix_ms=2,
+        )
+    with pytest.raises(ValueError, match="must not also be a transaction condition"):
+        store.compare_set_many_guarded(
+            _generation_writes(),
+            guard_key="run/coordinator-lease",
+            expected_guard_revision=guard.revision,
+            not_before_unix_ms=1,
+            deadline_unix_ms=2,
+            conditions={"run/coordinator-lease": guard.revision},
+        )
+    with pytest.raises(ValueError, match="must not also be targets"):
+        store.compare_set_many_guarded(
+            _generation_writes(),
+            guard_key="run/coordinator-lease",
+            expected_guard_revision=guard.revision,
+            not_before_unix_ms=1,
+            deadline_unix_ms=2,
+            conditions={"run/generation-head": None},
+        )
+    with pytest.raises(TypeError, match="conditions must be a mapping"):
+        store.compare_set_many_guarded(
+            _generation_writes(),
+            guard_key="run/coordinator-lease",
+            expected_guard_revision=guard.revision,
+            not_before_unix_ms=1,
+            deadline_unix_ms=2,
+            conditions=(),
+        )
+    with pytest.raises(ValueError, match="expected_revision"):
+        store.compare_set_many_guarded(
+            _generation_writes(),
+            guard_key="run/coordinator-lease",
+            expected_guard_revision=guard.revision,
+            not_before_unix_ms=1,
+            deadline_unix_ms=2,
+            conditions={"run/restart-intent-head": False},
         )
 
 
