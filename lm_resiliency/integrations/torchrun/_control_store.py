@@ -266,8 +266,9 @@ class ControlStore(Protocol):
         expected_guard_revision: int,
         not_before_unix_ms: int,
         deadline_unix_ms: int,
+        conditions: Mapping[str, int | None] | None = None,
     ) -> Mapping[str, ControlStoreEntry]:
-        """Atomically publish writes while a guard revision is live.
+        """Atomically publish writes while a guard and read conditions hold.
 
         Every returned target entry carries store-stamped guard key, revision,
         value digest, ordered mutation and value sequences, key-lifetime
@@ -412,11 +413,20 @@ class InMemoryControlStore:
         expected_guard_revision: int,
         not_before_unix_ms: int,
         deadline_unix_ms: int,
+        conditions: Mapping[str, int | None] | None = None,
     ) -> Mapping[str, ControlStoreEntry]:
         normalized_writes = _control_writes(writes)
+        normalized_conditions = _control_conditions(conditions)
         normalized_guard_key = _control_key(guard_key)
         if normalized_guard_key in normalized_writes:
             raise ValueError("guard_key must not also be a transaction target")
+        if normalized_guard_key in normalized_conditions:
+            raise ValueError("guard_key must not also be a transaction condition")
+        overlapping_keys = sorted(set(normalized_writes) & set(normalized_conditions))
+        if overlapping_keys:
+            raise ValueError(
+                f"transaction conditions must not also be targets: {overlapping_keys!r}"
+            )
         normalized_guard_revision = _required_revision(expected_guard_revision)
         normalized_not_before = _positive_integer(
             not_before_unix_ms,
@@ -432,6 +442,8 @@ class InMemoryControlStore:
             self._require_revision(normalized_guard_key, normalized_guard_revision)
             guard_entry = self._entries[normalized_guard_key]
             guard_value_digest = hashlib.sha256(guard_entry.value).hexdigest()
+            for key, expected_revision in normalized_conditions.items():
+                self._require_revision(key, expected_revision)
             for key, write in normalized_writes.items():
                 self._require_revision(key, write.expected_revision)
                 if write.require_never_created and key in self._last_revisions:
@@ -556,6 +568,25 @@ def _control_writes(value: object) -> dict[str, ControlStoreWrite]:
         if not isinstance(write, ControlStoreWrite):
             raise TypeError("writes values must be ControlStoreWrite")
         result[normalized_key] = write
+    return dict(sorted(result.items()))
+
+
+def _control_conditions(
+    value: object,
+) -> dict[str, int | None]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise TypeError("conditions must be a mapping")
+    result: dict[str, int | None] = {}
+    for key, expected_revision in value.items():
+        normalized_key = _control_key(key)
+        result[normalized_key] = _expected_revision(
+            expected_revision,
+            allow_absent=True,
+        )
+    if len(result) != len(value):
+        raise ValueError("condition keys must be unique")
     return dict(sorted(result.items()))
 
 

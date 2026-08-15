@@ -915,15 +915,20 @@ durable `has_history(key)` bit after deletion, allowing readers to distinguish a
 never-created authoritative key from one that was removed.
 
 Coordinator state that spans multiple keys uses one guarded store transaction.
-The transaction first checks the coordinator lease revision, then every target
-revision, then one authoritative store-time window. It publishes all target
-values with the same commit timestamp and store-stamped guard key, guard
-revision, guard-value digest, ordered guard mutation and value sequences,
-guard-key lifetime sequence, and authoritative guard commit time, or publishes
-none. The value sequence changes whenever the guarded bytes change or the key is
-recreated, but remains stable across same-value renewals. This is the primitive
-used to create an immutable generation snapshot and advance the generation head
-without allowing a stale or expired coordinator to commit either half alone.
+The transaction first checks the coordinator lease revision, then any
+side-effect-free revision conditions, every target revision, and one
+authoritative store-time window under the same lock. Condition keys cannot also
+be the guard or transaction targets. It publishes all target values with the
+same commit timestamp and store-stamped guard key, guard revision, guard-value
+digest, ordered guard mutation and value sequences, guard-key lifetime sequence,
+and authoritative guard commit time, or publishes none. The value sequence
+changes whenever the guarded bytes change or the key is recreated, but remains
+stable across same-value renewals. This is the primitive used to create an
+immutable generation snapshot and advance the generation head without allowing
+a stale or expired coordinator to commit either half alone. Revision conditions
+also let later components prove that the generation head did not advance while
+publishing an intent, without rewriting the head or weakening its immutable
+history checks.
 Create-once transaction targets may additionally require that the key has no
 prior committed history, not merely that it is currently absent. This prevents
 a deleted immutable quarantine or snapshot key from being recreated inside an
