@@ -11,6 +11,10 @@ from lm_resiliency.integrations.torchrun._coordinator_lease import (
     CoordinatorLeaseManager,
     HeldCoordinatorLease,
 )
+from lm_resiliency.integrations.torchrun._coordinator_lease_history import (
+    CoordinatorLeaseHistoryError,
+)
+from lm_resiliency.integrations.torchrun._generation_reader import GenerationStateError
 from lm_resiliency.integrations.torchrun._generation_state import GenerationStateManager
 from lm_resiliency.integrations.torchrun._protocol import (
     RankAssignment,
@@ -47,6 +51,14 @@ class ManualClock:
     def set(self, now_unix_ms: int) -> None:
         with self._lock:
             self.now_unix_ms = now_unix_ms
+
+
+class FailingOpenReader:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def read(self):
+        raise self._error
 
 
 def _manager(
@@ -260,3 +272,26 @@ def test_closure_preparer_translates_corrupt_opening():
             run_id=RUN_ID,
             clock=clock,
         ).prepare_initial_closure(lease)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        GenerationStateError("generation changed repeatedly"),
+        CoordinatorLeaseHistoryError("lease history changed repeatedly"),
+    ],
+)
+def test_closure_preparer_translates_dependency_contention(error: Exception):
+    clock, store, _, lease, _ = _open_state()
+    preparer = RestartIntentClosurePreparer(
+        store,
+        run_id=RUN_ID,
+        clock=clock,
+    )
+    preparer._open_reader = FailingOpenReader(error)
+
+    with pytest.raises(
+        RestartIntentClosurePreparationConflict,
+        match="dependencies changed repeatedly",
+    ):
+        preparer.prepare_initial_closure(lease)

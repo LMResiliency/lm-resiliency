@@ -13,6 +13,10 @@ from lm_resiliency.integrations.torchrun._coordinator_lease_history import (
     CoordinatorLeaseHistoryError,
     CoordinatorLeaseHistoryReader,
 )
+from lm_resiliency.integrations.torchrun._generation_reader import (
+    GenerationStateCorrupt,
+    GenerationStateError,
+)
 from lm_resiliency.integrations.torchrun._restart_intent_close import (
     PreparedInitialRestartIntentClosure,
 )
@@ -156,6 +160,14 @@ class RestartIntentClosurePreparer:
         except RestartIntentOpenStateError as error:
             raise RestartIntentClosurePreparationConflict(
                 "restart-intent opening changed repeatedly during preparation"
+            ) from error
+        except (CoordinatorLeaseHistoryCorrupt, GenerationStateCorrupt) as error:
+            raise RestartIntentClosurePreparationCorrupt(
+                "restart-intent opening dependencies are corrupt"
+            ) from error
+        except (CoordinatorLeaseHistoryError, GenerationStateError) as error:
+            raise RestartIntentClosurePreparationConflict(
+                "restart-intent opening dependencies changed repeatedly during preparation"
             ) from error
 
     def _read_lease_history(self) -> tuple[CoordinatorLeaseAuthority, ...]:
