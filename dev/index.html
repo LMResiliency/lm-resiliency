@@ -127,7 +127,7 @@
 </ul>
 <p>Before the first stable documentation tree is published, the site root redirects to <code>/dev/</code>. Once a stable release is published through the repository release workflow, the root redirects to <code>/latest/</code>.</p>
 <p>Publication workflows stage the complete versioned static tree on <code>gh-pages</code>. A dedicated trusted workflow then uploads the current staged tree as a GitHub Pages artifact and deploys it through GitHub's Pages deployment API. Repository Pages settings therefore need to use <strong>GitHub Actions</strong> as the publishing source rather than building directly from the <code>gh-pages</code> branch.</p>
-<p>The repository Markdown remains the source of truth for documentation changes. CI builds the site with warnings treated as errors before changes can satisfy the required CI gate.</p>
+<p>The repository Markdown remains the source of truth for documentation changes. CI builds the site with warnings treated as errors before changes can satisfy the required CI gate. A weekly workflow checks external links online with bounded retries, complementing the deterministic offline link and anchor check that runs on every pull request.</p>
               
             </div>
           </div><footer>
@@ -180,5 +180,5 @@
 
 <!--
 MkDocs version : 1.6.1
-Build Date UTC : 2026-08-15 15:50:19.644627+00:00
+Build Date UTC : 2026-08-15 15:50:45.455455+00:00
 -->
