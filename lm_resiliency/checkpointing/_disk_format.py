@@ -13,7 +13,7 @@ import torch
 from lm_resiliency.checkpointing.state_dict import FlatStateDictMetadata, TensorEntry
 
 FORMAT_NAME = "lm-resiliency.gemini.node-local"
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
 
 _METADATA_SCHEMA_VERSION = 1
 _MAX_METADATA_BYTES = 64 * 1024 * 1024
@@ -135,18 +135,35 @@ def decode_metadata(encoded: object) -> FlatStateDictMetadata:
 
 def validate_payload(
     payload: object,
-) -> tuple[FlatStateDictMetadata, list[torch.Tensor], list[int] | None]:
+) -> tuple[FlatStateDictMetadata, list[torch.Tensor], list[int] | None, dict[str, object]]:
     """Validate the weights-only payload before recovery can apply its contents."""
     _require_mapping(payload, "checkpoint payload")
     _require_exact_keys(
         payload,
-        {"format", "version", "metadata_json", "tensors", "checksums"},
+        {"format", "version", "identity", "metadata_json", "tensors", "checksums"},
         "checkpoint payload",
     )
     if payload["format"] != FORMAT_NAME:
         raise CheckpointFormatError("unrecognized or legacy checkpoint format")
     if payload["version"] != FORMAT_VERSION:
         raise CheckpointFormatError(f"unsupported checkpoint format version {payload['version']!r}")
+
+    identity = payload["identity"]
+    _require_mapping(identity, "checkpoint identity")
+    _require_exact_keys(
+        identity,
+        {"run_id", "topology_id", "owner_rank", "step"},
+        "checkpoint identity",
+    )
+    if not isinstance(identity["run_id"], str) or not identity["run_id"].strip():
+        raise CheckpointFormatError("checkpoint identity run_id must be a non-empty string")
+    if not isinstance(identity["topology_id"], str) or not identity["topology_id"].strip():
+        raise CheckpointFormatError("checkpoint identity topology_id must be a non-empty string")
+    for field in ("owner_rank", "step"):
+        if type(identity[field]) is not int or identity[field] < 0:
+            raise CheckpointFormatError(
+                f"checkpoint identity {field} must be a non-negative integer"
+            )
 
     metadata = decode_metadata(payload["metadata_json"])
     tensors = payload["tensors"]
@@ -178,7 +195,7 @@ def validate_payload(
             raise CheckpointFormatError(
                 "checkpoint checksums must be null or a list of unsigned CRC-32 values"
             )
-    return metadata, tensors, checksums
+    return metadata, tensors, checksums, dict(identity)
 
 
 def _encode_value(value: Any, *, depth: int) -> dict[str, Any]:

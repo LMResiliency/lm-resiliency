@@ -5,10 +5,14 @@ from __future__ import annotations
 
 import atexit
 import enum
+import hashlib
+import json
 import logging
+import os
 import pickle
 import signal
 import threading
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -144,10 +148,10 @@ class InMemoryCheckpointManager:
         self._replication_source: Any | None = None
 
         # Peer replication
+        jump = config.replication_jump
+        if jump < 0:
+            jump = torch.cuda.device_count() if torch.cuda.is_available() else 1
         if not self._skip_replication and self._world_size > 1:
-            jump = config.replication_jump
-            if jump < 0:
-                jump = torch.cuda.device_count() if torch.cuda.is_available() else 1
             backend = ChunkedGlooBackend(
                 replication_jump=jump,
                 chunk_size=config.replication_chunk_size,
@@ -158,14 +162,32 @@ class InMemoryCheckpointManager:
         else:
             self._replicator = PeerReplicator(None, enabled=False)
 
+        self._run_id = self._resolve_checkpoint_run_id(config.run_id)
+        self.config.run_id = self._run_id
+        topology = self._checkpoint_topology(jump)
+        self._require_exact_checkpoint_contract(self._run_id, topology)
+        self._topology_id = hashlib.sha256(
+            json.dumps(topology, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
         # Node-local (fast) tier. GEMINI is deliberately single-tier: durable /
         # global checkpointing is the pre-training framework's job (reached via the
         # caller's load_fallback when GEMINI has nothing to load — e.g. a fresh
         # allocation whose node-local tier is empty).
         self._disk = DiskSerializer(
-            folder=config.disk_folder, rank=self._rank, integrity=config.verify_integrity
+            folder=config.disk_folder,
+            rank=self._rank,
+            integrity=config.verify_integrity,
+            run_id=self._run_id,
+            topology_id=self._topology_id,
+            namespace=True,
         )
-        self._checkpoint_status = CheckpointStatusStore(config.disk_folder, rank=self._rank)
+        self._checkpoint_status = CheckpointStatusStore(
+            self._disk._folder,
+            rank=self._rank,
+            run_id=self._run_id,
+            topology_id=self._topology_id,
+        )
         self._save_count = 0
         self._restart_dest_fn: Callable[[], str | Path | None] | None = None
 
@@ -174,6 +196,76 @@ class InMemoryCheckpointManager:
         signal.signal(signal.SIGTERM, self._sigterm_handler)
         signal.signal(signal.SIGINT, self._sigterm_handler)
         self._exit_flush_registered = False
+
+    def _resolve_checkpoint_run_id(self, configured: str | None) -> str:
+        """Resolve one stable run id, coordinating a fresh id when necessary."""
+        if configured is not None:
+            if not isinstance(configured, str) or not configured.strip():
+                raise ValueError("checkpoint run_id must be a non-empty string")
+            return configured
+
+        value = os.environ.get("LM_RESILIENCY_RUN_ID")
+        if value and value.strip():
+            return value
+        value = os.environ.get("TORCHELASTIC_RUN_ID")
+        if value and value.strip() and value.strip().lower() != "none":
+            return value
+
+        source = 0
+        if dist.is_initialized() and self._process_group is not None:
+            source = dist.get_process_group_ranks(self._process_group)[0]
+        value = uuid.uuid4().hex if self._rank == source else ""
+        if dist.is_initialized() and dist.get_world_size(self._process_group) > 1:
+            values = [value]
+            dist.broadcast_object_list(values, src=source, group=self._process_group)
+            value = values[0]
+        return value
+
+    def _checkpoint_topology(self, replication_jump: int) -> dict[str, object]:
+        group_ranks = list(range(self._world_size))
+        if dist.is_initialized() and self._process_group is not None:
+            group_ranks = list(dist.get_process_group_ranks(self._process_group))
+        peer_map: dict[str, int] = {}
+        if not self._skip_replication and self._world_size > 1:
+            segment_size = replication_jump * 2
+            for rank in group_ranks:
+                segment_start = (rank // segment_size) * segment_size
+                offset = rank - segment_start
+                peer_map[str(rank)] = (
+                    rank + replication_jump
+                    if offset < replication_jump
+                    else rank - replication_jump
+                )
+        return {
+            "world_size": self._world_size,
+            "checkpoint_group_ranks": group_ranks,
+            "replication_jump": replication_jump if peer_map else None,
+            "replication_peers": peer_map,
+        }
+
+    def _require_exact_checkpoint_contract(self, run_id: str, topology: dict[str, object]) -> None:
+        """Fail before disk eligibility if checkpoint ranks disagree on identity."""
+        if not dist.is_initialized() or dist.get_world_size(self._process_group) == 1:
+            return
+        encoded = json.dumps(
+            {"run_id": run_id, "topology": topology},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        digest = int.from_bytes(hashlib.sha256(encoded).digest()[:8], "big") & ((1 << 63) - 1)
+        device = torch.device("cpu")
+        if str(dist.get_backend(self._process_group)).lower() == "nccl":
+            if not torch.cuda.is_available():
+                raise RuntimeError("NCCL checkpoint identity agreement requires a CUDA device")
+            device = torch.device("cuda", torch.cuda.current_device())
+        lower = torch.tensor([digest], dtype=torch.int64, device=device)
+        upper = lower.clone()
+        dist.all_reduce(lower, op=dist.ReduceOp.MIN, group=self._process_group)
+        dist.all_reduce(upper, op=dist.ReduceOp.MAX, group=self._process_group)
+        if lower.item() != upper.item():
+            raise RuntimeError(
+                "checkpoint ranks disagree on run_id or topology; node-local recovery is unsafe"
+            )
 
     def _should_skip_replication(self, par_info: Any | None) -> bool:
         if not self.config.skip_replication_if_hsdp:
@@ -777,7 +869,7 @@ class InMemoryCheckpointManager:
         source = self._disk._folder
         if not source.exists():
             return -1
-        destination = Path(destination)
+        destination = DiskSerializer.namespace_folder(destination, self._run_id, self._topology_id)
         ranks = {self._rank}
         peer_rank = self._replicator.peer_rank
         if peer_rank >= 0:
@@ -799,7 +891,12 @@ class InMemoryCheckpointManager:
                 latest = max(latest, step)
         status = self.checkpoint_status
         for rank in ranks:
-            CheckpointStatusStore(destination, rank=rank).write(status)
+            CheckpointStatusStore(
+                destination,
+                rank=rank,
+                run_id=self._run_id,
+                topology_id=self._topology_id,
+            ).write(status)
         return latest
 
     def _flush_slots(self, disk: DiskSerializer) -> int:

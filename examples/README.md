@@ -7,7 +7,8 @@ The example executes the complete forward, backward, optimizer, and GEMINI check
 
 ```bash
 lm-resiliency-quickstart \
-  --checkpoint-dir /tmp/lm-resiliency-quickstart/checkpoints
+  --checkpoint-dir /tmp/lm-resiliency-quickstart/checkpoints \
+  --run-id my-quickstart
 ```
 
 Run it again with a larger step target to resume from the saved GEMINI checkpoint:
@@ -15,7 +16,8 @@ Run it again with a larger step target to resume from the saved GEMINI checkpoin
 ```bash
 lm-resiliency-quickstart \
   --steps 6 \
-  --checkpoint-dir /tmp/lm-resiliency-quickstart/checkpoints
+  --checkpoint-dir /tmp/lm-resiliency-quickstart/checkpoints \
+  --run-id my-quickstart
 ```
 
 The installed command and library come from the same wheel.

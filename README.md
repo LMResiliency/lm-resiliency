@@ -50,11 +50,12 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e .
 python examples/quickstart.py \
-  --checkpoint-dir /tmp/lm-resiliency-quickstart/checkpoints
+  --checkpoint-dir /tmp/lm-resiliency-quickstart/checkpoints \
+  --run-id my-quickstart
 ```
 
 The example trains a tiny causal LM through a complete forward, backward, and optimizer loop while GEMINI saves recovery state.
-Run it again with `--steps 6` to resume from the saved checkpoint.
+Run it again with the same `--run-id` and `--steps 6` to resume from the saved checkpoint.
 See [Examples](examples/README.md) for the recovery command and distributed production loops that exercise SCOUT.
 
 For integrations that do not need the repository examples, install the latest published package directly with `python -m pip install lm-resiliency`, adding `[torchtitan]`, `[megatron]`, `[deepspeed]`, or `[all]` as needed.

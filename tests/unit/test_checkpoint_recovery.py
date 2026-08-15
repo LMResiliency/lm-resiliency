@@ -53,6 +53,44 @@ def test_flush_for_restart_own_shard_round_trip(tmp_path):
     reloaded_manager.close()
 
 
+def test_fresh_run_cannot_discover_stale_node_local_checkpoint(tmp_path):
+    first = InMemoryCheckpointManager(
+        InMemoryCkptConfig(
+            disk_flush_interval=0,
+            disk_folder=str(tmp_path),
+            run_id="run-a",
+        )
+    )
+    first.save({"w": torch.full((2,), 7.0)}, step=7)
+    first.maybe_wait()
+    first.flush_for_restart()
+    first.close()
+
+    fresh = InMemoryCheckpointManager(
+        InMemoryCkptConfig(
+            disk_flush_interval=0,
+            disk_folder=str(tmp_path),
+            run_id="run-b",
+        )
+    )
+    assert fresh.find_latest() == -1
+    assert fresh.load() is None
+    fresh.close()
+
+    resumed = InMemoryCheckpointManager(
+        InMemoryCkptConfig(
+            disk_flush_interval=0,
+            disk_folder=str(tmp_path),
+            run_id="run-a",
+        )
+    )
+    recovered = resumed.load()
+    assert recovered is not None
+    assert recovered[1] == 7
+    assert torch.equal(recovered[0]["w"], torch.full((2,), 7.0))
+    resumed.close()
+
+
 def test_flush_for_restart_disarms_exit_flush_until_next_save(tmp_path):
     config = InMemoryCkptConfig(
         enable=True,
@@ -220,7 +258,7 @@ def test_gemini_load_returns_none_on_corruption(tmp_path):
     assert manager.load() is not None
     manager.close()
 
-    rank_file = next(tmp_path.glob("step-*/rank-0.pt"))
+    rank_file = next(tmp_path.glob("runs/*/*/step-*/rank-0.pt"))
     raw = torch.load(rank_file, weights_only=True)
     raw["tensors"][0][0] += 9.0
     torch.save(raw, rank_file)
@@ -244,7 +282,13 @@ def test_disk_safe_format_round_trips_schema_constrained_metadata(tmp_path):
     path = serializer.save_sync(metadata, tensors, step=6)
     raw = torch.load(path, weights_only=True)
     assert raw["format"] == "lm-resiliency.gemini.node-local"
-    assert raw["version"] == 2
+    assert raw["version"] == 3
+    assert raw["identity"] == {
+        "run_id": "standalone",
+        "topology_id": "standalone",
+        "owner_rank": 0,
+        "step": 6,
+    }
     assert isinstance(raw["metadata_json"], str)
 
     loaded_metadata, loaded_tensors = serializer.load(6)
@@ -254,6 +298,22 @@ def test_disk_safe_format_round_trips_schema_constrained_metadata(tmp_path):
     assert np.array_equal(restored["numpy_rng"], state["numpy_rng"])
     assert restored["types"] == state["types"]
     assert restored["bytes"] == state["bytes"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("run_id", "other-run"), ("topology_id", "other-topology"), ("owner_rank", 1), ("step", 7)),
+)
+def test_disk_load_rejects_checkpoint_identity_mismatch(tmp_path, field, value):
+    metadata, tensors = flatten({"w": torch.ones(2)})
+    serializer = DiskSerializer(str(tmp_path), rank=0, run_id="run-a", topology_id="topology-a")
+    path = serializer.save_sync(metadata, tensors, step=6)
+    raw = torch.load(path, weights_only=True)
+    raw["identity"][field] = value
+    torch.save(raw, path)
+
+    with pytest.raises(CheckpointFormatError, match="identity mismatch"):
+        serializer.load(6)
 
 
 def test_disk_safe_format_round_trips_tensor_valued_extra(tmp_path):
@@ -435,12 +495,6 @@ def test_manager_votes_invalid_after_unexpected_local_load_error(tmp_path):
 
 
 def test_manager_recovers_older_generation_when_newest_is_malformed(tmp_path):
-    metadata, tensors = flatten({"w": torch.full((2,), 3.0)})
-    DiskSerializer(str(tmp_path), rank=0).save_sync(metadata, tensors, step=3)
-    newest = tmp_path / "step-4" / "rank-0.pt"
-    newest.parent.mkdir()
-    newest.write_bytes(b"torn checkpoint")
-
     manager = InMemoryCheckpointManager(
         InMemoryCkptConfig(
             enable=True,
@@ -449,6 +503,11 @@ def test_manager_recovers_older_generation_when_newest_is_malformed(tmp_path):
             disk_folder=str(tmp_path),
         )
     )
+    metadata, tensors = flatten({"w": torch.full((2,), 3.0)})
+    manager._disk.save_sync(metadata, tensors, step=3)
+    newest = manager._disk._folder / "step-4" / "rank-0.pt"
+    newest.parent.mkdir()
+    newest.write_bytes(b"torn checkpoint")
 
     assert manager.find_latest() == 3
     recovered = manager.load()
@@ -504,6 +563,7 @@ def test_restart_destination_mirrors_flushed_checkpoint(tmp_path):
             disk_flush_interval=0,
             disk_folder=str(mirror),
             verify_integrity=True,
+            run_id=config.run_id,
         )
     )
     result = recovered.load()
@@ -524,6 +584,7 @@ def test_extra_state_round_trips_through_gemini(tmp_path):
         interval=1,
         disk_flush_interval=0,
         disk_folder=str(tmp_path),
+        run_id="extra-state-test",
     )
 
     state = enable_resiliency(

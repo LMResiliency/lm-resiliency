@@ -70,6 +70,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("/tmp/lm-resiliency-quickstart/checkpoints"),
     )
+    parser.add_argument(
+        "--run-id",
+        default="lm-resiliency-quickstart",
+        help="stable identity to reuse only when intentionally resuming this example",
+    )
     return parser.parse_args()
 
 
@@ -92,6 +97,7 @@ def main() -> None:
         checkpoint=InMemoryCkptConfig(
             disk_flush_interval=1,
             disk_folder=str(args.checkpoint_dir),
+            run_id=args.run_id,
             pin_memory=False,
             verify_integrity=True,
         ),
