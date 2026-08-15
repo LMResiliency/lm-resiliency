@@ -598,16 +598,6 @@ its immutable closure record, first lifecycle head, and durable closed marker.
 It exposes create-once closure/lifecycle writes, a revision-guarded
 current-head update, and an exact immutable-intent condition, but does not
 authenticate a closing lease or mutate the store. A frozen
-`PreparedInitialRestartIntentClosure` wraps those records with the complete
-held closing lease, its authoritative transaction, mutation, value, and
-lifetime sequences, and a bounded store-time commit window. It carries a
-contiguous `CoordinatorLeaseAuthority` chain from the exact opening lease to
-the closing lease. Every adjacent observation must be one valid nonexpired
-renewal, nonoverlapping in-place replacement, or delete/recreate transition;
-lease identities and fencing tokens cannot reappear after replacement. This
-supports repeated coordinator failover without accepting omitted or replayed
-authority. The value remains non-mutating; a later preparer obtains and
-authenticates the transition chain before constructing it. A frozen
 `PreparedInitialRestartIntentOpen` descriptor binds the first intent record,
 current-intent head, exact generation revisions, coordinator fencing token,
 canonical run-scoped keys, and lease/intent commit window. It exposes immutable
@@ -978,7 +968,11 @@ mistake a recreated record for an older value with identical bytes. Higher
 coordinator records add lease fencing and run/schema namespaces in subsequent
 layers rather than weakening this storage primitive. The store also retains a
 durable `has_history(key)` bit after deletion, allowing readers to distinguish a
-never-created authoritative key from one that was removed.
+never-created authoritative key from one that was removed. `get_history(key)`
+returns every committed value entry in mutation order, including overwritten
+values and values from earlier key lifetimes. Deletes do not invent a payload;
+their revision, mutation, transaction, and lifetime effects remain visible as
+gaps between adjacent immutable entries. Failed operations append nothing.
 
 Coordinator state that spans multiple keys uses one guarded store transaction.
 The transaction first checks the coordinator lease revision, then any
