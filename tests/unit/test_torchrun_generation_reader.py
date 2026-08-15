@@ -154,6 +154,7 @@ def _reader_from_history(
     head_committed_at_offset_ms: int = 0,
     guard_lifetime_sequences: tuple[int, ...] | None = None,
     guard_grant_times_unix_ms: tuple[int, ...] | None = None,
+    snapshot_commit_times_unix_ms: tuple[int, ...] | None = None,
 ) -> GenerationStateReader:
     if guard_lifetime_sequences is None:
         guard_lifetime_sequences = (1,) * len(records)
@@ -176,19 +177,22 @@ def _reader_from_history(
             else:
                 grant_times.append(grant_times[-1] + 1)
         guard_grant_times_unix_ms = tuple(grant_times)
+    if snapshot_commit_times_unix_ms is None:
+        snapshot_commit_times_unix_ms = guard_grant_times_unix_ms
     store = StaticControlStore()
     reader = GenerationStateReader(store, run_id=RUN_ID)
-    for record, guard_lifetime_sequence, guard_grant_time in zip(
+    for record, guard_lifetime_sequence, guard_grant_time, snapshot_commit_time in zip(
         records,
         guard_lifetime_sequences,
         guard_grant_times_unix_ms,
+        snapshot_commit_times_unix_ms,
         strict=True,
     ):
         generation = record.assignment.generation
         store.entries[reader.snapshot_key(generation)] = ControlStoreEntry(
             value=record.to_json(),
             revision=1,
-            committed_at_unix_ms=guard_grant_time,
+            committed_at_unix_ms=snapshot_commit_time,
             guard_key=reader.coordinator_lease_key,
             guard_revision=record.coordinator_fencing_token,
             guard_value_digest=record.coordinator_lease_digest,
@@ -204,7 +208,7 @@ def _reader_from_history(
     store.entries[reader.head_key] = ControlStoreEntry(
         value=head.to_json(),
         revision=len(records),
-        committed_at_unix_ms=(guard_grant_times_unix_ms[-1] + head_committed_at_offset_ms),
+        committed_at_unix_ms=(snapshot_commit_times_unix_ms[-1] + head_committed_at_offset_ms),
         mutation_sequence=len(records),
         guard_key=reader.coordinator_lease_key,
         guard_revision=latest.coordinator_fencing_token,
@@ -753,6 +757,35 @@ def test_generation_reader_rejects_overlapping_in_place_lease_replacement():
     )
 
     with pytest.raises(GenerationStateCorrupt, match="leases overlap"):
+        reader.current()
+
+
+def test_generation_reader_rejects_expired_same_lease_renewal():
+    records = _history(
+        ("coordinator-a", "lease-a", 1),
+        ("coordinator-a", "lease-a", 2),
+    )
+    reader = _reader_from_history(
+        records,
+        guard_grant_times_unix_ms=(1_000, 1_100),
+    )
+
+    with pytest.raises(GenerationStateCorrupt, match="renews an expired"):
+        reader.current()
+
+
+def test_generation_reader_rejects_lease_grant_time_rollback():
+    records = _history(
+        ("coordinator-a", "lease-a", 1),
+        ("coordinator-a", "lease-a", 2),
+    )
+    reader = _reader_from_history(
+        records,
+        guard_grant_times_unix_ms=(1_001, 1_000),
+        snapshot_commit_times_unix_ms=(1_001, 1_002),
+    )
+
+    with pytest.raises(GenerationStateCorrupt, match="grant times move backward"):
         reader.current()
 
 

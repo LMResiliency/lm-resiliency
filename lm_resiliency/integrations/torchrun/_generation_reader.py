@@ -253,6 +253,8 @@ class GenerationStateReader:
                 )
             if predecessor.committed_at_unix_ms > successor.committed_at_unix_ms:
                 raise GenerationStateCorrupt("generation snapshot commit timestamps move backward")
+            if predecessor.guard_committed_at_unix_ms > successor.guard_committed_at_unix_ms:
+                raise GenerationStateCorrupt("generation snapshot lease grant times move backward")
             if (
                 predecessor.record.coordinator_fencing_token
                 > successor.record.coordinator_fencing_token
@@ -294,6 +296,19 @@ class GenerationStateReader:
             ):
                 raise GenerationStateCorrupt(
                     "one generation lease crosses a recreated guard lifetime"
+                )
+            if (
+                predecessor.record.lease_id == successor.record.lease_id
+                and predecessor.record.coordinator_fencing_token
+                != successor.record.coordinator_fencing_token
+                and successor.guard_committed_at_unix_ms
+                >= (
+                    predecessor.guard_committed_at_unix_ms
+                    + predecessor.record.coordinator_lease_duration_ms
+                )
+            ):
+                raise GenerationStateCorrupt(
+                    "generation snapshot renews an expired coordinator lease"
                 )
             if (
                 predecessor.record.lease_id != successor.record.lease_id
