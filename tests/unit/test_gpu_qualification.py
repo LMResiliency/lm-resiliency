@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import sys
 
+import pytest
+
 from tests.validation import run_gpu_qualification
 
 
@@ -62,6 +64,8 @@ def test_gpu_qualification_writes_failure_evidence_without_required_gpus(tmp_pat
             "2",
         ],
     )
+    monkeypatch.setenv("GITHUB_SHA", "a" * 40)
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/test")
 
     assert run_gpu_qualification.main() == 1
     summary = json.loads((artifact_dir / "summary.json").read_text())
@@ -83,3 +87,16 @@ def test_gpu_qualification_writes_failure_evidence_without_required_gpus(tmp_pat
     assert (artifact_dir / "summary.md").exists()
     assert (artifact_dir / "manifest.json").exists()
     assert (artifact_dir / "checksums.txt").exists()
+
+
+def test_git_revision_rejects_tracked_worktree_changes(monkeypatch):
+    class Completed:
+        returncode = 0
+        stdout = " M tracked.py\n"
+
+    monkeypatch.setattr(
+        run_gpu_qualification.subprocess, "run", lambda *args, **kwargs: Completed()
+    )
+
+    with pytest.raises(RuntimeError, match="clean tracked worktree"):
+        run_gpu_qualification._git_revision()

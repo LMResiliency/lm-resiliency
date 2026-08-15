@@ -113,8 +113,9 @@ def _validate_summary(summary: Any, campaign_id: str, command_ids: list[str]) ->
     timestamps = []
     for field in ("started_at", "completed_at"):
         timestamp = _require_string(summary[field], f"summary {field}")
+        normalized_timestamp = timestamp[:-1] + "+00:00" if timestamp.endswith("Z") else timestamp
         try:
-            parsed = dt.datetime.fromisoformat(timestamp)
+            parsed = dt.datetime.fromisoformat(normalized_timestamp)
         except ValueError as error:
             raise ValueError(f"summary {field} must be an ISO-8601 timestamp") from error
         if parsed.tzinfo is None:
@@ -147,8 +148,10 @@ def _validate_summary(summary: Any, campaign_id: str, command_ids: list[str]) ->
         result_ids.append(_require_string(result.get("command_id"), "result command_id"))
         if result.get("status") not in {"passed", "failed", "skipped", "error"}:
             raise ValueError("summary result status is invalid")
-    if not set(result_ids).issubset(command_ids):
-        raise ValueError("summary refers to an unknown command ID")
+    if len(result_ids) != len(set(result_ids)):
+        raise ValueError("summary contains duplicate command results")
+    if set(result_ids) != set(command_ids):
+        raise ValueError("summary results must cover every recorded command exactly once")
     topology = summary["topology"]
     if not isinstance(topology, dict):
         raise ValueError("summary topology must be an object")
@@ -201,11 +204,8 @@ def _validate_environment(environment: Any) -> None:
 
 
 def _payload_files(bundle: Path) -> list[Path]:
-    paths = sorted(
-        path
-        for path in bundle.rglob("*")
-        if path.is_file() and path.name not in {"manifest.json", "checksums.txt"}
-    )
+    generated = {bundle / "manifest.json", bundle / "checksums.txt"}
+    paths = sorted(path for path in bundle.rglob("*") if path.is_file() and path not in generated)
     if any(path.is_symlink() for path in paths):
         raise ValueError("evidence payloads must not be symbolic links")
     return paths

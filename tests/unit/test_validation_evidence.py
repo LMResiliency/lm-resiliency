@@ -102,15 +102,47 @@ def test_verify_rejects_payload_tampering(tmp_path):
         validation_evidence.verify_bundle(bundle)
 
 
-def test_seal_rejects_unidentified_commands(tmp_path):
+def test_seal_requires_exactly_one_result_per_recorded_command(tmp_path):
+    bundle = tmp_path / "evidence"
+    _write_payload(bundle)
+    (bundle / "commands.txt").write_text(
+        "[smoke] python -m pytest -q\n[omitted] python omitted.py\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="cover every recorded command exactly once"):
+        _seal(bundle)
+
+
+def test_verify_covers_nested_manifest_and_checksum_payloads(tmp_path):
+    bundle = tmp_path / "evidence"
+    _write_payload(bundle)
+    nested = bundle / "raw"
+    nested.mkdir()
+    nested_manifest = nested / "manifest.json"
+    nested_manifest.write_text('{"raw": true}\n', encoding="utf-8")
+    (nested / "checksums.txt").write_text("raw campaign checksums\n", encoding="utf-8")
+
+    manifest = _seal(bundle)
+
+    assert "raw/manifest.json" in {record["path"] for record in manifest["files"]}
+    assert "raw/checksums.txt" in {record["path"] for record in manifest["files"]}
+    nested_manifest.write_text('{"raw": false}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="payload digest mismatch"):
+        validation_evidence.verify_bundle(bundle)
+
+
+def test_seal_accepts_utc_z_timestamps_on_every_supported_python(tmp_path):
     bundle = tmp_path / "evidence"
     _write_payload(bundle)
     summary = json.loads((bundle / "summary.json").read_text(encoding="utf-8"))
-    summary["results"][0]["command_id"] = "unknown"
+    summary["started_at"] = "2026-08-14T00:00:00Z"
+    summary["completed_at"] = "2026-08-14T00:01:00Z"
     (bundle / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="unknown command ID"):
-        _seal(bundle)
+    _seal(bundle)
+
+    validation_evidence.verify_bundle(bundle, expected_commit=_COMMIT)
 
 
 def test_create_pytest_bundle_records_counts_environment_and_log(tmp_path):

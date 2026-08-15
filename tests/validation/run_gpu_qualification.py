@@ -347,6 +347,15 @@ def main() -> int:
 
 
 def _git_revision() -> str:
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        cwd=_REPOSITORY_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if status.returncode or status.stdout.strip():
+        raise RuntimeError("manual GPU qualification requires a clean tracked worktree")
     completed = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=_REPOSITORY_ROOT,
