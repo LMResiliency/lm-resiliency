@@ -9,6 +9,9 @@ from lm_resiliency.integrations.torchrun._control_store import (
     ControlStore,
     ControlStoreEntry,
 )
+from lm_resiliency.integrations.torchrun._coordinator_lease import (
+    CoordinatorLeaseRecord,
+)
 from lm_resiliency.integrations.torchrun._coordinator_lease_history import (
     CoordinatorLeaseAuthority,
     CoordinatorLeaseHistoryCorrupt,
@@ -119,7 +122,7 @@ class InitialRestartIntentLifecycleReader:
                     return None
                 intent_key = self.intent_key(open_head.intent_id)
                 intent_observation = self._observe(intent_key)
-                generation_result = self._read_generation()
+                lease_history, generation_result = self._read_dependencies()
                 if not self._stable(
                     self._intent_head_key,
                     head_observation,
@@ -131,18 +134,27 @@ class InitialRestartIntentLifecycleReader:
                     intent_observation,
                 ):
                     continue
-                confirmed_generation_result = self._read_generation()
-                if generation_result != confirmed_generation_result:
+                confirmed_lease_history, confirmed_generation_result = self._read_dependencies()
+                if (
+                    lease_history != confirmed_lease_history
+                    or generation_result != confirmed_generation_result
+                ):
                     continue
                 intent = self._validate_open_intent(
                     open_head,
                     head_observation,
                     intent_observation,
                 )
+                opening_authority = self._opening_authority(
+                    intent,
+                    intent_observation,
+                    lease_history,
+                )
                 self._validate_open_generation(
                     intent,
                     intent_observation,
                     generation_result,
+                    opening_authority,
                 )
                 return None
             lifecycle_head = self._decode_lifecycle_head(lifecycle_observation)
@@ -307,6 +319,7 @@ class InitialRestartIntentLifecycleReader:
         intent: RestartIntentRecord,
         intent_observation: _ObservedKey,
         generation_result: (tuple[CurrentGeneration, tuple[StoredGenerationSnapshot, ...]] | None),
+        opening_authority: CoordinatorLeaseAuthority,
     ) -> None:
         if generation_result is None:
             raise RestartIntentLifecycleReadCorrupt(
@@ -326,12 +339,74 @@ class InitialRestartIntentLifecycleReader:
         if committed_at_unix_ms is None:
             raise AssertionError("validated restart intent lost its commit time")
         if (
-            intent_entry.transaction_sequence <= snapshot.transaction_sequence
-            or committed_at_unix_ms < snapshot.committed_at_unix_ms
+            intent_entry.transaction_sequence
+            <= max(
+                snapshot.transaction_sequence,
+                opening_authority.transaction_sequence,
+            )
+            or committed_at_unix_ms
+            < max(
+                snapshot.committed_at_unix_ms,
+                opening_authority.lease.granted_at_unix_ms,
+            )
+            or committed_at_unix_ms
+            >= min(
+                opening_authority.lease.expires_at_unix_ms,
+                intent.intent.prepare_deadline_unix_ms,
+            )
         ):
             raise RestartIntentLifecycleReadCorrupt(
-                "open restart intent does not follow its current generation"
+                "open restart intent is outside its generation, lease, or deadline window"
             )
+
+    def _opening_authority(
+        self,
+        intent: RestartIntentRecord,
+        intent_observation: _ObservedKey,
+        lease_history: tuple[CoordinatorLeaseAuthority, ...],
+    ) -> CoordinatorLeaseAuthority:
+        intent_entry = _required_entry(intent_observation, "immutable restart intent")
+        provenance = (
+            intent_entry.guard_revision,
+            intent_entry.guard_committed_at_unix_ms,
+            intent_entry.guard_mutation_sequence,
+            intent_entry.guard_value_sequence,
+            intent_entry.guard_lifetime_sequence,
+        )
+        if any(value is None for value in provenance):
+            raise RestartIntentLifecycleReadCorrupt(
+                "immutable restart intent has incomplete coordinator lease provenance"
+            )
+        (
+            guard_revision,
+            guard_committed_at_unix_ms,
+            guard_mutation_sequence,
+            guard_value_sequence,
+            guard_lifetime_sequence,
+        ) = provenance
+        lease_record = CoordinatorLeaseRecord(
+            run_id=intent.intent.run_id,
+            coordinator_id=intent.coordinator_id,
+            lease_id=intent.lease_id,
+            lease_duration_ms=intent.coordinator_lease_duration_ms,
+        )
+        matches = tuple(
+            authority
+            for authority in lease_history
+            if (
+                authority.lease.record == lease_record
+                and authority.lease.fencing_token == guard_revision
+                and authority.lease.granted_at_unix_ms == guard_committed_at_unix_ms
+                and authority.mutation_sequence == guard_mutation_sequence
+                and authority.value_sequence == guard_value_sequence
+                and authority.lifetime_sequence == guard_lifetime_sequence
+            )
+        )
+        if len(matches) != 1:
+            raise RestartIntentLifecycleReadCorrupt(
+                "opening coordinator lease is absent from durable lease history"
+            )
+        return matches[0]
 
     def _read_dependencies(
         self,

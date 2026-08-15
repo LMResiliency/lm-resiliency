@@ -318,6 +318,21 @@ def test_lifecycle_reader_rejects_invalid_open_guard_provenance(
         reader.read()
 
 
+def test_lifecycle_reader_rejects_open_authority_absent_from_lease_history():
+    _, store, _, _, _, opened, reader = _open_state()
+    intent_entry = store.get(opened.prepared.intent_key)
+    assert intent_entry is not None
+    assert intent_entry.guard_mutation_sequence is not None
+    changes = {
+        "guard_mutation_sequence": intent_entry.guard_mutation_sequence + 1,
+    }
+    _replace_entry(store, opened.prepared.intent_head_key, **changes)
+    _replace_entry(store, opened.prepared.intent_key, **changes)
+
+    with pytest.raises(RestartIntentLifecycleReadCorrupt, match="durable lease history"):
+        reader.read()
+
+
 def test_lifecycle_reader_rejects_open_entries_without_commit_times():
     _, store, _, _, _, opened, reader = _open_state()
     _replace_entry(
