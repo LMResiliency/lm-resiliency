@@ -287,7 +287,10 @@ Rank-dependent values such as valid expert AllToAll splits are excluded from equ
 SCOUT wraps certified durable checkpoint callbacks and framework fallback loads automatically.
 Use <code>instrument_dataloader(...)</code> and <code>checkpoint_io(...)</code> for other boundaries.</p>
 <p>An explicit <code>hang_master_addr</code> or <code>hang_master_port</code> selects TCP rendezvous.
-<code>hang_state_dir</code> remains available for status files and is used for file rendezvous only when no TCP endpoint is configured.</p>
+<code>hang_state_dir</code> remains available for status files and is used for file rendezvous only when no TCP endpoint is configured.
+Each training publisher and daemon reader share an opaque run-, restart-generation-, process-, peer-group-, and rank-scoped shared-memory name plus an ownership token.
+A live publisher never attaches to or unlinks another owner's segment; a dead owner using the same exact channel can be reclaimed safely.
+Harness construction waits for the daemon's bounded readiness signal, and a supervisor reports unexpected post-start daemon exit as <code>oob_daemon_failure</code> while foreground step boundaries also fail explicitly if protection is unavailable.</p>
 <h2 id="checkpoint-certification-and-recovery">Checkpoint Certification and Recovery<a class="headerlink" href="#checkpoint-certification-and-recovery" title="Permanent link">&para;</a></h2>
 <p>SCOUT runs before checkpoint capture at the same optimizer boundary.</p>
 <table>
