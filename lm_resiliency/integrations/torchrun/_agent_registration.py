@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import threading
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from types import MappingProxyType
 
 from lm_resiliency.integrations.torchrun._agent_registration_records import (
     AgentRegistrationRecord,
@@ -45,6 +47,111 @@ class AgentRegistrationClockError(AgentRegistrationError):
     """Raised when client or store time contradicts the registration timeline."""
 
 
+@dataclass(frozen=True, slots=True)
+class AgentRegistrationObservation:
+    """One conservative observation of trusted node registrations."""
+
+    observed_at_unix_ms: int
+    live: Mapping[str, HeldAgentRegistration]
+    expired: Mapping[str, HeldAgentRegistration]
+    missing_node_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _positive_integer(
+            self.observed_at_unix_ms,
+            "AgentRegistrationObservation.observed_at_unix_ms",
+        )
+        live = _registration_mapping(
+            self.live,
+            "AgentRegistrationObservation.live",
+        )
+        expired = _registration_mapping(
+            self.expired,
+            "AgentRegistrationObservation.expired",
+        )
+        missing = _node_ids(
+            self.missing_node_ids,
+            "AgentRegistrationObservation.missing_node_ids",
+            require_nonempty=False,
+        )
+        overlap = (set(live) & set(expired)) | ((set(live) | set(expired)) & set(missing))
+        if overlap:
+            raise ValueError("AgentRegistrationObservation node classifications must be disjoint")
+        object.__setattr__(self, "live", MappingProxyType(live))
+        object.__setattr__(self, "expired", MappingProxyType(expired))
+        object.__setattr__(self, "missing_node_ids", missing)
+
+
+class AgentRegistrationReader:
+    """Read registrations for an explicit trusted scheduler node set."""
+
+    def __init__(
+        self,
+        store: ControlStore,
+        *,
+        run_id: str,
+        clock: Callable[[], int],
+    ) -> None:
+        self._store = store
+        self._run_id = _nonempty_string(run_id, "run_id")
+        if not callable(clock):
+            raise TypeError("clock must be callable")
+        self._clock = clock
+        self._clock_lock = threading.Lock()
+        self._last_now_unix_ms = 0
+
+    def get(self, node_id: str) -> HeldAgentRegistration | None:
+        normalized_node_id = _nonempty_string(node_id, "node_id")
+        entry = self._store.get(agent_registration_key(self._run_id, normalized_node_id))
+        if entry is None:
+            return None
+        return _decode_registration_entry(
+            entry,
+            run_id=self._run_id,
+            node_id=normalized_node_id,
+        )
+
+    def observe(self, node_ids: Sequence[str]) -> AgentRegistrationObservation:
+        normalized_node_ids = _node_ids(
+            node_ids,
+            "node_ids",
+            require_nonempty=True,
+        )
+        registrations = {
+            node_id: registration
+            for node_id in normalized_node_ids
+            if (registration := self.get(node_id)) is not None
+        }
+        observed_at_unix_ms = self._now_unix_ms()
+        live: dict[str, HeldAgentRegistration] = {}
+        expired: dict[str, HeldAgentRegistration] = {}
+        for node_id, registration in registrations.items():
+            if observed_at_unix_ms < registration.granted_at_unix_ms:
+                raise AgentRegistrationClockError(
+                    "observer clock precedes an authoritative registration commit"
+                )
+            target = live if registration.expires_at_unix_ms > observed_at_unix_ms else expired
+            target[node_id] = registration
+        return AgentRegistrationObservation(
+            observed_at_unix_ms=observed_at_unix_ms,
+            live=live,
+            expired=expired,
+            missing_node_ids=tuple(
+                node_id for node_id in normalized_node_ids if node_id not in registrations
+            ),
+        )
+
+    def _now_unix_ms(self) -> int:
+        with self._clock_lock:
+            now_unix_ms = _positive_integer(self._clock(), "clock")
+            if now_unix_ms < self._last_now_unix_ms:
+                raise AgentRegistrationClockError(
+                    "agent registration observer clock moved backward"
+                )
+            self._last_now_unix_ms = now_unix_ms
+        return now_unix_ms
+
+
 class AgentRegistrationManager:
     """Maintain one run- and node-scoped agent registration."""
 
@@ -69,10 +176,9 @@ class AgentRegistrationManager:
         self._clock = clock
         self._clock_lock = threading.Lock()
         self._last_now_unix_ms = 0
-        run_digest = hashlib.sha256(agent_identity.run_id.encode("utf-8")).hexdigest()
-        node_digest = hashlib.sha256(agent_identity.node_id.encode("utf-8")).hexdigest()
-        self._registration_key = (
-            f"{_CONTROL_PREFIX}/runs/{run_digest}/agent-registrations/{node_digest}"
+        self._registration_key = agent_registration_key(
+            agent_identity.run_id,
+            agent_identity.node_id,
         )
 
     @property
@@ -83,7 +189,11 @@ class AgentRegistrationManager:
         entry = self._store.get(self._registration_key)
         if entry is None:
             return None
-        return self._decode_entry(entry)
+        return _decode_registration_entry(
+            entry,
+            run_id=self._agent_identity.run_id,
+            node_id=self._agent_identity.node_id,
+        )
 
     def register(self) -> HeldAgentRegistration:
         now_unix_ms = self._now_unix_ms()
@@ -123,7 +233,13 @@ class AgentRegistrationManager:
                     ) from error
                 except ControlStoreConflict:
                     continue
-                return self._require_live_response(self._decode_entry(entry))
+                return self._require_live_response(
+                    _decode_registration_entry(
+                        entry,
+                        run_id=self._agent_identity.run_id,
+                        node_id=self._agent_identity.node_id,
+                    )
+                )
             record = AgentRegistrationRecord(
                 agent_identity=self._agent_identity,
                 registration_id=uuid.uuid4().hex,
@@ -151,7 +267,13 @@ class AgentRegistrationManager:
                 ) from error
             except ControlStoreConflict:
                 continue
-            return self._require_live_response(self._decode_entry(entry))
+            return self._require_live_response(
+                _decode_registration_entry(
+                    entry,
+                    run_id=self._agent_identity.run_id,
+                    node_id=self._agent_identity.node_id,
+                )
+            )
         raise AgentRegistrationUnavailable(
             "agent registration changed repeatedly during registration"
         )
@@ -184,7 +306,13 @@ class AgentRegistrationManager:
         except ControlStoreConflict as error:
             raise AgentRegistrationLost("agent registration changed before renewal") from error
         try:
-            return self._require_live_response(self._decode_entry(entry))
+            return self._require_live_response(
+                _decode_registration_entry(
+                    entry,
+                    run_id=self._agent_identity.run_id,
+                    node_id=self._agent_identity.node_id,
+                )
+            )
         except AgentRegistrationUnavailable as error:
             raise AgentRegistrationLost(
                 "renewed agent registration expired before the response arrived"
@@ -216,29 +344,6 @@ class AgentRegistrationManager:
             ) from error
         except ControlStoreConflict as error:
             raise AgentRegistrationLost("agent registration changed before release") from error
-
-    def _decode_entry(self, entry: ControlStoreEntry) -> HeldAgentRegistration:
-        try:
-            record = AgentRegistrationRecord.from_json(entry.value)
-        except (TypeError, ValueError) as error:
-            raise AgentRegistrationCorrupt("persisted agent registration is malformed") from error
-        identity = record.agent_identity
-        if (
-            identity.run_id != self._agent_identity.run_id
-            or identity.node_id != self._agent_identity.node_id
-        ):
-            raise AgentRegistrationCorrupt(
-                "persisted agent registration belongs to another run or node"
-            )
-        if entry.committed_at_unix_ms is None:
-            raise AgentRegistrationCorrupt(
-                "persisted agent registration has no authoritative commit time"
-            )
-        return HeldAgentRegistration(
-            record=record,
-            fencing_token=entry.revision,
-            granted_at_unix_ms=entry.committed_at_unix_ms,
-        )
 
     def _require_live_response(
         self,
@@ -284,11 +389,90 @@ def _positive_integer(value: object, path: str) -> int:
     return value
 
 
+def agent_registration_key(run_id: str, node_id: str) -> str:
+    """Derive one run/node-scoped registration key without exposing identities."""
+    normalized_run_id = _nonempty_string(run_id, "run_id")
+    normalized_node_id = _nonempty_string(node_id, "node_id")
+    run_digest = hashlib.sha256(normalized_run_id.encode("utf-8")).hexdigest()
+    node_digest = hashlib.sha256(normalized_node_id.encode("utf-8")).hexdigest()
+    return f"{_CONTROL_PREFIX}/runs/{run_digest}/agent-registrations/{node_digest}"
+
+
+def _decode_registration_entry(
+    entry: ControlStoreEntry,
+    *,
+    run_id: str,
+    node_id: str,
+) -> HeldAgentRegistration:
+    try:
+        record = AgentRegistrationRecord.from_json(entry.value)
+    except (TypeError, ValueError) as error:
+        raise AgentRegistrationCorrupt("persisted agent registration is malformed") from error
+    identity = record.agent_identity
+    if identity.run_id != run_id or identity.node_id != node_id:
+        raise AgentRegistrationCorrupt(
+            "persisted agent registration belongs to another run or node"
+        )
+    if entry.committed_at_unix_ms is None:
+        raise AgentRegistrationCorrupt(
+            "persisted agent registration has no authoritative commit time"
+        )
+    return HeldAgentRegistration(
+        record=record,
+        fencing_token=entry.revision,
+        granted_at_unix_ms=entry.committed_at_unix_ms,
+    )
+
+
+def _registration_mapping(
+    value: object,
+    path: str,
+) -> dict[str, HeldAgentRegistration]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{path} must be a mapping")
+    result: dict[str, HeldAgentRegistration] = {}
+    for node_id, registration in value.items():
+        normalized_node_id = _nonempty_string(node_id, f"{path}.key")
+        if not isinstance(registration, HeldAgentRegistration):
+            raise TypeError(f"{path}[{node_id!r}] must be HeldAgentRegistration")
+        if registration.record.agent_identity.node_id != normalized_node_id:
+            raise ValueError(f"{path}[{node_id!r}] registration node does not match key")
+        result[normalized_node_id] = registration
+    return result
+
+
+def _node_ids(
+    value: object,
+    path: str,
+    *,
+    require_nonempty: bool,
+) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
+        raise TypeError(f"{path} must be a sequence")
+    result = tuple(
+        _nonempty_string(node_id, f"{path}[{index}]") for index, node_id in enumerate(value)
+    )
+    if require_nonempty and not result:
+        raise ValueError(f"{path} must contain at least one node ID")
+    if len(result) != len(set(result)):
+        raise ValueError(f"{path} must contain unique node IDs")
+    return result
+
+
+def _nonempty_string(value: object, path: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{path} must be a non-empty string")
+    return value
+
+
 __all__ = [
     "AgentRegistrationClockError",
     "AgentRegistrationCorrupt",
     "AgentRegistrationError",
     "AgentRegistrationLost",
     "AgentRegistrationManager",
+    "AgentRegistrationObservation",
+    "AgentRegistrationReader",
     "AgentRegistrationUnavailable",
+    "agent_registration_key",
 ]

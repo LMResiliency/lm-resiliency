@@ -318,6 +318,16 @@ store-time-guarded mutation. Expiry takeover creates a new registration ID and
 fencing token. Registration keys are independently scoped by hashed run and node
 identity, so agents on different nodes do not contend.
 
+The coordinator does not enumerate arbitrary control-store keys. A registration
+reader receives the trusted scheduler node-ID set explicitly, derives the same
+hashed keys as the agents, and reads only those registrations. After completing
+the reads, it samples the observer clock once and classifies each trusted node
+as live, expired, or missing. This observation is conservative rather than an
+atomic multi-key snapshot: a concurrent renewal may appear expired or missing,
+but a selected registration must be revalidated before admission or plan
+commit. A store-stamped grant time later than the observer clock is a clock
+error, not a live registration.
+
 ## API: lm-resiliency to the coordinator
 
 The current `OrchestrationHooks` callbacks are the starting point. The torchrun
