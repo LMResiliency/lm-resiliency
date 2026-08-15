@@ -958,7 +958,13 @@ authenticated agent registration, active generation membership, and one
 coordinator-lease authority. It also rejects a receipt that predates the
 authoritative intent-opening commit. This value performs no store reads or
 writes. A following read-only layer constructs it from stable durable state
-before the preparation layer selects a bounded commit window.
+before the preparation layer selects a bounded commit window. That reader
+double-collects the current open intent, exact agent-registration value and
+retained history, and durable coordinator-lease history. It rejects a missing
+or replaced registration, a stale supplied coordinator lease, malformed
+registration bytes, incomplete retained history, closed or changed intent
+state, and contradictory dependencies. Repeated-read contention remains a
+retryable conflict rather than persisted corruption.
 
 For a crashed or unreachable node, no preparation is assumed.
 
