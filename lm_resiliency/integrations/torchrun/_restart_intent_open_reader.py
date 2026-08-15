@@ -14,12 +14,10 @@ from lm_resiliency.integrations.torchrun._coordinator_lease import (
 from lm_resiliency.integrations.torchrun._coordinator_lease_history import (
     CoordinatorLeaseAuthority,
     CoordinatorLeaseHistoryCorrupt,
-    CoordinatorLeaseHistoryError,
     CoordinatorLeaseHistoryReader,
 )
 from lm_resiliency.integrations.torchrun._generation_reader import (
     GenerationStateCorrupt,
-    GenerationStateError,
     GenerationStateReader,
 )
 from lm_resiliency.integrations.torchrun._restart_intent_open_execution import (
@@ -31,6 +29,7 @@ from lm_resiliency.integrations.torchrun._restart_intent_open_records import (
 from lm_resiliency.integrations.torchrun._restart_intent_records import (
     RestartIntentClosedHeadRecord,
     RestartIntentHeadRecord,
+    RestartIntentLifecycleHeadRecord,
     RestartIntentRecord,
 )
 
@@ -83,14 +82,14 @@ class RestartIntentOpenStateReader:
             head_has_history = self._store.has_history(self._intent_head_key)
             lifecycle_entry = self._store.get(self._lifecycle_head_key)
             lifecycle_has_history = self._store.has_history(self._lifecycle_head_key)
+            if not self._state_is_stable(
+                head_entry,
+                head_has_history,
+                lifecycle_entry,
+                lifecycle_has_history,
+            ):
+                continue
             if head_entry is None:
-                if not self._state_is_stable(
-                    head_entry,
-                    head_has_history,
-                    lifecycle_entry,
-                    lifecycle_has_history,
-                ):
-                    continue
                 if head_has_history:
                     raise RestartIntentOpenStateCorrupt(
                         "current restart-intent head disappeared after lifecycle creation"
@@ -104,19 +103,14 @@ class RestartIntentOpenStateReader:
                 raise RestartIntentOpenStateCorrupt(
                     "live restart-intent head has no durable history"
                 )
-            head = self._decode_open_head(head_entry)
-            if head is None:
-                if not self._state_is_stable(
+            head = self._decode_head(head_entry)
+            if isinstance(head, RestartIntentClosedHeadRecord):
+                self._validate_closed_state(
+                    head,
                     head_entry,
-                    head_has_history,
                     lifecycle_entry,
                     lifecycle_has_history,
-                ):
-                    continue
-                if lifecycle_entry is None or not lifecycle_has_history:
-                    raise RestartIntentOpenStateCorrupt(
-                        "closed restart-intent head has no lifecycle state"
-                    )
+                )
                 return None
             if lifecycle_entry is not None or lifecycle_has_history:
                 raise RestartIntentOpenStateCorrupt(
@@ -128,14 +122,17 @@ class RestartIntentOpenStateReader:
                 raise RestartIntentOpenStateCorrupt(
                     "current restart-intent head references a missing intent"
                 )
+            intent_has_history = self._store.has_history(intent_key)
+            if not intent_has_history:
+                raise RestartIntentOpenStateCorrupt(
+                    "live immutable restart intent has no durable history"
+                )
             try:
                 generation_result = self._generation_reader.current_with_history()
                 lease_history = self._lease_history_reader.read()
             except (
                 CoordinatorLeaseHistoryCorrupt,
-                CoordinatorLeaseHistoryError,
                 GenerationStateCorrupt,
-                GenerationStateError,
             ) as error:
                 raise RestartIntentOpenStateCorrupt(
                     "restart-intent opening dependencies are corrupt"
@@ -147,6 +144,7 @@ class RestartIntentOpenStateReader:
                 lifecycle_has_history,
                 intent_key=intent_key,
                 intent_entry=intent_entry,
+                intent_has_history=intent_has_history,
             ):
                 continue
             if generation_result is None:
@@ -227,10 +225,10 @@ class RestartIntentOpenStateReader:
                 ) from error
         raise RestartIntentOpenStateError("restart-intent opening changed repeatedly during read")
 
-    def _decode_open_head(
+    def _decode_head(
         self,
         entry: ControlStoreEntry,
-    ) -> RestartIntentHeadRecord | None:
+    ) -> RestartIntentHeadRecord | RestartIntentClosedHeadRecord:
         try:
             head = RestartIntentHeadRecord.from_json(entry.value)
         except (TypeError, ValueError) as open_error:
@@ -244,12 +242,63 @@ class RestartIntentOpenStateReader:
                 raise RestartIntentOpenStateCorrupt(
                     "closed restart-intent head belongs to another run"
                 ) from open_error
-            return None
+            if entry.value != closed.to_json():
+                raise RestartIntentOpenStateCorrupt("closed restart-intent head is noncanonical")
+            return closed
         if head.run_id != self._run_id:
             raise RestartIntentOpenStateCorrupt(
                 "current restart-intent head belongs to another run"
             )
         return head
+
+    def _validate_closed_state(
+        self,
+        closed: RestartIntentClosedHeadRecord,
+        head_entry: ControlStoreEntry,
+        lifecycle_entry: ControlStoreEntry | None,
+        lifecycle_has_history: bool,
+    ) -> None:
+        if lifecycle_entry is None or not lifecycle_has_history:
+            raise RestartIntentOpenStateCorrupt("closed restart-intent head has no lifecycle state")
+        try:
+            lifecycle = RestartIntentLifecycleHeadRecord.from_json(lifecycle_entry.value)
+        except (TypeError, ValueError) as error:
+            raise RestartIntentOpenStateCorrupt(
+                "restart-intent lifecycle head is malformed"
+            ) from error
+        if lifecycle_entry.value != lifecycle.to_json():
+            raise RestartIntentOpenStateCorrupt("restart-intent lifecycle head is noncanonical")
+        if (
+            lifecycle.run_id != closed.run_id
+            or lifecycle.closure_index != closed.closure_index
+            or lifecycle.generation != closed.generation
+            or lifecycle.intent_id != closed.intent_id
+            or lifecycle.digest != closed.lifecycle_head_digest
+        ):
+            raise RestartIntentOpenStateCorrupt(
+                "closed restart-intent head does not match its lifecycle head"
+            )
+        if (
+            head_entry.mutation_sequence != 2
+            or head_entry.value_sequence != 2
+            or head_entry.lifetime_sequence != 1
+            or lifecycle_entry.mutation_sequence != 1
+            or lifecycle_entry.value_sequence != 1
+            or lifecycle_entry.lifetime_sequence != 1
+        ):
+            raise RestartIntentOpenStateCorrupt(
+                "restart-intent closure has invalid store sequences"
+            )
+        if (
+            head_entry.committed_at_unix_ms is None
+            or lifecycle_entry.committed_at_unix_ms is None
+            or head_entry.committed_at_unix_ms != lifecycle_entry.committed_at_unix_ms
+            or head_entry.transaction_sequence != lifecycle_entry.transaction_sequence
+            or _guard_provenance(head_entry) != _guard_provenance(lifecycle_entry)
+        ):
+            raise RestartIntentOpenStateCorrupt(
+                "restart-intent closure records do not share one guarded transaction"
+            )
 
     def _opening_authority(
         self,
@@ -320,6 +369,7 @@ class RestartIntentOpenStateReader:
         *,
         intent_key: str | None = None,
         intent_entry: ControlStoreEntry | None = None,
+        intent_has_history: bool | None = None,
     ) -> bool:
         if (
             self._store.get(self._intent_head_key) != head_entry
@@ -328,13 +378,35 @@ class RestartIntentOpenStateReader:
             or self._store.has_history(self._lifecycle_head_key) != lifecycle_has_history
         ):
             return False
-        return intent_key is None or self._store.get(intent_key) == intent_entry
+        if intent_key is None:
+            return True
+        return (
+            self._store.get(intent_key) == intent_entry
+            and self._store.has_history(intent_key) == intent_has_history
+        )
 
 
 def _commit_time(entry: ControlStoreEntry) -> int:
     if entry.committed_at_unix_ms is None:
         raise RestartIntentOpenStateCorrupt("restart-intent entry has no authoritative commit time")
     return entry.committed_at_unix_ms
+
+
+def _guard_provenance(entry: ControlStoreEntry) -> tuple[object, ...]:
+    provenance = (
+        entry.guard_key,
+        entry.guard_revision,
+        entry.guard_value_digest,
+        entry.guard_mutation_sequence,
+        entry.guard_value_sequence,
+        entry.guard_lifetime_sequence,
+        entry.guard_committed_at_unix_ms,
+    )
+    if any(value is None for value in provenance):
+        raise RestartIntentOpenStateCorrupt(
+            "restart-intent closure has incomplete guard provenance"
+        )
+    return provenance
 
 
 def _nonempty_string(value: object, path: str) -> str:

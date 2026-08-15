@@ -12,6 +12,10 @@ from lm_resiliency.integrations.torchrun._coordinator_lease import (
     CoordinatorLeaseManager,
     HeldCoordinatorLease,
 )
+from lm_resiliency.integrations.torchrun._coordinator_lease_history import (
+    CoordinatorLeaseHistoryError,
+)
+from lm_resiliency.integrations.torchrun._generation_reader import GenerationStateError
 from lm_resiliency.integrations.torchrun._generation_state import GenerationStateManager
 from lm_resiliency.integrations.torchrun._protocol import (
     RankAssignment,
@@ -274,6 +278,14 @@ def test_open_reader_rejects_live_head_without_durable_history():
         reader.read()
 
 
+def test_open_reader_rejects_live_intent_without_durable_history():
+    _, store, _, _, _, opened, reader = _state()
+    del store._last_revisions[opened.prepared.intent_key]
+
+    with pytest.raises(RestartIntentOpenStateCorrupt, match="intent has no durable history"):
+        reader.read()
+
+
 def test_open_reader_rejects_closed_head_without_lifecycle_state():
     _, store, _, _, _, opened, reader = _state()
     records = _closure_records(opened, opened.prepared.lease)
@@ -285,6 +297,32 @@ def test_open_reader_rejects_closed_head_without_lifecycle_state():
 
     with pytest.raises(RestartIntentOpenStateCorrupt, match="no lifecycle state"):
         reader.read()
+
+
+def test_open_reader_retries_atomic_closure_between_initial_reads(monkeypatch):
+    clock, store, _, _, lease, opened, reader = _state()
+    records = _closure_records(opened, lease)
+    original_get = store.get
+    triggered = False
+
+    def racing_get(key):
+        nonlocal triggered
+        if key == reader.lifecycle_head_key and not triggered:
+            triggered = True
+            clock.set(1_010)
+            store.compare_set_many_guarded(
+                records.writes,
+                guard_key=opened.prepared.coordinator_lease_key,
+                expected_guard_revision=lease.fencing_token,
+                not_before_unix_ms=1_010,
+                deadline_unix_ms=lease.expires_at_unix_ms,
+                conditions=records.conditions,
+            )
+        return original_get(key)
+
+    monkeypatch.setattr(store, "get", racing_get)
+
+    assert reader.read() is None
 
 
 def test_open_reader_returns_none_after_atomic_initial_closure():
@@ -301,6 +339,66 @@ def test_open_reader_returns_none_after_atomic_initial_closure():
     )
 
     assert reader.read() is None
+
+
+@pytest.mark.parametrize("tamper", ["value", "link", "metadata"])
+def test_open_reader_rejects_unverified_lifecycle_state(tamper):
+    clock, store, _, _, lease, opened, reader = _state()
+    records = _closure_records(opened, lease)
+    clock.set(1_010)
+    committed = store.compare_set_many_guarded(
+        records.writes,
+        guard_key=opened.prepared.coordinator_lease_key,
+        expected_guard_revision=lease.fencing_token,
+        not_before_unix_ms=1_010,
+        deadline_unix_ms=lease.expires_at_unix_ms,
+        conditions=records.conditions,
+    )
+    lifecycle_entry = committed[records.lifecycle_head_key]
+    if tamper == "value":
+        lifecycle_entry = replace(lifecycle_entry, value=b"invalid")
+    elif tamper == "link":
+        lifecycle_entry = replace(
+            lifecycle_entry,
+            value=replace(
+                records.lifecycle_head,
+                intent_id="intent-b",
+            ).to_json(),
+        )
+    else:
+        lifecycle_entry = replace(
+            lifecycle_entry,
+            transaction_sequence=lifecycle_entry.transaction_sequence + 1,
+        )
+    store._entries[records.lifecycle_head_key] = lifecycle_entry
+
+    with pytest.raises(RestartIntentOpenStateCorrupt, match="lifecycle|transaction"):
+        reader.read()
+
+
+@pytest.mark.parametrize(
+    "dependency_error",
+    [
+        CoordinatorLeaseHistoryError("lease history changed"),
+        GenerationStateError("generation changed"),
+    ],
+)
+def test_open_reader_preserves_retryable_dependency_errors(
+    dependency_error,
+    monkeypatch,
+):
+    _, _, _, _, _, _, reader = _state()
+
+    def fail():
+        raise dependency_error
+
+    if isinstance(dependency_error, CoordinatorLeaseHistoryError):
+        monkeypatch.setattr(reader._lease_history_reader, "read", fail)
+    else:
+        monkeypatch.setattr(reader._generation_reader, "current_with_history", fail)
+
+    with pytest.raises(type(dependency_error), match="changed"):
+        reader.read()
 
 
 def test_open_reader_rejects_opening_authority_missing_from_history():
