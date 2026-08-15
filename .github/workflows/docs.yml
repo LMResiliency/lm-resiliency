@@ -97,7 +97,7 @@ jobs:
             git switch --force-create gh-pages origin/gh-pages
           else
             git switch --orphan gh-pages
-            git rm -rf .
+            git rm -rf --ignore-unmatch .
           fi
 
           rm -rf dev
@@ -124,4 +124,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "Publish documentation dev"
-          git push origin gh-pages
+          for attempt in $(seq 1 5); do
+            if git push origin gh-pages; then
+              exit 0
+            fi
+            if test "$attempt" -eq 5; then
+              echo "Failed to publish development documentation after $attempt attempts" >&2
+              exit 1
+            fi
+            git fetch origin gh-pages
+            git rebase origin/gh-pages
+          done

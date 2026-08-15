@@ -245,7 +245,7 @@ jobs:
           python -m pip install \
             --index-url https://download.pytorch.org/whl/cpu \
             --only-binary=:all: \
-            "torch==$TORCH_VERSION"
+            "torch==2.13.0"
           python -m pip install "numpy==2.5.1" "setuptools==84.0.0"
 
       - name: Install and import staged package
@@ -411,7 +411,7 @@ jobs:
     permissions:
       contents: write
     concurrency:
-      group: docs-publish
+      group: release-docs-${{ github.ref_name }}
       cancel-in-progress: false
 
     steps:
@@ -461,7 +461,7 @@ jobs:
             git switch --force-create gh-pages origin/gh-pages
           else
             git switch --orphan gh-pages
-            git rm -rf .
+            git rm -rf --ignore-unmatch .
           fi
 
           rm -rf -- "$version"
@@ -501,4 +501,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "Publish documentation ${version}"
-          git push origin gh-pages
+          for attempt in $(seq 1 5); do
+            if git push origin gh-pages; then
+              exit 0
+            fi
+            if test "$attempt" -eq 5; then
+              echo "Failed to publish release documentation after $attempt attempts" >&2
+              exit 1
+            fi
+            git fetch origin gh-pages
+            git rebase origin/gh-pages
+          done

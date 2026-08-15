@@ -4,11 +4,29 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
+from pathlib import Path
 from urllib.parse import quote
 
 _REPOSITORY = os.getenv("GITHUB_REPOSITORY", "LMResiliency/lm-resiliency")
-_SOURCE_REF = os.getenv("GITHUB_SHA", "main")
 _REPO_LINK = re.compile(r"(?P<prefix>\]\()(?P<target>\.\./[^)\s]+)(?P<suffix>\))")
+
+
+def _checked_out_revision() -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return "main"
+    return completed.stdout.strip() or "main"
+
+
+_SOURCE_REF = _checked_out_revision()
 
 
 def _repository_url(target: str) -> str:
