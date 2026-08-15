@@ -2867,9 +2867,9 @@ def validate_restart_plan(
             raise ProtocolValidationError(
                 f"restart_acks[{index}]: missing authenticated receipt time"
             )
-        if received_unix_ms > intent.prepare_deadline_unix_ms:
+        if received_unix_ms >= intent.prepare_deadline_unix_ms:
             raise ProtocolValidationError(
-                f"restart_acks[{index}]: received after restart intent deadline"
+                f"restart_acks[{index}]: received at or after restart intent deadline"
             )
         ack_by_node[ack.node_id] = ack
     if set(authenticated_ack_agents) != set(ack_by_node):

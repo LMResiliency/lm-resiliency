@@ -922,7 +922,7 @@ The manager transport authenticates the acknowledgement sender. The
 coordinator checks the acknowledgement's run, node, and agent incarnation
 against that authenticated identity and requires the agent to match the
 inventory reporter. The coordinator also records receipt time outside the
-worker payload and rejects acknowledgements received after
+worker payload and rejects acknowledgements received at or after
 `prepare_deadline_unix_ms`. Payload identity fields and timestamps alone are
 not authentication. For latest recovery, the acknowledgement's canonical
 inventory digest must match the exact event used by the manifest; event-ID
@@ -933,10 +933,11 @@ the exact immutable restart-intent record, the authenticated agent-registration
 lifetime, its registration fencing token and authoritative grant time, and the
 coordinator-recorded receipt time. The envelope rejects a sender identity that
 does not match the acknowledgement, a receipt outside the authenticated
-registration lifetime, or a receipt after the intent deadline. The record is
-not self-authenticating: the acknowledgement persistence layer must still
-verify the registration and intent against authoritative control-store state
-before committing it.
+registration lifetime, or a receipt at or after the intent deadline. The
+deadline is exclusive so every accepted receipt has a representable guarded
+commit window. The record is not self-authenticating: the acknowledgement
+persistence layer must still verify the registration and intent against
+authoritative control-store state before committing it.
 
 Each intent/node acknowledgement key is create-once. Its guarded transaction
 conditions on the exact immutable intent revision, the still-open current

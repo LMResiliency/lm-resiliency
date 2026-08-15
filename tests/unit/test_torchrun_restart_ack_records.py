@@ -172,15 +172,6 @@ def test_restart_ack_receipt_accepts_registration_grant_boundary():
     assert record.received_at_unix_ms == record.registration_granted_at_unix_ms
 
 
-def test_restart_ack_receipt_accepts_intent_deadline_boundary():
-    record = _record(
-        registration_granted_at_unix_ms=25_000,
-        received_at_unix_ms=50_000,
-    )
-
-    assert record.received_at_unix_ms == record.intent_record.intent.prepare_deadline_unix_ms
-
-
 @pytest.mark.parametrize(
     ("received_at_unix_ms", "message"),
     [
@@ -197,11 +188,14 @@ def test_restart_ack_receipt_rejects_receipt_outside_registration_lifetime(
         _record(received_at_unix_ms=received_at_unix_ms)
 
 
-def test_restart_ack_receipt_rejects_receipt_after_intent_deadline():
+@pytest.mark.parametrize("received_at_unix_ms", [50_000, 50_001])
+def test_restart_ack_receipt_rejects_receipt_at_or_after_intent_deadline(
+    received_at_unix_ms,
+):
     with pytest.raises(ValueError, match="intent deadline"):
         _record(
             registration_granted_at_unix_ms=25_000,
-            received_at_unix_ms=50_001,
+            received_at_unix_ms=received_at_unix_ms,
         )
 
 
