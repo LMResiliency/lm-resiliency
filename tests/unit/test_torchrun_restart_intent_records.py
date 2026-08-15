@@ -141,6 +141,10 @@ def test_restart_intent_record_requires_restart_intent():
             "intent is invalid",
         ),
         (
+            lambda value: value["intent"].update({"schema_version": 1.0}),
+            "intent is invalid",
+        ),
+        (
             lambda value: value["intent"].update({"unknown": True}),
             "intent is invalid",
         ),

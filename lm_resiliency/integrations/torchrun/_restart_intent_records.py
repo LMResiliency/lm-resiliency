@@ -103,6 +103,13 @@ class RestartIntentRecord:
         intent_value = value["intent"]
         if not isinstance(intent_value, Mapping):
             raise ValueError("RestartIntentRecord.intent must be an object")
+        nested_schema_version = intent_value.get("schema_version")
+        if (
+            isinstance(nested_schema_version, bool)
+            or not isinstance(nested_schema_version, int)
+            or nested_schema_version != RestartIntent.SCHEMA_VERSION
+        ):
+            raise ValueError("RestartIntentRecord.intent is invalid")
         try:
             intent = RestartIntent.from_dict(intent_value)
         except ProtocolValidationError as error:
