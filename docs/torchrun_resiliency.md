@@ -982,11 +982,14 @@ adjacent-transition validation build on this strict value boundary.
 The history reader obtains a stable immutable snapshot, requires the live value
 to be its final retained entry, requires empty/nonempty values to agree with the
 durable history marker, and validates every adjacent renewal, replacement, and
-delete/recreate transition. Renewals must commit before expiry, in-place
-replacements cannot overlap, no value or lifetime may be skipped, and lease
-identities and fencing tokens cannot recur after replacement. Higher layers can
-therefore reconstruct coordinator authority after process loss without
-trusting process-local observations.
+delete/recreate transition. A never-created lease has empty history; retained
+history with no live lease fails closed because the current store contract has
+no authoritative tombstone proving which retained value was deleted last.
+Renewals must commit before expiry, in-place replacements cannot overlap, no
+value or lifetime may be skipped, and lease identities and fencing tokens
+cannot recur after replacement. Higher layers can therefore reconstruct live
+coordinator authority after process loss without trusting process-local
+observations.
 
 Coordinator state that spans multiple keys uses one guarded store transaction.
 The transaction first checks the coordinator lease revision, then any

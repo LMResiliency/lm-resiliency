@@ -283,7 +283,7 @@ def test_coordinator_lease_history_reads_renewal_and_replacement():
     assert tuple(authority.lifetime_sequence for authority in history) == (1, 1, 1)
 
 
-def test_coordinator_lease_history_preserves_delete_recreate_and_final_delete():
+def test_coordinator_lease_history_preserves_delete_and_recreate():
     clock = ManualClock()
     store = InMemoryControlStore(clock=clock)
     first = _manager(store, clock, "coordinator-a")
@@ -293,13 +293,23 @@ def test_coordinator_lease_history_preserves_delete_recreate_and_final_delete():
     clock.set(1_010)
     first.release(opened)
     replacement = second.acquire()
-    second.release(replacement)
 
     history = CoordinatorLeaseHistoryReader(store, run_id="training-run").read()
 
     assert tuple(authority.lease for authority in history) == (opened, replacement)
     assert tuple(authority.mutation_sequence for authority in history) == (1, 3)
     assert tuple(authority.lifetime_sequence for authority in history) == (1, 2)
+
+
+def test_coordinator_lease_history_rejects_deleted_current_lease():
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    manager = _manager(store, clock, "coordinator-a")
+    lease = manager.acquire()
+    manager.release(lease)
+
+    with pytest.raises(CoordinatorLeaseHistoryCorrupt, match="deleted"):
+        CoordinatorLeaseHistoryReader(store, run_id="training-run").read()
 
 
 def test_coordinator_lease_history_reads_empty_store():

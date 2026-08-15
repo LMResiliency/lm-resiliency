@@ -140,7 +140,11 @@ class CoordinatorLeaseHistoryReader:
                 raise CoordinatorLeaseHistoryCorrupt(
                     "coordinator lease value history contradicts its durable history marker"
                 )
-            if current is not None and (not history or history[-1] != current):
+            if current is None and history:
+                raise CoordinatorLeaseHistoryCorrupt(
+                    "coordinator lease was deleted without an authoritative retained tail"
+                )
+            if current is not None and history[-1] != current:
                 raise CoordinatorLeaseHistoryCorrupt(
                     "current coordinator lease is absent from its value history"
                 )
