@@ -202,7 +202,12 @@ def minimum_safety(
 ) -> SafetyClass:
     """Return the minimum isolation required for a failure type."""
     if (
-        failure_type in {FailureType.DROP, FailureType.REORDER}
+        failure_type
+        in {
+            FailureType.DROP,
+            FailureType.DUPLICATE,
+            FailureType.REORDER,
+        }
         and surface is FaultSurface.COLLECTIVE
     ):
         return SafetyClass.CLUSTER_DESTRUCTIVE
@@ -213,8 +218,17 @@ def minimum_safety(
     return SafetyClass.SAFE_IN_PROCESS
 
 
-def expected_failure_kind(failure_type: FailureType) -> str:
+def expected_failure_kind(
+    failure_type: FailureType,
+    surface: FaultSurface | None = None,
+) -> str:
     """Map an injected effect to a neutral localization category."""
+    if surface is FaultSurface.COLLECTIVE and failure_type in {
+        FailureType.DROP,
+        FailureType.DUPLICATE,
+        FailureType.REORDER,
+    }:
+        return "hang"
     if failure_type in _STRAGGLER_FAILURES:
         return "straggler"
     if failure_type in _HANG_FAILURES:
@@ -550,7 +564,7 @@ class FaultSpec:
 
     @property
     def expected_kind(self) -> str:
-        return expected_failure_kind(self.type)
+        return expected_failure_kind(self.type, self.target.surface)
 
     def _validate_parameters(self) -> None:
         _validate_builtin_local_parameters(self)

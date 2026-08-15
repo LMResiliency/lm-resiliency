@@ -7457,6 +7457,29 @@ def test_collective_drop_requires_cluster_destructive_executor() -> None:
     )
 
     assert fault.safety is SafetyClass.CLUSTER_DESTRUCTIVE
+    assert fault.expected_kind == "hang"
+    assert not safe_executor.supports(fault)
+
+
+def test_collective_duplicate_requires_cluster_destructive_executor() -> None:
+    fault = FaultSpec(
+        fault_id="collective-duplicate",
+        type=FailureType.DUPLICATE,
+        target=FaultTarget(
+            rank=0,
+            surface=FaultSurface.COLLECTIVE,
+        ),
+    )
+    safe_executor = CallbackFaultExecutor(
+        name="safe-duplicate",
+        supported_types={FailureType.DUPLICATE},
+        activate=lambda _request: FaultExecutionResult(verified=True, active=False),
+        one_shot=True,
+        max_safety=SafetyClass.SAFE_IN_PROCESS,
+    )
+
+    assert fault.safety is SafetyClass.CLUSTER_DESTRUCTIVE
+    assert fault.expected_kind == "hang"
     assert not safe_executor.supports(fault)
 
 
@@ -7478,6 +7501,7 @@ def test_collective_reorder_requires_cluster_destructive_executor() -> None:
     )
 
     assert fault.safety is SafetyClass.CLUSTER_DESTRUCTIVE
+    assert fault.expected_kind == "hang"
     assert not safe_executor.supports(fault)
 
 

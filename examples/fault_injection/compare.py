@@ -8,7 +8,11 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from lm_resiliency.fault_injection.config import FailureType, expected_failure_kind
+from lm_resiliency.fault_injection.config import (
+    FailureType,
+    FaultSurface,
+    expected_failure_kind,
+)
 from lm_resiliency.fault_injection.injector import _probability_selected
 
 
@@ -444,10 +448,19 @@ def _expected_action_resource(action: Mapping[str, Any]) -> str | None:
 
 def _expected_action_kind(action: Mapping[str, Any]) -> str:
     failure_type = _required_string(action.get("type"), "manifest fault type")
+    surface = _required_string(
+        _action_target(action).get("surface"),
+        "manifest target surface",
+    )
     try:
-        return expected_failure_kind(FailureType(failure_type))
+        return expected_failure_kind(
+            FailureType(failure_type),
+            FaultSurface(surface),
+        )
     except ValueError as error:
-        raise ValueError(f"manifest fault type {failure_type!r} is unsupported") from error
+        raise ValueError(
+            f"manifest fault type {failure_type!r} or surface {surface!r} is unsupported"
+        ) from error
 
 
 def _action_target(action: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -787,7 +800,7 @@ def _expected_action_source_prefix(action: Mapping[str, Any]) -> str | None:
 def _expected_targets_for_source(
     actions: Sequence[Mapping[str, Any]],
     prefix: str,
-) -> dict[str, list[int] | list[str]]:
+) -> dict[str, Any]:
     matching = tuple(
         action for action in actions if _expected_action_source_prefix(action) == prefix
     )
@@ -806,13 +819,19 @@ def _expected_targets_for_source(
                 if (resource := _expected_action_resource(action)) is not None
             }
         ),
+        "rank_resource_pairs": _sorted_rank_resource_pairs(
+            (expected_rank, expected_resource)
+            for action in matching
+            if (expected_rank := _expected_action_rank(action)) is not None
+            and (expected_resource := _expected_action_resource(action)) is not None
+        ),
     }
 
 
 def _reported_targets_for_source(
     reports: Sequence[Mapping[str, Any]],
     prefix: str,
-) -> dict[str, list[int] | list[str]]:
+) -> dict[str, Any]:
     matching = tuple(
         report
         for report in reports
@@ -842,6 +861,7 @@ def _reported_targets_for_source(
                 )
             }
         ),
+        "rank_resource_pairs": _reported_rank_resource_pairs(matching),
     }
 
 

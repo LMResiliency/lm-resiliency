@@ -120,6 +120,11 @@ python -m examples.fault_injection.compare \
   --artifact-dir /tmp/lm-resiliency-fault-evaluation
 ```
 
+Source attribution preserves exact `(rank, resource)` associations within each
+SCOUT replay prefix. Matching the independent rank and resource sets while
+crossing their pairs between `hidden.*`, `embedding.*`, or `output.*` evidence
+does not pass certification.
+
 `enable_resiliency()` is intentionally called before
 `enable_fault_injection()`.
 That registration order lets SCOUT inspect the active one-iteration fault before

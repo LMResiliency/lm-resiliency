@@ -815,6 +815,91 @@ def test_comparison_correlates_source_prefixes_with_failed_targets() -> None:
     assert not occurrence["localized"]
 
 
+def test_comparison_preserves_rank_resource_pairs_within_source_prefixes() -> None:
+    injection = _injection_payload()
+    first_action = injection["manifest"]["incidents"][0]["faults"][0]
+    first_action["target"]["resource"] = "gpu-0"
+    injection["injections"][0]["target"]["resource"] = "gpu-0"
+
+    action_specs = (
+        ("hidden-rank-one", 1, "gpu-1", "transformer_block"),
+        ("output-rank-zero", 0, "gpu-1", "output"),
+        ("output-rank-one", 1, "gpu-0", "output"),
+    )
+    for fault_id, rank, resource, component in action_specs:
+        action = copy.deepcopy(first_action)
+        action["fault_id"] = fault_id
+        action["target"].update(
+            {
+                "rank": rank,
+                "resource": resource,
+                "component": component,
+            }
+        )
+        if component == "output":
+            action["target"].pop("index")
+        injection["manifest"]["incidents"][0]["faults"].append(action)
+        record = copy.deepcopy(injection["injections"][0])
+        record.update(
+            {
+                "fault_id": fault_id,
+                "execution_rank": rank,
+                "target": copy.deepcopy(action["target"]),
+            }
+        )
+        injection["injections"].append(record)
+
+    localization = _localization_payload()
+    localization["reports"] = [
+        {
+            "training_iteration": 4,
+            "failed_ranks": [0],
+            "failed_resources": ["gpu-1"],
+            "kind": "sdc",
+            "scope": "resource",
+            "layer_id": -1,
+            "sources": ["hidden.output"],
+        },
+        {
+            "training_iteration": 4,
+            "failed_ranks": [1],
+            "failed_resources": ["gpu-0"],
+            "kind": "sdc",
+            "scope": "resource",
+            "layer_id": -1,
+            "sources": ["hidden.output"],
+        },
+        {
+            "training_iteration": 4,
+            "failed_ranks": [0],
+            "failed_resources": ["gpu-0"],
+            "kind": "sdc",
+            "scope": "resource",
+            "layer_id": -1,
+            "sources": ["output.output"],
+        },
+        {
+            "training_iteration": 4,
+            "failed_ranks": [1],
+            "failed_resources": ["gpu-1"],
+            "kind": "sdc",
+            "scope": "resource",
+            "layer_id": -1,
+            "sources": ["output.output"],
+        },
+    ]
+    _refresh_manifest_identity(injection, localization)
+
+    occurrence = compare_payloads(injection, localization)["evaluations"][0]
+
+    assert occurrence["rank_match"]
+    assert occurrence["resource_match"]
+    assert occurrence["rank_resource_pair_match"]
+    assert occurrence["source_match"]
+    assert not occurrence["source_target_match"]
+    assert not occurrence["localized"]
+
+
 @pytest.mark.parametrize(
     ("module_path", "expected_source", "wrong_source"),
     [

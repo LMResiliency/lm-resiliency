@@ -589,10 +589,11 @@ Safety classes are:
 
 Campaign enablement fails before training when no configured executor supports a
 local fault or when an executor's safety ceiling is insufficient.
-Collective desynchronization expects SCOUT `hang` localization. `drop` and
-`reorder` actions on the `collective` surface are cluster-destructive, so they
-cannot use a safe-in-process executor or participate in an in-band
-post-activation collective.
+Collective desynchronization expects SCOUT `hang` localization. `drop`,
+`duplicate`, and `reorder` actions on the `collective` surface are
+cluster-destructive and also expect `hang`, so they cannot use a safe-in-process
+executor or participate in an in-band post-activation collective. The same
+operations on tensor and data-flow surfaces retain their normal local semantics.
 Unsupported effects are never silently skipped.
 At execution time, the selected executor must return verified evidence.
 An unverifiable activation is marked failed, deactivated when necessary, and is
@@ -800,8 +801,10 @@ match the injected actions; independently correct kind and component sets cannot
 be swapped across a correlated occurrence.
 The standalone SCOUT comparator applies the same rule to replay source prefixes:
 each `hidden.*`, `embedding.*`, or `output.*` source remains associated with the
-failed ranks or resources in the report that supplied it. Repeated actions with
-the same source and target are deduplicated for this set comparison.
+exact `(rank, resource)` pairs in the report that supplied it. Correct
+per-prefix rank and resource projections with their pairs crossed do not count
+as localization. Repeated actions with the same source and target are
+deduplicated for this set comparison.
 Example detection counts also require a report with the expected failure kind;
 an unrelated report at the same iteration is retained as evidence but does not
 count as detecting the injected occurrence. For correlated incidents containing
