@@ -1056,6 +1056,12 @@ key, including after deletion and recreation, so a delayed coordinator cannot
 mistake a recreated record for an older value with identical bytes. Higher
 coordinator records add lease fencing and run/schema namespaces in subsequent
 layers rather than weakening this storage primitive.</p>
+<p>Coordinator state that spans multiple keys uses one guarded store transaction.
+The transaction first checks the coordinator lease revision, then every target
+revision, then one authoritative store-time window. It publishes all target
+values with the same commit timestamp or publishes none. This is the primitive
+used to create an immutable generation snapshot and advance the generation head
+without allowing a stale or expired coordinator to commit either half alone.</p>
 <p>Coordinator ownership is stored under a schema-versioned, run-scoped lease key.
 The lease record binds the run, a unique coordinator-process incarnation, a
 unique lease acquisition, and the lease duration. The control store attaches
