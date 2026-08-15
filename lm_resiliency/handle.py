@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, ContextManager, Protocol, runtime_checkable
 
 from lm_resiliency.checkpointing.durable import DurableCheckpointCoordinator
 from lm_resiliency.checkpointing.manager import InMemoryCheckpointManager, RecoveryMode
@@ -19,6 +19,59 @@ from lm_resiliency.recovery import (
     build_recovery_decision,
     recovery_decision_reason,
 )
+
+
+@runtime_checkable
+class ResiliencySession(Protocol):
+    """Framework-neutral lifecycle returned by :func:`enable_resiliency`."""
+
+    @property
+    def step_count(self) -> int: ...
+
+    def prepare_recovery(
+        self,
+        failure_kind: str,
+        *,
+        all_ranks_accessible: bool = True,
+    ) -> RecoveryMode: ...
+
+    @property
+    def last_recovery_decision(self) -> RecoveryDecision | None: ...
+
+    def set_recovery_decision_callback(
+        self,
+        callback: RecoveryDecisionCallback | None,
+    ) -> None: ...
+
+    def describe_recovery(
+        self,
+        failure_kind: str,
+        recovery_mode: RecoveryMode | str,
+        *,
+        all_ranks_accessible: bool,
+        reason: str,
+        allow_collective: bool = False,
+    ) -> RecoveryDecision: ...
+
+    def instrument_dataloader(self, dataloader: Any, *, name: str = "train") -> Any: ...
+
+    def checkpoint_io(
+        self,
+        operation: CheckpointOperation,
+        *,
+        name: str = "framework",
+    ) -> ContextManager[None]: ...
+
+    def flush_for_restart(self) -> int: ...
+
+    def set_restart_destination(
+        self,
+        resolver: Callable[[], str | Path | None] | None,
+    ) -> None: ...
+
+    def copy_checkpoint_to(self, destination: str | Path) -> int: ...
+
+    def close(self) -> None: ...
 
 
 class ResiliencyHandle:

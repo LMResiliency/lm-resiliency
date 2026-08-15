@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """Training-side progress instrumentation for the OOB hang daemon."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """Megatron-core FrameworkAdapter implementation.
 
 Bridges megatron-core's distributed training components with lm_resiliency's

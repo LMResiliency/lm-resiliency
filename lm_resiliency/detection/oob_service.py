@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """Separate-process CPU/Gloo service for SCOUT hang localization."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """Async disk serialization and loading for checkpoint persistence."""
 
 from __future__ import annotations

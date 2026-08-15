@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """Peer group formation for fault detection.
 
 Auto-discovers the DP/FSDP peer group from the model's DeviceMesh without

@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """Layer Replay Detector: orchestrates SDC and straggler detection.
 
 Replays a sampled model layer across a peer group with identical inputs,

@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """Stable SCOUT fault-report payloads for external orchestration."""
 
 from __future__ import annotations

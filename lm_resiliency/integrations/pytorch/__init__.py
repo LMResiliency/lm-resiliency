@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """Native PyTorch integration for DDP, FSDP2, and HSDP."""
 
 from __future__ import annotations

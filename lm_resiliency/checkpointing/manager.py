@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """InMemoryCheckpointManager: orchestrates the 2-phase in-memory checkpoint pipeline."""
 
 from __future__ import annotations

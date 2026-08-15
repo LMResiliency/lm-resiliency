@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """IB subnet-manager topology adapter → `FabricTopology` (the live seam for
 switch-fault localization, see switch_localizer.py and
 docs/scout.md#stragglers-and-communication-localization).

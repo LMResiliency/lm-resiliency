@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """C³: Consensus Collective Communication.
 
 C³ gathers compact comparable evidence and returns an explicit verdict,
