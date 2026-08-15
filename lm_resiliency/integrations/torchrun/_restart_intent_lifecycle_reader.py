@@ -9,9 +9,6 @@ from lm_resiliency.integrations.torchrun._control_store import (
     ControlStore,
     ControlStoreEntry,
 )
-from lm_resiliency.integrations.torchrun._coordinator_lease import (
-    CoordinatorLeaseRecord,
-)
 from lm_resiliency.integrations.torchrun._coordinator_lease_history import (
     CoordinatorLeaseAuthority,
     CoordinatorLeaseHistoryCorrupt,
@@ -22,6 +19,9 @@ from lm_resiliency.integrations.torchrun._generation_reader import (
     GenerationStateReader,
     StoredGenerationSnapshot,
 )
+from lm_resiliency.integrations.torchrun._restart_intent_lifecycle_auth import (
+    AuthenticatedInitialRestartIntentClosure,
+)
 from lm_resiliency.integrations.torchrun._restart_intent_lifecycle_state import (
     PersistedInitialRestartIntentClosure,
 )
@@ -29,8 +29,6 @@ from lm_resiliency.integrations.torchrun._restart_intent_records import (
     RestartIntentClosedHeadRecord,
     RestartIntentHeadRecord,
     RestartIntentLifecycleHeadRecord,
-    RestartIntentLifecycleRecord,
-    RestartIntentRecord,
 )
 
 _CONTROL_PREFIX = "lm_resiliency/torchrun/v1"
@@ -43,66 +41,6 @@ class RestartIntentLifecycleReadError(RuntimeError):
 
 class RestartIntentLifecycleReadCorrupt(RestartIntentLifecycleReadError):
     """Raised when persisted restart-intent lifecycle state is contradictory."""
-
-
-@dataclass(frozen=True, slots=True)
-class StoredInitialRestartIntentClosure:
-    """One closure authenticated against generation and lease history."""
-
-    state: PersistedInitialRestartIntentClosure
-    generation_snapshot: StoredGenerationSnapshot
-    opening_authority: CoordinatorLeaseAuthority
-    closing_authority: CoordinatorLeaseAuthority
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.state, PersistedInitialRestartIntentClosure):
-            raise TypeError(
-                "StoredInitialRestartIntentClosure.state must be "
-                "PersistedInitialRestartIntentClosure"
-            )
-        if not isinstance(self.generation_snapshot, StoredGenerationSnapshot):
-            raise TypeError(
-                "StoredInitialRestartIntentClosure.generation_snapshot must be "
-                "StoredGenerationSnapshot"
-            )
-        if not isinstance(self.opening_authority, CoordinatorLeaseAuthority):
-            raise TypeError(
-                "StoredInitialRestartIntentClosure.opening_authority must be "
-                "CoordinatorLeaseAuthority"
-            )
-        if not isinstance(self.closing_authority, CoordinatorLeaseAuthority):
-            raise TypeError(
-                "StoredInitialRestartIntentClosure.closing_authority must be "
-                "CoordinatorLeaseAuthority"
-            )
-
-    @property
-    def intent(self) -> RestartIntentRecord:
-        return self.state.intent
-
-    @property
-    def open_head(self) -> RestartIntentHeadRecord:
-        return self.state.open_head
-
-    @property
-    def closed_head(self) -> RestartIntentClosedHeadRecord:
-        return self.state.closed_head
-
-    @property
-    def lifecycle(self) -> RestartIntentLifecycleRecord:
-        return self.state.lifecycle
-
-    @property
-    def lifecycle_head(self) -> RestartIntentLifecycleHeadRecord:
-        return self.state.lifecycle_head
-
-    @property
-    def closed_at_unix_ms(self) -> int:
-        return self.state.closed_at_unix_ms
-
-    @property
-    def transaction_sequence(self) -> int:
-        return self.state.closing_transaction_sequence
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,8 +83,8 @@ class InitialRestartIntentLifecycleReader:
         normalized_index = _positive_integer(closure_index, "closure_index")
         return f"{self._run_prefix}/restart-intent-closures/{normalized_index}"
 
-    def read(self) -> StoredInitialRestartIntentClosure | None:
-        """Return one stable verified closure, or ``None`` before closure."""
+    def read(self) -> AuthenticatedInitialRestartIntentClosure | None:
+        """Return one stable authenticated closure, or ``None`` before closure."""
 
         for _ in range(_MAX_READ_ATTEMPTS):
             head_observation = self._observe(self._intent_head_key)
@@ -171,8 +109,7 @@ class InitialRestartIntentLifecycleReader:
             intent_observation = self._observe(intent_key)
             try:
                 lease_history = self._lease_history_reader.read()
-                generation_snapshot = self._generation_reader.get(lifecycle_head.generation)
-                successor = self._generation_reader.get(lifecycle_head.generation + 1)
+                generation_result = self._generation_reader.current_with_history()
             except (
                 CoordinatorLeaseHistoryCorrupt,
                 GenerationStateCorrupt,
@@ -180,6 +117,15 @@ class InitialRestartIntentLifecycleReader:
                 raise RestartIntentLifecycleReadCorrupt(
                     "restart-intent lifecycle dependencies are corrupt"
                 ) from error
+            generation_snapshot = None
+            successor = None
+            if generation_result is not None:
+                _, generation_history = generation_result
+                if lifecycle_head.generation < len(generation_history):
+                    generation_snapshot = generation_history[lifecycle_head.generation]
+                    successor_index = lifecycle_head.generation + 1
+                    if successor_index < len(generation_history):
+                        successor = generation_history[successor_index]
             if not self._stable(
                 self._intent_head_key,
                 head_observation,
@@ -191,7 +137,7 @@ class InitialRestartIntentLifecycleReader:
                 intent_observation,
             ):
                 continue
-            return self._validate_closure(
+            return self._authenticate_closure(
                 head_observation,
                 lifecycle_observation,
                 closure_observation,
@@ -236,7 +182,7 @@ class InitialRestartIntentLifecycleReader:
                 "current restart-intent head is noncanonical or belongs to another run"
             )
 
-    def _validate_closure(
+    def _authenticate_closure(
         self,
         head_observation: _ObservedKey,
         lifecycle_observation: _ObservedKey,
@@ -245,7 +191,7 @@ class InitialRestartIntentLifecycleReader:
         generation_snapshot: StoredGenerationSnapshot | None,
         successor: StoredGenerationSnapshot | None,
         lease_history: tuple[CoordinatorLeaseAuthority, ...],
-    ) -> StoredInitialRestartIntentClosure:
+    ) -> AuthenticatedInitialRestartIntentClosure:
         head_entry = _required_entry(head_observation, "current restart-intent head")
         lifecycle_head_entry = _immutable_entry(
             lifecycle_observation,
@@ -268,6 +214,10 @@ class InitialRestartIntentLifecycleReader:
             raise RestartIntentLifecycleReadCorrupt(
                 "current restart-intent head is absent from its history"
             )
+        if generation_snapshot is None:
+            raise RestartIntentLifecycleReadCorrupt(
+                "restart-intent closure references a missing generation"
+            )
         try:
             state = PersistedInitialRestartIntentClosure.from_entries(
                 run_id=self._run_id,
@@ -277,94 +227,16 @@ class InitialRestartIntentLifecycleReader:
                 lifecycle_entry=closure_entry,
                 lifecycle_head_entry=lifecycle_head_entry,
             )
+            return AuthenticatedInitialRestartIntentClosure(
+                state=state,
+                generation_snapshot=generation_snapshot,
+                immediate_successor=successor,
+                lease_history=lease_history,
+            )
         except (TypeError, ValueError) as error:
             raise RestartIntentLifecycleReadCorrupt(
                 "persisted restart-intent closure is contradictory"
             ) from error
-        if generation_snapshot is None:
-            raise RestartIntentLifecycleReadCorrupt(
-                "restart-intent closure references a missing generation"
-            )
-        if generation_snapshot.record.digest != state.intent.generation_snapshot_digest:
-            raise RestartIntentLifecycleReadCorrupt(
-                "restart-intent closure references the wrong generation snapshot"
-            )
-        generation_authority = self._generation_authority(
-            generation_snapshot,
-            lease_history,
-        )
-        opening_authority = self._entry_authority(
-            state.intent_entry,
-            CoordinatorLeaseRecord(
-                run_id=self._run_id,
-                coordinator_id=state.intent.coordinator_id,
-                lease_id=state.intent.lease_id,
-                lease_duration_ms=state.intent.coordinator_lease_duration_ms,
-            ),
-            state.intent.coordinator_fencing_token,
-            state.intent.coordinator_lease_digest,
-            lease_history,
-            "opening",
-        )
-        closing_authority = self._entry_authority(
-            state.closed_head_entry,
-            CoordinatorLeaseRecord(
-                run_id=self._run_id,
-                coordinator_id=state.lifecycle.coordinator_id,
-                lease_id=state.lifecycle.lease_id,
-                lease_duration_ms=state.lifecycle.coordinator_lease_duration_ms,
-            ),
-            state.lifecycle.coordinator_fencing_token,
-            state.lifecycle.coordinator_lease_digest,
-            lease_history,
-            "closing",
-        )
-        generation_index = lease_history.index(generation_authority)
-        opening_index = lease_history.index(opening_authority)
-        closing_index = lease_history.index(closing_authority)
-        if generation_index > opening_index or opening_index > closing_index:
-            raise RestartIntentLifecycleReadCorrupt(
-                "restart-intent lifecycle lease authorities are out of order"
-            )
-        if (
-            state.opening_transaction_sequence
-            <= max(
-                generation_snapshot.transaction_sequence,
-                opening_authority.transaction_sequence,
-            )
-            or state.opened_at_unix_ms < generation_snapshot.committed_at_unix_ms
-            or state.opened_at_unix_ms < opening_authority.lease.granted_at_unix_ms
-            or state.opened_at_unix_ms
-            >= min(
-                opening_authority.lease.expires_at_unix_ms,
-                state.intent.intent.prepare_deadline_unix_ms,
-            )
-            or (
-                successor is not None
-                and state.opening_transaction_sequence >= successor.transaction_sequence
-            )
-        ):
-            raise RestartIntentLifecycleReadCorrupt(
-                "restart-intent opening is outside its causal window"
-            )
-        if (
-            state.closing_transaction_sequence
-            <= max(
-                state.opening_transaction_sequence,
-                closing_authority.transaction_sequence,
-            )
-            or state.closed_at_unix_ms < closing_authority.lease.granted_at_unix_ms
-            or state.closed_at_unix_ms >= closing_authority.lease.expires_at_unix_ms
-        ):
-            raise RestartIntentLifecycleReadCorrupt(
-                "restart-intent closure is outside its causal lease window"
-            )
-        return StoredInitialRestartIntentClosure(
-            state=state,
-            generation_snapshot=generation_snapshot,
-            opening_authority=opening_authority,
-            closing_authority=closing_authority,
-        )
 
     def _decode_lifecycle_head(
         self,
@@ -382,75 +254,6 @@ class InitialRestartIntentLifecycleReader:
                 "restart-intent lifecycle head is noncanonical or belongs to another run"
             )
         return lifecycle_head
-
-    def _generation_authority(
-        self,
-        snapshot: StoredGenerationSnapshot,
-        history: tuple[CoordinatorLeaseAuthority, ...],
-    ) -> CoordinatorLeaseAuthority:
-        record = CoordinatorLeaseRecord(
-            run_id=self._run_id,
-            coordinator_id=snapshot.record.coordinator_id,
-            lease_id=snapshot.record.lease_id,
-            lease_duration_ms=snapshot.record.coordinator_lease_duration_ms,
-        )
-        authority = _unique_authority(
-            history,
-            record=record,
-            fencing_token=snapshot.record.coordinator_fencing_token,
-            granted_at_unix_ms=snapshot.guard_committed_at_unix_ms,
-            mutation_sequence=snapshot.guard_mutation_sequence,
-            value_sequence=snapshot.guard_value_sequence,
-            lifetime_sequence=snapshot.guard_lifetime_sequence,
-            label="generation",
-        )
-        if (
-            snapshot.transaction_sequence <= authority.transaction_sequence
-            or snapshot.committed_at_unix_ms < authority.lease.granted_at_unix_ms
-            or snapshot.committed_at_unix_ms >= authority.lease.expires_at_unix_ms
-        ):
-            raise RestartIntentLifecycleReadCorrupt(
-                "restart-intent generation is outside its causal lease window"
-            )
-        return authority
-
-    def _entry_authority(
-        self,
-        entry: ControlStoreEntry,
-        record: CoordinatorLeaseRecord,
-        fencing_token: int,
-        lease_digest: str,
-        history: tuple[CoordinatorLeaseAuthority, ...],
-        label: str,
-    ) -> CoordinatorLeaseAuthority:
-        provenance = (
-            entry.guard_key,
-            entry.guard_revision,
-            entry.guard_value_digest,
-            entry.guard_mutation_sequence,
-            entry.guard_value_sequence,
-            entry.guard_lifetime_sequence,
-            entry.guard_committed_at_unix_ms,
-        )
-        if (
-            entry.guard_key != self._generation_reader.coordinator_lease_key
-            or entry.guard_revision != fencing_token
-            or entry.guard_value_digest != lease_digest
-            or any(value is None for value in provenance)
-        ):
-            raise RestartIntentLifecycleReadCorrupt(
-                f"restart-intent {label} has invalid lease provenance"
-            )
-        return _unique_authority(
-            history,
-            record=record,
-            fencing_token=fencing_token,
-            granted_at_unix_ms=entry.guard_committed_at_unix_ms,
-            mutation_sequence=entry.guard_mutation_sequence,
-            value_sequence=entry.guard_value_sequence,
-            lifetime_sequence=entry.guard_lifetime_sequence,
-            label=label,
-        )
 
     def _observe(self, key: str) -> _ObservedKey:
         return _ObservedKey(
@@ -485,36 +288,6 @@ def _immutable_entry(observation: _ObservedKey, path: str) -> ControlStoreEntry:
     return entry
 
 
-def _unique_authority(
-    history: tuple[CoordinatorLeaseAuthority, ...],
-    *,
-    record: CoordinatorLeaseRecord,
-    fencing_token: int,
-    granted_at_unix_ms: object,
-    mutation_sequence: object,
-    value_sequence: object,
-    lifetime_sequence: object,
-    label: str,
-) -> CoordinatorLeaseAuthority:
-    matches = tuple(
-        authority
-        for authority in history
-        if (
-            authority.lease.record == record
-            and authority.lease.fencing_token == fencing_token
-            and authority.lease.granted_at_unix_ms == granted_at_unix_ms
-            and authority.mutation_sequence == mutation_sequence
-            and authority.value_sequence == value_sequence
-            and authority.lifetime_sequence == lifetime_sequence
-        )
-    )
-    if len(matches) != 1:
-        raise RestartIntentLifecycleReadCorrupt(
-            f"restart-intent {label} authority is absent from lease history"
-        )
-    return matches[0]
-
-
 def _nonempty_string(value: object, path: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{path} must be a non-empty string")
@@ -531,5 +304,4 @@ __all__ = [
     "InitialRestartIntentLifecycleReader",
     "RestartIntentLifecycleReadCorrupt",
     "RestartIntentLifecycleReadError",
-    "StoredInitialRestartIntentClosure",
 ]

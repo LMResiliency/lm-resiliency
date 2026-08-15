@@ -217,6 +217,19 @@ def test_lifecycle_reader_returns_none_before_closure():
     assert open_reader.read() is None
 
 
+def test_lifecycle_reader_rejects_closed_head_without_lifecycle():
+    _, store, _, _, lease, opened, reader = _open_state()
+    records = _records(opened, lease)
+    store.compare_set(
+        records.intent_head_key,
+        expected_revision=opened.head_entry.revision,
+        value=records.closed_head.to_json(),
+    )
+
+    with pytest.raises(RestartIntentLifecycleReadCorrupt, match="no lifecycle"):
+        reader.read()
+
+
 def test_lifecycle_reader_reconstructs_verified_closure():
     clock, store, _, _, lease, opened, reader = _open_state()
     records = _commit_closure(clock, store, opened, lease)
@@ -349,7 +362,7 @@ def test_lifecycle_reader_rejects_closure_outside_causal_window():
             committed_at_unix_ms=lease.expires_at_unix_ms,
         )
 
-    with pytest.raises(RestartIntentLifecycleReadCorrupt, match="causal lease window"):
+    with pytest.raises(RestartIntentLifecycleReadCorrupt, match="contradictory"):
         reader.read()
 
 
@@ -373,7 +386,7 @@ def test_lifecycle_reader_preserves_retryable_dependency_errors(
     if isinstance(dependency_error, CoordinatorLeaseHistoryError):
         monkeypatch.setattr(reader._lease_history_reader, "read", fail)
     else:
-        monkeypatch.setattr(reader._generation_reader, "get", fail)
+        monkeypatch.setattr(reader._generation_reader, "current_with_history", fail)
 
     with pytest.raises(type(dependency_error), match="changed"):
         reader.read()
