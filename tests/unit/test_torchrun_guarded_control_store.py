@@ -69,6 +69,7 @@ def test_guarded_transaction_commits_all_writes_at_one_store_time():
     assert isinstance(committed, MappingProxyType)
     assert set(committed) == {"run/generation-head", "run/generations/0"}
     assert {entry.committed_at_unix_ms for entry in committed.values()} == {1_000}
+    assert {entry.transaction_sequence for entry in committed.values()} == {2}
     assert {entry.guard_key for entry in committed.values()} == {"run/coordinator-lease"}
     assert {entry.guard_revision for entry in committed.values()} == {guard.revision}
     assert {entry.guard_value_digest for entry in committed.values()} == {
@@ -124,6 +125,9 @@ def test_guarded_transaction_atomically_updates_head_and_creates_successor():
     assert store.get("run/generation-head") == successor["run/generation-head"]
     assert store.get("run/generations/1") == successor["run/generations/1"]
     assert {entry.committed_at_unix_ms for entry in successor.values()} == {1_001}
+    initial_sequence = next(iter(initial.values())).transaction_sequence
+    successor_sequence = next(iter(successor.values())).transaction_sequence
+    assert initial_sequence < successor_sequence
 
 
 def test_guarded_transaction_stamps_recreated_guard_lifetime():
@@ -391,6 +395,30 @@ def test_guarded_transaction_enforces_store_time_without_partial_writes(
 
     assert store.get("run/generation-head") is None
     assert store.get("run/generations/0") is None
+
+
+def test_guarded_transaction_failure_does_not_consume_transaction_sequence():
+    clock = ManualClock(1_100)
+    store = InMemoryControlStore(clock=clock)
+    guard = _guard(store)
+
+    with pytest.raises(ControlStoreDeadlineExceeded):
+        store.compare_set_many_guarded(
+            _generation_writes(),
+            guard_key="run/coordinator-lease",
+            expected_guard_revision=guard.revision,
+            not_before_unix_ms=1_000,
+            deadline_unix_ms=1_100,
+        )
+
+    next_entry = store.compare_set(
+        "run/after-failure",
+        expected_revision=None,
+        value=b"committed",
+    )
+
+    assert guard.transaction_sequence == 1
+    assert next_entry.transaction_sequence == 2
 
 
 def test_guarded_transaction_allows_only_one_concurrent_commit():

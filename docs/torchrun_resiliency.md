@@ -579,12 +579,7 @@ the last closed intent head to the coordinator lease that performed closure;
 that lease may be a renewal of the lease that opened the intent. The record
 schemas do not define a store mutation API. Lease-fenced intent creation,
 lifecycle observation and closure, and other lifecycle transitions are
-separate control-plane components. `RestartIntentLifecycleReader` provides the
-read-only observation boundary: it validates the exact committed generation,
-the permanent lifecycle record, the referenced create-once intent and
-generation snapshot, and the distinct opening and closing lease provenance.
-It returns the lifecycle record with its opaque store revision for use as a
-future transaction condition and never mutates control-plane state.
+separate control-plane components.
 
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be
@@ -933,14 +928,20 @@ authoritative store-time window under the same lock. Condition keys cannot also
 be the guard or transaction targets. It publishes all target values with the
 same commit timestamp and store-stamped guard key, guard revision, guard-value
 digest, ordered guard mutation and value sequences, guard-key lifetime sequence,
-and authoritative guard commit time, or publishes none. The value sequence
-changes whenever the guarded bytes change or the key is recreated, but remains
-stable across same-value renewals. This is the primitive used to create an
-immutable generation snapshot and advance the generation head without allowing
-a stale or expired coordinator to commit either half alone. Revision conditions
-also let later components prove that the generation head did not advance while
-publishing an intent, without rewriting the head or weakening its immutable
-history checks.
+authoritative guard commit time, and one store-global transaction sequence, or
+publishes none. All values in one atomic transaction share that sequence.
+Successful single-key mutations receive their own sequence, deletes consume a
+sequence, and rejected operations consume none. Readers use this ordering to
+prove cross-key causality when multiple commits have the same millisecond
+timestamp. The value sequence changes whenever the guarded bytes change or the
+key is recreated, but remains stable across same-value renewals. Store entries
+also reject mutation, value, and lifetime sequence combinations that cannot
+arise from create, update, delete, and recreate operations. This is the
+primitive used to create an immutable generation snapshot and advance the
+generation head without allowing a stale or expired coordinator to commit
+either half alone. Revision conditions also let later components prove that the
+generation head did not advance while publishing an intent, without rewriting
+the head or weakening its immutable history checks.
 Create-once transaction targets may additionally require that the key has no
 prior committed history, not merely that it is currently absent. This prevents
 a deleted immutable quarantine or snapshot key from being recreated inside an

@@ -78,6 +78,7 @@ class ControlStoreEntry:
     value: bytes
     revision: int
     committed_at_unix_ms: int | None = None
+    transaction_sequence: int = 1
     mutation_sequence: int = 1
     value_sequence: int = 1
     lifetime_sequence: int = 1
@@ -94,6 +95,11 @@ class ControlStoreEntry:
         object.__setattr__(self, "revision", _required_revision(self.revision))
         object.__setattr__(
             self,
+            "transaction_sequence",
+            _positive_integer(self.transaction_sequence, "transaction_sequence"),
+        )
+        object.__setattr__(
+            self,
             "mutation_sequence",
             _positive_integer(self.mutation_sequence, "mutation_sequence"),
         )
@@ -106,6 +112,12 @@ class ControlStoreEntry:
             self,
             "lifetime_sequence",
             _positive_integer(self.lifetime_sequence, "lifetime_sequence"),
+        )
+        _validate_sequence_lineage(
+            self.mutation_sequence,
+            self.value_sequence,
+            self.lifetime_sequence,
+            path="control-store entry",
         )
         if self.committed_at_unix_ms is not None:
             object.__setattr__(
@@ -141,29 +153,38 @@ class ControlStoreEntry:
                     "guard_value_digest",
                 ),
             )
+            guard_mutation_sequence = _positive_integer(
+                self.guard_mutation_sequence,
+                "guard_mutation_sequence",
+            )
+            guard_value_sequence = _positive_integer(
+                self.guard_value_sequence,
+                "guard_value_sequence",
+            )
+            guard_lifetime_sequence = _positive_integer(
+                self.guard_lifetime_sequence,
+                "guard_lifetime_sequence",
+            )
             object.__setattr__(
                 self,
                 "guard_mutation_sequence",
-                _positive_integer(
-                    self.guard_mutation_sequence,
-                    "guard_mutation_sequence",
-                ),
+                guard_mutation_sequence,
             )
             object.__setattr__(
                 self,
                 "guard_value_sequence",
-                _positive_integer(
-                    self.guard_value_sequence,
-                    "guard_value_sequence",
-                ),
+                guard_value_sequence,
             )
             object.__setattr__(
                 self,
                 "guard_lifetime_sequence",
-                _positive_integer(
-                    self.guard_lifetime_sequence,
-                    "guard_lifetime_sequence",
-                ),
+                guard_lifetime_sequence,
+            )
+            _validate_sequence_lineage(
+                guard_mutation_sequence,
+                guard_value_sequence,
+                guard_lifetime_sequence,
+                path="control-store guard provenance",
             )
             if self.guard_committed_at_unix_ms is not None:
                 object.__setattr__(
@@ -288,6 +309,7 @@ class InMemoryControlStore:
         self._mutation_sequences: dict[str, int] = {}
         self._value_sequences: dict[str, int] = {}
         self._lifetime_sequences: dict[str, int] = {}
+        self._transaction_sequence = 0
         self._clock = clock or _system_unix_ms
         self._last_now_unix_ms = 0
 
@@ -313,13 +335,18 @@ class InMemoryControlStore:
         normalized_value = _control_value(value)
         with self._lock:
             self._require_revision(normalized_key, normalized_revision)
-            return self._set_entry(normalized_key, normalized_value)
+            return self._set_entry(
+                normalized_key,
+                normalized_value,
+                transaction_sequence=self._next_transaction_sequence(),
+            )
 
     def compare_delete(self, key: str, *, expected_revision: int) -> int:
         normalized_key = _control_key(key)
         normalized_revision = _required_revision(expected_revision)
         with self._lock:
             self._require_revision(normalized_key, normalized_revision)
+            self._next_transaction_sequence()
             del self._entries[normalized_key]
             return self._next_revision(normalized_key)
 
@@ -365,6 +392,7 @@ class InMemoryControlStore:
                 normalized_key,
                 normalized_value,
                 committed_at_unix_ms=now_unix_ms,
+                transaction_sequence=self._next_transaction_sequence(),
             )
 
     def compare_delete_in_window(
@@ -402,6 +430,7 @@ class InMemoryControlStore:
                     normalized_deadline,
                     now_unix_ms,
                 )
+            self._next_transaction_sequence()
             del self._entries[normalized_key]
             return self._next_revision(normalized_key)
 
@@ -461,11 +490,13 @@ class InMemoryControlStore:
                     normalized_deadline,
                     now_unix_ms,
                 )
+            transaction_sequence = self._next_transaction_sequence()
             committed = {
                 key: self._set_entry(
                     key,
                     write.value,
                     committed_at_unix_ms=now_unix_ms,
+                    transaction_sequence=transaction_sequence,
                     guard_key=normalized_guard_key,
                     guard_revision=normalized_guard_revision,
                     guard_value_digest=guard_value_digest,
@@ -490,6 +521,7 @@ class InMemoryControlStore:
         value: bytes,
         *,
         committed_at_unix_ms: int | None = None,
+        transaction_sequence: int,
         guard_key: str | None = None,
         guard_revision: int | None = None,
         guard_value_digest: str | None = None,
@@ -509,6 +541,7 @@ class InMemoryControlStore:
             value=value,
             revision=revision,
             committed_at_unix_ms=committed_at_unix_ms,
+            transaction_sequence=transaction_sequence,
             mutation_sequence=self._mutation_sequences[key],
             value_sequence=self._value_sequences[key],
             lifetime_sequence=self._lifetime_sequences[key],
@@ -528,6 +561,10 @@ class InMemoryControlStore:
         self._last_revisions[key] = revision
         self._mutation_sequences[key] = self._mutation_sequences.get(key, 0) + 1
         return revision
+
+    def _next_transaction_sequence(self) -> int:
+        self._transaction_sequence += 1
+        return self._transaction_sequence
 
     def _store_now_unix_ms(self) -> int:
         now_unix_ms = _positive_integer(self._clock(), "control-store clock")
@@ -606,6 +643,23 @@ def _positive_integer(value: object, path: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{path} must be a positive integer")
     return value
+
+
+def _validate_sequence_lineage(
+    mutation_sequence: int,
+    value_sequence: int,
+    lifetime_sequence: int,
+    *,
+    path: str,
+) -> None:
+    minimum_mutation_sequence = 2 * lifetime_sequence - 1
+    maximum_value_sequence = mutation_sequence - lifetime_sequence + 1
+    if mutation_sequence < minimum_mutation_sequence:
+        raise ValueError(f"{path} mutation_sequence is too small for lifetime_sequence")
+    if value_sequence < lifetime_sequence:
+        raise ValueError(f"{path} value_sequence is too small for lifetime_sequence")
+    if value_sequence > maximum_value_sequence:
+        raise ValueError(f"{path} value_sequence is too large for mutation_sequence")
 
 
 def _system_unix_ms() -> int:
