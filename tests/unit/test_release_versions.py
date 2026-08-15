@@ -25,9 +25,10 @@ def test_invalid_version_is_rejected():
 
 
 def test_latest_stable_tag_uses_pep440_ordering():
-    assert latest_stable_tag(
-        ["v1.0-RC1", "v1.0.post1", "release-notes", "v1.0.0", "v1.0"]
-    ) == "v1.0.post1"
+    assert (
+        latest_stable_tag(["v1.0-RC1", "v1.0.post1", "release-notes", "v1.0.0", "v1.0"])
+        == "v1.0.post1"
+    )
 
 
 def test_latest_stable_tag_requires_a_valid_candidate():
