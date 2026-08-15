@@ -78,6 +78,10 @@ Dense replay covers four independently scheduled recipe classes:
 - language-model output; and
 - optimizer updates.
 
+At every scheduled replay boundary, equivalent peers first compare a compact readiness contract containing the optimizer step, scheduled recipe set, layer and shape identity, capture step, and tensor metadata.
+Recipe-specific collectives execute only when every peer reports the same ready contract.
+Missing or asymmetric capture evidence returns an explicit inconclusive replay result, leaves the scheduled cycle incomplete, and blocks checkpoint certification instead of allowing some ranks to skip while others enter C3.
+
 Before module execution, exact C3 verifies the broadcast invocation and synchronized RNG state.
 Replicated and HSDP paths also compare corresponding materialized parameter state.
 Forward-backward replay compares outputs, input gradients, parameter gradients, and adapter-provided updated state without mutating live gradients.
