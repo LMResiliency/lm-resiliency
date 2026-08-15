@@ -58,6 +58,7 @@ all = [
 dev = [
     "build==1.3.0",
     "detect-secrets==1.5.0",
+    "mypy==1.17.1",
     "pip-audit==2.9.0",
     "pre-commit==4.6.1",
     "pytest==9.1.1",
@@ -73,6 +74,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["lm_resiliency*"]
 
+[tool.setuptools.package-data]
+lm_resiliency = ["py.typed"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests/unit"]
 markers = [
@@ -84,6 +88,12 @@ markers = [
     "megatron: requires the optional Megatron Core integration",
     "torchtitan: requires the optional TorchTitan integration",
 ]
+
+[tool.mypy]
+python_version = "3.12"
+follow_imports = "silent"
+ignore_missing_imports = true
+warn_unused_ignores = true
 
 [tool.ruff]
 line-length = 100

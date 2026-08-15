@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """Shared utilities for detection modules."""
 
 from __future__ import annotations

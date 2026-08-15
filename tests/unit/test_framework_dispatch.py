@@ -1,14 +1,22 @@
 """Tests for the package-root automatic framework dispatcher."""
 
 import inspect
+import typing
 from unittest.mock import patch
 
 import pytest
 import torch.nn as nn
 
-from lm_resiliency import enable_resiliency
+import lm_resiliency
+from lm_resiliency import ResiliencySession, enable_resiliency
 from lm_resiliency.checkpointing.config import InMemoryCkptConfig
 from lm_resiliency.detection.replay_harness import ReplayHarnessConfig
+
+
+def test_public_dispatch_return_annotation_is_runtime_resolvable():
+    hints = typing.get_type_hints(lm_resiliency.enable_resiliency)
+
+    assert hints["return"] is ResiliencySession
 
 
 class FakeDeepSpeedEngine:

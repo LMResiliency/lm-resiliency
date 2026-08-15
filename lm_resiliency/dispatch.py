@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """Automatic framework dispatch for the package-root public API."""
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from lm_resiliency.checkpointing.durable import DurableCheckpointConfig
 from lm_resiliency.checkpointing.manager import RecoveryMode
 from lm_resiliency.detection.replay_harness import ReplayHarnessConfig, ReplayResult
 from lm_resiliency.detection.reports import SCOUTFaultCallback
+from lm_resiliency.handle import ResiliencySession
 from lm_resiliency.orchestration import OrchestrationHooks
 
 FrameworkName = Literal["auto", "pytorch", "torchtitan", "megatron", "deepspeed"]
@@ -41,7 +43,7 @@ def enable_resiliency(
     load_fallback: Callable[[], Any] | None = None,
     durable_checkpoint: DurableCheckpointConfig | None = None,
     recovery_mode: RecoveryMode | str | None = None,
-) -> Any:
+) -> ResiliencySession:
     """Enable resiliency through the matching framework integration.
 
     Framework selection is automatic for DeepSpeed engines and Megatron model-chunk

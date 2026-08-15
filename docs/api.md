@@ -18,7 +18,7 @@ The stable package-root exports are:
 
 | Area | Exports |
 |---|---|
-| Activation and lifecycle | `enable_resiliency`, `FrameworkName`, `ResiliencyHandle` |
+| Activation and lifecycle | `enable_resiliency`, `FrameworkName`, `ResiliencySession`, `ResiliencyHandle` |
 | Configuration | `InMemoryCkptConfig`, `ReplayHarnessConfig` |
 | Dynamic and MoE replay | `ReplayWorkload`, `GroupedExpertMaterializer`, `LeadingDimensionMaterializer` |
 | AllToAll replay | `AllToAllReplayPolicy`, `AllToAllCapture`, `AllToAllTrafficMatrix`, `BalancedAndPermutationPolicy` |

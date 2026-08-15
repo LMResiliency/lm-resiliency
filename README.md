@@ -30,9 +30,9 @@
 
 - **SDC-safe recovery-verified checkpoint:** SCOUT certifies recovery checkpoints and excludes candidates affected by recurring SDC, preventing corrupted state from being selected during recovery.
 - **Localize latent and permanent failures at runtime:** SCOUT identifies affected ranks, GPUs, nodes, communication endpoints, peer groups, or telemetry-reported physical devices, including failures observed while the training job is blocked.
-- **Minimize rollback:** GEMINI saves complete training state to CPU memory at high frequency with no measurable training-throughput loss, reducing lost computation after a failure.
+- **Minimize rollback:** Historical validation measured no training-throughput loss from GEMINI in its published workload. GEMINI saves complete training state to CPU memory at high frequency, reducing lost computation after a failure; see the [benchmark methodology](benchmarks/README.md).
 - **Retrieve checkpoints quickly:** GEMINI restores nearby state from memory, a surviving peer, or node-local storage, minimizing checkpoint retrieval time and global-storage reads.
-- **Keep protection lightweight:** SCOUT incurs less than 1% amortized overhead during training for runtime failure localization.
+- **Keep protection lightweight:** Historical validation measured less than 1% amortized SCOUT overhead in its published workload; scheduled current-package regressions are guarded by the [benchmark methodology](benchmarks/README.md) and its qualification boundaries.
 - **No framework fork:** `lm-resiliency` integrates with PyTorch, TorchTitan, Megatron Core, and DeepSpeed through automatic adapters and one public entry point.
 - **No training-loop rewrite:** `lm-resiliency` attaches hooks at framework initialization and leaves the existing training loop unchanged.
 - **Bring your own launcher:** Users can integrate `lm-resiliency` with `torchrun`, Slurm, Kubernetes, or custom managers through platform-neutral APIs.

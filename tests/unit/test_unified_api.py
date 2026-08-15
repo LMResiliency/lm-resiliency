@@ -859,6 +859,7 @@ class TestUnifiedAPIImport:
             "RecoveryDecisionCallback",
             "RecoveryMode",
             "ResiliencyHandle",
+            "ResiliencySession",
             "SCOUTFaultCallback",
             "SCOUTFaultReport",
             "enable_resiliency",

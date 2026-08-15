@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """InMemoryCheckpointManager: orchestrates the 2-phase in-memory checkpoint pipeline."""
 
 from __future__ import annotations
@@ -21,7 +22,6 @@ from lm_resiliency.checkpointing.copy import AsyncDeviceCopier
 from lm_resiliency.checkpointing.disk import (
     CheckpointStatus,
     CheckpointStatusStore,
-    ChecksumMismatch,
     DiskSerializer,
 )
 from lm_resiliency.checkpointing.replication import ChunkedGlooBackend, PeerReplicator
@@ -227,7 +227,7 @@ class InMemoryCheckpointManager:
         Args:
             tensors: Direct references to parameter/state tensors on GPU.
             step: Current training step.
-            extra: Optional small, picklable non-tensor state to checkpoint alongside
+            extra: Optional small, schema-supported non-tensor state to checkpoint alongside
                 this step's shard (e.g. RNG state for bitwise stochastic-forward recovery).
                 Rides the per-rank non-tensor payload, so it inherits node-local
                 flush and peer replication; ``load_tensors`` returns it back.
@@ -353,8 +353,12 @@ class InMemoryCheckpointManager:
         )
 
     def _consistent_memory_step(self) -> int:
-        """Latest step for which every rank has a complete own in-memory shard."""
-        return self._collective_min_step(self._latest_memory_step())
+        """Latest exact in-memory step retained by every rank."""
+        step = self._collective_min_step(self._latest_memory_step())
+        if step <= 0:
+            return -1
+        local_has_step = self._memory_slot_by_step(step) is not None
+        return step if self._collective_min_step(int(local_has_step)) == 1 else -1
 
     def _latest_recovery_steps(self) -> tuple[int, int]:
         """Return (memory_step, disk_step), each made rank-consistent."""
@@ -408,7 +412,14 @@ class InMemoryCheckpointManager:
     def _memory_slot_by_step(self, step: int) -> Any | None:
         if self._metadata is None or not self._buffer_pool.allocated:
             return None
-        return self._buffer_pool.get_slot_by_step(step)
+        return next(
+            (
+                slot
+                for slot in self._buffer_pool.own_slots
+                if slot.step == step and slot.state in (SlotState.READY, SlotState.REPLICATING)
+            ),
+            None,
+        )
 
     def find_latest(self, mode: RecoveryMode | str | None = None) -> int:
         """Collective: latest step recoverable across all ranks from memory or disk.
@@ -469,14 +480,10 @@ class InMemoryCheckpointManager:
         latest = disk_step
         if latest <= 0:
             return None
-        try:
-            metadata, tensors = self._disk.load(latest)
-        except ChecksumMismatch as e:
-            logger.error(
-                f"Checkpoint integrity check failed at step {latest}: {e} — "
-                "treating as unrecoverable (falling back to framework recovery)"
-            )
+        loaded = self._load_collectively_validated_disk_shard(latest)
+        if loaded is None:
             return None
+        metadata, tensors = loaded
         state_dict = unflatten(metadata, tensors)
         self._metadata = metadata
         logger.info(f"Loaded checkpoint from {self._disk._folder} at step {latest}")
@@ -510,18 +517,45 @@ class InMemoryCheckpointManager:
         latest = disk_step
         if latest <= 0:
             return None
-        try:
-            metadata, tensors = self._disk.load(latest)
-        except ChecksumMismatch as e:
-            logger.error(
-                f"Checkpoint integrity check failed at step {latest}: {e} — "
-                "treating as unrecoverable (falling back to framework recovery)"
-            )
+        loaded = self._load_collectively_validated_disk_shard(latest)
+        if loaded is None:
             return None
+        metadata, tensors = loaded
         self._metadata = metadata
         extra = (metadata.non_tensor_data or {}).get(_EXTRA_KEY)
         logger.info(f"Loaded checkpoint tensors from {self._disk._folder} at step {latest}")
         return tensors, latest, extra
+
+    def _load_collectively_validated_disk_shard(
+        self,
+        step: int,
+    ) -> tuple[FlatStateDictMetadata, list[torch.Tensor]] | None:
+        """Load locally, then require every rank to accept its selected shard."""
+        loaded: tuple[FlatStateDictMetadata, list[torch.Tensor]] | None = None
+        local_error: Exception | None = None
+        try:
+            loaded = self._disk.load(step)
+        except Exception as error:  # noqa: BLE001 - every rank must reach the validity vote
+            local_error = error
+
+        all_valid = self._collective_min_step(int(loaded is not None)) == 1
+        if all_valid:
+            return loaded
+
+        if local_error is not None:
+            logger.error(
+                "Checkpoint validation failed at step %s: %s — all ranks are "
+                "falling back to framework recovery",
+                step,
+                local_error,
+            )
+        else:
+            logger.error(
+                "A peer rejected its checkpoint shard at step %s — all ranks are "
+                "falling back to framework recovery",
+                step,
+            )
+        return None
 
     @property
     def checkpoint_status(self) -> CheckpointStatus:

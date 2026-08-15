@@ -47,6 +47,14 @@ Removing or changing a stable interface requires a new minor release and migrati
 Objects under `lm_resiliency.experimental` and unlisted module paths may change in any `0.x` release.
 The exact stable exports are listed in the [API guide](api.md#public-api-stability) and enforced by contract tests.
 
+## Static Typing
+
+Published wheels include the PEP 561 `py.typed` marker, so downstream type checkers may consume the package's inline annotations.
+CI follows normal imports and checks the stable package root, manager API, orchestration/recovery records, and a downstream fixture that asserts concrete exported types.
+Known pre-existing errors in internal checkpointing, detection, framework-integration, and feature-wiring modules are scoped with explicit mypy overrides; their annotations remain visible to the checked public dependency closure instead of being replaced with `Any` by skipped imports.
+The static gate is therefore a checked public-contract baseline, not a claim that every internal module is already mypy-clean.
+Runtime contract tests and distributed validation remain authoritative for behavior that static typing cannot prove.
+
 ## Manager Compatibility
 
 The separately distributed manager must depend on the same `0.x` minor series, for example `lm-resiliency>=0.1,<0.2`.

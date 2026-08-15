@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """SCOUT switch-fault localization via cross-group network tomography.
 
 Detects a faulty/degraded **network switch** on an HPC InfiniBand + RDMA fabric with

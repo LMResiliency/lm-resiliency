@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """Separate-process CPU/Gloo service for SCOUT hang localization."""
 
 from __future__ import annotations
@@ -61,6 +62,7 @@ class OOBHangService:
         self._config = config
         self._context = multiprocessing.get_context("spawn")
         self._progress_event = self._context.Event()
+        self._ready_event = self._context.Event()
         self._process: multiprocessing.Process | None = None
         self._report_callback = report_callback
         self._report_queue = self._context.Queue() if report_callback is not None else None
@@ -81,6 +83,7 @@ class OOBHangService:
                 daemon=True,
             )
             self._report_thread.start()
+        self._ready_event.clear()
         self._process = self._context.Process(
             target=_daemon_main,
             args=(
@@ -88,12 +91,28 @@ class OOBHangService:
                 self._peer_ranks,
                 self._config,
                 self._progress_event,
+                self._ready_event,
                 self._report_queue,
             ),
             name=f"scout-oob-rank-{self._global_rank}",
             daemon=True,
         )
         self._process.start()
+
+    def wait_until_ready(self, timeout_s: float | None = None) -> None:
+        """Wait until the child has joined its independent process group."""
+        process = self._process
+        if process is None:
+            raise RuntimeError("SCOUT OOB service has not been started")
+        timeout = self._config.rendezvous_timeout_s if timeout_s is None else timeout_s
+        if not self._ready_event.wait(timeout):
+            if not process.is_alive():
+                raise RuntimeError(
+                    f"SCOUT OOB daemon exited before readiness with code {process.exitcode}"
+                )
+            raise TimeoutError(f"SCOUT OOB daemon was not ready within {timeout:.1f}s")
+        if not process.is_alive():
+            raise RuntimeError(f"SCOUT OOB daemon exited at readiness with code {process.exitcode}")
 
     @property
     def pid(self) -> int | None:
@@ -145,6 +164,7 @@ def _daemon_main(
     peer_ranks: list[int],
     config: OOBHangConfig,
     progress_event,
+    ready_event,
     report_queue,
 ) -> None:
     _set_parent_death_signal()
@@ -180,6 +200,7 @@ def _daemon_main(
             checkpoint_io_confirmation_rounds=config.checkpoint_io_confirmation_rounds,
         )
         _write_daemon_status(config, global_rank, "ready")
+        ready_event.set()
 
         def report(result: HangLocalizationResult) -> None:
             if local_rank != 0:

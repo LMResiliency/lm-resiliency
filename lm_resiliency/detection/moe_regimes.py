@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """Offline discovery and replay scheduling for MoE execution regimes.
 
 Token count is not itself a hardware trigger. It selects a physical execution plan:
