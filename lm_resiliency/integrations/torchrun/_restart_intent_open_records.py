@@ -36,6 +36,8 @@ class PreparedInitialRestartIntentOpen:
     coordinator_lease_mutation_sequence: int
     coordinator_lease_value_sequence: int
     coordinator_lease_lifetime_sequence: int
+    generation_lease_id_history: tuple[str, ...]
+    generation_fencing_token_history: tuple[int, ...]
     not_before_unix_ms: int
     deadline_unix_ms: int
 
@@ -127,6 +129,41 @@ class PreparedInitialRestartIntentOpen:
             ("deadline_unix_ms", self.deadline_unix_ms),
         ):
             _positive_integer(integer_value, f"PreparedInitialRestartIntentOpen.{path}")
+        generation = self.current.snapshot.record.assignment.generation
+        if len(self.generation_lease_id_history) != generation + 1:
+            raise ValueError(
+                "PreparedInitialRestartIntentOpen lease-ID history does not cover its generation"
+            )
+        if len(self.generation_fencing_token_history) != generation + 1:
+            raise ValueError(
+                "PreparedInitialRestartIntentOpen fencing-token history does not cover its generation"
+            )
+        for lease_id in self.generation_lease_id_history:
+            if not isinstance(lease_id, str) or not lease_id.strip():
+                raise ValueError(
+                    "PreparedInitialRestartIntentOpen lease-ID history contains an invalid value"
+                )
+        for fencing_token in self.generation_fencing_token_history:
+            _positive_integer(
+                fencing_token,
+                "PreparedInitialRestartIntentOpen generation fencing token",
+            )
+        if (
+            self.generation_lease_id_history[-1] != self.current.snapshot.record.lease_id
+            or self.generation_fencing_token_history[-1]
+            != self.current.snapshot.record.coordinator_fencing_token
+        ):
+            raise ValueError(
+                "PreparedInitialRestartIntentOpen lease history does not end at its generation"
+            )
+        _reject_noncontiguous_recurrence(
+            self.generation_lease_id_history,
+            "lease identity",
+        )
+        _reject_noncontiguous_recurrence(
+            self.generation_fencing_token_history,
+            "fencing token",
+        )
         self._validate_lease_lineage()
         if self.not_before_unix_ms < self.lease.granted_at_unix_ms:
             raise ValueError(
@@ -177,15 +214,37 @@ class PreparedInitialRestartIntentOpen:
                 "PreparedInitialRestartIntentOpen lease lineage predates its generation"
             )
         mutation_delta = self.coordinator_lease_mutation_sequence - snapshot.guard_mutation_sequence
+        transaction_delta = (
+            self.coordinator_lease_transaction_sequence - snapshot.transaction_sequence
+        )
         value_delta = self.coordinator_lease_value_sequence - snapshot.guard_value_sequence
         lifetime_delta = self.coordinator_lease_lifetime_sequence - snapshot.guard_lifetime_sequence
         if (
-            mutation_delta < 2 * lifetime_delta
+            transaction_delta < mutation_delta
+            or mutation_delta < 2 * lifetime_delta
             or value_delta < lifetime_delta
             or value_delta > mutation_delta - lifetime_delta
         ):
             raise ValueError(
                 "PreparedInitialRestartIntentOpen lease lineage has impossible sequence deltas"
+            )
+        if self.lease.granted_at_unix_ms < snapshot.committed_at_unix_ms:
+            raise ValueError(
+                "PreparedInitialRestartIntentOpen lease grant predates its generation commit"
+            )
+        if (
+            self.lease.record.lease_id != snapshot_record.lease_id
+            and self.lease.record.lease_id in self.generation_lease_id_history[:-1]
+        ):
+            raise ValueError(
+                "PreparedInitialRestartIntentOpen reuses an older generation lease identity"
+            )
+        if (
+            self.lease.fencing_token != snapshot_record.coordinator_fencing_token
+            and self.lease.fencing_token in self.generation_fencing_token_history[:-1]
+        ):
+            raise ValueError(
+                "PreparedInitialRestartIntentOpen reuses an older generation fencing token"
             )
         same_lease_id = self.lease.record.lease_id == snapshot_record.lease_id
         if same_lease_id:
@@ -257,6 +316,17 @@ def _positive_integer(value: object, path: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{path} must be a positive integer")
     return value
+
+
+def _reject_noncontiguous_recurrence(values: tuple[object, ...], label: str) -> None:
+    seen: set[object] = set()
+    previous: object | None = None
+    for value in values:
+        if value != previous:
+            if value in seen:
+                raise ValueError(f"PreparedInitialRestartIntentOpen generation {label} reappears")
+            seen.add(value)
+        previous = value
 
 
 __all__ = ["PreparedInitialRestartIntentOpen"]

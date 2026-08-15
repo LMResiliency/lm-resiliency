@@ -107,6 +107,7 @@ class RestartIntentOpenPreparer:
         lease_entry = self._validate_lease(lease)
         self._validate_current(current)
         self._validate_intent(intent, current)
+        lease_id_history, fencing_token_history = self._generation_lease_history(current)
         self._require_never_opened()
         now_unix_ms = self._now_unix_ms()
         if now_unix_ms < lease.granted_at_unix_ms:
@@ -155,6 +156,8 @@ class RestartIntentOpenPreparer:
                 coordinator_lease_mutation_sequence=lease_entry.mutation_sequence,
                 coordinator_lease_value_sequence=lease_entry.value_sequence,
                 coordinator_lease_lifetime_sequence=lease_entry.lifetime_sequence,
+                generation_lease_id_history=lease_id_history,
+                generation_fencing_token_history=fencing_token_history,
                 not_before_unix_ms=not_before_unix_ms,
                 deadline_unix_ms=min(
                     lease.expires_at_unix_ms,
@@ -216,6 +219,23 @@ class RestartIntentOpenPreparer:
             raise ValueError(
                 f"restart intent suspects nodes outside the current generation: {unknown_nodes!r}"
             )
+
+    def _generation_lease_history(
+        self,
+        current: CurrentGeneration,
+    ) -> tuple[tuple[str, ...], tuple[int, ...]]:
+        generation = current.snapshot.record.assignment.generation
+        lease_ids: list[str] = []
+        fencing_tokens: list[int] = []
+        for predecessor_generation in range(generation + 1):
+            snapshot = self._generation_reader.get(predecessor_generation)
+            if snapshot is None:
+                raise RestartIntentOpenPreparationCorrupt(
+                    "current generation has an incomplete predecessor history"
+                )
+            lease_ids.append(snapshot.record.lease_id)
+            fencing_tokens.append(snapshot.record.coordinator_fencing_token)
+        return tuple(lease_ids), tuple(fencing_tokens)
 
     def _require_never_opened(self) -> None:
         if self._store.get(self._intent_head_key) is not None:

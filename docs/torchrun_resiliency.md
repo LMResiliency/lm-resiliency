@@ -618,6 +618,10 @@ generation snapshot's authority for the same fencing token or advance
 consistently for a nonexpired renewal or nonoverlapping replacement. Execution
 requires both committed entries to match that exact lease provenance and to
 follow both the generation snapshot and the authenticated lease transaction.
+The lease mutation count cannot exceed the store-global transaction gap, a
+post-generation lease grant cannot predate the generation commit, and a lease
+ID or fencing token cannot reappear after a different acquisition in the
+verified generation history.
 
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be
