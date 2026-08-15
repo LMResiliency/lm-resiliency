@@ -320,13 +320,17 @@ class DiskSerializer:
                     f"{load_path}: checkpoint tensor {index} must be dense, strided, and non-quantized"
                 )
         if self._integrity:
-            if stored is not None:
-                actual = shard_checksums(tensors)
-                if actual != stored:
-                    bad = sum(1 for a, b in zip(actual, stored) if a != b) + abs(
-                        len(actual) - len(stored)
-                    )
-                    raise ChecksumMismatch(f"{load_path}: {bad} shard chunk(s) failed checksum")
+            if stored is None:
+                raise ChecksumMismatch(
+                    f"{load_path}: integrity verification is enabled but the checkpoint "
+                    "does not contain checksums"
+                )
+            actual = shard_checksums(tensors)
+            if actual != stored:
+                bad = sum(1 for a, b in zip(actual, stored) if a != b) + abs(
+                    len(actual) - len(stored)
+                )
+                raise ChecksumMismatch(f"{load_path}: {bad} shard chunk(s) failed checksum")
         return metadata, tensors
 
     def has_rank(self, step: int, rank: int) -> bool:
