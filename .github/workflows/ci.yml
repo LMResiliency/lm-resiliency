@@ -145,7 +145,7 @@ jobs:
             --only-binary=:all: \
             "torch==$TORCH_VERSION"
           python -m pip install -c requirements/tool-versions.txt \
-            "numpy==$NUMPY_VERSION" pytest pytest-timeout
+            "numpy==$NUMPY_VERSION" packaging pytest pytest-timeout
           python -m pip install --no-deps -e .
           python -m pip check
 

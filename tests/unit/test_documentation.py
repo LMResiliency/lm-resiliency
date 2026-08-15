@@ -41,4 +41,8 @@ def test_deployment_contracts_cover_every_destination():
     assert "git rebase origin/gh-pages" not in release
     assert "retention-days: 30" in release
     assert "release_flags+=(--prerelease)" in release
+    assert "workflow_dispatch" not in development
+    assert "scripts/release_versions.py is-prerelease" in release
+    assert "scripts/release_versions.py latest-stable-tag" in release
+    assert "sort -V" not in release
     assert '"torch==2.13.0"' in release
