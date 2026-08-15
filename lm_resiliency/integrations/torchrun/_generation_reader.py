@@ -72,11 +72,18 @@ class GenerationStateReader:
         return f"{self._run_prefix}/generations/{normalized_generation}"
 
     def current(self) -> CurrentGeneration | None:
-        result = self._read_current_history()
-        if result is None:
-            return None
-        current, _ = result
-        return current
+        generation_zero_key = self.snapshot_key(0)
+        for _ in range(_MAX_READ_ATTEMPTS):
+            result = self._read_current_history()
+            if result is not None:
+                current, _ = result
+                return current
+            if self._store.get(generation_zero_key) is None:
+                return None
+            if self._store.get(self._head_key) is not None:
+                continue
+            raise GenerationStateCorrupt("generation snapshots exist without a generation head")
+        raise GenerationStateError("generation head changed repeatedly during read")
 
     def get(self, generation: int) -> StoredGenerationSnapshot | None:
         normalized_generation = _nonnegative_integer(generation, "generation")
@@ -84,7 +91,9 @@ class GenerationStateReader:
         for _ in range(_MAX_READ_ATTEMPTS):
             result = self._read_current_history()
             if result is None:
-                if self._store.get(snapshot_key) is None:
+                generation_zero = self._store.get(self.snapshot_key(0))
+                requested_snapshot = self._store.get(snapshot_key)
+                if generation_zero is None and requested_snapshot is None:
                     return None
                 if self._store.get(self._head_key) is not None:
                     continue
@@ -158,6 +167,7 @@ class GenerationStateReader:
             raise GenerationStateCorrupt("generation snapshot key and payload disagree")
         if entry.committed_at_unix_ms is None:
             raise GenerationStateCorrupt("generation snapshot has no authoritative commit time")
+        self._validate_guard_provenance(entry, record)
         return StoredGenerationSnapshot(
             record=record,
             revision=entry.revision,
@@ -176,6 +186,7 @@ class GenerationStateReader:
             raise GenerationStateCorrupt(
                 "generation head and snapshot commit timestamps do not match"
             )
+        self._validate_guard_provenance(head_entry, snapshot.record)
 
     def _read_snapshot_history(
         self,
@@ -183,6 +194,7 @@ class GenerationStateReader:
     ) -> dict[int, StoredGenerationSnapshot]:
         successor = snapshot
         history = {successor.record.assignment.generation: successor}
+        seen_lease_ids = {successor.record.lease_id}
         while successor.record.assignment.generation > 0:
             predecessor_generation = successor.record.assignment.generation - 1
             predecessor_entry = self._store.get(self.snapshot_key(predecessor_generation))
@@ -217,9 +229,33 @@ class GenerationStateReader:
                 and predecessor.record.coordinator_id != successor.record.coordinator_id
             ):
                 raise GenerationStateCorrupt("one generation lease changes coordinator identity")
+            if predecessor.record.lease_id != successor.record.lease_id:
+                if predecessor.record.lease_id in seen_lease_ids:
+                    raise GenerationStateCorrupt(
+                        "generation snapshot lease identity reappears after replacement"
+                    )
+                seen_lease_ids.add(predecessor.record.lease_id)
             history[predecessor_generation] = predecessor
             successor = predecessor
         return history
+
+    def _validate_guard_provenance(
+        self,
+        entry: ControlStoreEntry,
+        snapshot: GenerationSnapshotRecord,
+    ) -> None:
+        if entry.guard_key != self._coordinator_lease_key:
+            raise GenerationStateCorrupt(
+                "generation state has no matching coordinator-lease guard key"
+            )
+        if entry.guard_revision != snapshot.coordinator_fencing_token:
+            raise GenerationStateCorrupt(
+                "generation state guard revision does not match its fencing token"
+            )
+        if entry.guard_value_digest != snapshot.coordinator_lease_digest:
+            raise GenerationStateCorrupt(
+                "generation state guard digest does not match its lease identity"
+            )
 
 
 def _nonempty_string(value: object, path: str) -> str:

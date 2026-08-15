@@ -7,6 +7,9 @@ import json
 
 import pytest
 
+from lm_resiliency.integrations.torchrun._coordinator_lease import (
+    CoordinatorLeaseRecord,
+)
 from lm_resiliency.integrations.torchrun._generation_records import (
     GenerationHeadRecord,
     GenerationSnapshotRecord,
@@ -44,6 +47,7 @@ def _snapshot(generation: int = 1) -> GenerationSnapshotRecord:
         previous_snapshot_digest=None if generation == 0 else "a" * 64,
         coordinator_id="coordinator-a",
         lease_id="lease-a",
+        coordinator_lease_duration_ms=100,
         coordinator_fencing_token=4,
     )
 
@@ -61,6 +65,13 @@ def test_generation_records_round_trip_as_canonical_json():
     assert json.loads(snapshot.to_json()) == snapshot.to_dict()
     assert json.loads(head.to_json()) == head.to_dict()
     assert snapshot.digest == hashlib.sha256(snapshot.to_json()).hexdigest()
+    lease_record = CoordinatorLeaseRecord(
+        run_id=RUN_ID,
+        coordinator_id=snapshot.coordinator_id,
+        lease_id=snapshot.lease_id,
+        lease_duration_ms=snapshot.coordinator_lease_duration_ms,
+    )
+    assert snapshot.coordinator_lease_digest == hashlib.sha256(lease_record.to_json()).hexdigest()
     assert snapshot.to_json() == snapshot.to_json()
 
 
@@ -92,6 +103,7 @@ def test_generation_records_reject_duplicate_fields_at_any_depth():
     "mutation",
     [
         lambda value: value.pop("lease_id"),
+        lambda value: value.pop("coordinator_lease_duration_ms"),
         lambda value: value.update({"unknown": "field"}),
         lambda value: value.update({"schema_version": 2}),
         lambda value: value.update({"schema_version": True}),
@@ -128,6 +140,7 @@ def test_generation_snapshot_requires_exact_predecessor_shape():
             previous_snapshot_digest="a" * 64,
             coordinator_id="coordinator-a",
             lease_id="lease-a",
+            coordinator_lease_duration_ms=100,
             coordinator_fencing_token=1,
         )
 
@@ -137,6 +150,7 @@ def test_generation_snapshot_requires_exact_predecessor_shape():
             previous_snapshot_digest=None,
             coordinator_id="coordinator-a",
             lease_id="lease-a",
+            coordinator_lease_duration_ms=100,
             coordinator_fencing_token=1,
         )
 
@@ -146,6 +160,7 @@ def test_generation_snapshot_requires_exact_predecessor_shape():
             previous_snapshot_digest="A" * 64,
             coordinator_id="coordinator-a",
             lease_id="lease-a",
+            coordinator_lease_duration_ms=100,
             coordinator_fencing_token=1,
         )
 
@@ -158,5 +173,19 @@ def test_generation_snapshot_requires_positive_integer_fencing_token(fencing_tok
             previous_snapshot_digest="a" * 64,
             coordinator_id="coordinator-a",
             lease_id="lease-a",
+            coordinator_lease_duration_ms=100,
             coordinator_fencing_token=fencing_token,
+        )
+
+
+@pytest.mark.parametrize("lease_duration_ms", [0, -1, True])
+def test_generation_snapshot_requires_positive_lease_duration(lease_duration_ms):
+    with pytest.raises(ValueError, match="positive integer"):
+        GenerationSnapshotRecord(
+            assignment=_assignment(1),
+            previous_snapshot_digest="a" * 64,
+            coordinator_id="coordinator-a",
+            lease_id="lease-a",
+            coordinator_lease_duration_ms=lease_duration_ms,
+            coordinator_fencing_token=1,
         )

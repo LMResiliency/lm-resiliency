@@ -857,24 +857,27 @@ layers rather than weakening this storage primitive.
 Coordinator state that spans multiple keys uses one guarded store transaction.
 The transaction first checks the coordinator lease revision, then every target
 revision, then one authoritative store-time window. It publishes all target
-values with the same commit timestamp or publishes none. This is the primitive
-used to create an immutable generation snapshot and advance the generation head
+values with the same commit timestamp and store-stamped guard key, guard
+revision, and guard-value digest, or publishes none. This is the primitive used
+to create an immutable generation snapshot and advance the generation head
 without allowing a stale or expired coordinator to commit either half alone.
 
 Persisted generation state uses strict versioned records. A
 `GenerationSnapshotRecord` contains the immutable `RankAssignment`, the previous
-snapshot digest, and the coordinator lease identity and fencing token that
-committed it. Generation zero must not name a predecessor, while every later
-generation must carry a lowercase SHA-256 predecessor digest. A
+snapshot digest, and the complete coordinator lease identity, duration, and
+fencing token that committed it. Generation zero must not name a predecessor,
+while every later generation must carry a lowercase SHA-256 predecessor digest. A
 `GenerationHeadRecord` contains only the run, generation, and canonical snapshot
 digest. Both records reject missing, unknown, duplicate, or unsupported fields.
 
 The generation-state reader derives snapshot, head, and coordinator-lease keys
 from one run-scoped namespace. It requires the head and snapshot to agree on
-generation, digest, and authoritative commit time, then verifies the complete
-predecessor digest, timestamp, fencing-token, and lease-identity chain back to
-generation zero. Missing or contradictory history is corruption, not an empty
-or partially usable assignment.
+generation, digest, authoritative commit time, and store-stamped guard
+provenance, then verifies the complete predecessor digest, timestamp,
+fencing-token, and lease-identity chain back to generation zero. Lease
+identities cannot reappear after a different acquisition. Missing or
+contradictory history is corruption, not an empty or partially usable
+assignment.
 
 Coordinator ownership is stored under a schema-versioned, run-scoped lease key.
 The lease record binds the run, a unique coordinator-process incarnation, a

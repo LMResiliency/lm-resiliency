@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import MappingProxyType
@@ -65,6 +66,11 @@ def test_guarded_transaction_commits_all_writes_at_one_store_time():
     assert isinstance(committed, MappingProxyType)
     assert set(committed) == {"run/generation-head", "run/generations/0"}
     assert {entry.committed_at_unix_ms for entry in committed.values()} == {1_000}
+    assert {entry.guard_key for entry in committed.values()} == {"run/coordinator-lease"}
+    assert {entry.guard_revision for entry in committed.values()} == {guard.revision}
+    assert {entry.guard_value_digest for entry in committed.values()} == {
+        hashlib.sha256(b"lease-a").hexdigest()
+    }
     assert store.get("run/generation-head") == committed["run/generation-head"]
     assert store.get("run/generations/0") == committed["run/generations/0"]
     with pytest.raises(TypeError):

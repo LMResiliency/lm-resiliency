@@ -7,6 +7,7 @@ import threading
 import pytest
 
 from lm_resiliency.integrations.torchrun._control_store import (
+    ControlStoreEntry,
     ControlStoreWrite,
     InMemoryControlStore,
 )
@@ -39,6 +40,14 @@ class ManualClock:
     def set(self, now_unix_ms: int) -> None:
         with self._lock:
             self.now_unix_ms = now_unix_ms
+
+
+class StaticControlStore:
+    def __init__(self) -> None:
+        self.entries: dict[str, ControlStoreEntry] = {}
+
+    def get(self, key: str) -> ControlStoreEntry | None:
+        return self.entries.get(key)
 
 
 def _assignment(generation: int) -> RankAssignment:
@@ -86,16 +95,14 @@ def _commit(
     generation: int,
     previous_snapshot_digest: str | None,
     expected_head_revision: int | None,
-    coordinator_id: str = "coordinator-a",
-    lease_id: str | None = None,
-    fencing_token: int | None = None,
 ):
     snapshot = GenerationSnapshotRecord(
         assignment=_assignment(generation),
         previous_snapshot_digest=previous_snapshot_digest,
-        coordinator_id=coordinator_id,
-        lease_id=lease.record.lease_id if lease_id is None else lease_id,
-        coordinator_fencing_token=(lease.fencing_token if fencing_token is None else fencing_token),
+        coordinator_id=lease.record.coordinator_id,
+        lease_id=lease.record.lease_id,
+        coordinator_lease_duration_ms=lease.record.lease_duration_ms,
+        coordinator_fencing_token=lease.fencing_token,
     )
     head = GenerationHeadRecord(
         run_id=RUN_ID,
@@ -118,6 +125,73 @@ def _commit(
         not_before_unix_ms=lease.granted_at_unix_ms,
         deadline_unix_ms=lease.expires_at_unix_ms,
     )
+
+
+def _snapshot(
+    generation: int,
+    *,
+    previous_snapshot_digest: str | None,
+    coordinator_id: str,
+    lease_id: str,
+    fencing_token: int,
+) -> GenerationSnapshotRecord:
+    return GenerationSnapshotRecord(
+        assignment=_assignment(generation),
+        previous_snapshot_digest=previous_snapshot_digest,
+        coordinator_id=coordinator_id,
+        lease_id=lease_id,
+        coordinator_lease_duration_ms=100,
+        coordinator_fencing_token=fencing_token,
+    )
+
+
+def _reader_from_history(
+    records: tuple[GenerationSnapshotRecord, ...],
+) -> GenerationStateReader:
+    store = StaticControlStore()
+    reader = GenerationStateReader(store, run_id=RUN_ID)
+    for record in records:
+        generation = record.assignment.generation
+        store.entries[reader.snapshot_key(generation)] = ControlStoreEntry(
+            value=record.to_json(),
+            revision=1,
+            committed_at_unix_ms=1_000 + generation,
+            guard_key=reader.coordinator_lease_key,
+            guard_revision=record.coordinator_fencing_token,
+            guard_value_digest=record.coordinator_lease_digest,
+        )
+    latest = records[-1]
+    head = GenerationHeadRecord(
+        run_id=RUN_ID,
+        generation=latest.assignment.generation,
+        snapshot_digest=latest.digest,
+    )
+    store.entries[reader.head_key] = ControlStoreEntry(
+        value=head.to_json(),
+        revision=len(records),
+        committed_at_unix_ms=1_000 + latest.assignment.generation,
+        guard_key=reader.coordinator_lease_key,
+        guard_revision=latest.coordinator_fencing_token,
+        guard_value_digest=latest.coordinator_lease_digest,
+    )
+    return reader
+
+
+def _history(
+    *provenance: tuple[str, str, int],
+) -> tuple[GenerationSnapshotRecord, ...]:
+    records: list[GenerationSnapshotRecord] = []
+    for generation, (coordinator_id, lease_id, fencing_token) in enumerate(provenance):
+        records.append(
+            _snapshot(
+                generation,
+                previous_snapshot_digest=None if not records else records[-1].digest,
+                coordinator_id=coordinator_id,
+                lease_id=lease_id,
+                fencing_token=fencing_token,
+            )
+        )
+    return tuple(records)
 
 
 def test_generation_reader_returns_none_before_initialization():
@@ -148,10 +222,11 @@ def test_generation_reader_retries_concurrent_initialization(monkeypatch):
 
     monkeypatch.setattr(store, "get", racing_get)
 
-    snapshot = reader.get(0)
+    current = reader.current()
 
-    assert snapshot is not None
-    assert snapshot.record.assignment.generation == 0
+    assert current is not None
+    assert current.snapshot.record.assignment.generation == 0
+    assert reader.get(0) == current.snapshot
 
 
 def test_generation_reader_reads_current_and_historical_snapshots():
@@ -200,6 +275,7 @@ def test_generation_reader_rejects_snapshots_outside_committed_head():
         previous_snapshot_digest=None,
         coordinator_id=lease.record.coordinator_id,
         lease_id=lease.record.lease_id,
+        coordinator_lease_duration_ms=lease.record.lease_duration_ms,
         coordinator_fencing_token=lease.fencing_token,
     )
     store.compare_set_in_window(
@@ -209,6 +285,8 @@ def test_generation_reader_rejects_snapshots_outside_committed_head():
         deadline_unix_ms=None,
         value=orphan_zero.to_json(),
     )
+    with pytest.raises(GenerationStateCorrupt, match="without a generation head"):
+        reader.current()
     with pytest.raises(GenerationStateCorrupt, match="without a generation head"):
         reader.get(0)
 
@@ -229,6 +307,7 @@ def test_generation_reader_rejects_snapshots_outside_committed_head():
         ).digest,
         coordinator_id=lease.record.coordinator_id,
         lease_id=lease.record.lease_id,
+        coordinator_lease_duration_ms=lease.record.lease_duration_ms,
         coordinator_fencing_token=lease.fencing_token,
     )
     store.compare_set_in_window(
@@ -286,18 +365,21 @@ def test_generation_reader_rejects_head_digest_or_timestamp_substitution():
         generation=0,
         snapshot_digest="f" * 64,
     )
-    store.compare_set_in_window(
-        reader.head_key,
-        expected_revision=head_entry.revision,
+    updated = store.compare_set_many_guarded(
+        {
+            reader.head_key: ControlStoreWrite(
+                expected_revision=head_entry.revision,
+                value=substituted.to_json(),
+            )
+        },
+        guard_key=reader.coordinator_lease_key,
+        expected_guard_revision=lease.fencing_token,
         not_before_unix_ms=1_000,
-        deadline_unix_ms=None,
-        value=substituted.to_json(),
+        deadline_unix_ms=lease.expires_at_unix_ms,
     )
     with pytest.raises(GenerationStateCorrupt, match="digest"):
         reader.current()
 
-    current_head = store.get(reader.head_key)
-    assert current_head is not None
     clock.set(1_010)
     original = GenerationHeadRecord(
         run_id=RUN_ID,
@@ -306,12 +388,17 @@ def test_generation_reader_rejects_head_digest_or_timestamp_substitution():
             committed[reader.snapshot_key(0)].value
         ).digest,
     )
-    store.compare_set_in_window(
-        reader.head_key,
-        expected_revision=current_head.revision,
+    store.compare_set_many_guarded(
+        {
+            reader.head_key: ControlStoreWrite(
+                expected_revision=updated[reader.head_key].revision,
+                value=original.to_json(),
+            )
+        },
+        guard_key=reader.coordinator_lease_key,
+        expected_guard_revision=lease.fencing_token,
         not_before_unix_ms=1_010,
-        deadline_unix_ms=None,
-        value=original.to_json(),
+        deadline_unix_ms=lease.expires_at_unix_ms,
     )
     with pytest.raises(GenerationStateCorrupt, match="timestamps"):
         reader.current()
@@ -349,65 +436,138 @@ def test_generation_reader_rejects_missing_or_substituted_predecessor():
     with pytest.raises(GenerationStateCorrupt, match="missing predecessor"):
         reader.current()
 
-    substituted = GenerationSnapshotRecord(
-        assignment=_assignment(0),
+    original_zero = _snapshot(
+        0,
+        previous_snapshot_digest=None,
+        coordinator_id="coordinator-a",
+        lease_id="lease-a",
+        fencing_token=1,
+    )
+    substituted_zero = _snapshot(
+        0,
         previous_snapshot_digest=None,
         coordinator_id="coordinator-a",
         lease_id="substituted-lease",
-        coordinator_fencing_token=lease.fencing_token,
+        fencing_token=1,
     )
-    store.compare_set_in_window(
-        reader.snapshot_key(0),
-        expected_revision=None,
-        not_before_unix_ms=1_010,
-        deadline_unix_ms=None,
-        value=substituted.to_json(),
+    generation_one = _snapshot(
+        1,
+        previous_snapshot_digest=original_zero.digest,
+        coordinator_id="coordinator-a",
+        lease_id="lease-a",
+        fencing_token=1,
     )
+    substituted_reader = _reader_from_history((substituted_zero, generation_one))
     with pytest.raises(GenerationStateCorrupt, match="predecessor digest"):
+        substituted_reader.current()
+
+
+def test_generation_reader_anchors_snapshot_to_store_guard():
+    _, store, lease, reader = _state()
+    forged = _snapshot(
+        0,
+        previous_snapshot_digest=None,
+        coordinator_id="forged-coordinator",
+        lease_id="forged-lease",
+        fencing_token=lease.fencing_token,
+    )
+    head = GenerationHeadRecord(
+        run_id=RUN_ID,
+        generation=0,
+        snapshot_digest=forged.digest,
+    )
+    store.compare_set_many_guarded(
+        {
+            reader.head_key: ControlStoreWrite(
+                expected_revision=None,
+                value=head.to_json(),
+            ),
+            reader.snapshot_key(0): ControlStoreWrite(
+                expected_revision=None,
+                value=forged.to_json(),
+            ),
+        },
+        guard_key=reader.coordinator_lease_key,
+        expected_guard_revision=lease.fencing_token,
+        not_before_unix_ms=lease.granted_at_unix_ms,
+        deadline_unix_ms=lease.expires_at_unix_ms,
+    )
+
+    with pytest.raises(GenerationStateCorrupt, match="guard digest"):
+        reader.current()
+
+
+def test_generation_reader_anchors_fencing_token_to_store_guard():
+    _, store, lease, reader = _state()
+    forged = _snapshot(
+        0,
+        previous_snapshot_digest=None,
+        coordinator_id=lease.record.coordinator_id,
+        lease_id=lease.record.lease_id,
+        fencing_token=lease.fencing_token + 1,
+    )
+    head = GenerationHeadRecord(
+        run_id=RUN_ID,
+        generation=0,
+        snapshot_digest=forged.digest,
+    )
+    store.compare_set_many_guarded(
+        {
+            reader.head_key: ControlStoreWrite(
+                expected_revision=None,
+                value=head.to_json(),
+            ),
+            reader.snapshot_key(0): ControlStoreWrite(
+                expected_revision=None,
+                value=forged.to_json(),
+            ),
+        },
+        guard_key=reader.coordinator_lease_key,
+        expected_guard_revision=lease.fencing_token,
+        not_before_unix_ms=lease.granted_at_unix_ms,
+        deadline_unix_ms=lease.expires_at_unix_ms,
+    )
+
+    with pytest.raises(GenerationStateCorrupt, match="guard revision"):
         reader.current()
 
 
 @pytest.mark.parametrize(
-    ("first_fencing_token", "first_lease_id", "second_lease_id", "message"),
+    ("history", "message"),
     [
-        (5, "lease-a", "lease-b", "fencing tokens"),
-        (4, "lease-a", "lease-b", "lease identity"),
-        (3, "lease-a", "lease-a", "changes coordinator"),
+        (
+            _history(
+                ("coordinator-a", "lease-a", 5),
+                ("coordinator-b", "lease-b", 4),
+            ),
+            "fencing tokens",
+        ),
+        (
+            _history(
+                ("coordinator-a", "lease-a", 4),
+                ("coordinator-b", "lease-b", 4),
+            ),
+            "lease identity",
+        ),
+        (
+            _history(
+                ("coordinator-a", "lease-a", 3),
+                ("coordinator-b", "lease-a", 4),
+            ),
+            "changes coordinator",
+        ),
+        (
+            _history(
+                ("coordinator-a", "lease-a", 1),
+                ("coordinator-b", "lease-b", 3),
+                ("coordinator-a", "lease-a", 5),
+            ),
+            "reappears",
+        ),
     ],
 )
-def test_generation_reader_rejects_invalid_lease_provenance(
-    first_fencing_token,
-    first_lease_id,
-    second_lease_id,
-    message,
-):
-    clock, store, lease, reader = _state()
-    generation_zero = _commit(
-        store,
-        reader,
-        lease,
-        generation=0,
-        previous_snapshot_digest=None,
-        expected_head_revision=None,
-        coordinator_id="coordinator-a",
-        lease_id=first_lease_id,
-        fencing_token=first_fencing_token,
-    )
-    snapshot_zero = GenerationSnapshotRecord.from_json(
-        generation_zero[reader.snapshot_key(0)].value
-    )
-    clock.set(1_010)
-    _commit(
-        store,
-        reader,
-        lease,
-        generation=1,
-        previous_snapshot_digest=snapshot_zero.digest,
-        expected_head_revision=generation_zero[reader.head_key].revision,
-        coordinator_id="coordinator-b",
-        lease_id=second_lease_id,
-        fencing_token=4,
-    )
+def test_generation_reader_rejects_invalid_lease_history(history, message):
+    reader = _reader_from_history(history)
 
     with pytest.raises(GenerationStateCorrupt, match=message):
         reader.current()

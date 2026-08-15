@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -69,6 +70,9 @@ class ControlStoreEntry:
     value: bytes
     revision: int
     committed_at_unix_ms: int | None = None
+    guard_key: str | None = None
+    guard_revision: int | None = None
+    guard_value_digest: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "value", _control_value(self.value))
@@ -80,6 +84,28 @@ class ControlStoreEntry:
                 _positive_integer(
                     self.committed_at_unix_ms,
                     "committed_at_unix_ms",
+                ),
+            )
+        guard_values = (
+            self.guard_key,
+            self.guard_revision,
+            self.guard_value_digest,
+        )
+        if any(value is not None for value in guard_values):
+            if not all(value is not None for value in guard_values):
+                raise ValueError("control-store guard provenance must be complete")
+            object.__setattr__(self, "guard_key", _control_key(self.guard_key))
+            object.__setattr__(
+                self,
+                "guard_revision",
+                _required_revision(self.guard_revision),
+            )
+            object.__setattr__(
+                self,
+                "guard_value_digest",
+                _sha256_digest(
+                    self.guard_value_digest,
+                    "guard_value_digest",
                 ),
             )
 
@@ -160,7 +186,11 @@ class ControlStore(Protocol):
         not_before_unix_ms: int,
         deadline_unix_ms: int,
     ) -> Mapping[str, ControlStoreEntry]:
-        """Atomically publish writes while a guard revision is live in the time window."""
+        """Atomically publish writes while a guard revision is live.
+
+        Every returned target entry carries store-stamped guard key, revision,
+        and value-digest provenance from the same linearization point.
+        """
         ...
 
 
@@ -309,6 +339,8 @@ class InMemoryControlStore:
             raise ValueError("not_before_unix_ms must be before deadline_unix_ms")
         with self._lock:
             self._require_revision(normalized_guard_key, normalized_guard_revision)
+            guard_entry = self._entries[normalized_guard_key]
+            guard_value_digest = hashlib.sha256(guard_entry.value).hexdigest()
             for key, write in normalized_writes.items():
                 self._require_revision(key, write.expected_revision)
             now_unix_ms = self._store_now_unix_ms()
@@ -329,6 +361,9 @@ class InMemoryControlStore:
                     key,
                     write.value,
                     committed_at_unix_ms=now_unix_ms,
+                    guard_key=normalized_guard_key,
+                    guard_revision=normalized_guard_revision,
+                    guard_value_digest=guard_value_digest,
                 )
                 for key, write in normalized_writes.items()
             }
@@ -346,12 +381,18 @@ class InMemoryControlStore:
         value: bytes,
         *,
         committed_at_unix_ms: int | None = None,
+        guard_key: str | None = None,
+        guard_revision: int | None = None,
+        guard_value_digest: str | None = None,
     ) -> ControlStoreEntry:
         revision = self._next_revision(key)
         entry = ControlStoreEntry(
             value=value,
             revision=revision,
             committed_at_unix_ms=committed_at_unix_ms,
+            guard_key=guard_key,
+            guard_revision=guard_revision,
+            guard_value_digest=guard_value_digest,
         )
         self._entries[key] = entry
         return entry
@@ -379,6 +420,16 @@ def _control_value(value: object) -> bytes:
     if not isinstance(value, bytes):
         raise TypeError("control-store value must be bytes")
     return bytes(value)
+
+
+def _sha256_digest(value: object, path: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{path} must be a lowercase SHA-256 digest")
+    return value
 
 
 def _control_writes(value: object) -> dict[str, ControlStoreWrite]:

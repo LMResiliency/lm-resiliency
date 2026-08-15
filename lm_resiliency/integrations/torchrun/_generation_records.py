@@ -8,6 +8,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import ClassVar
 
+from lm_resiliency.integrations.torchrun._coordinator_lease import (
+    CoordinatorLeaseRecord,
+)
 from lm_resiliency.integrations.torchrun._protocol import (
     ProtocolValidationError,
     RankAssignment,
@@ -24,6 +27,7 @@ class GenerationSnapshotRecord:
     previous_snapshot_digest: str | None
     coordinator_id: str
     lease_id: str
+    coordinator_lease_duration_ms: int
     coordinator_fencing_token: int
 
     def __post_init__(self) -> None:
@@ -43,6 +47,10 @@ class GenerationSnapshotRecord:
         )
         _nonempty_string(self.lease_id, "GenerationSnapshotRecord.lease_id")
         _positive_integer(
+            self.coordinator_lease_duration_ms,
+            "GenerationSnapshotRecord.coordinator_lease_duration_ms",
+        )
+        _positive_integer(
             self.coordinator_fencing_token,
             "GenerationSnapshotRecord.coordinator_fencing_token",
         )
@@ -51,6 +59,16 @@ class GenerationSnapshotRecord:
     def digest(self) -> str:
         return hashlib.sha256(self.to_json()).hexdigest()
 
+    @property
+    def coordinator_lease_digest(self) -> str:
+        record = CoordinatorLeaseRecord(
+            run_id=self.assignment.run_id,
+            coordinator_id=self.coordinator_id,
+            lease_id=self.lease_id,
+            lease_duration_ms=self.coordinator_lease_duration_ms,
+        )
+        return hashlib.sha256(record.to_json()).hexdigest()
+
     def to_dict(self) -> dict[str, object]:
         return {
             "schema_version": self.SCHEMA_VERSION,
@@ -58,6 +76,7 @@ class GenerationSnapshotRecord:
             "previous_snapshot_digest": self.previous_snapshot_digest,
             "coordinator_id": self.coordinator_id,
             "lease_id": self.lease_id,
+            "coordinator_lease_duration_ms": self.coordinator_lease_duration_ms,
             "coordinator_fencing_token": self.coordinator_fencing_token,
         }
 
@@ -76,6 +95,7 @@ class GenerationSnapshotRecord:
                 "previous_snapshot_digest",
                 "coordinator_id",
                 "lease_id",
+                "coordinator_lease_duration_ms",
                 "coordinator_fencing_token",
             },
         )
@@ -103,6 +123,10 @@ class GenerationSnapshotRecord:
             lease_id=_nonempty_string(
                 value["lease_id"],
                 "GenerationSnapshotRecord.lease_id",
+            ),
+            coordinator_lease_duration_ms=_positive_integer(
+                value["coordinator_lease_duration_ms"],
+                "GenerationSnapshotRecord.coordinator_lease_duration_ms",
             ),
             coordinator_fencing_token=_positive_integer(
                 value["coordinator_fencing_token"],

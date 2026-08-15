@@ -297,3 +297,27 @@ def test_control_store_entry_rejects_invalid_backend_values(
             revision=revision,
             committed_at_unix_ms=committed_at_unix_ms,
         )
+
+
+@pytest.mark.parametrize(
+    ("guard_key", "guard_revision", "guard_value_digest"),
+    [
+        ("run/lease", None, None),
+        (None, 1, None),
+        (None, None, "a" * 64),
+        ("run/lease", 1, "invalid"),
+    ],
+)
+def test_control_store_entry_rejects_invalid_guard_provenance(
+    guard_key,
+    guard_revision,
+    guard_value_digest,
+):
+    with pytest.raises(ValueError):
+        ControlStoreEntry(
+            value=b"value",
+            revision=1,
+            guard_key=guard_key,
+            guard_revision=guard_revision,
+            guard_value_digest=guard_value_digest,
+        )
