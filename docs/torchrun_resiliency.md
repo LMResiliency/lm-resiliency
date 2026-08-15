@@ -600,16 +600,14 @@ current-head update, and an exact immutable-intent condition, but does not
 authenticate a closing lease or mutate the store. A frozen
 `PreparedInitialRestartIntentClosure` wraps those records with the complete
 held closing lease, its authoritative transaction, mutation, value, and
-lifetime sequences, and a bounded store-time commit window. It accepts exact
-opening authority, nonexpired same-lease renewal, and nonoverlapping
-replacement authority while rejecting lease identity or fencing-token reuse
-from the verified generation history. In-place replacement also carries the
-immediate predecessor lease and its store lineage, so intervening renewals are
-authenticated and replacement must be the next lease-key mutation at or after
-the predecessor expiry. The value remains non-mutating; a later preparer
-consumes a predecessor entry captured and authenticated before takeover, then
-authenticates the replacement lease against the live store before constructing
-it. A frozen
+lifetime sequences, and a bounded store-time commit window. It carries a
+contiguous `CoordinatorLeaseAuthority` chain from the exact opening lease to
+the closing lease. Every adjacent observation must be one valid nonexpired
+renewal, nonoverlapping in-place replacement, or delete/recreate transition;
+lease identities and fencing tokens cannot reappear after replacement. This
+supports repeated coordinator failover without accepting omitted or replayed
+authority. The value remains non-mutating; a later preparer obtains and
+authenticates the transition chain before constructing it. A frozen
 `PreparedInitialRestartIntentOpen` descriptor binds the first intent record,
 current-intent head, exact generation revisions, coordinator fencing token,
 canonical run-scoped keys, and lease/intent commit window. It exposes immutable

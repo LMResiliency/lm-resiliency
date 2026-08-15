@@ -24,6 +24,7 @@ from lm_resiliency.integrations.torchrun._protocol import (
     SlotAssignment,
 )
 from lm_resiliency.integrations.torchrun._restart_intent_close import (
+    CoordinatorLeaseAuthority,
     PreparedInitialRestartIntentClosure,
 )
 from lm_resiliency.integrations.torchrun._restart_intent_close_records import (
@@ -57,6 +58,20 @@ class ManualClock:
     def set(self, now_unix_ms: int) -> None:
         with self._lock:
             self.now_unix_ms = now_unix_ms
+
+
+def _manager(
+    store: InMemoryControlStore,
+    clock: ManualClock,
+    coordinator_id: str,
+) -> CoordinatorLeaseManager:
+    return CoordinatorLeaseManager(
+        store,
+        run_id=RUN_ID,
+        coordinator_id=coordinator_id,
+        lease_duration_ms=100,
+        clock=clock,
+    )
 
 
 def _assignment() -> RankAssignment:
@@ -124,121 +139,96 @@ def _records(
 def _state() -> tuple[
     ManualClock,
     InMemoryControlStore,
-    CoordinatorLeaseManager,
     CommittedInitialRestartIntentOpen,
     HeldCoordinatorLease,
+    CoordinatorLeaseAuthority,
 ]:
     clock = ManualClock()
     store = InMemoryControlStore(clock=clock)
-    lease_manager = CoordinatorLeaseManager(
-        store,
-        run_id=RUN_ID,
-        coordinator_id="coordinator-a",
-        lease_duration_ms=100,
-        clock=clock,
-    )
+    opening_manager = _manager(store, clock, "coordinator-a")
     generation_manager = GenerationStateManager(store, run_id=RUN_ID)
     open_preparer = RestartIntentOpenPreparer(store, run_id=RUN_ID, clock=clock)
     open_executor = RestartIntentOpenExecutor(store, run_id=RUN_ID)
-    lease = lease_manager.acquire()
+    lease = opening_manager.acquire()
     generation_manager.initialize(lease, _assignment())
     current = generation_manager.current()
     assert current is not None
     opened = open_executor.execute_initial_open(
         open_preparer.prepare_initial_open(lease, current, _intent())
     )
-    return clock, store, lease_manager, opened, lease
+    lease_entry = store.get(opened.prepared.coordinator_lease_key)
+    assert lease_entry is not None
+    return clock, store, opened, lease, _authority(lease, lease_entry)
 
 
-def _prepared(
-    opened: CommittedInitialRestartIntentOpen,
+def _authority(
     lease: HeldCoordinatorLease,
-    lease_entry: ControlStoreEntry,
-    *,
-    predecessor: tuple[HeldCoordinatorLease, ControlStoreEntry] | None = None,
-) -> PreparedInitialRestartIntentClosure:
-    predecessor_lease = None if predecessor is None else predecessor[0]
-    predecessor_entry = None if predecessor is None else predecessor[1]
-    return PreparedInitialRestartIntentClosure(
-        records=_records(opened, lease),
+    entry: ControlStoreEntry,
+) -> CoordinatorLeaseAuthority:
+    return CoordinatorLeaseAuthority(
         lease=lease,
-        coordinator_lease_transaction_sequence=lease_entry.transaction_sequence,
-        coordinator_lease_mutation_sequence=lease_entry.mutation_sequence,
-        coordinator_lease_value_sequence=lease_entry.value_sequence,
-        coordinator_lease_lifetime_sequence=lease_entry.lifetime_sequence,
-        not_before_unix_ms=max(
-            opened.committed_at_unix_ms,
-            lease.granted_at_unix_ms,
-        ),
-        deadline_unix_ms=lease.expires_at_unix_ms,
-        predecessor_lease=predecessor_lease,
-        predecessor_lease_transaction_sequence=(
-            None if predecessor_entry is None else predecessor_entry.transaction_sequence
-        ),
-        predecessor_lease_mutation_sequence=(
-            None if predecessor_entry is None else predecessor_entry.mutation_sequence
-        ),
-        predecessor_lease_value_sequence=(
-            None if predecessor_entry is None else predecessor_entry.value_sequence
-        ),
-        predecessor_lease_lifetime_sequence=(
-            None if predecessor_entry is None else predecessor_entry.lifetime_sequence
-        ),
+        transaction_sequence=entry.transaction_sequence,
+        mutation_sequence=entry.mutation_sequence,
+        value_sequence=entry.value_sequence,
+        lifetime_sequence=entry.lifetime_sequence,
     )
 
 
-def _initial_prepared() -> PreparedInitialRestartIntentClosure:
-    _, store, _, opened, lease = _state()
-    lease_entry = store.get(opened.prepared.coordinator_lease_key)
-    assert lease_entry is not None
-    return _prepared(opened, lease, lease_entry)
-
-
-def _with_lease(
-    prepared: PreparedInitialRestartIntentClosure,
+def _authority_with_sequences(
     lease: HeldCoordinatorLease,
     *,
     transaction_sequence: int,
     mutation_sequence: int,
     value_sequence: int,
     lifetime_sequence: int,
-    predecessor_lease: HeldCoordinatorLease | None = None,
-    predecessor_transaction_sequence: int | None = None,
-    predecessor_mutation_sequence: int | None = None,
-    predecessor_value_sequence: int | None = None,
-    predecessor_lifetime_sequence: int | None = None,
-) -> PreparedInitialRestartIntentClosure:
-    return PreparedInitialRestartIntentClosure(
-        records=_records(prepared.records.opened, lease),
+) -> CoordinatorLeaseAuthority:
+    return CoordinatorLeaseAuthority(
         lease=lease,
-        coordinator_lease_transaction_sequence=transaction_sequence,
-        coordinator_lease_mutation_sequence=mutation_sequence,
-        coordinator_lease_value_sequence=value_sequence,
-        coordinator_lease_lifetime_sequence=lifetime_sequence,
-        not_before_unix_ms=max(
-            prepared.records.opened.committed_at_unix_ms,
-            lease.granted_at_unix_ms,
-        ),
-        deadline_unix_ms=lease.expires_at_unix_ms,
-        predecessor_lease=predecessor_lease,
-        predecessor_lease_transaction_sequence=predecessor_transaction_sequence,
-        predecessor_lease_mutation_sequence=predecessor_mutation_sequence,
-        predecessor_lease_value_sequence=predecessor_value_sequence,
-        predecessor_lease_lifetime_sequence=predecessor_lifetime_sequence,
+        transaction_sequence=transaction_sequence,
+        mutation_sequence=mutation_sequence,
+        value_sequence=value_sequence,
+        lifetime_sequence=lifetime_sequence,
     )
 
 
-def _opening_predecessor(
-    prepared: PreparedInitialRestartIntentClosure,
-) -> dict[str, object]:
-    opening = prepared.records.opened.prepared
-    return {
-        "predecessor_lease": opening.lease,
-        "predecessor_transaction_sequence": (opening.coordinator_lease_transaction_sequence),
-        "predecessor_mutation_sequence": opening.coordinator_lease_mutation_sequence,
-        "predecessor_value_sequence": opening.coordinator_lease_value_sequence,
-        "predecessor_lifetime_sequence": opening.coordinator_lease_lifetime_sequence,
-    }
+def _prepared(
+    opened: CommittedInitialRestartIntentOpen,
+    chain: tuple[CoordinatorLeaseAuthority, ...],
+) -> PreparedInitialRestartIntentClosure:
+    lease = chain[-1].lease
+    return PreparedInitialRestartIntentClosure(
+        records=_records(opened, lease),
+        lease_authority_chain=chain,
+        not_before_unix_ms=max(
+            opened.committed_at_unix_ms,
+            lease.granted_at_unix_ms,
+        ),
+        deadline_unix_ms=lease.expires_at_unix_ms,
+    )
+
+
+def _initial_prepared() -> PreparedInitialRestartIntentClosure:
+    _, _, opened, _, opening = _state()
+    return _prepared(opened, (opening,))
+
+
+def _replacement_lease(
+    previous: HeldCoordinatorLease,
+    *,
+    coordinator_id: str,
+    lease_id: str,
+    granted_at_unix_ms: int,
+) -> HeldCoordinatorLease:
+    return HeldCoordinatorLease(
+        record=CoordinatorLeaseRecord(
+            run_id=RUN_ID,
+            coordinator_id=coordinator_id,
+            lease_id=lease_id,
+            lease_duration_ms=100,
+        ),
+        fencing_token=previous.fencing_token + 1,
+        granted_at_unix_ms=granted_at_unix_ms,
+    )
 
 
 def test_prepared_initial_closure_delegates_immutable_transaction_inputs():
@@ -261,22 +251,38 @@ def test_prepared_initial_closure_requires_expected_types():
 
     with pytest.raises(TypeError, match="InitialRestartIntentClosureRecords"):
         replace(prepared, records={})
-    with pytest.raises(TypeError, match="HeldCoordinatorLease"):
-        replace(prepared, lease={})
+    with pytest.raises(TypeError, match="must be tuple"):
+        replace(prepared, lease_authority_chain=[])
+    with pytest.raises(TypeError, match="CoordinatorLeaseAuthority"):
+        replace(prepared, lease_authority_chain=({},))
+    with pytest.raises(ValueError, match="must not be empty"):
+        replace(prepared, lease_authority_chain=())
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("transaction_sequence", 0),
+        ("mutation_sequence", True),
+        ("value_sequence", 0),
+        ("lifetime_sequence", 0),
+    ],
+)
+def test_coordinator_lease_authority_requires_positive_sequences(field, value):
+    authority = _initial_prepared().lease_authority
+
+    with pytest.raises(ValueError, match="positive integer"):
+        replace(authority, **{field: value})
 
 
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("coordinator_lease_transaction_sequence", 0, "positive integer"),
-        ("coordinator_lease_mutation_sequence", True, "positive integer"),
-        ("coordinator_lease_value_sequence", 0, "positive integer"),
-        ("coordinator_lease_lifetime_sequence", 0, "positive integer"),
         ("not_before_unix_ms", 999, "cannot precede its open"),
         ("deadline_unix_ms", 1_101, "exceeds its coordinator lease"),
     ],
 )
-def test_prepared_initial_closure_rejects_invalid_authority_fields(field, value, message):
+def test_prepared_initial_closure_rejects_invalid_time_window(field, value, message):
     with pytest.raises(ValueError, match=message):
         replace(_initial_prepared(), **{field: value})
 
@@ -305,171 +311,224 @@ def test_prepared_initial_closure_rejects_lifecycle_lease_mismatch():
         replace(prepared, records=records)
 
 
-def test_prepared_initial_closure_rejects_changed_same_token_authority():
+def test_prepared_initial_closure_requires_exact_opening_authority():
     prepared = _initial_prepared()
+    changed = replace(
+        prepared.lease_authority,
+        transaction_sequence=prepared.lease_authority.transaction_sequence + 1,
+    )
 
-    with pytest.raises(ValueError, match="changes one fencing token"):
-        replace(
-            prepared,
-            coordinator_lease_transaction_sequence=(
-                prepared.coordinator_lease_transaction_sequence + 1
-            ),
-        )
+    with pytest.raises(ValueError, match="does not begin"):
+        replace(prepared, lease_authority_chain=(changed,))
 
 
 def test_prepared_initial_closure_accepts_nonexpired_renewal():
-    clock, store, lease_manager, opened, lease = _state()
+    clock, store, opened, lease, opening = _state()
     clock.set(1_010)
-    renewed = lease_manager.renew(lease)
-    lease_entry = store.get(opened.prepared.coordinator_lease_key)
-    assert lease_entry is not None
+    renewed = _manager(store, clock, "coordinator-a").renew(lease)
+    entry = store.get(opened.prepared.coordinator_lease_key)
+    assert entry is not None
 
-    prepared = _prepared(opened, renewed, lease_entry)
+    prepared = _prepared(opened, (opening, _authority(renewed, entry)))
 
     assert prepared.lease == renewed
     assert prepared.coordinator_lease_mutation_sequence == 2
     assert prepared.coordinator_lease_value_sequence == 1
-    assert prepared.coordinator_lease_lifetime_sequence == 1
+
+
+def test_prepared_initial_closure_rejects_expired_renewal():
+    prepared = _initial_prepared()
+    expired = replace(
+        prepared.lease,
+        fencing_token=prepared.lease.fencing_token + 1,
+        granted_at_unix_ms=prepared.lease.expires_at_unix_ms,
+    )
+    renewed = _authority_with_sequences(
+        expired,
+        transaction_sequence=prepared.records.opened.transaction_sequence + 1,
+        mutation_sequence=prepared.coordinator_lease_mutation_sequence + 1,
+        value_sequence=prepared.coordinator_lease_value_sequence,
+        lifetime_sequence=prepared.coordinator_lease_lifetime_sequence,
+    )
+
+    with pytest.raises(ValueError, match="expired"):
+        _prepared(
+            prepared.records.opened,
+            (*prepared.lease_authority_chain, renewed),
+        )
 
 
 def test_prepared_initial_closure_accepts_replacement_after_post_open_renewal():
-    clock, store, _, opened, lease = _state()
-    opening_manager = CoordinatorLeaseManager(
-        store,
-        run_id=RUN_ID,
-        coordinator_id="coordinator-a",
-        lease_duration_ms=100,
-        clock=clock,
-    )
+    clock, store, opened, lease, opening = _state()
     clock.set(1_010)
-    renewed = opening_manager.renew(lease)
-    predecessor_entry = store.get(opened.prepared.coordinator_lease_key)
-    assert predecessor_entry is not None
-    replacement_manager = CoordinatorLeaseManager(
-        store,
-        run_id=RUN_ID,
-        coordinator_id="coordinator-b",
-        lease_duration_ms=100,
-        clock=clock,
-    )
+    renewed = _manager(store, clock, "coordinator-a").renew(lease)
+    renewed_entry = store.get(opened.prepared.coordinator_lease_key)
+    assert renewed_entry is not None
     clock.set(renewed.expires_at_unix_ms)
-    replacement = replacement_manager.acquire()
+    replacement = _manager(store, clock, "coordinator-b").acquire()
     replacement_entry = store.get(opened.prepared.coordinator_lease_key)
     assert replacement_entry is not None
 
     prepared = _prepared(
         opened,
-        replacement,
-        replacement_entry,
-        predecessor=(renewed, predecessor_entry),
+        (
+            opening,
+            _authority(renewed, renewed_entry),
+            _authority(replacement, replacement_entry),
+        ),
     )
 
     assert prepared.lease == replacement
-    assert prepared.predecessor_lease == renewed
 
 
-def test_prepared_initial_closure_rejects_expired_renewal():
-    prepared = _initial_prepared()
-    expired_renewal = replace(
-        prepared.lease,
-        fencing_token=prepared.lease.fencing_token + 1,
-        granted_at_unix_ms=prepared.lease.expires_at_unix_ms,
-    )
+def test_prepared_initial_closure_accepts_multiple_coordinator_replacements():
+    clock, store, opened, lease, opening = _state()
+    clock.set(lease.expires_at_unix_ms)
+    replacement_b = _manager(store, clock, "coordinator-b").acquire()
+    entry_b = store.get(opened.prepared.coordinator_lease_key)
+    assert entry_b is not None
+    clock.set(replacement_b.expires_at_unix_ms)
+    replacement_c = _manager(store, clock, "coordinator-c").acquire()
+    entry_c = store.get(opened.prepared.coordinator_lease_key)
+    assert entry_c is not None
 
-    with pytest.raises(ValueError, match="expired"):
-        _with_lease(
-            prepared,
-            expired_renewal,
-            transaction_sequence=prepared.records.opened.transaction_sequence + 1,
-            mutation_sequence=prepared.coordinator_lease_mutation_sequence + 1,
-            value_sequence=prepared.coordinator_lease_value_sequence,
-            lifetime_sequence=prepared.coordinator_lease_lifetime_sequence,
-        )
-
-
-def _replacement(
-    prepared: PreparedInitialRestartIntentClosure,
-    *,
-    granted_at_unix_ms: int,
-) -> HeldCoordinatorLease:
-    return HeldCoordinatorLease(
-        record=CoordinatorLeaseRecord(
-            run_id=RUN_ID,
-            coordinator_id="coordinator-b",
-            lease_id="lease-b",
-            lease_duration_ms=100,
+    prepared = _prepared(
+        opened,
+        (
+            opening,
+            _authority(replacement_b, entry_b),
+            _authority(replacement_c, entry_c),
         ),
-        fencing_token=prepared.lease.fencing_token + 1,
-        granted_at_unix_ms=granted_at_unix_ms,
     )
+
+    assert prepared.lease == replacement_c
 
 
 def test_prepared_initial_closure_rejects_overlapping_replacement():
     prepared = _initial_prepared()
-
-    with pytest.raises(ValueError, match="overlap"):
-        _with_lease(
-            prepared,
-            _replacement(prepared, granted_at_unix_ms=1_010),
-            transaction_sequence=prepared.records.opened.transaction_sequence + 1,
-            mutation_sequence=prepared.coordinator_lease_mutation_sequence + 1,
-            value_sequence=prepared.coordinator_lease_value_sequence + 1,
-            lifetime_sequence=prepared.coordinator_lease_lifetime_sequence,
-            **_opening_predecessor(prepared),
-        )
-
-
-def test_prepared_initial_closure_accepts_nonoverlapping_replacement():
-    prepared = _initial_prepared()
-    replacement = _replacement(
-        prepared,
-        granted_at_unix_ms=prepared.lease.expires_at_unix_ms,
+    replacement = _replacement_lease(
+        prepared.lease,
+        coordinator_id="coordinator-b",
+        lease_id="lease-b",
+        granted_at_unix_ms=1_010,
     )
-
-    replaced = _with_lease(
-        prepared,
+    authority = _authority_with_sequences(
         replacement,
         transaction_sequence=prepared.records.opened.transaction_sequence + 1,
         mutation_sequence=prepared.coordinator_lease_mutation_sequence + 1,
         value_sequence=prepared.coordinator_lease_value_sequence + 1,
         lifetime_sequence=prepared.coordinator_lease_lifetime_sequence,
-        **_opening_predecessor(prepared),
     )
 
-    assert replaced.lease == replacement
+    with pytest.raises(ValueError, match="overlap"):
+        _prepared(
+            prepared.records.opened,
+            (*prepared.lease_authority_chain, authority),
+        )
 
 
-def test_prepared_initial_closure_rejects_impossible_mutation_gap():
+def test_prepared_initial_closure_rejects_replacement_fencing_token_reuse():
+    prepared = _initial_prepared()
+    replacement = _replacement_lease(
+        prepared.lease,
+        coordinator_id="coordinator-b",
+        lease_id="lease-b",
+        granted_at_unix_ms=prepared.lease.expires_at_unix_ms,
+    )
+    replacement = replace(
+        replacement,
+        fencing_token=prepared.lease.fencing_token,
+    )
+    authority = _authority_with_sequences(
+        replacement,
+        transaction_sequence=prepared.records.opened.transaction_sequence + 1,
+        mutation_sequence=prepared.coordinator_lease_mutation_sequence + 1,
+        value_sequence=prepared.coordinator_lease_value_sequence + 1,
+        lifetime_sequence=prepared.coordinator_lease_lifetime_sequence,
+    )
+
+    with pytest.raises(ValueError, match="reuses its fencing token"):
+        _prepared(
+            prepared.records.opened,
+            (*prepared.lease_authority_chain, authority),
+        )
+
+
+def test_prepared_initial_closure_rejects_omitted_replacement_authority():
+    prepared = _initial_prepared()
+    replacement_c = _replacement_lease(
+        prepared.lease,
+        coordinator_id="coordinator-c",
+        lease_id="lease-c",
+        granted_at_unix_ms=1_200,
+    )
+    authority = _authority_with_sequences(
+        replacement_c,
+        transaction_sequence=prepared.records.opened.transaction_sequence + 2,
+        mutation_sequence=prepared.coordinator_lease_mutation_sequence + 2,
+        value_sequence=prepared.coordinator_lease_value_sequence + 2,
+        lifetime_sequence=prepared.coordinator_lease_lifetime_sequence,
+    )
+
+    with pytest.raises(ValueError, match="not one lease-key mutation"):
+        _prepared(
+            prepared.records.opened,
+            (*prepared.lease_authority_chain, authority),
+        )
+
+
+def test_prepared_initial_closure_rejects_lease_identity_reappearing():
+    prepared = _initial_prepared()
+    replacement_b = _replacement_lease(
+        prepared.lease,
+        coordinator_id="coordinator-b",
+        lease_id="lease-b",
+        granted_at_unix_ms=prepared.lease.expires_at_unix_ms,
+    )
+    authority_b = _authority_with_sequences(
+        replacement_b,
+        transaction_sequence=prepared.records.opened.transaction_sequence + 1,
+        mutation_sequence=prepared.coordinator_lease_mutation_sequence + 1,
+        value_sequence=prepared.coordinator_lease_value_sequence + 1,
+        lifetime_sequence=prepared.coordinator_lease_lifetime_sequence,
+    )
+    replayed_a = HeldCoordinatorLease(
+        record=prepared.lease.record,
+        fencing_token=replacement_b.fencing_token + 1,
+        granted_at_unix_ms=replacement_b.expires_at_unix_ms,
+    )
+    authority_a = _authority_with_sequences(
+        replayed_a,
+        transaction_sequence=authority_b.transaction_sequence + 1,
+        mutation_sequence=authority_b.mutation_sequence + 1,
+        value_sequence=authority_b.value_sequence + 1,
+        lifetime_sequence=authority_b.lifetime_sequence,
+    )
+
+    with pytest.raises(ValueError, match="lease identity reappears"):
+        _prepared(
+            prepared.records.opened,
+            (*prepared.lease_authority_chain, authority_b, authority_a),
+        )
+
+
+def test_prepared_initial_closure_rejects_impossible_transaction_gap():
     prepared = _initial_prepared()
     renewed = replace(
         prepared.lease,
         fencing_token=prepared.lease.fencing_token + 1,
         granted_at_unix_ms=1_001,
     )
+    authority = _authority_with_sequences(
+        renewed,
+        transaction_sequence=prepared.records.opened.transaction_sequence + 1,
+        mutation_sequence=prepared.coordinator_lease_mutation_sequence + 4,
+        value_sequence=prepared.coordinator_lease_value_sequence,
+        lifetime_sequence=prepared.coordinator_lease_lifetime_sequence,
+    )
 
-    with pytest.raises(ValueError, match="sequence deltas"):
-        _with_lease(
-            prepared,
-            renewed,
-            transaction_sequence=prepared.records.opened.transaction_sequence + 1,
-            mutation_sequence=prepared.coordinator_lease_mutation_sequence + 2,
-            value_sequence=prepared.coordinator_lease_value_sequence,
-            lifetime_sequence=prepared.coordinator_lease_lifetime_sequence,
-        )
-
-
-def test_prepared_initial_closure_requires_in_place_replacement_predecessor():
-    prepared = _initial_prepared()
-
-    with pytest.raises(ValueError, match="requires its immediate predecessor"):
-        _with_lease(
-            prepared,
-            _replacement(
-                prepared,
-                granted_at_unix_ms=prepared.lease.expires_at_unix_ms,
-            ),
-            transaction_sequence=prepared.records.opened.transaction_sequence + 1,
-            mutation_sequence=prepared.coordinator_lease_mutation_sequence + 1,
-            value_sequence=prepared.coordinator_lease_value_sequence + 1,
-            lifetime_sequence=prepared.coordinator_lease_lifetime_sequence,
+    with pytest.raises(ValueError, match="transaction ordering"):
+        _prepared(
+            prepared.records.opened,
+            (*prepared.lease_authority_chain, authority),
         )
