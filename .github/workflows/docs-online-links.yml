@@ -1,0 +1,55 @@
+name: Online Documentation Links
+
+on:
+  schedule:
+    - cron: "23 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-online-links
+  cancel-in-progress: false
+
+jobs:
+  links:
+    name: Check external links
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install verified link checker
+        env:
+          LYCHEE_VERSION: "0.24.2"
+        run: |
+          archive="lychee-x86_64-unknown-linux-gnu.tar.gz"
+          release_url="https://github.com/lycheeverse/lychee/releases/download/lychee-v${LYCHEE_VERSION}"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" "$release_url/$archive"
+          curl -fsSL -o "$RUNNER_TEMP/$archive.sha256" "$release_url/$archive.sha256"
+          (
+            cd "$RUNNER_TEMP"
+            sha256sum --check "$archive.sha256"
+            tar -xzf "$archive"
+          )
+
+      - name: Check local and external documentation links
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          "$RUNNER_TEMP/lychee-x86_64-unknown-linux-gnu/lychee" \
+            --exclude-all-private \
+            --exclude '^https://doi\.org/10\.1145/3600006\.3613145$' \
+            --github-token "$GH_TOKEN" \
+            --include-fragments \
+            --max-concurrency 32 \
+            --max-retries 3 \
+            --no-progress \
+            --retry-wait-time 2 \
+            --timeout 30 \
+            './**/*.md'
