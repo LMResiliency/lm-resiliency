@@ -156,8 +156,10 @@ At a dynamic recipe-cycle boundary, it persists them as the new candidate and re
 Each rank owns its status sidecar; several workers on one node never update the same mutable trust record.
 A persisted peer shard carries the corresponding peer status so recovery can reconstruct the verified generation after node loss.
 If newer status cannot be established, recovery selects the common verified step conservatively.
-With `verify_integrity=True`, it stores a CRC-32 for each shard and treats a checksum failure as an unavailable shard.
+With `verify_integrity=True`, it stores a CRC-32 for each shard and treats a checksum failure or missing checksum metadata as an unavailable shard.
 Checksums detect stored-byte corruption; they cannot prove that the source GPU state was numerically correct.
+Enabling integrity verification is therefore a fail-closed configuration change:
+node-local checkpoints written earlier with `verify_integrity=False` are not eligible for recovery until a new checksummed generation is persisted.
 
 Node-local files use checkpoint format version 2. Tensors are loaded through PyTorch's `weights_only=True` path, while reconstruction metadata is represented by a schema-constrained JSON document. The metadata schema supports the built-in containers and scalar types used by framework state, NumPy RNG values, and dense CPU tensors such as PyTorch RNG state. GEMINI validates the payload fields, metadata types, tensor count, shapes, dtypes, reconstruction paths, and optional CRC values before recovery can apply state. Unsupported caller-owned metadata fails the checkpoint write instead of falling back to unrestricted pickle deserialization.
 

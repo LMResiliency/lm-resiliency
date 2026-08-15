@@ -598,6 +598,14 @@ its immutable closure record, first lifecycle head, and durable closed marker.
 It exposes create-once closure/lifecycle writes, a revision-guarded
 current-head update, and an exact immutable-intent condition, but does not
 authenticate a closing lease or mutate the store. A frozen
+`PreparedInitialRestartIntentClosure` descriptor binds those records to a
+contiguous coordinator-lease authority slice beginning at the exact lease that
+opened the intent. It accepts same-lease renewal, nonoverlapping replacement,
+and delete/recreate transitions, while rejecting skipped mutations, expired
+renewals, overlapping leases, and recurrence of any generation or opening
+lease identity or fencing token after replacement. It bounds the future
+transaction to the final live lease but performs no store reads or mutations.
+A later preparer selects the slice from verified durable lease history. A frozen
 `PreparedInitialRestartIntentOpen` descriptor binds the first intent record,
 current-intent head, exact generation revisions, coordinator fencing token,
 canonical run-scoped keys, and lease/intent commit window. It exposes immutable
@@ -629,6 +637,28 @@ ID or fencing token cannot reappear after a different acquisition in the
 verified generation history. Preparation obtains that history through one
 stable reader traversal rather than rereading the full predecessor chain for
 each generation.
+
+A read-only `RestartIntentOpenStateReader` reconstructs the same
+`CommittedInitialRestartIntentOpen` contract after coordinator failover. It
+stably reads the current-intent head and immutable intent, requires the
+intent's generation to remain current, locates the exact opening authority in
+verified durable coordinator-lease history, and reuses the existing
+prepared/committed validators. Missing records, noncanonical bytes,
+contradictory lifecycle state, deleted heads, and lease provenance absent from
+durable history fail closed. When the current head is a closed marker, the
+reader raises `RestartIntentOpenStateClosed` instead of treating the opening as
+absent. That signal does not authenticate the closure; the lifecycle reader
+must verify the linked closure records separately. The open-state reader
+performs no mutation.
+
+A frozen `PersistedInitialRestartIntentClosure` value decodes the first
+closure's immutable intent, retained open head, durable closed marker,
+immutable closure record, and lifecycle head from their authoritative store
+entries. It requires canonical bytes, one linked initial closure, immutable
+create-once records, exactly one current-head replacement, canonical
+coordinator-lease guard keys, shared opening and closure transactions, and
+causal transaction order. Generation and durable lease-history authentication
+remain the responsibility of the lifecycle reader that constructs this value.
 
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be

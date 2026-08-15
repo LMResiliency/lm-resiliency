@@ -170,6 +170,41 @@ def test_atomic_copy_does_not_publish_partial_replacement(tmp_path):
     assert not list(destination.parent.glob(".*.tmp"))
 
 
+def test_disk_integrity_rejects_checkpoint_without_checksums(tmp_path):
+    metadata, tensors = flatten({"w": torch.arange(4, dtype=torch.float32)})
+    DiskSerializer(str(tmp_path), rank=0, integrity=False).save_sync(metadata, tensors, step=3)
+
+    with pytest.raises(ChecksumMismatch, match="does not contain checksums"):
+        DiskSerializer(str(tmp_path), rank=0, integrity=True).load(3)
+
+
+def test_disk_without_integrity_accepts_checkpoint_without_checksums(tmp_path):
+    metadata, tensors = flatten({"w": torch.arange(4, dtype=torch.float32)})
+    serializer = DiskSerializer(str(tmp_path), rank=0, integrity=False)
+    serializer.save_sync(metadata, tensors, step=3)
+
+    loaded_metadata, loaded_tensors = serializer.load(3)
+
+    assert loaded_metadata == metadata
+    assert torch.equal(loaded_tensors[0], tensors[0])
+
+
+def test_gemini_falls_back_when_integrity_is_enabled_for_unsigned_checkpoint(tmp_path):
+    metadata, tensors = flatten({"w": torch.arange(4, dtype=torch.float32)})
+    DiskSerializer(str(tmp_path), rank=0, integrity=False).save_sync(metadata, tensors, step=3)
+    manager = InMemoryCheckpointManager(
+        InMemoryCkptConfig(
+            disk_folder=str(tmp_path),
+            disk_flush_interval=0,
+            verify_integrity=True,
+        )
+    )
+
+    assert manager.find_latest() == -1
+    assert manager.load() is None
+    manager.close()
+
+
 def test_gemini_load_returns_none_on_corruption(tmp_path):
     config = InMemoryCkptConfig(
         enable=True,
