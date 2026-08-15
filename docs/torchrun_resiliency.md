@@ -948,6 +948,13 @@ pre-intent transport data cannot be replayed as preparation evidence. The
 coordinator-lease authority and commit-time window are added by a separate
 prepared-write layer before this transaction can execute.
 
+The prepared-write authority is one verified durable coordinator-lease value.
+Its commit lower bound must follow the receipt, intent opening, and lease grant;
+its exclusive deadline is bounded by both the restart-intent deadline and the
+lease expiry. This immutable value still performs no store reads or writes.
+The next layer authenticates the authority against durable lease history before
+constructing it.
+
 For a crashed or unreachable node, no preparation is assumed.
 
 ## API: lm-resiliency to the Framework
