@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
@@ -57,6 +57,7 @@ class TamperedTransactionResultStore(InMemoryControlStore):
         not_before_unix_ms: int,
         deadline_unix_ms: int,
         conditions: Mapping[str, int | None] | None = None,
+        never_created_conditions: Collection[str] | None = None,
     ) -> Mapping[str, ControlStoreEntry]:
         committed = dict(
             super().compare_set_many_guarded(
@@ -66,6 +67,7 @@ class TamperedTransactionResultStore(InMemoryControlStore):
                 not_before_unix_ms=not_before_unix_ms,
                 deadline_unix_ms=deadline_unix_ms,
                 conditions=conditions,
+                never_created_conditions=never_created_conditions,
             )
         )
         head_key = next(key for key in committed if key.endswith("/generation-head"))

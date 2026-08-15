@@ -119,6 +119,7 @@ def _prepared() -> PreparedInitialRestartIntentOpen:
         ),
         intent_key=f"{RUN_PREFIX}/restart-intents/{intent_digest}",
         intent_head_key=f"{RUN_PREFIX}/restart-intent-head",
+        lifecycle_head_key=f"{RUN_PREFIX}/restart-intent-lifecycle-head",
         coordinator_lease_key=f"{RUN_PREFIX}/coordinator-lease",
         generation_head_key=f"{RUN_PREFIX}/generation-head",
         generation_snapshot_key=f"{RUN_PREFIX}/generations/0",
@@ -135,6 +136,7 @@ def test_prepared_initial_open_builds_immutable_create_once_transaction_inputs()
     assert all(write.require_never_created for write in prepared.writes.values())
     assert prepared.writes[prepared.intent_head_key].value == prepared.head.to_json()
     assert prepared.writes[prepared.intent_key].value == prepared.record.to_json()
+    assert prepared.never_created_conditions == frozenset({prepared.lifecycle_head_key})
     assert prepared.conditions == {
         prepared.generation_head_key: prepared.current.head_revision,
         prepared.generation_snapshot_key: prepared.current.snapshot.revision,
@@ -159,6 +161,7 @@ def test_prepared_initial_open_is_immutable():
         {"lease": replace(_prepared().lease, fencing_token=8)},
         {"intent_key": "other"},
         {"intent_head_key": "other"},
+        {"lifecycle_head_key": "other"},
         {"coordinator_lease_key": "other"},
         {"generation_head_key": "other"},
         {"generation_snapshot_key": "other"},

@@ -28,6 +28,7 @@ class PreparedInitialRestartIntentOpen:
     lease: HeldCoordinatorLease
     intent_key: str
     intent_head_key: str
+    lifecycle_head_key: str
     coordinator_lease_key: str
     generation_head_key: str
     generation_snapshot_key: str
@@ -84,6 +85,7 @@ class PreparedInitialRestartIntentOpen:
         expected_keys = {
             "intent_key": f"{run_prefix}/restart-intents/{intent_digest}",
             "intent_head_key": f"{run_prefix}/restart-intent-head",
+            "lifecycle_head_key": f"{run_prefix}/restart-intent-lifecycle-head",
             "coordinator_lease_key": f"{run_prefix}/coordinator-lease",
             "generation_head_key": f"{run_prefix}/generation-head",
             "generation_snapshot_key": (
@@ -144,6 +146,10 @@ class PreparedInitialRestartIntentOpen:
                 ),
             }
         )
+
+    @property
+    def never_created_conditions(self) -> frozenset[str]:
+        return frozenset({self.lifecycle_head_key})
 
     @property
     def conditions(self) -> Mapping[str, int]:
