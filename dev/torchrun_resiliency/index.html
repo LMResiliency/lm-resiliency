@@ -1055,29 +1055,72 @@ and deletion require the exact current revision. Revisions never repeat for a
 key, including after deletion and recreation, so a delayed coordinator cannot
 mistake a recreated record for an older value with identical bytes. Higher
 coordinator records add lease fencing and run/schema namespaces in subsequent
-layers rather than weakening this storage primitive.</p>
+layers rather than weakening this storage primitive. The store also retains a
+durable <code>has_history(key)</code> bit after deletion, allowing readers to distinguish a
+never-created authoritative key from one that was removed.</p>
 <p>Coordinator state that spans multiple keys uses one guarded store transaction.
 The transaction first checks the coordinator lease revision, then every target
 revision, then one authoritative store-time window. It publishes all target
-values with the same commit timestamp or publishes none. This is the primitive
+values with the same commit timestamp and store-stamped guard key, guard
+revision, guard-value digest, ordered guard mutation and value sequences,
+guard-key lifetime sequence, and authoritative guard commit time, or publishes
+none. The value sequence changes whenever the guarded bytes change or the key is
+recreated, but remains stable across same-value renewals. This is the primitive
 used to create an immutable generation snapshot and advance the generation head
 without allowing a stale or expired coordinator to commit either half alone.</p>
-<p>Persisted generation state uses strict versioned records. A
-<code>GenerationSnapshotRecord</code> contains the immutable <code>RankAssignment</code>, the previous
-snapshot digest, and the coordinator lease identity and fencing token that
-committed it. Generation zero must not name a predecessor, while every later
-generation must carry a lowercase SHA-256 predecessor digest. A
-<code>GenerationHeadRecord</code> contains only the run, generation, and canonical snapshot
-digest. Both records reject missing, unknown, duplicate, or unsupported fields.</p>
+<p>Persisted generation state uses strict versioned records.
+<code>GenerationSnapshotRecord</code> schema version 2 contains the immutable
+<code>RankAssignment</code>, the previous snapshot digest, and the complete coordinator
+lease identity, duration, and opaque fencing token that committed it. Version 1
+is rejected explicitly rather than being interpreted as the expanded layout.
+Generation zero must not name a predecessor, while every later generation must
+carry a lowercase SHA-256 predecessor digest. A <code>GenerationHeadRecord</code> contains
+only the run, generation, and canonical snapshot digest. Both records reject
+missing, unknown, duplicate, or unsupported fields.</p>
+<p>The generation-state reader derives snapshot, head, and coordinator-lease keys
+from one run-scoped namespace. It requires the head and snapshot to agree on
+generation, digest, authoritative commit time, and store-stamped guard
+provenance, then verifies the complete predecessor digest, timestamp,
+guard-mutation, and lease-identity chain back to generation zero. Lease
+identities cannot reappear after a different acquisition, and one acquisition
+cannot change coordinator identity, lease duration, or store-stamped guard-key
+lifetime. Every snapshot entry must retain store-stamped mutation sequence <code>1</code>,
+lifetime. Every snapshot entry must retain store-stamped mutation, value, and
+lifetime sequence <code>1</code>, while the head mutation and value sequences must equal
+<code>generation + 1</code>; this rejects replacement, recreation, extra rewrites, and
+rollback. Every generation commit must fall within the stamped lease grant and
+duration. The head must remain in its first store-key lifetime, and a stable
+immediate successor snapshot beyond the head is contradictory state for every
+read API. Replacing a lease in place must not overlap the prior lease's stamped
+expiry, and one fencing token cannot identify multiple guard mutations. Fencing
+revisions are compared only for equality; ordering comes from the store-stamped
+guard mutation sequence. Each guard-key lifetime increase requires at least one
+delete and one create mutation, including before the first persisted generation.
+Because deletion advances mutation sequence without advancing value sequence,
+every entry and adjacent transition must also satisfy the corresponding
+value-sequence upper bound. When generations omit intervening renewals of one
+lease, the mutation distance bounds the latest grant time that a valid renewal
+chain could reach, so skipped valid renewals are accepted while resurrection
+after expiry is rejected. A same-key takeover with unobserved intervening
+mutations is ambiguous and rejected. An older generation commit cannot postdate
+the next guard mutation that fences it. Opaque fencing tokens cannot reappear
+after another guard mutation. One lease identity must retain one guard value
+sequence, so changing A to B and back to A cannot be misread as skipped
+renewals. The durable history of the generation-head key is the run
+initialization marker, so deleting both the head and generation zero cannot make
+an initialized run appear empty. Grant times, guard mutation/value sequences,
+and key-lifetime sequences cannot move backward. Missing or contradictory
+history is corruption, not an empty or partially usable assignment.</p>
 <p>Coordinator ownership is stored under a schema-versioned, run-scoped lease key.
 The lease record binds the run, a unique coordinator-process incarnation, a
 unique lease acquisition, and the lease duration. The control store attaches
 its authoritative commit time to every timed mutation. A held lease expires at
 that commit time plus the persisted duration, so network delay before the CAS
-cannot consume the granted lifetime. The record's control-store revision is the
-fencing token; acquisition, renewal, expiry takeover, release, and reacquisition
-therefore always produce a newer token. Every later authoritative coordinator
-mutation must carry the currently held token and fail closed when it is stale.</p>
+cannot consume the granted lifetime. The record's opaque control-store revision
+is the fencing token; acquisition, renewal, expiry takeover, release, and
+reacquisition therefore produce distinct tokens, while the store's mutation
+sequence supplies ordering. Every later authoritative coordinator mutation must
+carry the currently held token and fail closed when it is stale.</p>
 <p>Lease time comes from one authoritative, nondecreasing control-plane clock
 shared by all contenders. A clock that moves backward aborts lease operations.
 Every lease mutation atomically requires store time to be no earlier than the
