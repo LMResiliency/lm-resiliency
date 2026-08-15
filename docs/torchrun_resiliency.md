@@ -579,6 +579,13 @@ the last closed intent head to the coordinator lease that performed closure;
 that lease may be a renewal of the lease that opened the intent. The record
 schemas do not define a store mutation API. Lease-fenced intent creation,
 lifecycle observation and closure, and other lifecycle transitions are
+separate control-plane components. Each closure record is immutable and has a
+canonical digest. A strict `RestartIntentLifecycleHeadRecord` identifies the
+latest closure by run, positive closure index, generation, intent ID, and
+closure-record digest. The head is the only mutable lifecycle pointer; later
+readers require its store mutation and value sequences to equal the closure
+index so replaying an older A record after B cannot appear to roll lifecycle
+state back. Atomic current-intent closure and lifecycle-head advancement are
 separate control-plane components.
 
 `suspected_node_ids` is the policy-approved replacement scope for the
