@@ -138,7 +138,6 @@ class PreparedRestartIntentOpen:
                 self.intent_head_key: ControlStoreWrite(
                     expected_revision=None,
                     value=self.head.to_json(),
-                    require_never_created=True,
                 ),
                 self.intent_key: ControlStoreWrite(
                     expected_revision=None,

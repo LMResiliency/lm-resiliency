@@ -126,7 +126,8 @@ def test_prepare_open_builds_create_once_writes_and_generation_conditions():
     )
     assert set(prepared.writes) == {prepared.intent_head_key, prepared.intent_key}
     assert all(write.expected_revision is None for write in prepared.writes.values())
-    assert all(write.require_never_created for write in prepared.writes.values())
+    assert not prepared.writes[prepared.intent_head_key].require_never_created
+    assert prepared.writes[prepared.intent_key].require_never_created
     assert prepared.conditions == {
         prepared.generation_head_key: current.head_revision,
         prepared.generation_snapshot_key: current.snapshot.revision,
@@ -142,6 +143,35 @@ def test_prepare_open_builds_create_once_writes_and_generation_conditions():
         cast(Any, prepared.writes)["other"] = next(iter(prepared.writes.values()))
     with pytest.raises(TypeError):
         cast(Any, prepared.conditions)["other"] = 1
+
+
+def test_prepare_open_allows_reusing_a_deleted_intent_head():
+    _, store, _, generation_manager, repository, lease = _state()
+    current = generation_manager.current()
+    assert current is not None
+    prepared = repository.prepare_open(lease, current, _intent())
+    first_head = store.compare_set(
+        prepared.intent_head_key,
+        expected_revision=None,
+        value=b"closed-intent",
+    )
+    store.compare_delete(
+        prepared.intent_head_key,
+        expected_revision=first_head.revision,
+    )
+
+    assert store.has_history(prepared.intent_head_key)
+    assert not prepared.writes[prepared.intent_head_key].require_never_created
+    assert prepared.writes[prepared.intent_key].require_never_created
+    committed = store.compare_set_many_guarded(
+        prepared.writes,
+        guard_key=prepared.coordinator_lease_key,
+        expected_guard_revision=prepared.expected_guard_revision,
+        not_before_unix_ms=prepared.not_before_unix_ms,
+        deadline_unix_ms=prepared.deadline_unix_ms,
+        conditions=prepared.conditions,
+    )
+    assert set(committed) == {prepared.intent_head_key, prepared.intent_key}
 
 
 @pytest.mark.parametrize(
