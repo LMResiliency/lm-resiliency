@@ -310,8 +310,10 @@ At a dynamic recipe-cycle boundary, it persists them as the new candidate and re
 Each rank owns its status sidecar; several workers on one node never update the same mutable trust record.
 A persisted peer shard carries the corresponding peer status so recovery can reconstruct the verified generation after node loss.
 If newer status cannot be established, recovery selects the common verified step conservatively.
-With <code>verify_integrity=True</code>, it stores a CRC-32 for each shard and treats a checksum failure as an unavailable shard.
-Checksums detect stored-byte corruption; they cannot prove that the source GPU state was numerically correct.</p>
+With <code>verify_integrity=True</code>, it stores a CRC-32 for each shard and treats a checksum failure or missing checksum metadata as an unavailable shard.
+Checksums detect stored-byte corruption; they cannot prove that the source GPU state was numerically correct.
+Enabling integrity verification is therefore a fail-closed configuration change:
+node-local checkpoints written earlier with <code>verify_integrity=False</code> are not eligible for recovery until a new checksummed generation is persisted.</p>
 <p>Node-local files use checkpoint format version 2. Tensors are loaded through PyTorch's <code>weights_only=True</code> path, while reconstruction metadata is represented by a schema-constrained JSON document. The metadata schema supports the built-in containers and scalar types used by framework state, NumPy RNG values, and dense CPU tensors such as PyTorch RNG state. GEMINI validates the payload fields, metadata types, tensor count, shapes, dtypes, reconstruction paths, and optional CRC values before recovery can apply state. Unsupported caller-owned metadata fails the checkpoint write instead of falling back to unrestricted pickle deserialization.</p>
 <p>The original <code>0.1.0</code> node-local format used unrestricted pickle metadata and is intentionally not loadable by newer versions. Complete an in-progress <code>0.1.0</code> recovery before upgrading, or use the framework-owned durable checkpoint as the upgrade boundary. Node-local GEMINI files remain a fast restart tier rather than a cross-version interchange format.</p>
 <p>Safe deserialization prevents a replaced file from invoking arbitrary pickle globals, but it does not establish who produced the tensor values. Treat the checkpoint directory as training-state storage: restrict filesystem ownership and write permissions to the training job, avoid following untrusted symlinks or copying files from untrusted sources, and use framework-owned durable checkpoints when stronger provenance is required. CRC-32 detects accidental byte corruption only; an attacker able to replace a shard can also replace its checksum.</p>
@@ -393,7 +395,7 @@ Framework integrations call the manager at safe optimizer boundaries and include
 <p>These values measure the synchronization-visible portion of asynchronous capture.
 They do not infer overhead from small differences between independent end-to-end step-time runs.
 Hardware, state layout, capture cadence, and available copy or network overlap can change the result.
-The reproducible <a href="https://github.com/LMResiliency/lm-resiliency/blob/bb2c6b71e7d87f5f9867bfe1c242dc40091b53b6/benchmarks/README.md">healthy-path benchmark</a> records current-package baseline, GEMINI, SCOUT, and combined measurements and applies explicit scheduled-run thresholds.
+The reproducible <a href="https://github.com/LMResiliency/lm-resiliency/blob/f3338b3ef799aea75a590c905b99d1e78e1c5d5f/benchmarks/README.md">healthy-path benchmark</a> records current-package baseline, GEMINI, SCOUT, and combined measurements and applies explicit scheduled-run thresholds.
 The table above remains historical evidence for its stated A100 workload and is not a baseline for different benchmark shapes or hardware.</p>
 <h2 id="boundaries">Boundaries<a class="headerlink" href="#boundaries" title="Permanent link">&para;</a></h2>
 <ul>
