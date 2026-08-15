@@ -56,6 +56,8 @@ class PreparedRestartIntentOpen:
     head: RestartIntentHeadRecord
     intent_key: str
     intent_head_key: str
+    intent_lifecycle_key: str
+    expected_intent_lifecycle_revision: int | None
     coordinator_lease_key: str
     expected_guard_revision: int
     generation_head_key: str
@@ -81,11 +83,16 @@ class PreparedRestartIntentOpen:
         for path, key in (
             ("intent_key", self.intent_key),
             ("intent_head_key", self.intent_head_key),
+            ("intent_lifecycle_key", self.intent_lifecycle_key),
             ("coordinator_lease_key", self.coordinator_lease_key),
             ("generation_head_key", self.generation_head_key),
             ("generation_snapshot_key", self.generation_snapshot_key),
         ):
             _nonempty_string(key, f"PreparedRestartIntentOpen.{path}")
+        _expected_revision(
+            self.expected_intent_lifecycle_revision,
+            "PreparedRestartIntentOpen.expected_intent_lifecycle_revision",
+        )
         for path, integer_value in (
             ("expected_guard_revision", self.expected_guard_revision),
             (
@@ -111,11 +118,12 @@ class PreparedRestartIntentOpen:
         keys = {
             self.intent_key,
             self.intent_head_key,
+            self.intent_lifecycle_key,
             self.coordinator_lease_key,
             self.generation_head_key,
             self.generation_snapshot_key,
         }
-        if len(keys) != 5:
+        if len(keys) != 6:
             raise ValueError("PreparedRestartIntentOpen key roles must be distinct")
         if self.not_before_unix_ms < self.coordinator_lease_granted_at_unix_ms:
             raise ValueError("PreparedRestartIntentOpen cannot precede its coordinator lease grant")
@@ -153,6 +161,7 @@ class PreparedRestartIntentOpen:
             {
                 self.generation_head_key: self.expected_generation_head_revision,
                 self.generation_snapshot_key: self.expected_generation_snapshot_revision,
+                self.intent_lifecycle_key: self.expected_intent_lifecycle_revision,
             }
         )
 
@@ -167,6 +176,7 @@ class RestartIntentWriteRepository:
         run_digest = hashlib.sha256(self._run_id.encode("utf-8")).hexdigest()
         self._run_prefix = f"{_CONTROL_PREFIX}/runs/{run_digest}"
         self._intent_head_key = f"{self._run_prefix}/restart-intent-head"
+        self._intent_lifecycle_key = f"{self._run_prefix}/restart-intent-lifecycle"
 
     @property
     def coordinator_lease_key(self) -> str:
@@ -179,6 +189,10 @@ class RestartIntentWriteRepository:
     @property
     def intent_head_key(self) -> str:
         return self._intent_head_key
+
+    @property
+    def intent_lifecycle_key(self) -> str:
+        return self._intent_lifecycle_key
 
     def intent_key(self, intent_id: str) -> str:
         normalized_intent_id = _nonempty_string(intent_id, "intent_id")
@@ -194,6 +208,7 @@ class RestartIntentWriteRepository:
         self._validate_lease(lease)
         self._validate_current(current)
         self._validate_intent(intent, current)
+        expected_lifecycle_revision = self._observe_intent_lifecycle(current)
         not_before_unix_ms = max(
             lease.granted_at_unix_ms,
             current.snapshot.committed_at_unix_ms,
@@ -224,6 +239,8 @@ class RestartIntentWriteRepository:
             ),
             intent_key=self.intent_key(intent.intent_id),
             intent_head_key=self._intent_head_key,
+            intent_lifecycle_key=self._intent_lifecycle_key,
+            expected_intent_lifecycle_revision=expected_lifecycle_revision,
             coordinator_lease_key=self.coordinator_lease_key,
             expected_guard_revision=lease.fencing_token,
             generation_head_key=self.generation_head_key,
@@ -288,6 +305,45 @@ class RestartIntentWriteRepository:
                 f"restart intent suspects nodes outside the current generation: {unknown_nodes!r}"
             )
 
+    def _observe_intent_lifecycle(
+        self,
+        current: CurrentGeneration,
+    ) -> int | None:
+        if self._store.get(self._intent_head_key) is not None:
+            raise RestartIntentPreparationConflict("another restart intent is already current")
+        entry = self._store.get(self._intent_lifecycle_key)
+        if entry is None:
+            if self._store.has_history(self._intent_lifecycle_key):
+                raise RestartIntentPreparationCorrupt("restart-intent lifecycle record was deleted")
+            return None
+        try:
+            record = RestartIntentRecord.from_json(entry.value)
+        except (TypeError, ValueError) as error:
+            raise RestartIntentPreparationCorrupt(
+                "restart-intent lifecycle record is malformed"
+            ) from error
+        current_generation = current.snapshot.record.assignment.generation
+        if record.intent.run_id != self._run_id or record.intent.generation > current_generation:
+            raise RestartIntentPreparationCorrupt(
+                "restart-intent lifecycle record contradicts the current generation"
+            )
+        if (
+            entry.lifetime_sequence != 1
+            or entry.value_sequence != entry.mutation_sequence
+            or entry.guard_key != self.coordinator_lease_key
+            or entry.guard_revision != record.coordinator_fencing_token
+            or entry.guard_value_digest != record.coordinator_lease_digest
+            or entry.guard_committed_at_unix_ms is None
+            or entry.committed_at_unix_ms is None
+            or entry.committed_at_unix_ms < entry.guard_committed_at_unix_ms
+            or entry.committed_at_unix_ms
+            >= entry.guard_committed_at_unix_ms + record.coordinator_lease_duration_ms
+        ):
+            raise RestartIntentPreparationCorrupt(
+                "restart-intent lifecycle record has invalid store provenance"
+            )
+        return entry.revision
+
 
 def _nonempty_string(value: object, path: str) -> str:
     if not isinstance(value, str) or not value.strip():
@@ -299,6 +355,12 @@ def _positive_integer(value: object, path: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{path} must be a positive integer")
     return value
+
+
+def _expected_revision(value: object, path: str) -> int | None:
+    if value is None:
+        return None
+    return _positive_integer(value, path)
 
 
 __all__ = [

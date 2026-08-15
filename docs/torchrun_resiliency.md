@@ -577,15 +577,18 @@ opening an intent can atomically create both the create-once intent record and
 the current pointer. `RestartIntentWriteRepository` authenticates the
 coordinator lease, validates the exact committed generation and suspected-node
 scope, and prepares a create-once immutable intent write plus a
-create-if-absent current-head write. Lifecycle closure removes the transient
-head so a later failure can open another intent; prior head history does not
-block that reuse. The prepared transaction conditions on the exact
-generation-head and immutable snapshot revisions without rewriting either, and
-uses the earlier of lease expiry and the preparation deadline as its store-time
-commit deadline. Preparation does not mutate the store or make an intent
-authoritative. Transaction execution, response verification, reading the
-current intent, and lifecycle transitions remain separate control-plane
-components.
+create-if-absent current-head write. Lifecycle closure atomically removes the
+transient head so a later failure can open another intent and updates a permanent
+last-closed-intent lifecycle key with the closed `RestartIntentRecord`. Every
+prepared open conditions on the exact observed lifecycle-key revision, or on
+its verified never-created state for the first intent. An abort or completed
+plan therefore invalidates every older prepared open before the head becomes
+reusable. The prepared transaction also conditions on the exact generation-head
+and immutable snapshot revisions without rewriting either, and uses the earlier
+of lease expiry and the preparation deadline as its store-time commit deadline.
+Preparation does not mutate the store or make an intent authoritative.
+Transaction execution, response verification, reading the current intent, and
+lifecycle transitions remain separate control-plane components.
 
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be
