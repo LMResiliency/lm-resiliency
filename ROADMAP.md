@@ -73,6 +73,10 @@ The training manager owns job launch, restart, placement, resource quarantine,
 and replacement coordination. Physical hardware repair or replacement remains an
 infrastructure operator responsibility.
 
+See the draft [torchrun native resiliency design](docs/torchrun_resiliency.md)
+for a fixed-size active fleet, standby-node admission, stable logical rank
+slots, and checkpoint-aware restart APIs.
+
 ## Fault Injection Evaluation Kit
 
 Create an independently enabled feature within `lm-resiliency` for injecting

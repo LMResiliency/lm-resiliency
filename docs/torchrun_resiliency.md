@@ -1,0 +1,1337 @@
+# Torchrun Native Resiliency Integration
+
+Status: draft for discussion
+
+Last updated: 2026-08-14
+
+## Decision Summary
+
+The recommended first design is **fixed-size training with replacement**, not
+general elastic training:
+
+- allocate a fleet of `max_nodes` homogeneous hosts;
+- run the training job on exactly `min_nodes` active hosts;
+- keep `max_nodes - min_nodes` hosts as agent-only standbys;
+- preserve a stable logical node slot and rank range across restart;
+- let SCOUT report fault evidence and GEMINI report recoverable checkpoint
+  state;
+- let an LM Resiliency coordinator make the final quarantine, placement, and
+  restart-plan decision;
+- use a custom `RendezvousHandler` to park standbys and expose only a
+  plan-selected replacement to torchrun's existing membership-change path; and
+- pass one fenced `RestartContext` to every relaunched worker so
+  `lm-resiliency` and the framework recover the same checkpoint generation.
+
+### Why `--nnodes=min:max` is not a standby contract
+
+In stock torchrun, `--nnodes=min_nodes:max_nodes` bounds the number of nodes
+that may participate in an elastic rendezvous. It does not divide an allocated
+fleet into active nodes and replacement-only standbys:
+
+- `min_nodes` is the threshold at which a rendezvous is allowed to complete,
+  not the exact number of nodes that must run trainers;
+- `max_nodes` is the largest active membership for a rendezvous round, not a
+  fleet size whose excess capacity is reserved; and
+- every admitted node is an active worker-group member. There is no standard
+  state meaning "keep this agent registered, but do not start trainers unless a
+  particular active node is replaced."
+
+For example, `--nnodes=8:10` can initially form an active group of 8, 9, or 10
+nodes depending on which agents arrive before the rendezvous completes. If it
+starts with 8 and a ninth node arrives later, that node is a candidate for the
+next rendezvous round. The resulting membership change restarts the worker
+group and may increase `WORLD_SIZE`; it is not treated as passive reserve
+capacity. Conversely, after a departure, a new round may form with any allowed
+membership rather than waiting for a policy-selected replacement that restores
+exactly 8 active nodes.
+
+The semantic differences are:
+
+| Property | Stock `--nnodes=min:max` | Replacement-only design |
+|---|---|---|
+| Active size | Any rendezvous size in the configured range | Exactly `min_nodes` |
+| Extra nodes | Elastic scale-up candidates | Agent-only standbys |
+| Restart trigger | Worker failure or rendezvous membership change | Worker failure or a plan-selected membership change; admission is gated by `RestartPlan` |
+| Placement | Participants selected by rendezvous; ranks reassigned per round | Coordinator selects a node for a specific logical slot |
+| Rank identity | Global and group ranks may change after re-rendezvous | Logical slot and rank range remain stable |
+| Fault exclusion | No job-specific quarantine contract in the range | Quarantined node and resource IDs cannot be readmitted |
+| Recovery state | Restart is not coupled to checkpoint trust or completeness | Relaunch is fenced to one complete trusted checkpoint manifest |
+
+Even if a stock re-rendezvous happens to return to 8 nodes, it does not
+guarantee that the replacement inherits the departed node's rank range.
+Arbitrary renumbering can change framework parallel coordinates and disconnect
+GEMINI's rank-owned shards and peer replicas from their intended owners.
+`--max-restarts` only bounds retries; it does not add standby admission,
+quarantine, slot inheritance, or checkpoint-selection semantics. The design
+therefore needs an explicit replacement-only admission policy and stable
+logical slots in addition to a node-count range.
+
+The design uses existing torchrun extension points rather than adding a new
+resiliency-policy interface:
+
+1. register an out-of-tree `SlotAwareRendezvousHandler` through the
+   `torchrun.handlers` entry-point group;
+2. keep the stock `LocalElasticAgent` and its normal full-worker-group restart
+   behavior; and
+3. keep fault evaluation, checkpoint preparation, quarantine, and immutable
+   restart-plan selection in the LM Resiliency control plane.
+
+## Scope
+
+### Goals
+
+- Replace a localized bad node with a healthy standby without changing the
+  training topology.
+- Prevent quarantined nodes from rejoining later rendezvous generations.
+- Select recovery state conservatively from SCOUT and GEMINI evidence.
+- Preserve the complete framework state for one coherent optimizer step.
+- Keep TorchTitan, native PyTorch, Megatron Core, and DeepSpeed integrations
+  independent of torchrun process-management details.
+- Fence stale fault reports and restart commands from earlier generations.
+- Fail closed when there are too few healthy nodes or no complete trusted
+  checkpoint.
+
+### Initial assumptions
+
+- `min_nodes` is the exact active training fleet size.
+- `max_nodes - min_nodes` is the maximum standby capacity.
+- Every admitted node has the same local worker count and compatible hardware,
+  software, model configuration, and framework version.
+- A replacement node inherits the failed node's logical slot and global-rank
+  range.
+- Version 1 does not change DP, TP, PP, CP, EP, expert-TP, FSDP/HSDP, or ZeRO
+  degrees during recovery.
+- Standby agents are running and reachable, but standby trainer processes are
+  not.
+- The control store is strongly consistent enough to publish a single restart
+  plan by compare-and-swap.
+
+### Non-goals for version 1
+
+- Elastic scale-up or scale-down of the active training world.
+- Recovery with a different model-parallel layout or global batch size.
+- Partial restart of one rank while the rest of the worker group continues.
+- A planned restart that preserves the identical physical node membership;
+  version 1's healthy-group restart edge is admission of at least one standby.
+- Reusing a node that SCOUT could not safely clear.
+- Physical hardware repair.
+- Turning inconclusive peer evidence into confident node attribution.
+
+## Existing Interfaces and Required Integration
+
+Stock torchrun already provides useful foundations:
+
+- an agent process on every participating node;
+- local worker lifecycle and failure monitoring;
+- worker-group restart after process failure;
+- dynamic rendezvous with `min_nodes` and `max_nodes`;
+- custom rendezvous handlers through the `torchrun.handlers` entry-point group;
+- `RendezvousHandler.next_rendezvous()` for admission and rank assignment;
+- `RendezvousHandler.num_nodes_waiting()` for requesting re-rendezvous;
+- restart-count and run-ID environment variables; and
+- full worker-group restart on failure or membership change.
+
+The existing interfaces are sufficient for the torchrun lifecycle mechanics:
+
+- a standby agent remains blocked in `next_rendezvous()`, so its trainers are
+  not started;
+- the handler can return a deterministic group rank derived from a logical
+  slot;
+- parked standbys are kept outside the handler's reported wait count; and
+- after a restart plan commits, the handler reports only the selected
+  replacement through `num_nodes_waiting()`. The stock elastic agent then
+  performs its normal full-worker-group membership restart.
+
+The handler is not the recovery decision-maker. The integration still must
+provide contracts that stock torchrun does not:
+
+1. `min_nodes:max_nodes` describes elastic active membership, not
+   `min_nodes` active nodes plus replacement-only standbys.
+2. The stock rendezvous handlers do not distinguish passive standbys from
+   scale-up candidates.
+3. Stock rank assignment is not stable across re-rendezvous.
+4. Torchrun failure handling does not consume SCOUT fault localization or
+   checkpoint trust.
+5. The rendezvous API does not define a quarantine database or logical-slot
+   inheritance contract.
+6. Checkpoint preparation and recovery-plan consensus remain application and
+   manager responsibilities.
+
+PyTorch 2.13 includes an experimental worker control-plane server, but it is a
+generic handler server and not a stable restart or quarantine protocol. The
+reference integration does not require that experimental surface.
+
+The integration must also avoid depending on `--max-restarts` as its only
+replacement budget. Failure retries and membership changes have had different
+accounting behavior across torchrun versions. The coordinator should own an
+explicit `max_replacement_generations` policy.
+
+## Three-Layer Architecture
+
+```text
+                    control store / coordinator
+              restart plans, slot leases, quarantine
+                              |
+                              v
++------------------------------------------------------------------+
+| Layer 1: torchrun                                                 |
+|                                                                  |
+| Stock LocalElasticAgent     RendezvousHandler plugin              |
+| - monitors and restarts local workers                            |
+| - calls next_rendezvous() before worker launch                    |
+| - polls num_nodes_waiting() while workers are healthy             |
+| - performs the standard full-group membership restart            |
++-----------------------------+------------------------------------+
+                              |
+        control client / store | restart-context file/environment
+                              v
++------------------------------------------------------------------+
+| Layer 2: lm-resiliency                                           |
+|                                                                  |
+| SlotAwareRendezvousHandler  RestartCoordinator  SCOUT  GEMINI    |
+| TorchrunOrchestrationClient  manager_api                          |
+| - owns active/standby state and logical-slot assignments         |
+| - commits one fenced RestartPlan                                 |
+| - exposes only the selected replacement as waiting               |
+| - excludes quarantined nodes                                     |
+| - reports normalized fault evidence                              |
+| - proposes checkpoint trust and locally available state          |
+| - flushes and transfers eligible checkpoint shards               |
+| - validates and consumes the committed RestartContext            |
+| - performs rank-consistent checkpoint selection after relaunch   |
++-----------------------------+------------------------------------+
+                              |
+             framework-neutral| recovery request and adapter
+                              v
++------------------------------------------------------------------+
+| Layer 3: TorchTitan or another torchrun framework                 |
+|                                                                  |
+| FrameworkAdapter / Trainer                                       |
+| - owns model, optimizer, scheduler, RNG, sampler/data position    |
+| - exposes safe optimizer boundaries                              |
+| - loads framework durable state when GEMINI is unavailable        |
+| - resumes at the step selected by lm-resiliency                  |
++------------------------------------------------------------------+
+```
+
+### Ownership boundary
+
+| Concern | Owner |
+|---|---|
+| Detection, localization, evidence confidence | SCOUT |
+| Checkpoint capture, trust, inventory, transfer | GEMINI |
+| Final node quarantine and replacement policy | LM Resiliency coordinator |
+| Active/standby admission and logical-slot assignment | `SlotAwareRendezvousHandler` and coordinator |
+| Worker-group stop and relaunch | Stock torchrun elastic agent |
+| Final restart generation and checkpoint manifest | LM Resiliency coordinator |
+| Model and optimizer state semantics | framework adapter |
+| Physical repair or scheduler allocation | infrastructure manager |
+
+SCOUT and GEMINI may recommend a replacement scope and recovery state, but they
+must not directly evict a physical host. A rank-local report is evidence, not a
+cluster-wide decision.
+
+## Identity Model
+
+Ranks cannot be used as durable resource identities. Every event and plan must
+carry both the current rank mapping and stable infrastructure identities.
+
+```python
+class AgentIdentity(TypedDict):
+    run_id: str
+    node_id: str  # Stable scheduler or infrastructure identity.
+    agent_id: str  # Unique torchrun agent incarnation.
+    hostname: str
+    local_world_size: int
+    resource_ids: list[str]  # GPU UUIDs, NICs, HCAs, or deployment IDs.
+    environment_digest: str  # Software, configuration, and capability identity.
+
+
+class WorkerIdentity(TypedDict):
+    run_id: str
+    generation: int
+    node_id: str
+    agent_id: str
+    logical_node_slot: int  # Stable for the lifetime of the training job.
+    global_rank: int
+    local_rank: int
+    local_world_size: int
+    hostname: str
+    gpu_uuid: str | None
+    topology_digest: str
+```
+
+The coordinator records an immutable `RankAssignment` for each generation:
+
+```python
+@dataclass(frozen=True)
+class RankAssignment:
+    run_id: str
+    generation: int
+    active_nodes: int
+    local_world_size: int
+    slot_to_node_id: dict[int, str]
+    slot_to_rank_range: dict[int, tuple[int, int]]
+    topology_digest: str
+```
+
+When node `host-a` in slot `3` is replaced by `host-spare-1`, the new node
+inherits slot `3` and the same rank range. This keeps GEMINI shard ownership and
+framework parallel coordinates stable.
+
+`GROUP_RANK`, hostname, PID, and global rank alone are not valid quarantine
+keys. A quarantine record uses `node_id` and may also contain GPU, NIC, HCA, or
+other resource IDs.
+
+`node_id` must come from a trusted scheduler, cloud instance identity, or
+deployment inventory. A worker-provided hostname is diagnostic metadata and
+must not be allowed to choose its own quarantine identity. If no stable node
+identity is available, replacement mode should refuse to start.
+
+The trusted resource inventory maps every resource ID to both its stable node
+owner, resource kind (`gpu`, `nic`, `hca`, `link`, or `node`), and the global
+rank for rank-bound endpoints. Worker registration proves that an agent may
+report a resource; it does not allow the worker to relabel a GPU as a NIC or
+attribute another local worker's GPU to its own rank.
+
+The topology digest covers at least the active world size, local worker count,
+framework parallel dimensions, logical rank-to-parallel-coordinate mapping,
+checkpoint schema, and model configuration needed to interpret rank-local
+state. It is separate from `environment_digest`, which describes whether a node
+is eligible to run the same software and hardware workload.
+
+## API: lm-resiliency to the coordinator
+
+The current `OrchestrationHooks` callbacks are the starting point. The torchrun
+integration wraps them in a versioned, incident-correlated envelope and sends
+them to the coordinator through the configured manager transport. A local
+Unix-domain socket or sidecar may provide that transport, but the stock
+torchrun agent is not part of the protocol.
+
+### Fault event
+
+```python
+class HardwareFaultReport(TypedDict):
+    kind: Literal["hardware"]
+    resource_kind: Literal["gpu", "node", "nic", "hca", "link"]
+    resource_id: str
+    metric: str
+    value: float
+    severity: Literal["fatal"]
+    message: str
+
+
+class FaultEvent(TypedDict):
+    schema_version: int
+    event_id: str
+    incident_id: str
+    run_id: str
+    generation: int
+    reporter: WorkerIdentity
+    optimizer_step: int
+    report: SCOUTFaultReport | HardwareFaultReport
+```
+
+Requirements:
+
+- `event_id` is idempotent.
+- `incident_id` correlates the fault with recovery and checkpoint events.
+- The coordinator rejects a stale `generation`.
+- Event admission validates the reporter's node, logical slot, local worker
+  count, rank range, and topology digest against that generation's immutable
+  `RankAssignment`; worker-supplied rank arithmetic alone is insufficient.
+- Event admission also binds the worker to its registered `AgentIdentity`.
+  Hardware reports are accepted only when the reported node or resource belongs
+  to that agent and both its node owner and resource kind match the trusted
+  scheduler or infrastructure inventory.
+- The original `SCOUTFaultReport` is preserved without upgrading its
+  attribution. A direct `HealthEvent` is normalized to
+  `HardwareFaultReport` without upgrading its resource granularity.
+- The coordinator resolves reported ranks through that generation's
+  `RankAssignment` and rejects any reported rank outside its committed ranges.
+- `failed_ranks`, `endpoint_rank`, `dataloader_culprit_ranks`, and
+  `stage_culprit_ranks` are validated together. Culprit and endpoint ranks must
+  be included in `failed_ranks`; node or resource endpoint IDs must resolve to
+  the endpoint rank's node through the trusted assignment and resource map.
+  Rank-bound resources must also match the trusted resource-to-rank binding;
+  node-shared NIC, HCA, and link resources need no artificial rank binding.
+- The orchestration dispatcher allocates `incident_id` once and uses it for
+  both the recovery and fault callbacks. The client must not infer correlation
+  from callback timing.
+
+### Recovery proposal
+
+The existing `RecoveryDecision` remains a rank-local, noncollective result. At
+the torchrun boundary it is explicitly called a proposal:
+
+```python
+class RecoveryProposalEvent(TypedDict):
+    schema_version: int
+    event_id: str
+    incident_id: str
+    run_id: str
+    generation: int
+    reporter: WorkerIdentity
+    decision: RecoveryDecision
+```
+
+The coordinator combines proposals with a conservative lattice:
+
+```text
+RECOVERY_VERIFIED dominates LATEST_GEMINI
+unavailable required shard dominates locally available state
+missing or stale evidence blocks promotion to a less conservative mode
+```
+
+A schema-v1 proposal accepts only the known failure kinds `straggler`,
+`data_stall`, `checkpoint_stall`, `hang`, `uncertain`, `sdc`, and
+`machine_unavailable`. Unknown or newly introduced kinds are rejected until a
+new schema defines their recovery semantics.
+
+A worker must never interpret its local `checkpoint_step` as the final global
+step. The coordinator selects one step from the complete job-wide inventory,
+and the restarted job collectively validates that exact step before loading.
+
+### Checkpoint inventory
+
+`RecoveryDecision` says what one worker recommends. Replacement also needs to
+know where every logical-rank shard can be obtained.
+
+```python
+class CheckpointCopy(TypedDict):
+    owner_global_rank: int
+    checkpoint_step: int
+    inventory_event_id: str
+    checkpoint_id: str | None
+    holder_node_id: str
+    holder_kind: Literal["owner", "peer", "durable"]
+    storage_kind: Literal["memory", "node_local", "shared", "remote"]
+    location_token: str
+    complete: bool
+    checksums_available: bool
+
+
+class CheckpointInventoryEvent(TypedDict):
+    schema_version: int
+    event_id: str
+    run_id: str
+    generation: int
+    reporter: WorkerIdentity
+    step: int
+    trust: Literal["latest", "candidate", "recovery_verified"]
+    topology_digest: str
+    copies: list[CheckpointCopy]
+```
+
+Only completed checkpoint slots may appear with `complete=True`.
+`checkpoint_step` must equal the enclosing inventory event's positive `step`;
+`inventory_event_id` binds the copy to that source event, and the coordinator
+validates the complete copy record against the referenced event when assembling
+the recovery manifest. A `CANDIDATE` inventory can be retained for diagnosis
+but is never selected for conservative recovery. Durable copies must use shared
+or remote storage and carry the opaque durable `checkpoint_id`; that ID must
+match the committed plan. Owner and peer copies do not carry a durable
+checkpoint ID. Node-local and in-memory copies remain subject to holder health
+and quarantine, and are eligible only when the inventory event was reported by
+that holder. Shared or remote copies may instead be referenced by an
+authenticated control-plane inventory.
+
+`location_token` is an opaque control-plane reference, not an unchecked path
+that another worker is allowed to open.
+
+Worker inventory is not checkpoint certification. The coordinator consumes a
+separate record from the trusted SCOUT/GEMINI catalog store:
+
+```python
+class CheckpointCertification(TypedDict):
+    schema_version: int
+    certification_id: str
+    run_id: str
+    source_generation: int
+    step: int
+    topology_digest: str
+    checkpoint_source: Literal["gemini", "durable"]
+    checkpoint_id: str | None
+    expected_world_size: int
+    certification_kind: Literal[
+        "dense_consensus",
+        "dynamic_candidate_promotion",
+    ]
+    inventory_event_digests: dict[str, str]  # event ID to canonical SHA-256
+```
+
+This record is written only after job-wide dense acceptance or the documented
+two-cycle dynamic-catalog promotion. It is not accepted through the worker
+event sink. A worker-declared `recovery_verified` inventory is eligible only
+when a trusted certification matches its run, generation, step, topology,
+source, durable checkpoint ID, world size, and canonical inventory-event
+digest. Reusing an event ID with different copy contents therefore cannot reuse
+the earlier certification.
+
+### Local client protocol
+
+```python
+class ResiliencyEventSink(Protocol):
+    def publish_fault(self, event: FaultEvent) -> None: ...
+    def publish_recovery(self, event: RecoveryProposalEvent) -> None: ...
+    def publish_checkpoint(self, event: CheckpointInventoryEvent) -> None: ...
+    def acknowledge_restart(self, ack: RestartAck) -> None: ...
+```
+
+The callbacks must be bounded and must not use the training process group.
+Delivery failure is visible and causes the coordinator to use conservative
+recovery; it must not be silently treated as a healthy report.
+
+## API: coordinator to lm-resiliency
+
+Restart is a two-phase protocol:
+
+1. a `RestartIntent` quiesces accessible workers and gathers final checkpoint
+   preparation results without advancing the generation; then
+2. an immutable `RestartPlan` selects the actual checkpoint and next placement
+   from those results.
+
+This prevents a failed flush or transfer from invalidating a plan that already
+promised `LATEST_GEMINI`.
+
+### Restart intent
+
+```python
+class RestartIntent(TypedDict):
+    schema_version: int
+    intent_id: str
+    run_id: str
+    generation: int
+    incident_ids: list[str]
+    reason_code: str
+    minimum_recovery_mode: Literal["latest", "recovery_verified"]
+    suspected_node_ids: list[str]
+    prepare_deadline_unix_ms: int
+```
+
+The intent is a single-writer, compare-and-swap record for the current
+generation. It does not authorize a new worker group. Accessible workers
+observe it through `TorchrunOrchestrationClient`, quiesce at a framework-safe
+boundary, prepare eligible checkpoint state, and wait for either a committed
+plan or an explicit abort. The stock torchrun agent still considers the worker
+group healthy during this preparation phase.
+
+`suspected_node_ids` is the policy-approved replacement scope for the
+incident. Every listed node must belong to the committed generation and must be
+absent from the next assignment. Policy may additionally quarantine a removed
+node when the evidence supports doing so.
+
+An abort is allowed only before a plan is committed and only when resuming the
+same generation is safe. An SDC, inaccessible node, corrupted checkpoint, or
+lost worker group cannot be aborted back to normal training.
+
+### Committed restart plan
+
+Only the coordinator writes a `RestartPlan`. It is published atomically after
+checkpoint preparation finishes or times out and advances the monotonically
+increasing generation.
+
+```python
+class SlotAssignment(TypedDict):
+    logical_node_slot: int
+    node_id: str
+    first_global_rank: int
+    local_world_size: int
+
+
+class RestartPlan(TypedDict):
+    schema_version: int
+    plan_id: str
+    intent_id: str
+    run_id: str
+    from_generation: int
+    to_generation: int
+    incident_ids: list[str]
+    reason_code: str
+    recovery_mode: Literal["latest", "recovery_verified"]
+    checkpoint_source: Literal["gemini", "durable"]
+    checkpoint_step: int
+    checkpoint_id: str | None
+    checkpoint_manifest_id: str
+    slot_assignments: list[SlotAssignment]
+    quarantined_node_ids: list[str]
+    expected_world_size: int
+    topology_digest: str
+    restart_deadline_unix_ms: int
+```
+
+Before commit, the coordinator validates:
+
+- the plan is fenced to the same intent ID, run, generation, incidents, and
+  reason;
+- the recovery mode is at least as conservative as the intent's minimum;
+- every node in the intent's suspected scope is removed from the next
+  assignment;
+- every new quarantine entry is both in that suspected scope and removed from
+  the current assignment; unrelated standbys require separate trusted fault
+  evidence before quarantine;
+- exactly `min_nodes` active logical slots are assigned;
+- at least one assigned node is new to the active membership, because version
+  1 uses standby admission as its healthy-group restart edge;
+- every surviving node retains its committed logical slot and rank range;
+- every assigned node is healthy, compatible, and not quarantined;
+- each logical slot is assigned once;
+- active size, local world size, total world size, and topology digest match the
+  committed generation;
+- the checkpoint is complete for every required logical rank;
+- every copy included in the committed manifest belongs to the selected
+  positive step and selected checkpoint source; a rank entry with one eligible
+  copy and any additional ineligible copy is rejected rather than left for the
+  loader to choose;
+- every copy exactly matches its referenced inventory event, and the source
+  inventory trust satisfies the manifest trust;
+- the checkpoint trust satisfies the selected recovery mode;
+- the plan never selects `CANDIDATE`;
+- the target step is coherent across all selected shards;
+- the plan generation is the successor of the current committed generation;
+  and
+- the restart deadline has not elapsed when the plan is committed or exposed
+  through rendezvous.
+
+### Restart context passed to workers
+
+Before returning from `next_rendezvous()`, `SlotAwareRendezvousHandler` derives
+a node-local context from the committed plan and writes it to an atomically
+replaced file. The deployment places the fixed file path in the torchrun
+agent's environment before launch, so every local worker receives:
+
+```text
+LM_RESILIENCY_RESTART_CONTEXT=/run/torchrun/<run-id>/restart-context.json
+```
+
+```python
+class RestartContext(TypedDict):
+    schema_version: int
+    plan_id: str
+    run_id: str
+    generation: int
+    node_id: str
+    logical_node_slot: int
+    first_global_rank: int
+    local_world_size: int
+    expected_world_size: int
+    topology_digest: str
+    recovery_mode: Literal["latest", "recovery_verified"]
+    checkpoint_source: Literal["gemini", "durable"]
+    checkpoint_step: int
+    checkpoint_id: str | None
+    checkpoint_manifest_id: str
+    reason_code: str
+```
+
+Each worker derives its expected rank as
+`first_global_rank + LOCAL_RANK`. `lm-resiliency` rejects startup if the
+context conflicts with torchrun's `RANK`, `LOCAL_RANK`, `LOCAL_WORLD_SIZE`,
+`WORLD_SIZE`, `TORCHELASTIC_RUN_ID`, or the framework topology.
+`expected_world_size` must also be divisible by `local_world_size`, so a
+context cannot describe a partial logical node slot.
+
+Before inspecting checkpoint fields, the worker validates the complete context
+against the currently committed `RestartPlan` for its node. The plan ID,
+successor generation, assignment, topology, recovery mode, checkpoint pin, and
+reason must match exactly. A leftover context from an earlier plan is rejected
+even when stable ranks make every torchrun environment value identical.
+This acceptance check receives trusted current time and rejects the context
+when the committed plan's restart deadline has elapsed. Rendezvous performs
+the same deadline check immediately before exposing the plan.
+
+The context must not contain a newer, less trusted local checkpoint merely
+because it exists on the replacement host.
+
+The committed `checkpoint_step` is a pin, not a hint. On a managed restart,
+GEMINI must load exactly that step from `checkpoint_manifest_id` on every rank
+or fail. Its existing collective `find_latest()` remains useful for validating
+rank-wide availability during unmanaged recovery, but it must not silently
+substitute a different step after the coordinator commits a plan. This requires
+an additive exact-step checkpoint-manager surface used by
+`enable_resiliency(..., restart_context=restart)`:
+
+```python
+checkpoint_manager.load_exact(
+    step=restart.checkpoint_step,
+    manifest_id=restart.checkpoint_manifest_id,
+    recovery_mode=restart.recovery_mode,
+)
+```
+
+This is an implementation boundary, not an additional call required in the
+training script. A durable source is similarly pinned by `checkpoint_id` and
+step.
+
+### Prepare-for-restart command
+
+For an accessible worker group, `TorchrunOrchestrationClient` derives a local
+command from the intent:
+
+```python
+class PrepareRestart(TypedDict):
+    intent_id: str
+    generation: int
+    minimum_recovery_mode: Literal["latest", "recovery_verified"]
+    destination_token: str | None
+    deadline_unix_ms: int
+```
+
+The `lm-resiliency` client:
+
+1. stops accepting new unsafe checkpoint candidates;
+2. waits boundedly for the eligible GEMINI capture and replication state;
+3. flushes completed owner and peer slots;
+4. transfers or mirrors only checkpoint state allowed by the plan; and
+5. writes a `RestartAck`.
+
+```python
+class RestartAck(TypedDict):
+    intent_id: str
+    run_id: str
+    node_id: str
+    agent_id: str
+    generation: int
+    flushed_step: int
+    inventory_event_digests: dict[str, str]  # event ID to canonical SHA-256
+    transferred_owner_ranks: list[int]
+    transferred_peer_ranks: list[int]
+    success: bool
+    reason: str
+```
+
+The listener only validates and stages the command. It must not call CUDA,
+framework, or checkpoint operations from a background listener thread. The
+framework adapter consumes the command at a safe optimizer boundary. GEMINI's
+bounded main-thread path performs the flush and writes the acknowledgement,
+after which the worker remains quiesced.
+
+The coordinator waits only until the intent deadline. Missing or failed
+acknowledgements make the associated latest inventory unavailable. A latest
+manifest may use an inventory event only when the reporting node returned a
+successful acknowledgement for the selected step and included that event ID.
+Previously certified recovery-verified inventory remains eligible without
+promoting unprepared latest state. Missing or failed preparation cannot promote
+`LATEST_GEMINI`; the coordinator must commit a plan using a complete
+recovery-verified source or fail the restart.
+
+The manager transport authenticates the acknowledgement sender. The
+coordinator checks the acknowledgement's run, node, and agent incarnation
+against that authenticated identity and requires the agent to match the
+inventory reporter. The coordinator also records receipt time outside the
+worker payload and rejects acknowledgements received after
+`prepare_deadline_unix_ms`. Payload identity fields and timestamps alone are
+not authentication. For latest recovery, the acknowledgement's canonical
+inventory digest must match the exact event used by the manifest; event-ID
+reuse cannot substitute different copies after preparation.
+
+For a crashed or unreachable node, no preparation is assumed.
+
+## API: lm-resiliency to the Framework
+
+The framework receives a platform-neutral recovery request. It does not receive
+quarantine or placement policy.
+
+```python
+@dataclass(frozen=True)
+class FrameworkRecoveryRequest:
+    run_id: str
+    generation: int
+    recovery_mode: RecoveryMode
+    checkpoint_source: Literal["gemini", "durable"]
+    checkpoint_step: int
+    checkpoint_id: str | None
+    expected_world_size: int
+    topology_digest: str
+
+
+class FrameworkRecoveryAdapter(Protocol):
+    def validate_restart(self, request: FrameworkRecoveryRequest) -> None: ...
+    def load_durable(self, request: FrameworkRecoveryRequest) -> int | None: ...
+```
+
+The proposed activation API is additive:
+
+```python
+from lm_resiliency import enable_resiliency
+from lm_resiliency.integrations.torchrun import (
+    RestartContext,
+    TorchrunOrchestrationClient,
+)
+
+restart = RestartContext.from_env()
+control = TorchrunOrchestrationClient.connect(restart)
+
+resiliency = enable_resiliency(
+    trainer,
+    orchestration=control.hooks(),
+    restart_context=restart,
+)
+trainer.train()
+```
+
+`restart_context=None` preserves the current behavior. Existing
+`load_fallback: Callable[[], int | None]` remains supported. A new
+context-aware durable loader can be added without changing the old callback.
+
+For TorchTitan, the existing adapter already captures:
+
+- model state;
+- optimizer state;
+- LR scheduler state;
+- trainer state;
+- dataloader position; and
+- the recovered training step.
+
+The adapter must additionally validate that the relaunched
+`ParallelDims/world_size` produces the committed topology digest before any
+checkpoint is loaded.
+
+## Torchrun Rendezvous Integration
+
+### Node states
+
+```text
+STANDBY -> ADMITTED -> ACTIVE -> PREPARING -> RESTARTING
+     \          \         \          \-> FAILED
+      \----------> REJECTED             \-> QUARANTINED
+```
+
+- `STANDBY`: agent is registered; no trainer process is running.
+- `ADMITTED`: coordinator assigned a logical slot for the next generation.
+- `ACTIVE`: local workers are running for the committed generation.
+- `PREPARING`: workers observed an intent, quiesced, and are performing bounded
+  checkpoint preparation; the stock agent still sees healthy worker processes.
+- `RESTARTING`: the plan is committed and torchrun is stopping, rendezvousing,
+  or relaunching the worker group.
+- `QUARANTINED`: node cannot enter another generation for this run.
+- `FAILED`: agent or node is unreachable; its slot may be reassigned.
+
+### Job states
+
+```text
+RUNNING
+  -> DECIDING
+  -> PREPARING
+  -> COMMITTING
+  -> STOPPING
+  -> RENDEZVOUS
+  -> RECOVERING
+  -> RUNNING
+```
+
+Any state may transition to `FAILED` when there are too few eligible nodes, no
+complete trusted checkpoint, a conflicting plan, or an unrecoverable topology
+mismatch.
+
+### Coordinator
+
+The `RestartCoordinator` is the single writer for:
+
+- current generation;
+- current restart intent;
+- active slot leases;
+- standby eligibility;
+- quarantine records;
+- checkpoint manifest selection; and
+- committed restart plans.
+
+The writer may be lease-elected rather than a fixed process. All authoritative
+state must be in the strongly consistent store so another coordinator can take
+over after the lease expires without changing or duplicating an already
+committed plan.
+
+It may be implemented over the rendezvous store for a prototype, but control
+keys must be namespaced separately from worker-group bootstrap keys. Production
+deployments should use a durable external service if the rendezvous endpoint is
+not sufficiently available or persistent.
+
+### Slot-aware rendezvous
+
+`SlotAwareRendezvousHandler` implements the existing `RendezvousHandler`
+interface and is registered through `torchrun.handlers`. It admits only nodes
+named by the committed plan:
+
+- `next_rendezvous()` blocks standby agents without creating trainers;
+- blocked standbys maintain a registration lease or heartbeat;
+- quarantined nodes remain blocked or receive a terminal rejection according to
+  deployment cleanup policy, but are never admitted;
+- a replacement node receives the failed node's logical slot;
+- exactly `min_nodes` slots complete the rendezvous; and
+- returned group rank is derived from logical slot, not arrival order.
+
+Passive standbys are not reported by `num_nodes_waiting()`. After a plan
+commits, the selected replacement becomes the only newly waiting node visible
+to active agents. This is the restart edge: a random late node must not trigger
+scale-up. This mechanism is used only when the next plan admits at least one
+standby; it is not a generic restart signal for unchanged membership.
+
+Before returning an admitted node from `next_rendezvous()`, the handler:
+
+1. validates that the assignment belongs to the latest committed generation;
+2. writes the node-local `RestartContext`;
+3. returns the logical slot as the rendezvous group rank; and
+4. returns exactly `min_nodes` as the group world size.
+
+### Stock elastic agent behavior
+
+No custom elastic agent is required. The existing agent behavior is used in two
+ways:
+
+1. a worker failure follows torchrun's normal failure-restart path; and
+2. while workers are healthy, a positive `num_nodes_waiting()` result causes
+   the agent to stop and re-rendezvous its local worker group.
+
+For an accessible replacement, workers first quiesce and acknowledge the
+`RestartIntent`. Only after the coordinator commits the plan does the handler
+expose the selected replacement as waiting. Each active agent then observes the
+same membership change and enters its standard restart path. A worker that
+missed the preparation deadline is treated as unavailable and cannot influence
+the committed checkpoint manifest. Correctness does not depend on agents
+stopping in the same polling instant because the plan is already immutable and
+the new rendezvous cannot complete without its assignments.
+
+For an inaccessible node, surviving workers eventually fail or their agents
+observe the normal failure path.
+`SlotAwareRendezvousHandler.next_rendezvous()` blocks the survivors until the
+coordinator commits a conservative plan and assigns a standby. A node-local
+SCOUT report never directly manipulates `num_nodes_waiting()` or chooses the
+next membership.
+
+The handler cannot customize torchrun's worker-stop signal or timeout for an
+individual incident. Version 1 therefore requires workers to quiesce before a
+planned membership restart, relies on the agent's configured bounded shutdown,
+and treats failure to complete the next rendezvous before the plan deadline as
+a failed restart. If a supported torchrun version cannot satisfy those
+constraints, that version requires an out-of-tree agent fallback.
+
+On successful job completion or terminal failure, the coordinator closes the
+handler generation. Blocked standbys observe closure, release their leases, and
+exit without starting trainers.
+
+## Control-Plane Integrity
+
+- Create the local control directory with owner-only permissions and verify Unix
+  peer credentials where supported.
+- Write intent, context, and acknowledgement files with atomic replace.
+- Provision `node_id` and agent credentials outside the training worker.
+- Namespace every store key by run ID and schema version.
+- Protect the external store with deployment authentication and authorization.
+- Include the plan ID and generation in every mutable operation.
+- Reject path traversal and never expand `location_token` as a raw filesystem
+  path without resolving it through the trusted control client.
+- Treat malformed, unauthenticated, or conflicting input as unavailable
+  evidence, not as permission to continue.
+
+## Healthy-Path Cost
+
+The integration must not add a global synchronization to normal optimizer
+steps.
+
+- Fault and recovery events are emitted only when SCOUT produces actionable
+  evidence.
+- Checkpoint inventory contains metadata only and is published asynchronously
+  after a completed checkpoint transition.
+- Control-client intent polling is bounded.
+- The stock agent's existing rendezvous wait-count polling is unchanged.
+- Standby agents do not allocate model state or join training collectives.
+- Checkpoint flush and transfer happen only after a restart intent.
+- Control delivery backpressure must not block the training thread
+  indefinitely.
+
+## Recovery Policy
+
+| Incident | Node action | Recovery mode |
+|---|---|---|
+| Attributed SDC on one node/GPU | Quarantine affected node conservatively | `RECOVERY_VERIFIED` |
+| Inconclusive exact replay | Do not over-attribute; replace only a policy-defined conservative scope or fail closed | `RECOVERY_VERIFIED` |
+| Required node inaccessible | Mark failed and replace its slot | `RECOVERY_VERIFIED` |
+| Confirmed accessible compute or communication straggler | Drain and replace when policy threshold is met | `LATEST_GEMINI` if a complete generation is prepared; otherwise verified |
+| Hang with complete clean emergency replay and all ranks accessible | Replace a policy-selected scope | `LATEST_GEMINI` |
+| Hang with missing, stale, incomplete, or contradictory evidence | Replace a conservative policy-defined scope or fail closed | `RECOVERY_VERIFIED` |
+| Operator-initiated healthy migration | Drain source and replace slot | `LATEST_GEMINI` if preparation succeeds |
+
+### Aggregation rules
+
+The coordinator uses all available events for the incident:
+
+- any SDC or inconclusive exact evidence forces verified recovery;
+- any inaccessible required rank forces verified recovery;
+- a latest proposal is accepted only if the checkpoint manifest proves every
+  required logical-rank shard is complete at one step;
+- conflicting steps are not merged;
+- after plan commit, workers load the exact selected step rather than
+  independently choosing a newer local generation;
+- missing reporter events do not count as agreement;
+- a checksum failure makes that copy unavailable;
+- checksum success does not prove the original GPU state was numerically
+  correct; and
+- one comparison group cannot certify the job if another group found SDC.
+
+## Checkpoint Placement and Transfer
+
+Stable logical slots are required for the fast path. GEMINI checkpoints are
+rank-sharded and peer replicas preserve the original owner rank. If torchrun
+arbitrarily renumbers ranks after replacement, a new framework topology may not
+match those shards even when `WORLD_SIZE` is unchanged.
+
+For each selected checkpoint, the coordinator builds one immutable manifest:
+
+```python
+class RankCheckpointCopies(TypedDict):
+    owner_global_rank: int
+    copies: list[CheckpointCopy]
+
+
+class RecoveryManifest(TypedDict):
+    manifest_id: str
+    run_id: str
+    source_generation: int
+    step: int
+    trust: Literal["latest", "recovery_verified"]
+    topology_digest: str
+    rank_copies: list[RankCheckpointCopies]
+```
+
+The manifest is usable only when every required rank has at least one copy and
+every included copy is eligible for the manifest's exact positive step and the
+plan's selected source. The coordinator must omit rejected alternatives before
+commit; an immutable committed manifest cannot advertise an incomplete,
+wrong-source, or unproven fallback. GEMINI plans use owner or peer copies;
+durable plans use durable copies. Only shared or remote storage is independent
+of holder-node availability. The manifest's trust label is not
+self-authenticating: every selected copy must match its referenced inventory
+record, and `RECOVERY_VERIFIED` manifests may use only recovery-verified
+inventory evidence. Durable recovery always requires a recovery-verified
+manifest and recovery-verified inventory, even if the originating intent
+allowed latest recovery.
+
+An in-memory or node-local copy is selectable only when its holder remains in
+the next assignment. Process-memory copies are never selectable because stock
+elastic restart destroys every worker address space, including workers on
+retained nodes. Successful preparation must publish new node-local inventory
+for the flushed bytes. A departing node's transfer counters in `RestartAck` do
+not by themselves prove that a destination has the bytes. Version 1 requires
+such transfers to materialize as authenticated shared or remote copy
+provenance before plan commit; a future local-destination transfer record may
+extend this without weakening the holder rule.
+
+The coordinator resolves every rank through the immutable `RankAssignment` for
+the manifest's `source_generation`. An `owner` copy must be held by the node
+that owned that rank in that generation; a `peer` copy must be held elsewhere.
+The source assignment's run, generation, topology digest, and world size must
+match the manifest and plan. When source and current generations are equal,
+their assignments must be identical rather than merely share metadata.
+
+Preferred source order:
+
+1. completed owner copy on an accessible healthy node;
+2. completed peer replica on a different healthy node;
+3. previously mirrored restart storage; or
+4. framework durable recovery-verified checkpoint.
+
+For an SDC incident, the selected generation must already be
+`RECOVERY_VERIFIED`. The current suspect state is never promoted. A stored
+verified copy on a suspect machine should be transferred only when policy
+allows it and integrity verification succeeds; a healthy peer or durable copy
+is preferred.
+
+The current `CheckpointTransfer` interface can move shards after the
+coordinator chooses source and destination endpoints. The transport never
+chooses the checkpoint or replacement node.
+
+If a failed node and every holder of its peer replicas are unavailable, GEMINI
+cannot reconstruct that rank's fast checkpoint. Recovery falls back to the
+framework durable checkpoint.
+
+## End-to-End Flows
+
+### Initial launch
+
+1. All `max_nodes` agents register stable node identities.
+2. The coordinator validates compatibility and selects exactly `min_nodes`.
+3. Selected nodes receive logical slots; the rest enter `STANDBY`.
+4. Slot-aware rendezvous assigns deterministic rank ranges; parked standbys
+   remain blocked in `next_rendezvous()`.
+5. Agents start workers with generation `0`.
+6. `lm-resiliency` registers the worker identity and framework topology digest.
+
+### Accessible straggler replacement
+
+1. SCOUT emits a confirmed straggler report and latest-checkpoint proposal.
+2. The coordinator maps the reported rank to its generation and node.
+3. The coordinator opens a restart intent and provisionally reserves a
+   compatible standby for the affected logical slot.
+4. Every accessible worker enters `PREPARING`, quiesces at a safe boundary, and
+   acknowledges the intent.
+5. Workers flush eligible GEMINI state and report transfer results.
+6. The coordinator commits a restart plan using the newest complete allowed
+   generation, or falls back to verified recovery.
+7. `SlotAwareRendezvousHandler` exposes the selected standby through
+   `num_nodes_waiting()`.
+8. Stock elastic agents observe the membership change and restart their local
+   worker groups.
+9. The source node becomes quarantined or standby according to policy.
+10. The replacement and surviving nodes rendezvous with the same slots/ranks.
+11. Relaunched workers validate the restart context and load exactly the
+    committed rank-consistent step.
+12. TorchTitan restores the complete state and resumes.
+
+### Inaccessible node
+
+1. The agent or infrastructure marks one node unavailable.
+2. The coordinator opens an intent so surviving nodes can expose their
+   completed peer replicas.
+3. The coordinator selects `RECOVERY_VERIFIED`.
+4. The committed manifest uses peer replicas or the durable verified
+   checkpoint.
+5. A standby inherits the failed logical slot.
+6. Surviving agents follow torchrun's failure-restart path and block in
+   slot-aware rendezvous until the plan is committed.
+7. If any required shard is unavailable, the job fails rather than mixing
+   checkpoint generations.
+
+### SDC
+
+1. SCOUT rejects the current candidate and emits attributed or inconclusive
+   evidence.
+2. The coordinator selects only `RECOVERY_VERIFIED`.
+3. The affected node is quarantined only to the scope supported by evidence and
+   deployment policy.
+4. No current or candidate checkpoint is copied into the restart manifest.
+5. The fixed-size group relaunches and loads the verified generation.
+
+## Failure Handling
+
+- **Coordinator unavailable:** do not autonomously form a new generation.
+- **Coordinator unavailable with an open intent:** remain quiesced and fail
+  after the control-plane deadline; do not resume training without an explicit
+  safe abort.
+- **Conflicting committed plans:** fail the run; never choose locally.
+- **Stale event:** ignore it and record the rejection.
+- **Missing preparation acknowledgement:** treat the node's latest state as
+  unavailable.
+- **Standby fails admission health checks:** select another standby or fail.
+- **Too few eligible nodes:** wait within policy or fail; do not silently shrink
+  the training world.
+- **Restart context mismatch:** exit before framework checkpoint loading.
+- **Checkpoint manifest incomplete:** use a complete verified durable
+  checkpoint or fail.
+- **Transfer timeout or checksum failure:** mark that copy unavailable and
+  re-plan only from the same or a more conservative trust state.
+- **Agent crash after plan commit:** another agent cannot rewrite the plan; the
+  same generation may be retried idempotently.
+- **Job closes while standbys are parked:** close the rendezvous generation and
+  wake blocked standby agents so they exit without spawning workers.
+
+## Packaging and Compatibility
+
+- Keep the public neutral payloads in `lm_resiliency.manager_api`.
+- Put torchrun-specific code under `lm_resiliency.integrations.torchrun`.
+- Keep TorchTitan imports lazy.
+- Importing `lm_resiliency` must not import TorchTitan or CUDA-only packages.
+- Version every wire payload independently from the Python package version.
+- Reject unknown required fields or unsupported schema versions.
+- Implement standby admission through the documented `RendezvousHandler`
+  interface and `torchrun.handlers` registration mechanism.
+- Do not subclass protected elastic-agent methods.
+- Qualify the handler against every supported PyTorch minor because the stock
+  agent's membership-restart behavior remains a runtime compatibility
+  dependency.
+- Preserve the existing `OrchestrationHooks`, `RecoveryDecision`,
+  `SCOUTFaultReport`, and framework entry points.
+- Use PyTorch 2.13 as the initial prototype baseline, then separately qualify
+  the other PyTorch minors in the supported compatibility range.
+
+### Proposed command
+
+The custom rendezvous backend makes replacement-only semantics explicit without
+changing torchrun's default behavior:
+
+```bash
+export LM_RESILIENCY_RESTART_CONTEXT="/run/lm-resiliency/${JOB_ID}/restart-context.json"
+
+torchrun \
+  --nnodes=8:10 \
+  --nproc-per-node=8 \
+  --rdzv-backend=lm_resiliency \
+  --rdzv-endpoint="${RDZV_ENDPOINT}" \
+  --rdzv-id="${JOB_ID}" \
+  --rdzv-conf="control_endpoint=${CONTROL_ENDPOINT},replacement_only=true,max_replacement_generations=2" \
+  --module torchtitan.train ...
+```
+
+The command runs on all `max_nodes` machines. The backend interprets
+`min_nodes` as the exact active-slot count and `max_nodes` as the registered
+fleet limit. Selecting `--rdzv-backend=lm_resiliency` is the explicit opt-in;
+the built-in rendezvous backends retain their existing elastic semantics.
+
+## Validation Plan
+
+### Contract tests
+
+- JSON round-trip and schema-version rejection for every event and plan.
+- Stale generation, duplicate event, and conflicting-plan rejection.
+- Conservative recovery lattice across missing and conflicting proposals.
+- Rank-to-node mapping through immutable generation snapshots.
+- Quarantine by stable node ID, never by rank alone.
+- Plan validation for intent fencing, unexpired deadlines, exact active and
+  worker counts, unique slots, topology digest, source-compatible copies, and a
+  complete single-step checkpoint manifest.
+
+### CPU multi-process tests
+
+- Standby agents do not spawn trainer workers.
+- A new standby does not cause scale-up.
+- Parked standbys do not contribute to `num_nodes_waiting()`.
+- A committed plan exposes only the selected replacement as waiting.
+- The stock agent membership path restarts every active local worker group.
+- A replacement inherits the same logical slot and rank range.
+- A quarantined node cannot rejoin.
+- Closing the job wakes parked standbys and starts no trainer processes.
+- The node-local `RestartContext` is written before `next_rendezvous()` returns.
+- Restart context mismatch aborts before user code initializes recovery.
+- Agent/coordinator restart preserves idempotent generation state.
+
+### Focused GPU and multi-node tests
+
+Start with `min_nodes=2`, `max_nodes=3`, and the smallest topology that
+exercises peer replication:
+
+1. kill one active node and recover its rank shards from peer replicas;
+2. replace an accessible straggler after bounded flush and transfer;
+3. inject SDC and verify rollback to the prior recovery-verified generation;
+4. make one rank's newest shard unavailable and verify global step selection
+   falls back consistently;
+5. verify bitwise model, optimizer, scheduler, RNG, and data-position recovery;
+6. repeat with TorchTitan and native PyTorch;
+7. exercise one HSDP or FSDP2 topology with stable shard coordinates; and
+8. document the remaining hardware-dependent coverage.
+
+The test must assert that no quarantined node runs a trainer process in the new
+generation and that the active world size remains exactly `min_nodes`.
+
+## Alternatives Considered
+
+### Use stock `--nnodes=min:max` and callbacks only
+
+Insufficient. It cannot keep extra nodes standby-only, preserve stable rank
+slots, or exclude a localized bad node from later rendezvous.
+
+### Use a custom rendezvous handler without a recovery coordinator
+
+Insufficient. The handler provides standby admission, stable ranks, and the
+membership-restart edge, but it does not evaluate SCOUT evidence, prepare
+GEMINI state, select a complete checkpoint manifest, or decide quarantine.
+
+### Add a custom elastic agent
+
+Not selected for version 1. PyTorch exposes agent extension points, but the
+existing membership-change path already provides the required full-group
+restart after the rendezvous handler reveals a selected replacement. A custom
+agent would add version coupling without removing the need for the coordinator
+and worker preparation protocol.
+
+### Add a new upstream torchrun resiliency-policy interface
+
+Not required. The existing `RendezvousHandler` interface and stock elastic
+agent cover admission and restart mechanics. Reconsider an upstream change only
+if focused validation finds a correctness requirement that those interfaces
+cannot satisfy.
+
+### Allow the active world to shrink after a failure
+
+Deferred. It changes framework parallelism, checkpoint sharding, batch size,
+optimizer semantics, and potentially the training trajectory. It requires a
+separate elastic-topology and resharding contract.
+
+### Put placement policy inside SCOUT or GEMINI
+
+Rejected. SCOUT and GEMINI do not own scheduler state, leases, or physical
+resource lifecycle. They should provide evidence and recovery state to a
+coordinator or infrastructure manager.
+
+### Delegate replacement decisions to an external scheduler
+
+Viable for production, and the neutral manager API should continue supporting
+it. The reference design still adds value by defining the rendezvous and
+recovery contracts needed for local standby replacement.
+
+## Phased Implementation
+
+### Phase 0: agree on contracts
+
+- Decide stable node identity and logical-slot semantics.
+- Agree on the event, inventory, manifest, plan, and restart-context schemas.
+- Decide where the single-writer coordinator runs.
+
+### Phase 1: manager-neutral data model
+
+- Add versioned event envelopes and `RestartContext`.
+- Extend checkpoint inventory without changing current callback behavior.
+- Add contract tests and conservative aggregation tests.
+
+### Phase 2: reference torchrun integration
+
+- Add the local orchestration client.
+- Add the coordinator and quarantine store.
+- Add the `torchrun.handlers` rendezvous plugin.
+- Add standby-only admission, stable slot assignment, and restart-context
+  publication.
+- Use the stock `LocalElasticAgent` membership-restart path.
+
+### Phase 3: framework validation
+
+- Validate native PyTorch and TorchTitan end to end.
+- Add Megatron Core and DeepSpeed after the neutral contract is stable.
+
+### Phase 4: production hardening
+
+- Validate handler and agent behavior across every supported PyTorch minor.
+- Add durable coordinator failover and scheduler integration.
+- Exercise repeated replacement generations and bounded shutdown failures.
+
+## Open Questions
+
+Recommended defaults for the first prototype:
+
+- pre-launch standby agents in the same allocation;
+- require stable logical slots and exact rank-range inheritance;
+- quarantine the whole node when one full-node torchrun local worker group is
+  the scheduling unit;
+- prefer healthy peer or durable verified copies over a suspect node;
+- keep framework durable checkpoint IDs opaque;
+- use a separate replacement-generation budget; and
+- use the existing rendezvous plugin and stock agent before considering any
+  torchrun change.
+
+1. **Coordinator placement:** should the first prototype use a namespaced c10d
+   rendezvous store, etcd, or a separate manager service?
+2. **Stable slots:** can all target deployments guarantee that a standby can
+   inherit the failed node's exact rank range and local device count?
+3. **Quarantine scope:** when SCOUT identifies one GPU but torchrun launches a
+   homogeneous full-node local worker group, should policy always quarantine
+   the whole node in version 1?
+4. **Verified copies on suspect hardware:** may a previously certified
+   checkpoint be transferred from a now-suspect node when its checksum passes,
+   or must recovery use only a healthy peer/durable copy?
+5. **Replacement budget:** should repeated replacement generations be bounded
+   separately by incident type, node, and whole job?
+6. **Standby lifecycle:** are standby agents pre-launched in the same scheduler
+   allocation, or must the coordinator request a new host on demand?
+7. **Durable checkpoint handoff:** should `checkpoint_id` remain framework
+   opaque, or should the restart manifest expose a common durable-checkpoint
+   URI contract?
+8. **Compatibility fallback:** if a supported PyTorch minor changes the stock
+   membership-restart behavior, should that minor be excluded or supported by
+   a version-specific out-of-tree `SimpleElasticAgent` launcher?
+
+## References
+
+- [GEMINI operational contract](gemini.md)
+- [SCOUT operational contract](scout.md)
+- [LM Resiliency API guide](api.md)
+- [Compatibility policy](compatibility.md)
+- [PyTorch torchrun elastic launch documentation](https://docs.pytorch.org/docs/2.13/elastic/run.html)
+- [PyTorch elastic agent documentation](https://docs.pytorch.org/docs/2.13/elastic/agent.html)
+- [PyTorch rendezvous documentation](https://docs.pytorch.org/docs/2.13/elastic/rendezvous.html)
