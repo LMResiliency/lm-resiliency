@@ -37,4 +37,8 @@ def test_deployment_contracts_cover_every_destination():
     assert "group: release-docs-${{ github.ref_name }}" in release
     assert "for attempt in $(seq 1 5)" in development
     assert "for attempt in $(seq 1 5)" in release
+    assert "git reset --hard origin/gh-pages" in release
+    assert "git rebase origin/gh-pages" not in release
+    assert "retention-days: 30" in release
+    assert "release_flags+=(--prerelease)" in release
     assert '"torch==2.13.0"' in release
