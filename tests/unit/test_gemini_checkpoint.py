@@ -52,6 +52,20 @@ def test_checkpoint_status_store_is_rank_scoped(tmp_dir):
     assert rank_one.path.name == "GEMINI_CHECKPOINT_STATUS.rank-1"
 
 
+def test_checkpoint_status_rejects_another_run_or_topology(tmp_dir):
+    writer = CheckpointStatusStore(tmp_dir, rank=0, run_id="run-a", topology_id="topology-a")
+    writer.write(CheckpointStatus(candidate_step=10))
+
+    assert (
+        CheckpointStatusStore(tmp_dir, rank=0, run_id="run-b", topology_id="topology-a").read()
+        == CheckpointStatus()
+    )
+    assert (
+        CheckpointStatusStore(tmp_dir, rank=0, run_id="run-a", topology_id="topology-b").read()
+        == CheckpointStatus()
+    )
+
+
 def test_rank_scoped_status_store_reads_legacy_status(tmp_dir):
     legacy = CheckpointStatusStore(tmp_dir)
     status = CheckpointStatus(candidate_step=10, recovery_verified_step=5)
@@ -287,8 +301,20 @@ def test_copy_to_writes_status_for_local_and_peer_shards(mock_dist, tmp_dir):
     with tempfile.TemporaryDirectory() as destination:
         mgr.copy_to(destination)
 
-        assert CheckpointStatusStore(destination, rank=0).read() == status
-        assert CheckpointStatusStore(destination, rank=7).read() == status
+        namespaced = mgr._disk.namespace_folder(destination, mgr._run_id, mgr._topology_id)
+
+        assert (
+            CheckpointStatusStore(
+                namespaced, rank=0, run_id=mgr._run_id, topology_id=mgr._topology_id
+            ).read()
+            == status
+        )
+        assert (
+            CheckpointStatusStore(
+                namespaced, rank=7, run_id=mgr._run_id, topology_id=mgr._topology_id
+            ).read()
+            == status
+        )
 
     mgr.close()
 

@@ -24,6 +24,10 @@ class InMemoryCkptConfig:
             for a same-node restart. GEMINI is single-tier by design: durable /
             global checkpointing is the pre-training framework's responsibility,
             reached via the caller's load_fallback when GEMINI has nothing to load.
+        run_id: Stable identity of the training run allowed to recover node-local
+            checkpoints. Reuse the same non-empty value for an intentional resume.
+            When omitted, GEMINI uses the launcher's stable run id when available,
+            otherwise creates and coordinates a fresh id for this manager group.
         verify_integrity: If True, store a per-shard CRC-32 on every disk write and
             verify it on load. Guards at-rest / in-flight byte corruption (DRAM
             rot, transfer flips, NVMe errors) — the failure mode layer replay
@@ -38,6 +42,7 @@ class InMemoryCkptConfig:
     replication_chunk_size: int = 16 * 1024 * 1024  # 16 MiB
     disk_flush_interval: int = 100
     disk_folder: str = "./checkpoints"
+    run_id: str | None = None
     verify_integrity: bool = False
     skip_replication_if_hsdp: bool = True
     pin_memory: bool = True

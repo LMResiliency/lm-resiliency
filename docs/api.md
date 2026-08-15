@@ -259,6 +259,7 @@ resiliency = enable_resiliency(
     checkpoint=InMemoryCkptConfig(
         replication_jump=8,
         disk_folder="/local_nvme/gemini",
+        run_id="training-run-2026-08-15",
         verify_integrity=True,
     ),
     replay=ReplayHarnessConfig(

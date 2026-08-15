@@ -16,6 +16,7 @@ import torch.multiprocessing as mp
 
 from lm_resiliency.checkpointing._disk_format import CheckpointFormatError
 from lm_resiliency.checkpointing.buffer import SlotState
+from lm_resiliency.checkpointing.config import InMemoryCkptConfig
 from lm_resiliency.checkpointing.disk import DiskSerializer
 from lm_resiliency.checkpointing.manager import InMemoryCheckpointManager
 from lm_resiliency.checkpointing.state_dict import FlatStateDictMetadata, flatten
@@ -161,6 +162,39 @@ def _gloo_recovery_worker(
         dist.destroy_process_group()
 
 
+def _gloo_identity_worker(
+    rank: int,
+    world_size: int,
+    rendezvous: str,
+    checkpoint_dir: str,
+    result_dir: str,
+) -> None:
+    dist.init_process_group(
+        "gloo",
+        init_method=f"file://{rendezvous}",
+        rank=rank,
+        world_size=world_size,
+        timeout=dt.timedelta(seconds=30),
+    )
+    try:
+        rejected = False
+        try:
+            InMemoryCheckpointManager(
+                InMemoryCkptConfig(
+                    disk_folder=checkpoint_dir,
+                    run_id=f"different-run-{rank}",
+                ),
+                parallelism_info=SimpleNamespace(has_natural_replicas=True),
+            )
+        except RuntimeError as error:
+            rejected = "disagree on run_id or topology" in str(error)
+        Path(result_dir, f"identity-rank-{rank}.json").write_text(
+            json.dumps({"rejected": rejected})
+        )
+    finally:
+        dist.destroy_process_group()
+
+
 @pytest.mark.skipif(not dist.is_gloo_available(), reason="PyTorch Gloo backend is unavailable")
 def test_cpu_gloo_recovery_consensus(tmp_path):
     world_size = 2
@@ -183,3 +217,25 @@ def test_cpu_gloo_recovery_consensus(tmp_path):
         {"memory_step": -1, "disk_rejected": True},
         {"memory_step": -1, "disk_rejected": True},
     ]
+
+
+@pytest.mark.skipif(not dist.is_gloo_available(), reason="PyTorch Gloo backend is unavailable")
+def test_cpu_gloo_requires_exact_run_identity_agreement(tmp_path):
+    world_size = 2
+    rendezvous = tmp_path / "identity-rendezvous"
+    checkpoint_dir = tmp_path / "identity-checkpoints"
+    result_dir = tmp_path / "identity-results"
+    result_dir.mkdir()
+
+    mp.spawn(
+        _gloo_identity_worker,
+        args=(world_size, str(rendezvous), str(checkpoint_dir), str(result_dir)),
+        nprocs=world_size,
+        join=True,
+    )
+
+    results = [
+        json.loads((result_dir / f"identity-rank-{rank}.json").read_text())
+        for rank in range(world_size)
+    ]
+    assert results == [{"rejected": True}, {"rejected": True}]

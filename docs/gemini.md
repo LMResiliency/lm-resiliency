@@ -80,6 +80,7 @@ config = InMemoryCkptConfig(
     replication_chunk_size=16 * 1024 * 1024,
     disk_flush_interval=100,
     disk_folder="./checkpoints",
+    run_id="training-run-2026-08-15",
     verify_integrity=False,
     skip_replication_if_hsdp=True,
     pin_memory=True,
@@ -93,11 +94,18 @@ config = InMemoryCkptConfig(
 | `replication_chunk_size` | Bytes per replication send |
 | `disk_flush_interval` | Node-local flush cadence; `0` disables periodic flush |
 | `disk_folder` | Node-local checkpoint directory |
+| `run_id` | Stable identity required to resume this run's node-local files |
 | `verify_integrity` | Store and verify CRC-32 for serialized shards |
 | `skip_replication_if_hsdp` | Use natural HSDP replicas instead of explicit peer transfer |
 | `pin_memory` | Allocate page-locked host buffers for asynchronous copies |
 
 The unified `enable_resiliency(..., interval=N)` call overrides the component interval.
+
+Set `run_id` to the same non-empty value on every rank and reuse it only for an
+intentional resume. When it is omitted, GEMINI uses `LM_RESILIENCY_RUN_ID` or
+torchrun's `TORCHELASTIC_RUN_ID`; without either launcher identity it coordinates
+a fresh ID for the current manager group. A newly constructed job therefore does
+not inherit files from an unrelated job that happened to reuse `disk_folder`.
 
 ## Checkpoint Validation
 
@@ -156,9 +164,21 @@ If newer status cannot be established, recovery selects the common verified step
 With `verify_integrity=True`, it stores a CRC-32 for each shard and treats a checksum failure as an unavailable shard.
 Checksums detect stored-byte corruption; they cannot prove that the source GPU state was numerically correct.
 
-Node-local files use checkpoint format version 2. Tensors are loaded through PyTorch's `weights_only=True` path, while reconstruction metadata is represented by a schema-constrained JSON document. The metadata schema supports the built-in containers and scalar types used by framework state, NumPy RNG values, and dense CPU tensors such as PyTorch RNG state. GEMINI validates the payload fields, metadata types, tensor count, shapes, dtypes, reconstruction paths, and optional CRC values before recovery can apply state. Unsupported caller-owned metadata fails the checkpoint write instead of falling back to unrestricted pickle deserialization.
+Node-local files use checkpoint format version 3. Files and status sidecars live
+under an opaque run/topology namespace. Every shard also records the exact run
+ID, topology fingerprint, owner rank, and step; the loader checks all four before
+recovery can apply state. The topology fingerprint covers world size, checkpoint
+group ranks, and the replication assignment, and all checkpoint ranks agree on
+the run/topology contract collectively during manager construction.
+
+Tensors are loaded through PyTorch's `weights_only=True` path, while reconstruction metadata is represented by a schema-constrained JSON document. The metadata schema supports the built-in containers and scalar types used by framework state, NumPy RNG values, and dense CPU tensors such as PyTorch RNG state. GEMINI validates the payload fields, metadata types, tensor count, shapes, dtypes, reconstruction paths, identity, and optional CRC values before recovery can apply state. Unsupported caller-owned metadata fails the checkpoint write instead of falling back to unrestricted pickle deserialization.
 
 The original `0.1.0` node-local format used unrestricted pickle metadata and is intentionally not loadable by newer versions. Complete an in-progress `0.1.0` recovery before upgrading, or use the framework-owned durable checkpoint as the upgrade boundary. Node-local GEMINI files remain a fast restart tier rather than a cross-version interchange format.
+
+Version 2 node-local files did not bind state to a run or topology and are not
+silently assigned to a version 3 run. Resume them with the release that wrote
+them and publish a framework-owned durable checkpoint, then upgrade and begin a
+version 3 run from that durable boundary.
 
 Safe deserialization prevents a replaced file from invoking arbitrary pickle globals, but it does not establish who produced the tensor values. Treat the checkpoint directory as training-state storage: restrict filesystem ownership and write permissions to the training job, avoid following untrusted symlinks or copying files from untrusted sources, and use framework-owned durable checkpoints when stronger provenance is required. CRC-32 detects accidental byte corruption only; an attacker able to replace a shard can also replace its checksum.
 
@@ -244,6 +264,6 @@ The table above remains historical evidence for its stated A100 workload and is 
 - `replication_jump` assumes a compatible rank placement and must be validated for the deployment.
 - Integrity checks detect corruption after capture, not corruption already present in source state.
 - Safe weights-only loading prevents arbitrary pickle execution but does not authenticate tensor values or their source.
-- Node-local checkpoint format version 2 does not load the unrestricted-pickle format written by `0.1.0`.
+- Node-local checkpoint format version 3 rejects legacy files without run/topology identity.
 - Signal-triggered flush requires a catchable signal and sufficient termination grace time.
 - Manager policy, relaunch, placement, and physical replacement remain external.
