@@ -2011,9 +2011,15 @@ class RestartContext(_WireRecord):
         environment: Mapping[str, str],
         *,
         committed_plan: RestartPlan,
+        now_unix_ms: int,
     ) -> None:
         if not isinstance(committed_plan, RestartPlan):
             raise ProtocolValidationError("committed_plan: expected RestartPlan")
+        _integer(now_unix_ms, "now_unix_ms", minimum=1)
+        if committed_plan.restart_deadline_unix_ms <= now_unix_ms:
+            raise ProtocolValidationError(
+                "RestartPlan.restart_deadline_unix_ms: deadline has elapsed"
+            )
         expected_context = RestartContext.from_plan(committed_plan, self.node_id)
         if self != expected_context:
             raise ProtocolValidationError(
@@ -2909,6 +2915,10 @@ def validate_restart_plan(
         if not eligible_copies:
             raise ProtocolValidationError(
                 f"RecoveryManifest.rank_copies[{rank}]: no complete eligible copy"
+            )
+        if len(eligible_copies) != len(entry.copies):
+            raise ProtocolValidationError(
+                f"RecoveryManifest.rank_copies[{rank}]: contains an ineligible copy"
             )
 
 

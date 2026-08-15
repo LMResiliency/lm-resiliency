@@ -577,8 +577,10 @@ Before commit, the coordinator validates:
 - active size, local world size, total world size, and topology digest match the
   committed generation;
 - the checkpoint is complete for every required logical rank;
-- every copy belongs to the selected positive step and selected checkpoint
-  source;
+- every copy included in the committed manifest belongs to the selected
+  positive step and selected checkpoint source; a rank entry with one eligible
+  copy and any additional ineligible copy is rejected rather than left for the
+  loader to choose;
 - every copy exactly matches its referenced inventory event, and the source
   inventory trust satisfies the manifest trust;
 - the checkpoint trust satisfies the selected recovery mode;
@@ -632,6 +634,9 @@ against the currently committed `RestartPlan` for its node. The plan ID,
 successor generation, assignment, topology, recovery mode, checkpoint pin, and
 reason must match exactly. A leftover context from an earlier plan is rejected
 even when stable ranks make every torchrun environment value identical.
+This acceptance check receives trusted current time and rejects the context
+when the committed plan's restart deadline has elapsed. Rendezvous performs
+the same deadline check immediately before exposing the plan.
 
 The context must not contain a newer, less trusted local checkpoint merely
 because it exists on the replacement host.
@@ -986,15 +991,18 @@ class RecoveryManifest(TypedDict):
     rank_copies: list[RankCheckpointCopies]
 ```
 
-The manifest is usable only when every required rank has at least one eligible
-copy for the manifest's exact positive step and the plan's selected source.
-GEMINI plans use owner or peer copies; durable plans use durable copies. Only
-shared or remote storage is independent of holder-node availability. The
-manifest's trust label is not self-authenticating: every selected copy must
-match its referenced inventory record, and `RECOVERY_VERIFIED` manifests may
-use only recovery-verified inventory evidence. Durable recovery always requires
-a recovery-verified manifest and recovery-verified inventory, even if the
-originating intent allowed latest recovery.
+The manifest is usable only when every required rank has at least one copy and
+every included copy is eligible for the manifest's exact positive step and the
+plan's selected source. The coordinator must omit rejected alternatives before
+commit; an immutable committed manifest cannot advertise an incomplete,
+wrong-source, or unproven fallback. GEMINI plans use owner or peer copies;
+durable plans use durable copies. Only shared or remote storage is independent
+of holder-node availability. The manifest's trust label is not
+self-authenticating: every selected copy must match its referenced inventory
+record, and `RECOVERY_VERIFIED` manifests may use only recovery-verified
+inventory evidence. Durable recovery always requires a recovery-verified
+manifest and recovery-verified inventory, even if the originating intent
+allowed latest recovery.
 
 An in-memory or node-local copy is selectable only when its holder remains in
 the next assignment. Process-memory copies are never selectable because stock

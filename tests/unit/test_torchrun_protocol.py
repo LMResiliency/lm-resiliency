@@ -641,6 +641,43 @@ def test_restart_plan_requires_exact_inventory_copy_match():
         )
 
 
+def test_restart_plan_rejects_ineligible_copy_alongside_eligible_copy():
+    base_manifest = _manifest()
+    inventory = _inventory_event(base_manifest)
+    manifest = replace(
+        base_manifest,
+        rank_copies=tuple(
+            replace(
+                entry,
+                copies=entry.copies
+                + (
+                    replace(
+                        entry.copies[0],
+                        inventory_event_id="inventory-unproven",
+                        location_token="unproven-copy",
+                    ),
+                ),
+            )
+            if entry.owner_global_rank == 0
+            else entry
+            for entry in base_manifest.rank_copies
+        ),
+    )
+
+    with pytest.raises(ProtocolValidationError, match="contains an ineligible copy"):
+        _validate(
+            manifest=manifest,
+            inventory_events=(inventory,),
+            restart_acks=(
+                _ack(
+                    inventory_event_digests={
+                        inventory.event_id: checkpoint_inventory_digest(inventory),
+                    }
+                ),
+            ),
+        )
+
+
 def test_restart_plan_rejects_local_copy_reported_by_another_node():
     with pytest.raises(ProtocolValidationError, match="no complete eligible copy"):
         _validate(
@@ -1425,18 +1462,43 @@ def test_restart_context_validates_worker_environment():
         "TORCHELASTIC_RUN_ID": RUN_ID,
     }
 
-    context.validate_worker_environment(environment, committed_plan=_plan())
+    context.validate_worker_environment(
+        environment,
+        committed_plan=_plan(),
+        now_unix_ms=1_900_000_000_000,
+    )
 
     with pytest.raises(ProtocolValidationError, match="RANK=2"):
         context.validate_worker_environment(
             {**environment, "RANK": "2"},
             committed_plan=_plan(),
+            now_unix_ms=1_900_000_000_000,
         )
 
     with pytest.raises(ProtocolValidationError, match="TORCHELASTIC_RUN_ID"):
         context.validate_worker_environment(
             {**environment, "TORCHELASTIC_RUN_ID": "stale-run"},
             committed_plan=_plan(),
+            now_unix_ms=1_900_000_000_000,
+        )
+
+
+def test_restart_context_rejects_expired_committed_plan():
+    plan = _plan()
+    context = RestartContext.from_plan(plan, "node-spare")
+    environment = {
+        "RANK": "3",
+        "LOCAL_RANK": "1",
+        "LOCAL_WORLD_SIZE": "2",
+        "WORLD_SIZE": "4",
+        "TORCHELASTIC_RUN_ID": RUN_ID,
+    }
+
+    with pytest.raises(ProtocolValidationError, match="deadline has elapsed"):
+        context.validate_worker_environment(
+            environment,
+            committed_plan=plan,
+            now_unix_ms=plan.restart_deadline_unix_ms,
         )
 
 
@@ -1461,6 +1523,7 @@ def test_restart_context_must_match_current_committed_plan():
         stale_context.validate_worker_environment(
             environment,
             committed_plan=current_plan,
+            now_unix_ms=1_900_000_000_000,
         )
 
 
