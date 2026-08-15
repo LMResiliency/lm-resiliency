@@ -598,6 +598,14 @@ its immutable closure record, first lifecycle head, and durable closed marker.
 It exposes create-once closure/lifecycle writes, a revision-guarded
 current-head update, and an exact immutable-intent condition, but does not
 authenticate a closing lease or mutate the store. A frozen
+`PreparedInitialRestartIntentClosure` wraps those records with the complete
+held closing lease, its authoritative transaction, mutation, value, and
+lifetime sequences, and a bounded store-time commit window. It accepts exact
+opening authority, nonexpired same-lease renewal, and nonoverlapping
+replacement authority while rejecting lease identity or fencing-token reuse
+from the verified generation history. The value remains non-mutating; a later
+preparer authenticates the closing lease against the live store before
+constructing it. A frozen
 `PreparedInitialRestartIntentOpen` descriptor binds the first intent record,
 current-intent head, exact generation revisions, coordinator fencing token,
 canonical run-scoped keys, and lease/intent commit window. It exposes immutable
