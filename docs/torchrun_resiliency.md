@@ -638,6 +638,15 @@ verified generation history. Preparation obtains that history through one
 stable reader traversal rather than rereading the full predecessor chain for
 each generation.
 
+A read-only `RestartIntentOpenStateReader` reconstructs the same
+`CommittedInitialRestartIntentOpen` contract after coordinator failover. It
+stably reads the current-intent head and immutable intent, requires the
+intent's generation to remain current, locates the exact opening authority in
+verified durable coordinator-lease history, and reuses the existing
+prepared/committed validators. Missing records, noncanonical bytes,
+contradictory lifecycle state, deleted heads, and lease provenance absent from
+durable history fail closed. The reader performs no mutation.
+
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be
 absent from the next assignment. Policy may additionally quarantine a removed
