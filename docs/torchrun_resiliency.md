@@ -586,9 +586,12 @@ generation snapshot, and the distinct opening and closing lease provenance.
 Store-global transaction sequences must prove the strict causal order
 `generation snapshot < intent creation < lifecycle closure`, even when all
 three commits share one millisecond and one unchanged coordinator lease. The
-reader returns the lifecycle record with its opaque store revision and
-transaction sequence for future control-plane conditions and never mutates
-control-plane state.
+intent must also precede the referenced generation's successor snapshot when
+one exists, proving it opened while that generation was current. Coordinator
+lease digests and value sequences must advance together so an A-to-B-to-A lease
+value replay cannot authorize closure. The reader returns the lifecycle record
+with its opaque store revision and transaction sequence for future
+control-plane conditions and never mutates control-plane state.
 
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be

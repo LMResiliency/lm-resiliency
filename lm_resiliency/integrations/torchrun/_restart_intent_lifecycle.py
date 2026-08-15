@@ -176,6 +176,15 @@ class RestartIntentLifecycleReader:
             raise RestartIntentLifecycleCorrupt(
                 "closed restart intent predates its generation snapshot"
             )
+        if closed_intent.intent.generation < current_generation:
+            successor = self._generation_reader.get(closed_intent.intent.generation + 1)
+            if (
+                successor is None
+                or opening_provenance.transaction_sequence >= successor.transaction_sequence
+            ):
+                raise RestartIntentLifecycleCorrupt(
+                    "closed restart intent was opened after its generation was superseded"
+                )
         closing_provenance = _guarded_provenance(
             entry,
             guard_key=self.coordinator_lease_key,
@@ -298,10 +307,9 @@ def _validate_provenance_order(
         or closing.guard_committed_at_unix_ms < opening.guard_committed_at_unix_ms
     ):
         raise RestartIntentLifecycleCorrupt("restart-intent closure predates intent opening")
-    if (
-        closing.value_sequence == opening.value_sequence
-        and closing.value_digest != opening.value_digest
-    ):
+    same_value_sequence = closing.value_sequence == opening.value_sequence
+    same_value_digest = closing.value_digest == opening.value_digest
+    if same_value_sequence != same_value_digest:
         raise RestartIntentLifecycleCorrupt("restart-intent lease value lineage is contradictory")
     if closing.mutation_sequence == opening.mutation_sequence and (
         closing.revision != opening.revision

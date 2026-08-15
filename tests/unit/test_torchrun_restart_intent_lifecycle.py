@@ -548,6 +548,75 @@ def test_current_rejects_closure_transaction_before_intent_at_same_time():
         reader.current(current)
 
 
+def test_current_rejects_intent_opened_after_its_generation_was_superseded():
+    clock, store, _, generation_manager, reader, lease, generation_zero = _state()
+    clock.set(1_010)
+    generation_one = generation_manager.commit_successor(
+        lease,
+        generation_zero,
+        _assignment(1, replacement_node_id="node-c"),
+    )
+    record, _, lifecycle = _records(generation_zero, lease, lease)
+    store.compare_set_many_guarded(
+        {
+            reader.intent_key(record.intent.intent_id): ControlStoreWrite(
+                expected_revision=None,
+                value=record.to_json(),
+                require_never_created=True,
+            )
+        },
+        guard_key=reader.coordinator_lease_key,
+        expected_guard_revision=lease.fencing_token,
+        not_before_unix_ms=lease.granted_at_unix_ms,
+        deadline_unix_ms=lease.expires_at_unix_ms,
+    )
+    _commit_lifecycle(store, reader, lease, lifecycle)
+
+    with pytest.raises(RestartIntentLifecycleCorrupt, match="superseded"):
+        reader.current(generation_one)
+
+
+def test_current_rejects_replayed_coordinator_lease_value():
+    clock, store, _, generation_manager, reader, lease, current = _state()
+    record, _, lifecycle = _records(current, lease, lease)
+    _commit_intent(store, generation_manager, reader, current, lease, record)
+    lease_entry = store.get(reader.coordinator_lease_key)
+    assert lease_entry is not None
+    changed = store.compare_set_in_window(
+        reader.coordinator_lease_key,
+        expected_revision=lease_entry.revision,
+        not_before_unix_ms=1_000,
+        deadline_unix_ms=None,
+        value=b"intervening-lease-value",
+    )
+    replayed = store.compare_set_in_window(
+        reader.coordinator_lease_key,
+        expected_revision=changed.revision,
+        not_before_unix_ms=1_000,
+        deadline_unix_ms=None,
+        value=lease_entry.value,
+    )
+    lifecycle = replace(
+        lifecycle,
+        coordinator_fencing_token=replayed.revision,
+    )
+    store.compare_set_many_guarded(
+        {
+            reader.lifecycle_key: ControlStoreWrite(
+                expected_revision=None,
+                value=lifecycle.to_json(),
+            )
+        },
+        guard_key=reader.coordinator_lease_key,
+        expected_guard_revision=replayed.revision,
+        not_before_unix_ms=1_000,
+        deadline_unix_ms=1_100,
+    )
+
+    with pytest.raises(RestartIntentLifecycleCorrupt, match="value lineage"):
+        reader.current(current)
+
+
 def test_current_rejects_closure_guarded_by_an_older_lease_mutation():
     clock = ManualClock()
     store = EntryOverrideStore(clock=clock)
