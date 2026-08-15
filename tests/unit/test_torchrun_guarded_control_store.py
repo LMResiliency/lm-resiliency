@@ -12,6 +12,7 @@ import pytest
 from lm_resiliency.integrations.torchrun._control_store import (
     ControlStoreConflict,
     ControlStoreDeadlineExceeded,
+    ControlStoreHistoryConflict,
     ControlStoreTooEarly,
     ControlStoreWrite,
     InMemoryControlStore,
@@ -86,7 +87,7 @@ def test_guarded_transaction_commits_all_writes_at_one_store_time():
     assert store.get("run/generation-head") == committed["run/generation-head"]
     assert store.get("run/generations/0") == committed["run/generations/0"]
     with pytest.raises(TypeError):
-        committed["run/other"] = committed["run/generation-head"]  # type: ignore[index]
+        committed["run/other"] = committed["run/generation-head"]
 
 
 def test_guarded_transaction_atomically_updates_head_and_creates_successor():
@@ -219,6 +220,64 @@ def test_guarded_transaction_rejects_target_conflict_without_partial_writes():
     assert store.get("run/generations/0") is None
 
 
+def test_guarded_transaction_can_require_target_to_have_no_history():
+    store = InMemoryControlStore(clock=ManualClock())
+    guard = _guard(store)
+
+    committed = store.compare_set_many_guarded(
+        {
+            "run/quarantine/node-a": ControlStoreWrite(
+                expected_revision=None,
+                value=b"quarantined",
+                require_never_created=True,
+            ),
+        },
+        guard_key="run/coordinator-lease",
+        expected_guard_revision=guard.revision,
+        not_before_unix_ms=1_000,
+        deadline_unix_ms=1_100,
+    )
+
+    assert store.get("run/quarantine/node-a") == committed["run/quarantine/node-a"]
+
+
+def test_guarded_transaction_rejects_deleted_create_once_target_without_partial_writes():
+    store = InMemoryControlStore()
+    guard = _guard(store)
+    quarantine = store.compare_set(
+        "run/quarantine/node-a",
+        expected_revision=None,
+        value=b"old-quarantine",
+    )
+    store.compare_delete(
+        "run/quarantine/node-a",
+        expected_revision=quarantine.revision,
+    )
+
+    with pytest.raises(ControlStoreHistoryConflict) as error:
+        store.compare_set_many_guarded(
+            {
+                "run/generation-head": ControlStoreWrite(
+                    expected_revision=None,
+                    value=b"generation-1",
+                ),
+                "run/quarantine/node-a": ControlStoreWrite(
+                    expected_revision=None,
+                    value=b"new-quarantine",
+                    require_never_created=True,
+                ),
+            },
+            guard_key="run/coordinator-lease",
+            expected_guard_revision=guard.revision,
+            not_before_unix_ms=1,
+            deadline_unix_ms=2,
+        )
+
+    assert error.value.key == "run/quarantine/node-a"
+    assert store.get("run/generation-head") is None
+    assert store.get("run/quarantine/node-a") is None
+
+
 @pytest.mark.parametrize(
     ("now_unix_ms", "error"),
     [
@@ -315,4 +374,19 @@ def test_control_store_write_rejects_invalid_values(expected_revision, value, er
         ControlStoreWrite(
             expected_revision=expected_revision,
             value=value,
+        )
+
+
+def test_control_store_write_restricts_never_created_condition():
+    with pytest.raises(ValueError, match="create-if-absent"):
+        ControlStoreWrite(
+            expected_revision=1,
+            value=b"value",
+            require_never_created=True,
+        )
+    with pytest.raises(TypeError, match="bool"):
+        ControlStoreWrite(
+            expected_revision=None,
+            value=b"value",
+            require_never_created=1,
         )
