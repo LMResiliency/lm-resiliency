@@ -13,6 +13,8 @@ from lm_resiliency.integrations.torchrun._control_store import (
 )
 from lm_resiliency.integrations.torchrun._coordinator_lease import (
     CoordinatorLeaseManager,
+    CoordinatorLeaseRecord,
+    HeldCoordinatorLease,
 )
 from lm_resiliency.integrations.torchrun._generation_state import GenerationStateManager
 from lm_resiliency.integrations.torchrun._protocol import (
@@ -122,6 +124,12 @@ def test_prepare_initial_open_authenticates_and_builds_descriptor_without_writes
     )
     assert prepared.current == current
     assert prepared.lease == lease
+    assert prepared.coordinator_lease_transaction_sequence == 1
+    assert prepared.coordinator_lease_mutation_sequence == 1
+    assert prepared.coordinator_lease_value_sequence == 1
+    assert prepared.coordinator_lease_lifetime_sequence == 1
+    assert prepared.generation_lease_id_history == (lease.record.lease_id,)
+    assert prepared.generation_fencing_token_history == (lease.fencing_token,)
     assert prepared.not_before_unix_ms == 1_000
     assert prepared.deadline_unix_ms == 1_050
     assert prepared.never_created_conditions == frozenset({preparer.lifecycle_head_key})
@@ -213,6 +221,116 @@ def test_prepare_initial_open_rejects_stale_or_fabricated_lease():
         preparer.prepare_initial_open(fabricated, current, _intent())
 
     assert store.get(preparer.intent_head_key) is None
+
+
+def test_prepare_initial_open_rejects_overlapping_replacement_lease():
+    clock, store, _, _, preparer, lease, current = _state()
+    clock.set(1_010)
+    replacement_record = CoordinatorLeaseRecord(
+        run_id=RUN_ID,
+        coordinator_id="coordinator-b",
+        lease_id="lease-b",
+        lease_duration_ms=100,
+    )
+    replacement_entry = store.compare_set_in_window(
+        preparer.coordinator_lease_key,
+        expected_revision=lease.fencing_token,
+        not_before_unix_ms=1_010,
+        deadline_unix_ms=None,
+        value=replacement_record.to_json(),
+    )
+    replacement = HeldCoordinatorLease(
+        record=replacement_record,
+        fencing_token=replacement_entry.revision,
+        granted_at_unix_ms=1_010,
+    )
+
+    with pytest.raises(RestartIntentOpenPreparationCorrupt, match="lineage"):
+        preparer.prepare_initial_open(replacement, current, _intent())
+
+    assert store.get(preparer.intent_head_key) is None
+
+
+def test_prepare_initial_open_accepts_nonoverlapping_replacement_lease():
+    clock, store, _, _, preparer, _, current = _state()
+    replacement_manager = CoordinatorLeaseManager(
+        store,
+        run_id=RUN_ID,
+        coordinator_id="coordinator-b",
+        lease_duration_ms=100,
+        clock=clock,
+    )
+    clock.set(1_100)
+    replacement = replacement_manager.acquire()
+
+    prepared = preparer.prepare_initial_open(
+        replacement,
+        current,
+        _intent(prepare_deadline_unix_ms=1_200),
+    )
+
+    assert prepared.coordinator_lease_transaction_sequence > current.snapshot.transaction_sequence
+    assert prepared.coordinator_lease_mutation_sequence == 2
+    assert prepared.coordinator_lease_value_sequence == 2
+    assert prepared.coordinator_lease_lifetime_sequence == 1
+
+
+@pytest.mark.parametrize("reused_identity", ["lease_id", "fencing_token"])
+def test_prepare_initial_open_rejects_identity_reused_from_generation_history(
+    reused_identity,
+):
+    clock, store, _, generation_manager, preparer, lease_a, generation_zero = _state()
+    replacement_manager = CoordinatorLeaseManager(
+        store,
+        run_id=RUN_ID,
+        coordinator_id="coordinator-b",
+        lease_duration_ms=100,
+        clock=clock,
+    )
+    clock.set(1_100)
+    lease_b = replacement_manager.acquire()
+    generation_one = generation_manager.commit_successor(
+        lease_b,
+        generation_zero,
+        _assignment(generation=1),
+    )
+    clock.set(1_200)
+    candidate_record = CoordinatorLeaseRecord(
+        run_id=RUN_ID,
+        coordinator_id="coordinator-c",
+        lease_id=(lease_a.record.lease_id if reused_identity == "lease_id" else "lease-c"),
+        lease_duration_ms=100,
+    )
+    candidate_entry = store.compare_set_in_window(
+        preparer.coordinator_lease_key,
+        expected_revision=lease_b.fencing_token,
+        not_before_unix_ms=1_200,
+        deadline_unix_ms=None,
+        value=candidate_record.to_json(),
+    )
+    candidate_token = (
+        lease_a.fencing_token if reused_identity == "fencing_token" else candidate_entry.revision
+    )
+    if candidate_token != candidate_entry.revision:
+        store._entries[preparer.coordinator_lease_key] = replace(
+            candidate_entry,
+            revision=candidate_token,
+        )
+    candidate = HeldCoordinatorLease(
+        record=candidate_record,
+        fencing_token=candidate_token,
+        granted_at_unix_ms=1_200,
+    )
+
+    with pytest.raises(RestartIntentOpenPreparationCorrupt, match="lineage"):
+        preparer.prepare_initial_open(
+            candidate,
+            generation_one,
+            _intent(
+                generation=1,
+                prepare_deadline_unix_ms=1_300,
+            ),
+        )
 
 
 def test_prepare_initial_open_rejects_malformed_or_untimed_lease():

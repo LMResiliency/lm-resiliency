@@ -123,8 +123,42 @@ def _prepared() -> PreparedInitialRestartIntentOpen:
         coordinator_lease_key=f"{RUN_PREFIX}/coordinator-lease",
         generation_head_key=f"{RUN_PREFIX}/generation-head",
         generation_snapshot_key=f"{RUN_PREFIX}/generations/0",
+        coordinator_lease_transaction_sequence=1,
+        coordinator_lease_mutation_sequence=1,
+        coordinator_lease_value_sequence=1,
+        coordinator_lease_lifetime_sequence=1,
+        generation_lease_id_history=("lease-a",),
+        generation_fencing_token_history=(7,),
         not_before_unix_ms=1_000,
         deadline_unix_ms=1_050,
+    )
+
+
+def _with_renewed_lease(
+    prepared: PreparedInitialRestartIntentOpen,
+    *,
+    granted_at_unix_ms: int,
+    transaction_sequence: int,
+    mutation_sequence: int,
+    current: CurrentGeneration | None = None,
+) -> PreparedInitialRestartIntentOpen:
+    lease = replace(
+        prepared.lease,
+        fencing_token=8,
+        granted_at_unix_ms=granted_at_unix_ms,
+    )
+    record = replace(
+        prepared.record,
+        coordinator_fencing_token=lease.fencing_token,
+    )
+    return replace(
+        prepared,
+        record=record,
+        head=replace(prepared.head, intent_digest=record.digest),
+        current=current or prepared.current,
+        lease=lease,
+        coordinator_lease_transaction_sequence=transaction_sequence,
+        coordinator_lease_mutation_sequence=mutation_sequence,
     )
 
 
@@ -166,6 +200,14 @@ def test_prepared_initial_open_is_immutable():
         {"generation_head_key": "other"},
         {"generation_snapshot_key": "other"},
         {"lease": replace(_prepared().lease, granted_at_unix_ms=1_001)},
+        {"coordinator_lease_transaction_sequence": 4},
+        {"coordinator_lease_mutation_sequence": 2},
+        {"coordinator_lease_value_sequence": 2},
+        {"coordinator_lease_lifetime_sequence": 2},
+        {"generation_lease_id_history": ()},
+        {"generation_fencing_token_history": ()},
+        {"generation_lease_id_history": ("",)},
+        {"generation_fencing_token_history": (False,)},
         {"not_before_unix_ms": 999},
         {"deadline_unix_ms": 1_051},
     ],
@@ -234,9 +276,45 @@ def test_prepared_initial_open_binds_complete_held_lease():
         replace(prepared, lease=longer_lease)
 
 
+def test_prepared_initial_open_bounds_lease_mutations_by_transaction_gap():
+    prepared = _prepared()
+
+    with pytest.raises(ValueError, match="sequence deltas"):
+        _with_renewed_lease(
+            prepared,
+            granted_at_unix_ms=1_001,
+            transaction_sequence=5,
+            mutation_sequence=3,
+        )
+
+
+def test_prepared_initial_open_rejects_lease_grant_before_generation_commit():
+    prepared = _prepared()
+    current = replace(
+        prepared.current,
+        snapshot=replace(
+            prepared.current.snapshot,
+            committed_at_unix_ms=1_010,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="grant predates"):
+        _with_renewed_lease(
+            prepared,
+            granted_at_unix_ms=1_005,
+            transaction_sequence=5,
+            mutation_sequence=2,
+            current=current,
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
+        ("coordinator_lease_transaction_sequence", 0),
+        ("coordinator_lease_mutation_sequence", 0),
+        ("coordinator_lease_value_sequence", 0),
+        ("coordinator_lease_lifetime_sequence", 0),
         ("not_before_unix_ms", 0),
         ("deadline_unix_ms", 0),
     ],

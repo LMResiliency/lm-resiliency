@@ -77,14 +77,22 @@ class GenerationStateReader:
         return f"{self._run_prefix}/generations/{normalized_generation}"
 
     def current(self) -> CurrentGeneration | None:
+        result = self.current_with_history()
+        return None if result is None else result[0]
+
+    def current_with_history(
+        self,
+    ) -> tuple[CurrentGeneration, tuple[StoredGenerationSnapshot, ...]] | None:
+        """Return the stable current generation and its verified history."""
+
         generation_zero_key = self.snapshot_key(0)
         for _ in range(_MAX_READ_ATTEMPTS):
             result = self._read_current_history()
             if result is not None:
-                current, _ = result
+                current, history = result
                 if self._head_changed_while_checking_successor(current):
                     continue
-                return current
+                return current, tuple(history[generation] for generation in range(len(history)))
             generation_zero = self._store.get(generation_zero_key)
             observed_head = self._store.get(self._head_key)
             if observed_head is not None:

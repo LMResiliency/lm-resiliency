@@ -6,7 +6,10 @@ import hashlib
 import threading
 from collections.abc import Callable
 
-from lm_resiliency.integrations.torchrun._control_store import ControlStore
+from lm_resiliency.integrations.torchrun._control_store import (
+    ControlStore,
+    ControlStoreEntry,
+)
 from lm_resiliency.integrations.torchrun._coordinator_lease import (
     CoordinatorLeaseRecord,
     HeldCoordinatorLease,
@@ -14,6 +17,7 @@ from lm_resiliency.integrations.torchrun._coordinator_lease import (
 from lm_resiliency.integrations.torchrun._generation_reader import (
     CurrentGeneration,
     GenerationStateReader,
+    StoredGenerationSnapshot,
 )
 from lm_resiliency.integrations.torchrun._protocol import RestartIntent
 from lm_resiliency.integrations.torchrun._restart_intent_open_records import (
@@ -101,8 +105,8 @@ class RestartIntentOpenPreparer:
         current: CurrentGeneration,
         intent: RestartIntent,
     ) -> PreparedInitialRestartIntentOpen:
-        self._validate_lease(lease)
-        self._validate_current(current)
+        lease_entry = self._validate_lease(lease)
+        generation_history = self._validate_current(current)
         self._validate_intent(intent, current)
         self._require_never_opened()
         now_unix_ms = self._now_unix_ms()
@@ -131,30 +135,45 @@ class RestartIntentOpenPreparer:
             coordinator_lease_duration_ms=lease.record.lease_duration_ms,
             coordinator_fencing_token=lease.fencing_token,
         )
-        return PreparedInitialRestartIntentOpen(
-            record=record,
-            head=RestartIntentHeadRecord(
-                run_id=self._run_id,
-                generation=intent.generation,
-                intent_id=intent.intent_id,
-                intent_digest=record.digest,
-            ),
-            current=current,
-            lease=lease,
-            intent_key=self.intent_key(intent.intent_id),
-            intent_head_key=self._intent_head_key,
-            lifecycle_head_key=self._lifecycle_head_key,
-            coordinator_lease_key=self.coordinator_lease_key,
-            generation_head_key=self.generation_head_key,
-            generation_snapshot_key=self._generation_reader.snapshot_key(intent.generation),
-            not_before_unix_ms=not_before_unix_ms,
-            deadline_unix_ms=min(
-                lease.expires_at_unix_ms,
-                intent.prepare_deadline_unix_ms,
-            ),
-        )
+        try:
+            return PreparedInitialRestartIntentOpen(
+                record=record,
+                head=RestartIntentHeadRecord(
+                    run_id=self._run_id,
+                    generation=intent.generation,
+                    intent_id=intent.intent_id,
+                    intent_digest=record.digest,
+                ),
+                current=current,
+                lease=lease,
+                intent_key=self.intent_key(intent.intent_id),
+                intent_head_key=self._intent_head_key,
+                lifecycle_head_key=self._lifecycle_head_key,
+                coordinator_lease_key=self.coordinator_lease_key,
+                generation_head_key=self.generation_head_key,
+                generation_snapshot_key=self._generation_reader.snapshot_key(intent.generation),
+                coordinator_lease_transaction_sequence=lease_entry.transaction_sequence,
+                coordinator_lease_mutation_sequence=lease_entry.mutation_sequence,
+                coordinator_lease_value_sequence=lease_entry.value_sequence,
+                coordinator_lease_lifetime_sequence=lease_entry.lifetime_sequence,
+                generation_lease_id_history=tuple(
+                    snapshot.record.lease_id for snapshot in generation_history
+                ),
+                generation_fencing_token_history=tuple(
+                    snapshot.record.coordinator_fencing_token for snapshot in generation_history
+                ),
+                not_before_unix_ms=not_before_unix_ms,
+                deadline_unix_ms=min(
+                    lease.expires_at_unix_ms,
+                    intent.prepare_deadline_unix_ms,
+                ),
+            )
+        except ValueError as error:
+            raise RestartIntentOpenPreparationCorrupt(
+                "coordinator lease lineage contradicts the current generation"
+            ) from error
 
-    def _validate_lease(self, lease: HeldCoordinatorLease) -> None:
+    def _validate_lease(self, lease: HeldCoordinatorLease) -> ControlStoreEntry:
         if not isinstance(lease, HeldCoordinatorLease):
             raise TypeError("lease must be HeldCoordinatorLease")
         if lease.record.run_id != self._run_id:
@@ -176,14 +195,20 @@ class RestartIntentOpenPreparer:
             raise RestartIntentOpenPreparationLeaseLost(
                 "coordinator lease handle does not match persisted ownership"
             )
+        return entry
 
-    def _validate_current(self, current: CurrentGeneration) -> None:
+    def _validate_current(
+        self,
+        current: CurrentGeneration,
+    ) -> tuple[StoredGenerationSnapshot, ...]:
         if not isinstance(current, CurrentGeneration):
             raise TypeError("current must be CurrentGeneration")
-        if self._generation_reader.current() != current:
+        observed = self._generation_reader.current_with_history()
+        if observed is None or observed[0] != current:
             raise RestartIntentOpenPreparationConflict(
                 "current generation does not match the committed generation head"
             )
+        return observed[1]
 
     def _validate_intent(
         self,

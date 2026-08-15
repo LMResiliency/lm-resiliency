@@ -32,6 +32,12 @@ class PreparedInitialRestartIntentOpen:
     coordinator_lease_key: str
     generation_head_key: str
     generation_snapshot_key: str
+    coordinator_lease_transaction_sequence: int
+    coordinator_lease_mutation_sequence: int
+    coordinator_lease_value_sequence: int
+    coordinator_lease_lifetime_sequence: int
+    generation_lease_id_history: tuple[str, ...]
+    generation_fencing_token_history: tuple[int, ...]
     not_before_unix_ms: int
     deadline_unix_ms: int
 
@@ -102,11 +108,63 @@ class PreparedInitialRestartIntentOpen:
                 "generation_snapshot_committed_at_unix_ms",
                 self.current.snapshot.committed_at_unix_ms,
             ),
+            (
+                "coordinator_lease_transaction_sequence",
+                self.coordinator_lease_transaction_sequence,
+            ),
+            (
+                "coordinator_lease_mutation_sequence",
+                self.coordinator_lease_mutation_sequence,
+            ),
+            (
+                "coordinator_lease_value_sequence",
+                self.coordinator_lease_value_sequence,
+            ),
+            (
+                "coordinator_lease_lifetime_sequence",
+                self.coordinator_lease_lifetime_sequence,
+            ),
             ("coordinator_lease_granted_at_unix_ms", self.lease.granted_at_unix_ms),
             ("not_before_unix_ms", self.not_before_unix_ms),
             ("deadline_unix_ms", self.deadline_unix_ms),
         ):
             _positive_integer(integer_value, f"PreparedInitialRestartIntentOpen.{path}")
+        generation = self.current.snapshot.record.assignment.generation
+        if len(self.generation_lease_id_history) != generation + 1:
+            raise ValueError(
+                "PreparedInitialRestartIntentOpen lease-ID history does not cover its generation"
+            )
+        if len(self.generation_fencing_token_history) != generation + 1:
+            raise ValueError(
+                "PreparedInitialRestartIntentOpen fencing-token history does not cover its generation"
+            )
+        for lease_id in self.generation_lease_id_history:
+            if not isinstance(lease_id, str) or not lease_id.strip():
+                raise ValueError(
+                    "PreparedInitialRestartIntentOpen lease-ID history contains an invalid value"
+                )
+        for fencing_token in self.generation_fencing_token_history:
+            _positive_integer(
+                fencing_token,
+                "PreparedInitialRestartIntentOpen generation fencing token",
+            )
+        if (
+            self.generation_lease_id_history[-1] != self.current.snapshot.record.lease_id
+            or self.generation_fencing_token_history[-1]
+            != self.current.snapshot.record.coordinator_fencing_token
+        ):
+            raise ValueError(
+                "PreparedInitialRestartIntentOpen lease history does not end at its generation"
+            )
+        _reject_noncontiguous_recurrence(
+            self.generation_lease_id_history,
+            "lease identity",
+        )
+        _reject_noncontiguous_recurrence(
+            self.generation_fencing_token_history,
+            "fencing token",
+        )
+        self._validate_lease_lineage()
         if self.not_before_unix_ms < self.lease.granted_at_unix_ms:
             raise ValueError(
                 "PreparedInitialRestartIntentOpen cannot precede its coordinator lease grant"
@@ -125,6 +183,99 @@ class PreparedInitialRestartIntentOpen:
             )
         if self.deadline_unix_ms > self.record.intent.prepare_deadline_unix_ms:
             raise ValueError("PreparedInitialRestartIntentOpen deadline exceeds its restart intent")
+
+    def _validate_lease_lineage(self) -> None:
+        snapshot = self.current.snapshot
+        snapshot_record = snapshot.record
+        if self.lease.fencing_token == snapshot_record.coordinator_fencing_token:
+            if (
+                self.coordinator_lease_transaction_sequence >= snapshot.transaction_sequence
+                or self.coordinator_lease_mutation_sequence != snapshot.guard_mutation_sequence
+                or self.coordinator_lease_value_sequence != snapshot.guard_value_sequence
+                or self.coordinator_lease_lifetime_sequence != snapshot.guard_lifetime_sequence
+                or self.lease.granted_at_unix_ms != snapshot.guard_committed_at_unix_ms
+                or self.record.coordinator_lease_digest != snapshot_record.coordinator_lease_digest
+            ):
+                raise ValueError(
+                    "PreparedInitialRestartIntentOpen lease lineage contradicts its generation"
+                )
+            return
+        if self.coordinator_lease_transaction_sequence <= snapshot.transaction_sequence:
+            raise ValueError(
+                "PreparedInitialRestartIntentOpen lease mutation does not follow its generation"
+            )
+        if (
+            self.coordinator_lease_mutation_sequence <= snapshot.guard_mutation_sequence
+            or self.coordinator_lease_value_sequence < snapshot.guard_value_sequence
+            or self.coordinator_lease_lifetime_sequence < snapshot.guard_lifetime_sequence
+            or self.lease.granted_at_unix_ms < snapshot.guard_committed_at_unix_ms
+        ):
+            raise ValueError(
+                "PreparedInitialRestartIntentOpen lease lineage predates its generation"
+            )
+        mutation_delta = self.coordinator_lease_mutation_sequence - snapshot.guard_mutation_sequence
+        transaction_delta = (
+            self.coordinator_lease_transaction_sequence - snapshot.transaction_sequence
+        )
+        value_delta = self.coordinator_lease_value_sequence - snapshot.guard_value_sequence
+        lifetime_delta = self.coordinator_lease_lifetime_sequence - snapshot.guard_lifetime_sequence
+        if (
+            transaction_delta < mutation_delta
+            or mutation_delta < 2 * lifetime_delta
+            or value_delta < lifetime_delta
+            or value_delta > mutation_delta - lifetime_delta
+        ):
+            raise ValueError(
+                "PreparedInitialRestartIntentOpen lease lineage has impossible sequence deltas"
+            )
+        if self.lease.granted_at_unix_ms < snapshot.committed_at_unix_ms:
+            raise ValueError(
+                "PreparedInitialRestartIntentOpen lease grant predates its generation commit"
+            )
+        if (
+            self.lease.record.lease_id != snapshot_record.lease_id
+            and self.lease.record.lease_id in self.generation_lease_id_history[:-1]
+        ):
+            raise ValueError(
+                "PreparedInitialRestartIntentOpen reuses an older generation lease identity"
+            )
+        if (
+            self.lease.fencing_token != snapshot_record.coordinator_fencing_token
+            and self.lease.fencing_token in self.generation_fencing_token_history[:-1]
+        ):
+            raise ValueError(
+                "PreparedInitialRestartIntentOpen reuses an older generation fencing token"
+            )
+        same_lease_id = self.lease.record.lease_id == snapshot_record.lease_id
+        if same_lease_id:
+            if self.lease.record.coordinator_id != snapshot_record.coordinator_id:
+                raise ValueError("PreparedInitialRestartIntentOpen changes one lease's coordinator")
+            if self.lease.record.lease_duration_ms != snapshot_record.coordinator_lease_duration_ms:
+                raise ValueError("PreparedInitialRestartIntentOpen changes one lease's duration")
+            if lifetime_delta != 0 or value_delta != 0:
+                raise ValueError(
+                    "PreparedInitialRestartIntentOpen changes one lease's store identity"
+                )
+            latest_valid_grant = snapshot.guard_committed_at_unix_ms + mutation_delta * (
+                snapshot_record.coordinator_lease_duration_ms - 1
+            )
+            if self.lease.granted_at_unix_ms > latest_valid_grant:
+                raise ValueError(
+                    "PreparedInitialRestartIntentOpen renews an expired coordinator lease"
+                )
+            return
+        if value_delta == 0:
+            raise ValueError(
+                "PreparedInitialRestartIntentOpen changes lease identity without a new value"
+            )
+        if lifetime_delta == 0 and mutation_delta != 1:
+            raise ValueError(
+                "PreparedInitialRestartIntentOpen lease replacement has ambiguous mutations"
+            )
+        if lifetime_delta == 0 and self.lease.granted_at_unix_ms < (
+            snapshot.guard_committed_at_unix_ms + snapshot_record.coordinator_lease_duration_ms
+        ):
+            raise ValueError("PreparedInitialRestartIntentOpen coordinator leases overlap")
 
     @property
     def expected_guard_revision(self) -> int:
@@ -165,6 +316,17 @@ def _positive_integer(value: object, path: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{path} must be a positive integer")
     return value
+
+
+def _reject_noncontiguous_recurrence(values: tuple[object, ...], label: str) -> None:
+    seen: set[object] = set()
+    previous: object | None = None
+    for value in values:
+        if value != previous:
+            if value in seen:
+                raise ValueError(f"PreparedInitialRestartIntentOpen generation {label} reappears")
+            seen.add(value)
+        previous = value
 
 
 __all__ = ["PreparedInitialRestartIntentOpen"]

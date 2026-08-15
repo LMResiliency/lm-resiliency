@@ -414,7 +414,7 @@ def test_generation_reader_retries_concurrent_head_advance(monkeypatch):
     assert current.snapshot.record.assignment.generation == 1
 
 
-def test_generation_reader_reads_current_and_historical_snapshots():
+def test_generation_reader_reads_current_and_historical_snapshots(monkeypatch):
     clock, store, lease, reader = _state()
     generation_zero = _commit(
         store,
@@ -436,10 +436,26 @@ def test_generation_reader_reads_current_and_historical_snapshots():
         expected_head_revision=generation_zero[reader.head_key].revision,
     )
 
-    current = reader.current()
+    original_get = store.get
+    snapshot_reads = {reader.snapshot_key(0): 0, reader.snapshot_key(1): 0}
 
+    def counting_get(key):
+        if key in snapshot_reads:
+            snapshot_reads[key] += 1
+        return original_get(key)
+
+    monkeypatch.setattr(store, "get", counting_get)
+    observed = reader.current_with_history()
+
+    assert observed is not None
+    current, history = observed
     assert current is not None
     assert current.snapshot.record.assignment.generation == 1
+    assert history == (current_zero.snapshot, current.snapshot)
+    assert snapshot_reads == {
+        reader.snapshot_key(0): 1,
+        reader.snapshot_key(1): 1,
+    }
     assert (
         current_zero.snapshot.transaction_sequence
         == generation_zero[reader.snapshot_key(0)].transaction_sequence
