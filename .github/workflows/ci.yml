@@ -150,7 +150,45 @@ jobs:
           python -m pip check
 
       - name: Run CPU unit suite
-        run: python -m pytest -q
+        id: cpu_tests
+        run: python -m pytest -q --junitxml="$RUNNER_TEMP/unit-results.xml"
+
+      - name: Create revision-bound CPU evidence
+        if: ${{ always() && matrix.name == 'primary' }}
+        env:
+          TEST_OUTCOME: ${{ steps.cpu_tests.outcome }}
+        run: |
+          python scripts/validation_evidence.py create-pytest \
+            --bundle "$RUNNER_TEMP/cpu-primary-evidence" \
+            --junit "$RUNNER_TEMP/unit-results.xml" \
+            --action-status "$TEST_OUTCOME" \
+            --recorded-command 'python -m pytest -q --junitxml="$RUNNER_TEMP/unit-results.xml"' \
+            --configuration "python=${{ matrix.python }}" \
+            --configuration "numpy=${{ matrix.numpy }}" \
+            --configuration "torch=${{ matrix.torch }}" \
+            --campaign-id cpu-unit-primary \
+            --tier cpu \
+            --repository "$GITHUB_REPOSITORY" \
+            --commit "$GITHUB_SHA" \
+            --ref "$GITHUB_REF" \
+            --artifact-name "cpu-primary-$GITHUB_SHA" \
+            --artifact-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --framework pytorch \
+            --framework gemini \
+            --framework scout \
+            --boundary "CPU tests do not qualify CUDA, NCCL, or multi-process behavior."
+          python scripts/validation_evidence.py verify \
+            --bundle "$RUNNER_TEMP/cpu-primary-evidence" \
+            --expected-commit "$GITHUB_SHA"
+
+      - name: Upload revision-bound CPU evidence
+        if: ${{ always() && matrix.name == 'primary' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cpu-primary-${{ github.sha }}
+          path: ${{ runner.temp }}/cpu-primary-evidence
+          if-no-files-found: error
+          retention-days: 90
 
   package:
     name: Package

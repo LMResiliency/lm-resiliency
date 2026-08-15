@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
+import importlib.metadata
 import json
 import os
 import platform
@@ -65,18 +66,28 @@ def _environment() -> dict[str, Any]:
         )
     nccl_version = torch.cuda.nccl.version() if cuda_available else None
     return {
+        "schema_version": _SCHEMA_VERSION,
         "captured_at": _timestamp(),
-        "host": platform.node(),
-        "platform": platform.platform(),
-        "python": sys.version,
-        "python_executable": sys.executable,
-        "torch": torch.__version__,
-        "cuda_available": cuda_available,
-        "cuda_runtime": torch.version.cuda,
-        "nccl": list(nccl_version) if isinstance(nccl_version, tuple) else nccl_version,
-        "device_count": device_count,
-        "devices": devices,
-        "nvidia_smi": _nvidia_smi(),
+        "hardware": {
+            "host": platform.node(),
+            "platform": platform.platform(),
+            "hosts": 1,
+            "world_size": 2,
+            "gpu_count": device_count,
+            "devices": devices,
+            "nvidia_smi": _nvidia_smi(),
+        },
+        "software": {
+            "python": sys.version,
+            "python_executable": sys.executable,
+            "cuda_available": cuda_available,
+            "cuda_runtime": torch.version.cuda,
+            "nccl": list(nccl_version) if isinstance(nccl_version, tuple) else nccl_version,
+            "frameworks": {
+                "lm-resiliency": importlib.metadata.version("lm-resiliency"),
+                "pytorch": torch.__version__,
+            },
+        },
         "runner": {
             "name": os.environ.get("RUNNER_NAME"),
             "os": os.environ.get("RUNNER_OS"),
@@ -158,7 +169,7 @@ def _run_command(
         returncode = process.wait()
     print("::endgroup::", flush=True)
     return {
-        "name": name,
+        "command_id": name,
         "command": command,
         "started_at": started_at,
         "completed_at": _timestamp(),
@@ -182,35 +193,77 @@ def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _write_summary_markdown(path: Path, summary: dict[str, Any]) -> None:
+def _write_summary_markdown(path: Path, summary: dict[str, Any], commit_sha: str) -> None:
     lines = [
         "## GPU qualification",
         "",
         f"- Status: **{summary['status']}**",
-        f"- Commit: `{summary['commit_sha']}`",
+        f"- Commit: `{commit_sha}`",
         f"- Completed: `{summary['completed_at']}`",
         f"- Topology: `{summary['topology']['hosts']} host / "
-        f"{summary['topology']['visible_gpus']} visible GPUs`",
+        f"{summary['topology']['gpu_count']} visible GPUs`",
         "",
         "| Check | Result | Duration |",
         "|---|---|---:|",
     ]
     for result in summary["results"]:
         lines.append(
-            f"| `{result['name']}` | {result['status']} | {result['duration_seconds']:.3f}s |"
+            f"| `{result['command_id']}` | {result['status']} | "
+            f"{result.get('duration_seconds', 0.0):.3f}s |"
         )
-    if summary.get("error"):
-        lines.extend(["", f"Error: `{summary['error']}`"])
+    reasons = [result.get("reason") for result in summary["results"] if result.get("reason")]
+    if reasons:
+        lines.extend(["", f"Error: `{reasons[0]}`"])
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _write_checksums(artifact_dir: Path) -> None:
-    lines = []
-    for path in sorted(item for item in artifact_dir.rglob("*") if item.is_file()):
-        if path.name == "checksums.txt":
-            continue
-        lines.append(f"{_sha256(path)}  {path.relative_to(artifact_dir)}")
-    (artifact_dir / "checksums.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+def _seal_evidence(
+    artifact_dir: Path,
+    summary: dict[str, Any],
+    *,
+    commit_sha: str,
+    ref: str,
+) -> None:
+    repository = os.environ.get("GITHUB_REPOSITORY", "LMResiliency/lm-resiliency")
+    run_id = os.environ.get("GITHUB_RUN_ID")
+    artifact_name = f"gpu-qualification-{commit_sha}"
+    artifact_url = (
+        f"https://github.com/{repository}/actions/runs/{run_id}" if run_id else str(artifact_dir)
+    )
+    command = [
+        sys.executable,
+        str(_REPOSITORY_ROOT / "scripts" / "validation_evidence.py"),
+        "seal",
+        "--bundle",
+        str(artifact_dir),
+        "--campaign-id",
+        "core-gpu-qualification",
+        "--tier",
+        "single-host-gpu",
+        "--repository",
+        repository,
+        "--commit",
+        commit_sha,
+        "--ref",
+        ref,
+        "--artifact-name",
+        artifact_name,
+        "--artifact-url",
+        artifact_url,
+        "--framework",
+        "pytorch",
+        "--framework",
+        "gemini",
+        "--framework",
+        "scout",
+        "--boundary",
+        "One host and two ranks; multi-host transport is not qualified.",
+        "--boundary",
+        "Tiny deterministic workloads qualify recovery and localization, not convergence.",
+    ]
+    completed = subprocess.run(command, cwd=_REPOSITORY_ROOT, check=False)
+    if completed.returncode:
+        raise RuntimeError("failed to seal GPU qualification evidence")
 
 
 def main() -> int:
@@ -228,31 +281,36 @@ def main() -> int:
 
     command_specs = _commands(artifact_dir)
     (artifact_dir / "commands.txt").write_text(
-        "\n".join(shlex.join(command) for _, command in command_specs) + "\n",
+        "\n".join(f"[{name}] {shlex.join(command)}" for name, command in command_specs) + "\n",
         encoding="utf-8",
     )
+    commit_sha = os.environ.get("GITHUB_SHA") or _git_revision()
+    ref = os.environ.get("GITHUB_REF") or _git_ref()
     summary: dict[str, Any] = {
         "schema_version": _SCHEMA_VERSION,
-        "repository": os.environ.get("GITHUB_REPOSITORY"),
-        "commit_sha": os.environ.get("GITHUB_SHA") or _git_revision(),
-        "ref": os.environ.get("GITHUB_REF"),
-        "event": os.environ.get("GITHUB_EVENT_NAME"),
+        "campaign_id": "core-gpu-qualification",
         "started_at": _timestamp(),
         "completed_at": None,
         "status": "running",
         "topology": {
             "hosts": 1,
-            "required_gpus": args.minimum_gpus,
-            "visible_gpus": environment["device_count"],
+            "world_size": 2,
+            "gpu_count": environment["hardware"]["gpu_count"],
         },
+        "seed": None,
+        "configuration": {"minimum_gpus": args.minimum_gpus},
+        "counts": {"total": 0, "passed": 0, "failed": 0, "skipped": 0, "errors": 0},
+        "metrics": {},
         "results": [],
     }
 
-    if not environment["cuda_available"] or environment["device_count"] < args.minimum_gpus:
+    gpu_count = environment["hardware"]["gpu_count"]
+    if not environment["software"]["cuda_available"] or gpu_count < args.minimum_gpus:
         summary["status"] = "failed"
-        summary["error"] = (
-            f"requires at least {args.minimum_gpus} CUDA GPUs; found {environment['device_count']}"
-        )
+        reason = f"requires at least {args.minimum_gpus} CUDA GPUs; found {gpu_count}"
+        summary["results"] = [
+            {"command_id": name, "status": "skipped", "reason": reason} for name, _ in command_specs
+        ]
     else:
         command_environment = os.environ.copy()
         root = str(_REPOSITORY_ROOT)
@@ -270,13 +328,34 @@ def main() -> int:
         )
 
     summary["completed_at"] = _timestamp()
+    summary["counts"] = {
+        "total": len(summary["results"]),
+        "passed": sum(result["status"] == "passed" for result in summary["results"]),
+        "failed": sum(result["status"] == "failed" for result in summary["results"]),
+        "skipped": sum(result["status"] == "skipped" for result in summary["results"]),
+        "errors": sum(result["status"] == "error" for result in summary["results"]),
+    }
+    summary["metrics"] = {
+        "duration_seconds": round(
+            sum(result.get("duration_seconds", 0.0) for result in summary["results"]), 3
+        )
+    }
     _write_json(artifact_dir / "summary.json", summary)
-    _write_summary_markdown(artifact_dir / "summary.md", summary)
-    _write_checksums(artifact_dir)
+    _write_summary_markdown(artifact_dir / "summary.md", summary, commit_sha)
+    _seal_evidence(artifact_dir, summary, commit_sha=commit_sha, ref=ref)
     return 0 if summary["status"] == "passed" else 1
 
 
-def _git_revision() -> str | None:
+def _git_revision() -> str:
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        cwd=_REPOSITORY_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if status.returncode or status.stdout.strip():
+        raise RuntimeError("manual GPU qualification requires a clean tracked worktree")
     completed = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=_REPOSITORY_ROOT,
@@ -284,7 +363,21 @@ def _git_revision() -> str | None:
         capture_output=True,
         text=True,
     )
-    return completed.stdout.strip() if completed.returncode == 0 else None
+    revision = completed.stdout.strip()
+    if completed.returncode or not revision:
+        raise RuntimeError("could not determine the repository revision")
+    return revision
+
+
+def _git_ref() -> str:
+    completed = subprocess.run(
+        ["git", "symbolic-ref", "--short", "HEAD"],
+        cwd=_REPOSITORY_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip() if completed.returncode == 0 else "detached"
 
 
 if __name__ == "__main__":

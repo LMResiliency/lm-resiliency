@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/LMResiliency/lm-resiliency/blob/main/validation/evidence-schema-v1.json",
+  "title": "LM Resiliency validation evidence manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "project",
+    "campaign",
+    "artifact",
+    "qualification",
+    "files"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "repository", "commit_sha", "ref"],
+      "properties": {
+        "name": { "const": "lm-resiliency" },
+        "version": { "type": "string", "minLength": 1 },
+        "repository": { "type": "string", "minLength": 1 },
+        "commit_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "ref": { "type": "string", "minLength": 1 }
+      }
+    },
+    "campaign": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "tier",
+        "status",
+        "started_at",
+        "completed_at",
+        "command_ids",
+        "seed",
+        "configuration"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "tier": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["passed", "failed", "cancelled"] },
+        "started_at": { "type": "string", "minLength": 1 },
+        "completed_at": { "type": "string", "minLength": 1 },
+        "command_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" }
+        },
+        "seed": { "type": ["integer", "null"] },
+        "configuration": { "type": "object" }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "url"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "url": { "type": "string", "minLength": 1 }
+      }
+    },
+    "qualification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frameworks", "topology", "boundaries"],
+      "properties": {
+        "frameworks": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "topology": {
+          "type": "object",
+          "required": ["hosts", "world_size", "gpu_count"],
+          "properties": {
+            "hosts": { "type": "integer", "minimum": 0 },
+            "world_size": { "type": "integer", "minimum": 0 },
+            "gpu_count": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "boundaries": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "files": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "bytes", "sha256"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "bytes": { "type": "integer", "minimum": 0 },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    }
+  }
+}
