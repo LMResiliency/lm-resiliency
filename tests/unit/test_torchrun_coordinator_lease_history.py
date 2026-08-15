@@ -45,15 +45,20 @@ class StaticHistoryStore(InMemoryControlStore):
         history: tuple[ControlStoreEntry, ...],
         *,
         current: ControlStoreEntry | None = None,
+        has_history: bool | None = None,
     ) -> None:
         self._history = history
         self._current = history[-1] if current is None and history else current
+        self._has_history = bool(history) if has_history is None else has_history
 
     def get(self, key: str) -> ControlStoreEntry | None:
         return self._current
 
     def get_history(self, key: str) -> tuple[ControlStoreEntry, ...]:
         return self._history
+
+    def has_history(self, key: str) -> bool:
+        return self._has_history
 
 
 class UnstableHistoryStore(StaticHistoryStore):
@@ -426,9 +431,24 @@ def test_coordinator_lease_history_rejects_noninitial_or_incomplete_history():
             run_id="training-run",
         ).read()
 
+    retained = _entry(transaction_sequence=1, revision=1)
+    different_current = _entry(
+        record=_record(coordinator_id="coordinator-b", lease_id="lease-b"),
+        transaction_sequence=2,
+        mutation_sequence=2,
+        value_sequence=2,
+        revision=2,
+        committed_at_unix_ms=1_100,
+    )
     with pytest.raises(CoordinatorLeaseHistoryCorrupt, match="absent from"):
         CoordinatorLeaseHistoryReader(
-            StaticHistoryStore((), current=_entry()),
+            StaticHistoryStore((retained,), current=different_current),
+            run_id="training-run",
+        ).read()
+
+    with pytest.raises(CoordinatorLeaseHistoryCorrupt, match="durable history marker"):
+        CoordinatorLeaseHistoryReader(
+            StaticHistoryStore((), has_history=True),
             run_id="training-run",
         ).read()
 

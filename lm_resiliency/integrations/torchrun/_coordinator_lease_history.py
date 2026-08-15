@@ -126,10 +126,20 @@ class CoordinatorLeaseHistoryReader:
         for _ in range(_MAX_READ_ATTEMPTS):
             history = self._store.get_history(self._lease_key)
             current = self._store.get(self._lease_key)
+            has_history = self._store.has_history(self._lease_key)
             confirmed_history = self._store.get_history(self._lease_key)
             confirmed_current = self._store.get(self._lease_key)
-            if history != confirmed_history or current != confirmed_current:
+            confirmed_has_history = self._store.has_history(self._lease_key)
+            if (
+                history != confirmed_history
+                or current != confirmed_current
+                or has_history != confirmed_has_history
+            ):
                 continue
+            if bool(history) != has_history:
+                raise CoordinatorLeaseHistoryCorrupt(
+                    "coordinator lease value history contradicts its durable history marker"
+                )
             if current is not None and (not history or history[-1] != current):
                 raise CoordinatorLeaseHistoryCorrupt(
                     "current coordinator lease is absent from its value history"
