@@ -255,11 +255,13 @@ class FaultInjectionSession:
     ) -> None:
         if not isinstance(campaign, FaultCampaign):
             raise TypeError("campaign must be a FaultCampaign")
+        if rank is not None and (isinstance(rank, bool) or not isinstance(rank, int)):
+            raise TypeError("fault injection rank must be an integer")
         self.campaign = campaign
         self._context: TrainingContext = resolve_training_context(target, optimizer)
         self.framework = self._context.framework
         distributed_rank = _distributed_rank()
-        self.rank = distributed_rank if rank is None else int(rank)
+        self.rank = distributed_rank if rank is None else rank
         if self.rank < 0:
             raise ValueError("fault injection rank must be non-negative")
         if dist.is_available() and dist.is_initialized() and self.rank != distributed_rank:

@@ -777,6 +777,37 @@ def test_comparison_rejects_unexpected_source_family() -> None:
     assert not occurrence["localized"]
 
 
+def test_comparison_rejects_positive_layer_for_non_layer_target() -> None:
+    injection = _injection_payload()
+    target = {
+        "rank": 0,
+        "model_part": 0,
+        "component": "output",
+        "surface": "output",
+    }
+    injection["manifest"]["incidents"][0]["faults"][0]["target"] = copy.deepcopy(target)
+    injection["injections"][0]["target"] = copy.deepcopy(target)
+    localization = _localization_payload(layer_id=5)
+    localization["reports"][0]["sources"] = ["output.output"]
+    _refresh_manifest_identity(injection, localization)
+
+    occurrence = compare_payloads(injection, localization)["evaluations"][0]
+
+    assert occurrence["layer_evidence"] == "unexpected"
+    assert not occurrence["layer_match"]
+    assert not occurrence["localized"]
+
+
+def test_comparison_rejects_duplicate_manifest_incident_ids() -> None:
+    injection = _injection_payload()
+    injection["manifest"]["incidents"].append(copy.deepcopy(injection["manifest"]["incidents"][0]))
+    localization = _localization_payload()
+    _refresh_manifest_identity(injection, localization)
+
+    with pytest.raises(ValueError, match="incident_id values must be unique"):
+        compare_payloads(injection, localization)
+
+
 def test_comparison_correlates_source_prefixes_with_failed_targets() -> None:
     injection = _injection_payload()
     second_action = copy.deepcopy(injection["manifest"]["incidents"][0]["faults"][0])

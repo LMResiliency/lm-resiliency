@@ -341,8 +341,8 @@ def _evaluate_occurrence(
         str(layer): _reported_targets_for_layer(localizing, layer) for layer in observed_layers
     }
     if not expected_layers:
-        layer_match = True
-        layer_evidence = "not_required"
+        layer_match = not observed_layers
+        layer_evidence = "not_required" if layer_match else "unexpected"
     elif (
         set(expected_layers) == set(observed_layers)
         and observed_targets_by_layer == expected_targets_by_layer
@@ -488,6 +488,8 @@ def _manifest_actions(
             incident.get("incident_id", incident.get("id")),
             "injection manifest incident_id",
         )
+        if incident_id in expected:
+            raise ValueError("injection manifest incident_id values must be unique")
         faults = incident.get("faults")
         if isinstance(faults, (str, bytes)) or not isinstance(faults, Sequence):
             raise TypeError("injection manifest faults must be an array")

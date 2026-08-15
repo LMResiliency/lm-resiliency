@@ -490,6 +490,19 @@ def test_campaign_parser_rejects_non_string_identifiers(
         FaultCampaign.from_dict(payload)
 
 
+@pytest.mark.parametrize("rank", [True, 0.5, "0"])
+def test_session_rejects_coercible_non_integer_rank_overrides(rank: object) -> None:
+    model = TinyModel()
+
+    with pytest.raises(TypeError, match="rank must be an integer"):
+        enable_fault_injection(
+            model,
+            _optimizer(model),
+            campaign=_campaign(),
+            rank=rank,  # type: ignore[arg-type]
+        )
+
+
 @pytest.mark.parametrize("field", ["module_path", "operation", "path"])
 def test_fault_target_rejects_mutable_string_selectors(field: str) -> None:
     target = {
