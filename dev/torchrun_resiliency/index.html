@@ -845,6 +845,14 @@ its immutable closure record, first lifecycle head, and durable closed marker.
 It exposes create-once closure/lifecycle writes, a revision-guarded
 current-head update, and an exact immutable-intent condition, but does not
 authenticate a closing lease or mutate the store. A frozen
+<code>PreparedInitialRestartIntentClosure</code> descriptor binds those records to a
+contiguous coordinator-lease authority slice beginning at the exact lease that
+opened the intent. It accepts same-lease renewal, nonoverlapping replacement,
+and delete/recreate transitions, while rejecting skipped mutations, expired
+renewals, overlapping leases, and recurrence of any generation or opening
+lease identity or fencing token after replacement. It bounds the future
+transaction to the final live lease but performs no store reads or mutations.
+A later preparer selects the slice from verified durable lease history. A frozen
 <code>PreparedInitialRestartIntentOpen</code> descriptor binds the first intent record,
 current-intent head, exact generation revisions, coordinator fencing token,
 canonical run-scoped keys, and lease/intent commit window. It exposes immutable
