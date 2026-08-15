@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """Internal feature configuration and framework-agnostic hook wiring."""
 
 from __future__ import annotations

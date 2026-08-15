@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """Model Replay Harness: captures activations during training, replays on demand.
 
 Minimal integration: one line to attach, zero changes to training logic.

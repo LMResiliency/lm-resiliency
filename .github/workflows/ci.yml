@@ -168,6 +168,18 @@ jobs:
           "$smoke_env/bin/python" -c \
             'import lm_resiliency, pathlib, sys; optional = {"deepspeed", "megatron", "torchtitan", "triton"}; assert not optional.intersection(sys.modules); assert pathlib.Path(lm_resiliency.__file__).with_name("py.typed").is_file(); print(lm_resiliency.__file__)'
 
+      - name: Test installed wheel typing as a downstream consumer
+        run: |
+          smoke_env="$RUNNER_TEMP/lm-resiliency-wheel-smoke"
+          consumer="$RUNNER_TEMP/lm-resiliency-consumer.py"
+          "$smoke_env/bin/python" -m pip install \
+            -c requirements/tool-versions.txt mypy typing-extensions
+          cp tests/typing/public_api.py "$consumer"
+          cd "$RUNNER_TEMP"
+          "$smoke_env/bin/python" -m mypy \
+            --config-file "$GITHUB_WORKSPACE/tests/typing/downstream.ini" \
+            "$consumer"
+
       - name: Audit runtime dependencies
         run: |
           smoke_env="$RUNNER_TEMP/lm-resiliency-wheel-smoke"

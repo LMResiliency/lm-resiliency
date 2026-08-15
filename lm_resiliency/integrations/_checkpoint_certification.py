@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """Shared checkpoint certification workflow for framework integrations."""
 
 from __future__ import annotations

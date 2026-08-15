@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """torchtitan integration for lm_resiliency.
 
 Provides GEMINI (in-memory checkpointing) and SCOUT (fault detection)

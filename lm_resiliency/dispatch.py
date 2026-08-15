@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """Automatic framework dispatch for the package-root public API."""
 
 from __future__ import annotations

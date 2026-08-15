@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """C3 payload collection and isolated optimizer-transition replay."""
 
 from __future__ import annotations

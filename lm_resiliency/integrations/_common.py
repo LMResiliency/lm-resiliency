@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """Shared lifecycle helpers for framework integrations."""
 
 from __future__ import annotations

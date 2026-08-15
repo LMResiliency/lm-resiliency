@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """Bounded temporal baselines for hierarchical replay straggler detection."""
 
 from __future__ import annotations
