@@ -40,9 +40,20 @@ Examples of representing the community include using an official email address, 
 
 ## Enforcement
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be reported privately using a maintainer's private contact method on GitHub.
+Instances of abusive, harassing, or otherwise unacceptable behavior may be reported privately by email to `lm.resiliency.dev@gmail.com`.
+This project mailbox is restricted to the [current maintainers](MAINTAINERS.md).
 Do not file a public issue containing sensitive conduct details.
-All complaints will be reviewed and investigated promptly and fairly.
+
+A maintainer will acknowledge a report within three business days and will review and investigate it promptly and fairly.
+Report details will be shared only with the people needed to investigate and respond.
+Except when required by law or needed to address an immediate safety risk, maintainers will ask the reporter before sharing details outside that group.
+
+If a report concerns a maintainer, identify the conflict in the email subject so that maintainer can be excluded from the investigation and response.
+The remaining conflict-free maintainer will handle the report.
+If no conflict-free project maintainer remains, the acknowledging maintainer will offer to engage a mutually acceptable independent reviewer and will not share report details with that reviewer without the reporter's consent.
+
+This mailbox is for conduct reports, not security vulnerabilities.
+Report vulnerabilities through the separate private process in [SECURITY.md](SECURITY.md).
 
 Community leaders must respect the privacy and security of the reporter of any incident.
 
