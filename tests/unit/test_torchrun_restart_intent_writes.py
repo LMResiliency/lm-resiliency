@@ -25,9 +25,11 @@ from lm_resiliency.integrations.torchrun._protocol import (
 )
 from lm_resiliency.integrations.torchrun._restart_intent_records import (
     RestartIntentHeadRecord,
+    RestartIntentLifecycleRecord,
     RestartIntentRecord,
 )
 from lm_resiliency.integrations.torchrun._restart_intent_writes import (
+    PreparedRestartIntentOpen,
     RestartIntentPreparationConflict,
     RestartIntentPreparationCorrupt,
     RestartIntentPreparationDeadlineElapsed,
@@ -81,6 +83,19 @@ def _intent(
         minimum_recovery_mode="recovery_verified",
         suspected_node_ids=suspected_node_ids,
         prepare_deadline_unix_ms=prepare_deadline_unix_ms,
+    )
+
+
+def _lifecycle(
+    prepared: PreparedRestartIntentOpen,
+    lease: HeldCoordinatorLease,
+) -> RestartIntentLifecycleRecord:
+    return RestartIntentLifecycleRecord(
+        closed_intent=prepared.head,
+        coordinator_id=lease.record.coordinator_id,
+        lease_id=lease.record.lease_id,
+        coordinator_lease_duration_ms=lease.record.lease_duration_ms,
+        coordinator_fencing_token=lease.fencing_token,
     )
 
 
@@ -173,7 +188,7 @@ def test_stale_prepared_open_is_fenced_by_lifecycle_closure():
         {
             prepared.intent_lifecycle_key: ControlStoreWrite(
                 expected_revision=None,
-                value=prepared.record.to_json(),
+                value=_lifecycle(prepared, lease).to_json(),
             )
         },
         guard_key=prepared.coordinator_lease_key,
@@ -214,7 +229,7 @@ def test_prepare_open_reuses_head_after_observing_lifecycle_closure():
         {
             first.intent_lifecycle_key: ControlStoreWrite(
                 expected_revision=None,
-                value=first.record.to_json(),
+                value=_lifecycle(first, lease).to_json(),
             )
         },
         guard_key=first.coordinator_lease_key,
@@ -242,6 +257,50 @@ def test_prepare_open_reuses_head_after_observing_lifecycle_closure():
         conditions=second.conditions,
     )
     assert set(reopened) == {second.intent_head_key, second.intent_key}
+
+
+def test_prepare_open_accepts_lifecycle_closed_under_renewed_lease():
+    clock, store, lease_manager, generation_manager, repository, lease = _state()
+    current = generation_manager.current()
+    assert current is not None
+    first = repository.prepare_open(lease, current, _intent())
+    committed = store.compare_set_many_guarded(
+        first.writes,
+        guard_key=first.coordinator_lease_key,
+        expected_guard_revision=first.expected_guard_revision,
+        not_before_unix_ms=first.not_before_unix_ms,
+        deadline_unix_ms=first.deadline_unix_ms,
+        conditions=first.conditions,
+    )
+    clock.set(1_010)
+    renewed = lease_manager.renew(lease)
+    store.compare_delete(
+        first.intent_head_key,
+        expected_revision=committed[first.intent_head_key].revision,
+    )
+    closed = store.compare_set_many_guarded(
+        {
+            first.intent_lifecycle_key: ControlStoreWrite(
+                expected_revision=None,
+                value=_lifecycle(first, renewed).to_json(),
+            )
+        },
+        guard_key=first.coordinator_lease_key,
+        expected_guard_revision=renewed.fencing_token,
+        not_before_unix_ms=renewed.granted_at_unix_ms,
+        deadline_unix_ms=renewed.expires_at_unix_ms,
+    )
+
+    second = repository.prepare_open(
+        renewed,
+        current,
+        _intent(intent_id="intent-b"),
+    )
+
+    assert (
+        second.conditions[second.intent_lifecycle_key]
+        == closed[second.intent_lifecycle_key].revision
+    )
 
 
 @pytest.mark.parametrize(
@@ -382,10 +441,22 @@ def test_prepare_open_rejects_unguarded_lifecycle_state():
     current = generation_manager.current()
     assert current is not None
     prepared = repository.prepare_open(lease, current, _intent())
+    committed = store.compare_set_many_guarded(
+        prepared.writes,
+        guard_key=prepared.coordinator_lease_key,
+        expected_guard_revision=prepared.expected_guard_revision,
+        not_before_unix_ms=prepared.not_before_unix_ms,
+        deadline_unix_ms=prepared.deadline_unix_ms,
+        conditions=prepared.conditions,
+    )
+    store.compare_delete(
+        prepared.intent_head_key,
+        expected_revision=committed[prepared.intent_head_key].revision,
+    )
     store.compare_set(
         repository.intent_lifecycle_key,
         expected_revision=None,
-        value=prepared.record.to_json(),
+        value=_lifecycle(prepared, lease).to_json(),
     )
 
     with pytest.raises(RestartIntentPreparationCorrupt, match="provenance"):

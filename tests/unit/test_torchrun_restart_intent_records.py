@@ -14,6 +14,7 @@ from lm_resiliency.integrations.torchrun._coordinator_lease import (
 from lm_resiliency.integrations.torchrun._protocol import RestartIntent
 from lm_resiliency.integrations.torchrun._restart_intent_records import (
     RestartIntentHeadRecord,
+    RestartIntentLifecycleRecord,
     RestartIntentRecord,
 )
 
@@ -49,6 +50,16 @@ def _head() -> RestartIntentHeadRecord:
         generation=record.intent.generation,
         intent_id=record.intent.intent_id,
         intent_digest=record.digest,
+    )
+
+
+def _lifecycle() -> RestartIntentLifecycleRecord:
+    return RestartIntentLifecycleRecord(
+        closed_intent=_head(),
+        coordinator_id="coordinator-b",
+        lease_id="lease-b",
+        coordinator_lease_duration_ms=45_000,
+        coordinator_fencing_token=9,
     )
 
 
@@ -95,6 +106,30 @@ def test_restart_intent_head_round_trips_canonical_json():
     )
 
 
+def test_restart_intent_lifecycle_round_trips_canonical_json():
+    record = _lifecycle()
+
+    encoded = record.to_json()
+    decoded = RestartIntentLifecycleRecord.from_json(encoded)
+
+    assert decoded == record
+    assert encoded == (
+        b'{"closed_intent":{"generation":4,"intent_digest":"'
+        + _record().digest.encode("ascii")
+        + b'","intent_id":"intent-a","run_id":"training-run","schema_version":1},'
+        b'"coordinator_fencing_token":9,"coordinator_id":"coordinator-b",'
+        b'"coordinator_lease_duration_ms":45000,"lease_id":"lease-b",'
+        b'"schema_version":1}'
+    )
+    lease_record = CoordinatorLeaseRecord(
+        run_id="training-run",
+        coordinator_id="coordinator-b",
+        lease_id="lease-b",
+        lease_duration_ms=45_000,
+    )
+    assert record.coordinator_lease_digest == hashlib.sha256(lease_record.to_json()).hexdigest()
+
+
 def test_restart_intent_record_is_immutable():
     record = _record()
 
@@ -109,6 +144,36 @@ def test_restart_intent_head_is_immutable():
 
     with pytest.raises(AttributeError):
         head.intent_id = "other"
+
+
+def test_restart_intent_lifecycle_is_immutable():
+    record = _lifecycle()
+
+    with pytest.raises(AttributeError):
+        record.lease_id = "other"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("coordinator_id", "", "coordinator_id"),
+        ("lease_id", "", "lease_id"),
+        ("coordinator_lease_duration_ms", 0, "coordinator_lease_duration_ms"),
+        ("coordinator_fencing_token", 0, "coordinator_fencing_token"),
+    ],
+)
+def test_restart_intent_lifecycle_validates_constructor_fields(
+    field,
+    value,
+    message,
+):
+    with pytest.raises(ValueError, match=message):
+        replace(_lifecycle(), **{field: value})
+
+
+def test_restart_intent_lifecycle_requires_head_record():
+    with pytest.raises(TypeError, match="RestartIntentHeadRecord"):
+        replace(_lifecycle(), closed_intent={})
 
 
 @pytest.mark.parametrize(
@@ -268,6 +333,45 @@ def test_restart_intent_head_rejects_invalid_wire_values(mutate, message):
 
 
 @pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda value: value.pop("closed_intent"),
+            "missing fields",
+        ),
+        (
+            lambda value: value.update({"unknown": True}),
+            "unknown fields",
+        ),
+        (
+            lambda value: value.update({"schema_version": 2}),
+            "unsupported value",
+        ),
+        (
+            lambda value: value["closed_intent"].update({"schema_version": 1.0}),
+            "closed_intent is invalid",
+        ),
+        (
+            lambda value: value["closed_intent"].update({"intent_id": ""}),
+            "closed_intent is invalid",
+        ),
+        (
+            lambda value: value.update({"coordinator_fencing_token": 0}),
+            "coordinator_fencing_token",
+        ),
+    ],
+)
+def test_restart_intent_lifecycle_rejects_invalid_wire_values(mutate, message):
+    value = json.loads(_lifecycle().to_json())
+    mutate(value)
+
+    with pytest.raises(ValueError, match=message):
+        RestartIntentLifecycleRecord.from_json(
+            json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        )
+
+
+@pytest.mark.parametrize(
     "encoded",
     [
         b"not-json",
@@ -311,9 +415,26 @@ def test_restart_intent_head_rejects_malformed_or_duplicate_json(encoded):
         RestartIntentHeadRecord.from_json(encoded)
 
 
+def test_restart_intent_lifecycle_rejects_duplicate_nested_fields():
+    encoded = (
+        _lifecycle()
+        .to_json()
+        .replace(
+            b'"intent_id":"intent-a"',
+            b'"intent_id":"intent-a","intent_id":"intent-b"',
+        )
+    )
+
+    with pytest.raises(ValueError, match="duplicate field"):
+        RestartIntentLifecycleRecord.from_json(encoded)
+
+
 def test_restart_intent_record_requires_encoded_bytes():
     with pytest.raises(ValueError, match="encoded bytes"):
         RestartIntentRecord.from_json(_record().to_json().decode("utf-8"))
 
     with pytest.raises(ValueError, match="encoded bytes"):
         RestartIntentHeadRecord.from_json(_head().to_json().decode("utf-8"))
+
+    with pytest.raises(ValueError, match="encoded bytes"):
+        RestartIntentLifecycleRecord.from_json(_lifecycle().to_json().decode("utf-8"))

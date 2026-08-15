@@ -22,6 +22,7 @@ from lm_resiliency.integrations.torchrun._generation_reader import (
 from lm_resiliency.integrations.torchrun._protocol import RestartIntent
 from lm_resiliency.integrations.torchrun._restart_intent_records import (
     RestartIntentHeadRecord,
+    RestartIntentLifecycleRecord,
     RestartIntentRecord,
 )
 
@@ -317,16 +318,20 @@ class RestartIntentWriteRepository:
                 raise RestartIntentPreparationCorrupt("restart-intent lifecycle record was deleted")
             return None
         try:
-            record = RestartIntentRecord.from_json(entry.value)
+            record = RestartIntentLifecycleRecord.from_json(entry.value)
         except (TypeError, ValueError) as error:
             raise RestartIntentPreparationCorrupt(
                 "restart-intent lifecycle record is malformed"
             ) from error
         current_generation = current.snapshot.record.assignment.generation
-        if record.intent.run_id != self._run_id or record.intent.generation > current_generation:
+        if (
+            record.closed_intent.run_id != self._run_id
+            or record.closed_intent.generation > current_generation
+        ):
             raise RestartIntentPreparationCorrupt(
                 "restart-intent lifecycle record contradicts the current generation"
             )
+        self._validate_closed_intent(record)
         if (
             entry.lifetime_sequence != 1
             or entry.value_sequence != entry.mutation_sequence
@@ -343,6 +348,48 @@ class RestartIntentWriteRepository:
                 "restart-intent lifecycle record has invalid store provenance"
             )
         return entry.revision
+
+    def _validate_closed_intent(
+        self,
+        lifecycle: RestartIntentLifecycleRecord,
+    ) -> None:
+        head = lifecycle.closed_intent
+        entry = self._store.get(self.intent_key(head.intent_id))
+        if entry is None:
+            raise RestartIntentPreparationCorrupt(
+                "restart-intent lifecycle record references a missing intent"
+            )
+        try:
+            record = RestartIntentRecord.from_json(entry.value)
+        except (TypeError, ValueError) as error:
+            raise RestartIntentPreparationCorrupt(
+                "closed restart-intent record is malformed"
+            ) from error
+        if (
+            record.intent.run_id != head.run_id
+            or record.intent.generation != head.generation
+            or record.intent.intent_id != head.intent_id
+            or record.digest != head.intent_digest
+        ):
+            raise RestartIntentPreparationCorrupt(
+                "restart-intent lifecycle record does not identify its closed intent"
+            )
+        if (
+            entry.lifetime_sequence != 1
+            or entry.mutation_sequence != 1
+            or entry.value_sequence != 1
+            or entry.guard_key != self.coordinator_lease_key
+            or entry.guard_revision != record.coordinator_fencing_token
+            or entry.guard_value_digest != record.coordinator_lease_digest
+            or entry.guard_committed_at_unix_ms is None
+            or entry.committed_at_unix_ms is None
+            or entry.committed_at_unix_ms < entry.guard_committed_at_unix_ms
+            or entry.committed_at_unix_ms
+            >= entry.guard_committed_at_unix_ms + record.coordinator_lease_duration_ms
+        ):
+            raise RestartIntentPreparationCorrupt(
+                "closed restart-intent record has invalid store provenance"
+            )
 
 
 def _nonempty_string(value: object, path: str) -> str:
