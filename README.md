@@ -35,6 +35,7 @@
 - **Keep protection lightweight:** Historical validation measured less than 1% amortized SCOUT overhead in its published workload; scheduled current-package regressions are guarded by the [benchmark methodology](benchmarks/README.md) and its qualification boundaries.
 - **No framework fork:** `lm-resiliency` integrates with PyTorch, TorchTitan, Megatron Core, and DeepSpeed through automatic adapters and one public entry point.
 - **No training-loop rewrite:** `lm-resiliency` attaches hooks at framework initialization and leaves the existing training loop unchanged.
+- **Evaluate localization independently:** Run reproducible framework-aware fault campaigns and score neutral localization results without coupling the injector to SCOUT.
 - **Bring your own launcher:** Users can integrate `lm-resiliency` with `torchrun`, Slurm, Kubernetes, or custom managers through platform-neutral APIs.
 
 ## Quick Start
@@ -137,6 +138,7 @@ Launcher-specific retry, placement, and replacement policy remains external. See
 |---|---|
 | Public APIs and manager integration | [API guide](docs/api.md) |
 | Runnable framework integrations | [Production-loop examples](examples/README.md) |
+| Reproducible fault campaigns and localization scoring | [Fault injection evaluation](docs/fault_injection.md) |
 | Supported Python and framework versions | [Compatibility](docs/compatibility.md) |
 | GEMINI checkpoint tiers, recovery, and cadence | [GEMINI guide](docs/gemini.md) |
 | SCOUT coverage, replay, fault reports, and checkpoint certification | [SCOUT guide](docs/scout.md) |

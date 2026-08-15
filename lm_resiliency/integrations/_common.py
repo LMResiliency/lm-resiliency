@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Callable
 
 import torch.distributed as dist
@@ -19,6 +20,8 @@ from lm_resiliency.detection.layer_replay import ReplayResult, replay_result_has
 from lm_resiliency.detection.temporal import SCOUT_TEMPORAL_KEY
 
 _UNSET = object()
+_CHECKPOINT_TENSOR_LOAD_OBSERVERS: list[Callable[[Any], None]] = []
+_CHECKPOINT_TENSOR_LOAD_OBSERVERS_LOCK = threading.RLock()
 
 
 def build_checkpoint_manager(
@@ -121,6 +124,38 @@ def prepare_checkpoint_tensor_load(adapter: Any, saved_tensors: list[Any]) -> No
     live_count = len(adapter.collect_checkpoint_tensors())
     if len(saved_tensors) > live_count:
         adapter.materialize_optimizer_state()
+
+
+def register_checkpoint_tensor_load_observer(
+    observer: Callable[[Any], None],
+) -> Callable[[], None]:
+    """Observe successful direct framework checkpoint tensor loads."""
+    with _CHECKPOINT_TENSOR_LOAD_OBSERVERS_LOCK:
+        _CHECKPOINT_TENSOR_LOAD_OBSERVERS.append(observer)
+
+    def remove() -> None:
+        with _CHECKPOINT_TENSOR_LOAD_OBSERVERS_LOCK:
+            try:
+                _CHECKPOINT_TENSOR_LOAD_OBSERVERS.remove(observer)
+            except ValueError:
+                pass
+
+    return remove
+
+
+def notify_checkpoint_tensor_load(adapter: Any) -> None:
+    """Notify every observer after an adapter finishes replacing live tensors."""
+    with _CHECKPOINT_TENSOR_LOAD_OBSERVERS_LOCK:
+        observers = tuple(_CHECKPOINT_TENSOR_LOAD_OBSERVERS)
+    first_error: BaseException | None = None
+    for observer in observers:
+        try:
+            observer(adapter)
+        except BaseException as error:
+            if first_error is None:
+                first_error = error
+    if first_error is not None:
+        raise first_error
 
 
 def report_replay_result(
