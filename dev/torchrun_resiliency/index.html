@@ -1162,10 +1162,13 @@ cannot change coordinator identity, lease duration, or store-stamped guard-key
 lifetime. Every snapshot entry must retain store-stamped mutation, value, and
 lifetime sequence <code>1</code>, while the head mutation and value sequences must equal
 <code>generation + 1</code>; this rejects replacement, recreation, extra rewrites, and
-rollback. Every generation commit must fall within the stamped lease grant and
-duration. The head must remain in its first store-key lifetime, and a stable
-immediate successor snapshot beyond the head is contradictory state for every
-read API. Replacing a lease in place must not overlap the prior lease's stamped
+rollback. The mutable head and referenced snapshot must share one store-global
+transaction sequence, and snapshot transaction sequences must advance strictly
+through the predecessor chain. Every generation commit must fall within the
+stamped lease grant and duration. The head must remain in its first store-key
+lifetime, and a stable immediate successor snapshot beyond the head is
+contradictory state for every read API. Replacing a lease in place must not
+overlap the prior lease's stamped
 expiry, and one fencing token cannot identify multiple guard mutations. Fencing
 revisions are compared only for equality; ordering comes from the store-stamped
 guard mutation sequence. Each guard-key lifetime increase requires at least one
