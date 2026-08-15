@@ -11,6 +11,8 @@ The [GPU Qualification workflow](https://github.com/LMResiliency/lm-resiliency/a
 
 This frequent tier exercises single-GPU trajectory-equivalent recovery plus two-rank Gloo/NCCL replay, synchronized RNG, FSDP2 checkpoint recovery, and process-exit cleanup. It does not replace the larger release-qualification campaigns documented below. Self-hosted runner provisioning and isolation requirements are documented in the [test guide](../tests/README.md#automated-gpu-qualification).
 
+The same scheduled job runs the [healthy-path performance suite](../benchmarks/README.md) in isolated baseline, GEMINI-only, SCOUT-only, and combined processes. It publishes workload, environment, topology, throughput, p50/p95 latency, peak memory, per-mode results, and threshold comparisons. Two-peer SCOUT measurements qualify overhead only, not exact fault attribution.
+
 ## Release Baseline
 
 | Check | Result |

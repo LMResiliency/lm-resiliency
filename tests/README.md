@@ -19,6 +19,7 @@ python -m pytest -q
 Distributed programs document their required `torchrun` command in the module docstring.
 Production-loop integration is exercised directly through `examples/production_loops/` with `--inject-fault`.
 MoE validation is manual because it depends on specific GPU, Triton, Megatron Core, and Transformer Engine environments.
+Reproducible healthy-path performance commands and regression thresholds are documented in [benchmarks](../benchmarks/README.md).
 
 ## Automated GPU Qualification
 
