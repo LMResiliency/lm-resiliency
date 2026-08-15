@@ -4,7 +4,7 @@
 
 ### Fast checkpoint recovery and fault localization for distributed LLM pre-training
 
-[![16 GPU Feature Tests](https://img.shields.io/badge/16_GPU_Feature_Tests-passing-brightgreen.svg)](docs/validation.md#release-baseline)
+[![Historical 16 GPU Evidence](https://img.shields.io/badge/16_GPU_Evidence-historical_2026--08--13-lightgrey.svg)](docs/validation.md#historical-release-baseline)
 [![GPU Qualification](https://github.com/LMResiliency/lm-resiliency/actions/workflows/gpu-qualification.yml/badge.svg?branch=main)](https://github.com/LMResiliency/lm-resiliency/actions/workflows/gpu-qualification.yml)
 [![pip](https://img.shields.io/pypi/v/lm-resiliency?color=blue)](https://pypi.org/project/lm-resiliency/)
 [![PyTorch 2.10–2.13](https://img.shields.io/badge/PyTorch-2.10--2.13-EE4C2C.svg)](https://pytorch.org/)
@@ -143,7 +143,7 @@ Launcher-specific retry, placement, and replacement policy remains external. See
 | GEMINI checkpoint tiers, recovery, and cadence | [GEMINI guide](docs/gemini.md) |
 | SCOUT coverage, replay, fault reports, and checkpoint certification | [SCOUT guide](docs/scout.md) |
 | MoE regime discovery, qualification, and measured results | [MoE execution regimes](docs/moe_execution_regimes.md) |
-| Complete test evidence and limitations | [Validation report](docs/validation.md) |
+| Revision-bound evidence format, results, and limitations | [Validation report](docs/validation.md) |
 | Planned project direction and priorities | [Roadmap](ROADMAP.md) |
 
 ## Development
