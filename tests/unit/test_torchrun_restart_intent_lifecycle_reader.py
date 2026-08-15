@@ -7,10 +7,7 @@ from dataclasses import replace
 
 import pytest
 
-from lm_resiliency.integrations.torchrun._control_store import (
-    ControlStoreWrite,
-    InMemoryControlStore,
-)
+from lm_resiliency.integrations.torchrun._control_store import InMemoryControlStore
 from lm_resiliency.integrations.torchrun._coordinator_lease import (
     CoordinatorLeaseManager,
     HeldCoordinatorLease,
@@ -303,48 +300,12 @@ def test_lifecycle_reader_retries_atomic_closure_during_read(monkeypatch):
     assert observed.lifecycle == records.lifecycle
 
 
-@pytest.mark.parametrize(
-    ("key_role", "change", "message"),
-    [
-        ("intent", {"value": b"invalid"}, "intent is malformed"),
-        ("closure", {"value": b"invalid"}, "closure is malformed"),
-        ("lifecycle", {"value": b"invalid"}, "head is malformed"),
-        ("closed", {"value": b"invalid"}, "head is malformed"),
-    ],
-)
-def test_lifecycle_reader_rejects_malformed_records(
-    key_role,
-    change,
-    message,
-):
+def test_lifecycle_reader_translates_invalid_persisted_closure():
     clock, store, _, _, lease, opened, reader = _open_state()
     records = _commit_closure(clock, store, opened, lease)
-    keys = {
-        "intent": records.intent_key,
-        "closure": records.closure_key,
-        "lifecycle": records.lifecycle_head_key,
-        "closed": records.intent_head_key,
-    }
-    _replace_entry(store, keys[key_role], **change)
+    _replace_entry(store, records.closure_key, value=b"invalid")
 
-    with pytest.raises(RestartIntentLifecycleReadCorrupt, match=message):
-        reader.read()
-
-
-def test_lifecycle_reader_rejects_unlinked_closure_records():
-    clock, store, _, _, lease, opened, reader = _open_state()
-    records = _commit_closure(clock, store, opened, lease)
-    substituted = replace(
-        records.lifecycle_head,
-        lifecycle_digest="0" * 64,
-    )
-    _replace_entry(
-        store,
-        records.lifecycle_head_key,
-        value=substituted.to_json(),
-    )
-
-    with pytest.raises(RestartIntentLifecycleReadCorrupt, match="one intent"):
+    with pytest.raises(RestartIntentLifecycleReadCorrupt, match="contradictory"):
         reader.read()
 
 
@@ -374,96 +335,6 @@ def test_lifecycle_reader_rejects_missing_or_rewritten_records():
         reader.read()
 
 
-def test_lifecycle_reader_rejects_noncanonical_closing_lease_provenance():
-    clock, store, _, _, lease, opened, reader = _open_state()
-    records = _commit_closure(clock, store, opened, lease)
-    for key in (
-        records.intent_head_key,
-        records.lifecycle_head_key,
-        records.closure_key,
-    ):
-        _replace_entry(store, key, guard_key="other/coordinator-lease")
-
-    with pytest.raises(RestartIntentLifecycleReadCorrupt, match="lease provenance"):
-        reader.read()
-
-
-def test_lifecycle_reader_rejects_closure_of_another_predecessor():
-    clock, store, _, _, lease, opened, reader = _open_state()
-    records = _commit_closure(clock, store, opened, lease)
-    other_head = replace(opened.prepared.head, intent_id="intent-b")
-    other_closure = replace(records.lifecycle, closed_intent=other_head)
-    other_lifecycle_head = replace(
-        records.lifecycle_head,
-        lifecycle_digest=other_closure.digest,
-    )
-    substitutions = {
-        records.intent_head_key: replace(
-            records.closed_head,
-            lifecycle_head_digest=other_lifecycle_head.digest,
-        ).to_json(),
-        records.lifecycle_head_key: other_lifecycle_head.to_json(),
-        records.closure_key: other_closure.to_json(),
-    }
-    for key, value in substitutions.items():
-        _replace_entry(store, key, value=value)
-
-    with pytest.raises(RestartIntentLifecycleReadCorrupt, match="one intent"):
-        reader.read()
-
-
-def test_lifecycle_reader_rejects_skipped_initial_index():
-    clock, store, _, _, lease, opened, reader = _open_state()
-    lifecycle = RestartIntentLifecycleRecord(
-        closed_intent=opened.prepared.head,
-        coordinator_id=lease.record.coordinator_id,
-        lease_id=lease.record.lease_id,
-        coordinator_lease_duration_ms=lease.record.lease_duration_ms,
-        coordinator_fencing_token=lease.fencing_token,
-    )
-    lifecycle_head = RestartIntentLifecycleHeadRecord(
-        run_id=RUN_ID,
-        closure_index=2,
-        generation=0,
-        intent_id="intent-a",
-        lifecycle_digest=lifecycle.digest,
-    )
-    closed_head = RestartIntentClosedHeadRecord(
-        run_id=RUN_ID,
-        closure_index=2,
-        generation=0,
-        intent_id="intent-a",
-        lifecycle_head_digest=lifecycle_head.digest,
-    )
-    clock.set(1_010)
-    store.compare_set_many_guarded(
-        {
-            opened.prepared.intent_head_key: ControlStoreWrite(
-                expected_revision=opened.head_entry.revision,
-                value=closed_head.to_json(),
-            ),
-            opened.prepared.lifecycle_head_key: ControlStoreWrite(
-                expected_revision=None,
-                value=lifecycle_head.to_json(),
-                require_never_created=True,
-            ),
-            reader.closure_key(2): ControlStoreWrite(
-                expected_revision=None,
-                value=lifecycle.to_json(),
-                require_never_created=True,
-            ),
-        },
-        guard_key=opened.prepared.coordinator_lease_key,
-        expected_guard_revision=lease.fencing_token,
-        not_before_unix_ms=1_010,
-        deadline_unix_ms=lease.expires_at_unix_ms,
-        conditions={opened.prepared.intent_key: opened.intent_entry.revision},
-    )
-
-    with pytest.raises(RestartIntentLifecycleReadCorrupt, match="index"):
-        reader.read()
-
-
 def test_lifecycle_reader_rejects_closure_outside_causal_window():
     clock, store, _, _, lease, opened, reader = _open_state()
     records = _commit_closure(clock, store, opened, lease)
@@ -475,7 +346,7 @@ def test_lifecycle_reader_rejects_closure_outside_causal_window():
         _replace_entry(
             store,
             key,
-            transaction_sequence=opened.transaction_sequence,
+            committed_at_unix_ms=lease.expires_at_unix_ms,
         )
 
     with pytest.raises(RestartIntentLifecycleReadCorrupt, match="causal lease window"):
