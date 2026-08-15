@@ -411,6 +411,29 @@ def test_lifecycle_reader_rejects_invalid_open_generation_binding():
         reader.read()
 
 
+def test_lifecycle_reader_rejects_open_suspects_outside_generation():
+    _, store, _, _, _, opened, reader = _open_state()
+    intent = replace(
+        opened.prepared.record.intent,
+        suspected_node_ids=("node-z",),
+    )
+    record = replace(opened.prepared.record, intent=intent)
+    head = replace(opened.prepared.head, intent_digest=record.digest)
+    _replace_entry(
+        store,
+        opened.prepared.intent_head_key,
+        value=head.to_json(),
+    )
+    _replace_entry(
+        store,
+        opened.prepared.intent_key,
+        value=record.to_json(),
+    )
+
+    with pytest.raises(RestartIntentLifecycleReadCorrupt, match="suspects nodes outside"):
+        reader.read()
+
+
 def test_lifecycle_reader_reconstructs_verified_closure():
     clock, store, _, _, lease, opened, reader = _open_state()
     records = _commit_closure(clock, store, opened, lease)

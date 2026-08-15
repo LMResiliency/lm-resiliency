@@ -289,6 +289,31 @@ def test_authenticated_closure_accepts_immediate_generation_successor():
         )
 
 
+def test_authenticated_closure_rejects_successor_that_retains_suspect():
+    fixture = _fixture()
+    current = fixture.generation_manager.current()
+    assert current is not None
+    fixture.clock.set(1_020)
+    fixture.generation_manager.commit_successor(
+        fixture.opening_lease,
+        current,
+        _assignment(generation=1),
+    )
+    successor = GenerationStateReader(fixture.store, run_id=RUN_ID).get(1)
+    assert successor is not None
+
+    with pytest.raises(ValueError, match="successor retains suspected nodes"):
+        AuthenticatedInitialRestartIntentClosure(
+            state=fixture.state,
+            generation_snapshot=fixture.generation,
+            immediate_successor=successor,
+            lease_history=CoordinatorLeaseHistoryReader(
+                fixture.store,
+                run_id=RUN_ID,
+            ).read(),
+        )
+
+
 def test_authenticated_closure_rejects_wrong_generation_or_successor():
     fixture = _fixture()
 

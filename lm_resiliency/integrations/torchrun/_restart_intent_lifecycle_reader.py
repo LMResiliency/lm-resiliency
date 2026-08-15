@@ -336,6 +336,12 @@ class InitialRestartIntentLifecycleReader:
             raise RestartIntentLifecycleReadCorrupt(
                 "current generation does not match the open restart intent"
             )
+        active_nodes = set(snapshot.record.assignment.slot_to_node_id.values())
+        unknown_nodes = sorted(set(intent.intent.suspected_node_ids) - active_nodes)
+        if unknown_nodes:
+            raise RestartIntentLifecycleReadCorrupt(
+                f"open restart intent suspects nodes outside its generation: {unknown_nodes!r}"
+            )
         generation_authority = self._generation_authority(
             snapshot,
             lease_history,

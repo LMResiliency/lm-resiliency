@@ -159,6 +159,14 @@ class AuthenticatedInitialRestartIntentClosure:
             raise ValueError(
                 "AuthenticatedInitialRestartIntentClosure immediate successor is invalid"
             )
+        if successor is not None:
+            successor_nodes = set(successor.record.assignment.slot_to_node_id.values())
+            retained_suspects = sorted(set(intent.suspected_node_ids) & successor_nodes)
+            if retained_suspects:
+                raise ValueError(
+                    "AuthenticatedInitialRestartIntentClosure immediate successor "
+                    f"retains suspected nodes: {retained_suspects!r}"
+                )
 
     def _generation_authority(self) -> CoordinatorLeaseAuthority:
         snapshot = self.generation_snapshot
