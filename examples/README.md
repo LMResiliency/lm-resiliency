@@ -2,22 +2,24 @@
 
 ## Quick Start
 
-Run [quickstart.py](quickstart.py) with plain Python to train a tiny causal LM on CPU.
+After installing `lm-resiliency`, run its packaged command to train a tiny causal LM on CPU.
 The example executes the complete forward, backward, optimizer, and GEMINI checkpoint lifecycle without requiring a GPU.
 
 ```bash
-python examples/quickstart.py \
+lm-resiliency-quickstart \
   --checkpoint-dir /tmp/lm-resiliency-quickstart/checkpoints
 ```
 
 Run it again with a larger step target to resume from the saved GEMINI checkpoint:
 
 ```bash
-python examples/quickstart.py \
+lm-resiliency-quickstart \
   --steps 6 \
   --checkpoint-dir /tmp/lm-resiliency-quickstart/checkpoints
 ```
 
+The installed command and library come from the same wheel.
+Developers working from a source checkout can use the equivalent [quickstart.py](quickstart.py) wrapper.
 The single-process example validates training-loop integration and recovery.
 Use the distributed examples below to exercise SCOUT replay and multi-rank localization.
 

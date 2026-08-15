@@ -155,6 +155,10 @@ jobs:
           "$smoke_env/bin/python" -m pip install --no-deps dist/*.whl
           "$smoke_env/bin/python" -m pip check
           "$smoke_env/bin/lm-resiliency-discover-moe-regimes" --help
+          CUDA_VISIBLE_DEVICES="" "$smoke_env/bin/lm-resiliency-quickstart" \
+            --steps 2 \
+            --interval 1 \
+            --checkpoint-dir "$RUNNER_TEMP/lm-resiliency-wheel-quickstart"
           cd "$RUNNER_TEMP"
           "$smoke_env/bin/python" -c \
             'import lm_resiliency, sys; optional = {"deepspeed", "megatron", "torchtitan", "triton"}; assert not optional.intersection(sys.modules); print(lm_resiliency.__file__)'

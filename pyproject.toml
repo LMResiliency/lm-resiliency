@@ -36,6 +36,7 @@ dependencies = [
 
 [project.scripts]
 lm-resiliency-discover-moe-regimes = "lm_resiliency.cli.discover_moe_regimes:main"
+lm-resiliency-quickstart = "lm_resiliency.quickstart:main"
 
 [project.urls]
 Homepage = "https://github.com/LMResiliency/lm-resiliency"

@@ -11,7 +11,8 @@ def _run_example(checkpoint_dir: Path, *, steps: int) -> dict:
     completed = subprocess.run(
         [
             sys.executable,
-            "examples/quickstart.py",
+            "-m",
+            "lm_resiliency.quickstart",
             "--steps",
             str(steps),
             "--interval",
@@ -41,3 +42,13 @@ def test_quickstart_trains_and_resumes(tmp_path: Path) -> None:
     assert resumed["recovered_step"] == 2
     assert resumed["completed_step"] == 3
     assert resumed["checkpoint_step"] == 3
+
+
+def test_readme_uses_the_version_aligned_installed_command() -> None:
+    readme = Path("README.md").read_text()
+    quick_start = readme.split("## Quick Start", maxsplit=1)[1].split(
+        "### Add resiliency", maxsplit=1
+    )[0]
+
+    assert "lm-resiliency-quickstart" in quick_start
+    assert "git clone" not in quick_start
