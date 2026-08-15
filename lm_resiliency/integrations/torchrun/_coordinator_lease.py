@@ -12,7 +12,9 @@ from typing import ClassVar
 
 from lm_resiliency.integrations.torchrun._control_store import (
     ControlStore,
+    ControlStoreClockError,
     ControlStoreConflict,
+    ControlStoreDeadlineExceeded,
     ControlStoreEntry,
 )
 
@@ -93,7 +95,12 @@ class CoordinatorLeaseRecord:
         if not isinstance(encoded, bytes):
             raise ValueError("CoordinatorLeaseRecord: expected encoded bytes")
         try:
-            value = json.loads(encoded)
+            value = json.loads(
+                encoded,
+                object_pairs_hook=_reject_duplicate_object_fields,
+            )
+        except _DuplicateLeaseField as error:
+            raise ValueError(f"CoordinatorLeaseRecord: {error}") from error
         except (TypeError, ValueError) as error:
             raise ValueError("CoordinatorLeaseRecord: invalid JSON") from error
         if not isinstance(value, Mapping) or not all(isinstance(key, str) for key in value):
@@ -249,11 +256,20 @@ class CoordinatorLeaseManager:
             expires_at_unix_ms=requested_expiry,
         )
         try:
-            entry = self._store.compare_set(
+            entry = self._store.compare_set_before(
                 self._lease_key,
                 expected_revision=lease.fencing_token,
+                deadline_unix_ms=lease.record.expires_at_unix_ms,
                 value=record.to_json(),
             )
+        except ControlStoreDeadlineExceeded as error:
+            raise CoordinatorLeaseLost(
+                "coordinator lease expired at the control store before renewal"
+            ) from error
+        except ControlStoreClockError as error:
+            raise CoordinatorLeaseClockError(
+                "authoritative control-store clock moved backward"
+            ) from error
         except ControlStoreConflict as error:
             raise CoordinatorLeaseLost("coordinator lease changed before renewal") from error
         return HeldCoordinatorLease(
@@ -310,6 +326,21 @@ def _nonempty_string(value: object, path: str) -> str:
 def _positive_integer(value: object, path: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{path} must be a positive integer")
+    return value
+
+
+class _DuplicateLeaseField(ValueError):
+    pass
+
+
+def _reject_duplicate_object_fields(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise _DuplicateLeaseField(f"duplicate field {key!r}")
+        value[key] = item
     return value
 
 

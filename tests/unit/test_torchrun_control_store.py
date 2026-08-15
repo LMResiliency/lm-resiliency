@@ -8,10 +8,20 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from lm_resiliency.integrations.torchrun._control_store import (
+    ControlStoreClockError,
     ControlStoreConflict,
+    ControlStoreDeadlineExceeded,
     ControlStoreEntry,
     InMemoryControlStore,
 )
+
+
+class ManualClock:
+    def __init__(self, now_unix_ms: int) -> None:
+        self.now_unix_ms = now_unix_ms
+
+    def __call__(self) -> int:
+        return self.now_unix_ms
 
 
 def test_control_store_create_update_delete_and_recreate():
@@ -160,6 +170,54 @@ def test_control_store_rejects_mutable_values():
             expected_revision=None,
             value=bytearray(b"value"),  # type: ignore[arg-type]
         )
+
+
+def test_control_store_deadline_guard_is_checked_atomically():
+    clock = ManualClock(100)
+    store = InMemoryControlStore(clock=clock)
+    created = store.compare_set("run/control", expected_revision=None, value=b"one")
+
+    updated = store.compare_set_before(
+        "run/control",
+        expected_revision=created.revision,
+        deadline_unix_ms=101,
+        value=b"two",
+    )
+    clock.now_unix_ms = 101
+
+    with pytest.raises(ControlStoreDeadlineExceeded) as error:
+        store.compare_set_before(
+            "run/control",
+            expected_revision=updated.revision,
+            deadline_unix_ms=101,
+            value=b"expired",
+        )
+
+    assert error.value.observed_unix_ms == 101
+    assert store.get("run/control") == updated
+
+
+def test_control_store_deadline_guard_rejects_backward_clock():
+    clock = ManualClock(100)
+    store = InMemoryControlStore(clock=clock)
+    created = store.compare_set("run/control", expected_revision=None, value=b"one")
+    updated = store.compare_set_before(
+        "run/control",
+        expected_revision=created.revision,
+        deadline_unix_ms=200,
+        value=b"two",
+    )
+    clock.now_unix_ms = 99
+
+    with pytest.raises(ControlStoreClockError, match="backward"):
+        store.compare_set_before(
+            "run/control",
+            expected_revision=updated.revision,
+            deadline_unix_ms=200,
+            value=b"stale-clock",
+        )
+
+    assert store.get("run/control") == updated
 
 
 @pytest.mark.parametrize(

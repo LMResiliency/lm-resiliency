@@ -38,6 +38,28 @@ class ManualClock:
             self.now_unix_ms += duration_ms
 
 
+class ExpireDuringRenewalStore(InMemoryControlStore):
+    def __init__(self, clock: ManualClock) -> None:
+        super().__init__(clock=clock)
+        self._manual_clock = clock
+
+    def compare_set_before(
+        self,
+        key: str,
+        *,
+        expected_revision: int,
+        deadline_unix_ms: int,
+        value: bytes,
+    ):
+        self._manual_clock.set(deadline_unix_ms)
+        return super().compare_set_before(
+            key,
+            expected_revision=expected_revision,
+            deadline_unix_ms=deadline_unix_ms,
+            value=value,
+        )
+
+
 def _manager(
     store: InMemoryControlStore,
     clock: ManualClock,
@@ -77,10 +99,18 @@ def test_coordinator_lease_record_round_trips_strict_json():
         with pytest.raises(ValueError, match="unsupported"):
             CoordinatorLeaseRecord.from_json(json.dumps(value).encode("utf-8"))
 
+    duplicate_run = (
+        b'{"schema_version":1,"run_id":"run-a","run_id":"run-b",'
+        b'"coordinator_id":"coordinator-a","lease_id":"lease-a",'
+        b'"acquired_at_unix_ms":1000,"expires_at_unix_ms":1100}'
+    )
+    with pytest.raises(ValueError, match="duplicate field 'run_id'"):
+        CoordinatorLeaseRecord.from_json(duplicate_run)
+
 
 def test_coordinator_lease_acquire_is_exclusive_and_idempotent():
-    store = InMemoryControlStore()
     clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
     first = _manager(store, clock, "coordinator-a")
     second = _manager(store, clock, "coordinator-b")
 
@@ -95,8 +125,8 @@ def test_coordinator_lease_acquire_is_exclusive_and_idempotent():
 
 
 def test_coordinator_lease_renewal_advances_fencing_token():
-    store = InMemoryControlStore()
     clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
     manager = _manager(store, clock, "coordinator-a")
     original = manager.acquire()
 
@@ -114,8 +144,8 @@ def test_coordinator_lease_renewal_advances_fencing_token():
 
 
 def test_early_renewal_still_checks_and_advances_fencing_token():
-    store = InMemoryControlStore()
     clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
     manager = _manager(store, clock, "coordinator-a")
     original = manager.acquire()
 
@@ -129,9 +159,22 @@ def test_early_renewal_still_checks_and_advances_fencing_token():
         manager.renew(renewed)
 
 
-def test_expired_lease_takeover_fences_old_coordinator():
-    store = InMemoryControlStore()
+def test_renewal_cannot_commit_after_store_observes_expiry():
     clock = ManualClock()
+    store = ExpireDuringRenewalStore(clock)
+    manager = _manager(store, clock, "coordinator-a")
+    lease = manager.acquire()
+    clock.set(1_050)
+
+    with pytest.raises(CoordinatorLeaseLost, match="expired at the control store"):
+        manager.renew(lease)
+
+    assert manager.current() == lease
+
+
+def test_expired_lease_takeover_fences_old_coordinator():
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
     first = _manager(store, clock, "coordinator-a")
     second = _manager(store, clock, "coordinator-b")
     stale = first.acquire()
@@ -149,8 +192,8 @@ def test_expired_lease_takeover_fences_old_coordinator():
 
 
 def test_release_and_reacquire_never_reuses_fencing_token():
-    store = InMemoryControlStore()
     clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
     manager = _manager(store, clock, "coordinator-a")
     original = manager.acquire()
 
@@ -162,8 +205,8 @@ def test_release_and_reacquire_never_reuses_fencing_token():
 
 
 def test_concurrent_coordinator_acquisition_has_one_winner():
-    store = InMemoryControlStore()
     clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
     workers = 8
     barrier = threading.Barrier(workers)
     managers = [_manager(store, clock, f"coordinator-{index}") for index in range(workers)]
@@ -184,8 +227,8 @@ def test_concurrent_coordinator_acquisition_has_one_winner():
 
 
 def test_coordinator_lease_fails_closed_on_corrupt_record():
-    store = InMemoryControlStore()
     clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
     manager = _manager(store, clock, "coordinator-a")
     store.compare_set(
         manager.lease_key,
@@ -200,8 +243,8 @@ def test_coordinator_lease_fails_closed_on_corrupt_record():
 
 
 def test_coordinator_lease_clock_cannot_move_backward():
-    store = InMemoryControlStore()
     clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
     manager = _manager(store, clock, "coordinator-a")
     lease = manager.acquire()
 
@@ -211,8 +254,8 @@ def test_coordinator_lease_clock_cannot_move_backward():
 
 
 def test_coordinator_lease_rejects_handle_from_another_manager():
-    store = InMemoryControlStore()
     clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
     first = _manager(store, clock, "coordinator-a")
     second = _manager(store, clock, "coordinator-b")
     lease = first.acquire()
@@ -224,8 +267,8 @@ def test_coordinator_lease_rejects_handle_from_another_manager():
 
 
 def test_distinct_runs_use_distinct_lease_keys():
-    store = InMemoryControlStore()
     clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
     first = _manager(store, clock, "coordinator-a", run_id="run-a")
     second = _manager(store, clock, "coordinator-b", run_id="run-b")
 
