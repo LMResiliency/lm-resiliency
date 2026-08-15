@@ -1,0 +1,27 @@
+site_name: LM Resiliency
+repo_url: https://github.com/LMResiliency/lm-resiliency
+repo_name: LMResiliency/lm-resiliency
+edit_uri: edit/main/docs/
+docs_dir: docs
+site_dir: site
+
+nav:
+  - Home: index.md
+  - API Guide: api.md
+  - Compatibility: compatibility.md
+  - GEMINI: gemini.md
+  - SCOUT: scout.md
+  - Torchrun Resiliency: torchrun_resiliency.md
+  - MoE Execution Regimes: moe_execution_regimes.md
+  - Validation: validation.md
+  - Release Process: release.md
+
+theme:
+  name: readthedocs
+
+hooks:
+  - docs_hooks.py
+
+markdown_extensions:
+  - toc:
+      permalink: true
