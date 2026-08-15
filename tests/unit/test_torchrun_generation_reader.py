@@ -573,14 +573,13 @@ def test_generation_reader_rejects_noninitial_snapshot_store_sequences(
     snapshot_lifetime_sequence,
 ):
     records = _history(("coordinator-a", "lease-a", 100))
-    reader = _reader_from_history(
-        records,
-        snapshot_value_sequences=(snapshot_value_sequence,),
-        snapshot_lifetime_sequences=(snapshot_lifetime_sequence,),
-    )
 
-    with pytest.raises(GenerationStateCorrupt, match="noninitial store sequences"):
-        reader.current()
+    with pytest.raises(ValueError, match="control-store entry"):
+        _reader_from_history(
+            records,
+            snapshot_value_sequences=(snapshot_value_sequence,),
+            snapshot_lifetime_sequences=(snapshot_lifetime_sequence,),
+        )
 
 
 def test_generation_reader_rejects_head_value_sequence_mismatch():
@@ -1041,27 +1040,25 @@ def test_generation_reader_rejects_guard_recreation_without_two_mutations():
 
 def test_generation_reader_rejects_impossible_initial_guard_lifetime():
     records = _history(("coordinator-a", "lease-a", 100))
-    reader = _reader_from_history(
-        records,
-        guard_mutation_sequences=(1,),
-        guard_lifetime_sequences=(2,),
-    )
 
-    with pytest.raises(GenerationStateCorrupt, match="cannot support its lifetime"):
-        reader.current()
+    with pytest.raises(ValueError, match="control-store guard provenance"):
+        _reader_from_history(
+            records,
+            guard_mutation_sequences=(1,),
+            guard_lifetime_sequences=(2,),
+        )
 
 
 def test_generation_reader_rejects_initial_value_sequence_advanced_by_delete():
     records = _history(("coordinator-a", "lease-a", 100))
-    reader = _reader_from_history(
-        records,
-        guard_mutation_sequences=(3,),
-        guard_value_sequences=(3,),
-        guard_lifetime_sequences=(2,),
-    )
 
-    with pytest.raises(GenerationStateCorrupt, match="includes deletion mutations"):
-        reader.current()
+    with pytest.raises(ValueError, match="control-store guard provenance"):
+        _reader_from_history(
+            records,
+            guard_mutation_sequences=(3,),
+            guard_value_sequences=(3,),
+            guard_lifetime_sequences=(2,),
+        )
 
 
 def test_generation_reader_rejects_value_delta_advanced_by_delete():

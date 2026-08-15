@@ -44,6 +44,9 @@ def test_control_store_create_update_delete_and_recreate():
     assert created.value == b"one"
     assert updated.value == b"two"
     assert store.get("run/control") == recreated
+    assert created.transaction_sequence == 1
+    assert updated.transaction_sequence == 2
+    assert recreated.transaction_sequence == 4
     assert created.mutation_sequence == 1
     assert updated.mutation_sequence == 2
     assert recreated.mutation_sequence == 4
@@ -55,6 +58,22 @@ def test_control_store_create_update_delete_and_recreate():
     assert recreated.lifetime_sequence == 2
     assert store.has_history("run/control")
     assert created.revision < updated.revision < tombstone_revision < recreated.revision
+
+
+def test_control_store_transaction_sequence_orders_keys_and_consumes_deletes():
+    store = InMemoryControlStore()
+    first = store.compare_set("run/first", expected_revision=None, value=b"one")
+
+    with pytest.raises(ControlStoreConflict):
+        store.compare_set("run/first", expected_revision=None, value=b"conflict")
+
+    second = store.compare_set("run/second", expected_revision=None, value=b"two")
+    store.compare_delete("run/first", expected_revision=first.revision)
+    third = store.compare_set("run/third", expected_revision=None, value=b"three")
+
+    assert first.transaction_sequence == 1
+    assert second.transaction_sequence == 2
+    assert third.transaction_sequence == 4
 
 
 def test_control_store_retains_key_history_after_delete():
@@ -338,6 +357,64 @@ def test_control_store_entry_rejects_invalid_backend_values(
             value=value,
             revision=revision,
             committed_at_unix_ms=committed_at_unix_ms,
+        )
+
+
+def test_control_store_entry_rejects_invalid_transaction_sequence():
+    with pytest.raises(ValueError, match="transaction_sequence"):
+        ControlStoreEntry(
+            value=b"value",
+            revision=1,
+            transaction_sequence=0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation_sequence", "value_sequence", "lifetime_sequence"),
+    [
+        (2, 1, 2),
+        (3, 1, 2),
+        (1, 2, 1),
+    ],
+)
+def test_control_store_entry_rejects_impossible_sequence_lineage(
+    mutation_sequence,
+    value_sequence,
+    lifetime_sequence,
+):
+    with pytest.raises(ValueError, match="control-store entry"):
+        ControlStoreEntry(
+            value=b"value",
+            revision=1,
+            mutation_sequence=mutation_sequence,
+            value_sequence=value_sequence,
+            lifetime_sequence=lifetime_sequence,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation_sequence", "value_sequence", "lifetime_sequence"),
+    [
+        (2, 1, 2),
+        (3, 1, 2),
+        (1, 2, 1),
+    ],
+)
+def test_control_store_entry_rejects_impossible_guard_sequence_lineage(
+    mutation_sequence,
+    value_sequence,
+    lifetime_sequence,
+):
+    with pytest.raises(ValueError, match="control-store guard provenance"):
+        ControlStoreEntry(
+            value=b"value",
+            revision=1,
+            guard_key="run/lease",
+            guard_revision=1,
+            guard_value_digest="a" * 64,
+            guard_mutation_sequence=mutation_sequence,
+            guard_value_sequence=value_sequence,
+            guard_lifetime_sequence=lifetime_sequence,
         )
 
 
