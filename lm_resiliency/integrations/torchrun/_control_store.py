@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Protocol
 
 
@@ -83,6 +84,22 @@ class ControlStoreEntry:
             )
 
 
+@dataclass(frozen=True, slots=True)
+class ControlStoreWrite:
+    """One expected revision and immutable value in an atomic store transaction."""
+
+    expected_revision: int | None
+    value: bytes
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "expected_revision",
+            _expected_revision(self.expected_revision, allow_absent=True),
+        )
+        object.__setattr__(self, "value", _control_value(self.value))
+
+
 class ControlStore(Protocol):
     """Strongly consistent per-key compare-and-set storage."""
 
@@ -132,6 +149,18 @@ class ControlStore(Protocol):
         deadline_unix_ms: int,
     ) -> int:
         """Delete ``key`` within an inclusive-start, exclusive-end window."""
+        ...
+
+    def compare_set_many_guarded(
+        self,
+        writes: Mapping[str, ControlStoreWrite],
+        *,
+        guard_key: str,
+        expected_guard_revision: int,
+        not_before_unix_ms: int,
+        deadline_unix_ms: int,
+    ) -> Mapping[str, ControlStoreEntry]:
+        """Atomically publish writes while a guard revision is live in the time window."""
         ...
 
 
@@ -254,6 +283,57 @@ class InMemoryControlStore:
             del self._entries[normalized_key]
             return self._next_revision(normalized_key)
 
+    def compare_set_many_guarded(
+        self,
+        writes: Mapping[str, ControlStoreWrite],
+        *,
+        guard_key: str,
+        expected_guard_revision: int,
+        not_before_unix_ms: int,
+        deadline_unix_ms: int,
+    ) -> Mapping[str, ControlStoreEntry]:
+        normalized_writes = _control_writes(writes)
+        normalized_guard_key = _control_key(guard_key)
+        if normalized_guard_key in normalized_writes:
+            raise ValueError("guard_key must not also be a transaction target")
+        normalized_guard_revision = _required_revision(expected_guard_revision)
+        normalized_not_before = _positive_integer(
+            not_before_unix_ms,
+            "not_before_unix_ms",
+        )
+        normalized_deadline = _positive_integer(
+            deadline_unix_ms,
+            "deadline_unix_ms",
+        )
+        if normalized_not_before >= normalized_deadline:
+            raise ValueError("not_before_unix_ms must be before deadline_unix_ms")
+        with self._lock:
+            self._require_revision(normalized_guard_key, normalized_guard_revision)
+            for key, write in normalized_writes.items():
+                self._require_revision(key, write.expected_revision)
+            now_unix_ms = self._store_now_unix_ms()
+            if now_unix_ms < normalized_not_before:
+                raise ControlStoreTooEarly(
+                    normalized_guard_key,
+                    normalized_not_before,
+                    now_unix_ms,
+                )
+            if now_unix_ms >= normalized_deadline:
+                raise ControlStoreDeadlineExceeded(
+                    normalized_guard_key,
+                    normalized_deadline,
+                    now_unix_ms,
+                )
+            committed = {
+                key: self._set_entry(
+                    key,
+                    write.value,
+                    committed_at_unix_ms=now_unix_ms,
+                )
+                for key, write in normalized_writes.items()
+            }
+            return MappingProxyType(committed)
+
     def _require_revision(self, key: str, expected_revision: int | None) -> None:
         entry = self._entries.get(key)
         actual_revision = None if entry is None else entry.revision
@@ -301,6 +381,18 @@ def _control_value(value: object) -> bytes:
     return bytes(value)
 
 
+def _control_writes(value: object) -> dict[str, ControlStoreWrite]:
+    if not isinstance(value, Mapping) or not value:
+        raise ValueError("writes must be a non-empty mapping")
+    result: dict[str, ControlStoreWrite] = {}
+    for key, write in value.items():
+        normalized_key = _control_key(key)
+        if not isinstance(write, ControlStoreWrite):
+            raise TypeError("writes values must be ControlStoreWrite")
+        result[normalized_key] = write
+    return dict(sorted(result.items()))
+
+
 def _expected_revision(value: object, *, allow_absent: bool) -> int | None:
     if allow_absent and value is None:
         return None
@@ -331,5 +423,6 @@ __all__ = [
     "ControlStoreEntry",
     "ControlStoreError",
     "ControlStoreTooEarly",
+    "ControlStoreWrite",
     "InMemoryControlStore",
 ]
