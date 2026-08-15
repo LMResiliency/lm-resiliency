@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import replace
 
 import pytest
 
 from lm_resiliency.integrations.torchrun._control_store import (
+    ControlStoreEntry,
     ControlStoreWrite,
     InMemoryControlStore,
 )
@@ -50,6 +52,30 @@ class ManualClock:
             self.now_unix_ms = now_unix_ms
 
 
+class CallbackStore(InMemoryControlStore):
+    def __init__(self, *, clock: ManualClock) -> None:
+        super().__init__(clock=clock)
+        self.callback_key: str | None = None
+        self.callback: Callable[[], None] | None = None
+
+    def get(self, key: str) -> ControlStoreEntry | None:
+        entry = super().get(key)
+        if key == self.callback_key and self.callback is not None:
+            callback = self.callback
+            self.callback = None
+            callback()
+        return entry
+
+
+class EntryOverrideStore(InMemoryControlStore):
+    def __init__(self, *, clock: ManualClock) -> None:
+        super().__init__(clock=clock)
+        self.overrides: dict[str, ControlStoreEntry] = {}
+
+    def get(self, key: str) -> ControlStoreEntry | None:
+        return self.overrides.get(key, super().get(key))
+
+
 def _assignment(
     generation: int = 0,
     *,
@@ -83,7 +109,11 @@ def _intent(
     )
 
 
-def _state() -> tuple[
+def _state(
+    *,
+    clock: ManualClock | None = None,
+    store: InMemoryControlStore | None = None,
+) -> tuple[
     ManualClock,
     InMemoryControlStore,
     CoordinatorLeaseManager,
@@ -92,8 +122,8 @@ def _state() -> tuple[
     HeldCoordinatorLease,
     CurrentGeneration,
 ]:
-    clock = ManualClock()
-    store = InMemoryControlStore(clock=clock)
+    clock = ManualClock() if clock is None else clock
+    store = InMemoryControlStore(clock=clock) if store is None else store
     lease_manager = CoordinatorLeaseManager(
         store,
         run_id=RUN_ID,
@@ -203,6 +233,30 @@ def test_current_returns_none_for_never_created_lifecycle():
     assert reader.current(current) is None
 
 
+def test_current_rechecks_generation_before_returning_no_lifecycle():
+    clock = ManualClock()
+    store = CallbackStore(clock=clock)
+    (
+        _,
+        _,
+        _,
+        generation_manager,
+        reader,
+        lease,
+        current,
+    ) = _state(clock=clock, store=store)
+    clock.set(1_010)
+    store.callback_key = reader.lifecycle_key
+    store.callback = lambda: generation_manager.commit_successor(
+        lease,
+        current,
+        _assignment(1, replacement_node_id="node-c"),
+    )
+
+    with pytest.raises(RestartIntentLifecycleConflict, match="generation changed"):
+        reader.current(current)
+
+
 def test_current_verifies_closed_intent_and_closing_lease():
     _, store, _, generation_manager, reader, lease, current = _state()
     record, _, lifecycle = _records(current, lease, lease)
@@ -231,6 +285,21 @@ def test_current_accepts_closure_under_renewed_lease():
     assert observed is not None
     assert observed.record == lifecycle
     assert observed.revision == committed.revision
+
+
+def test_current_accepts_later_closure_under_the_same_lease():
+    clock, store, _, generation_manager, reader, lease, current = _state()
+    record, _, lifecycle = _records(current, lease, lease)
+    _commit_intent(store, generation_manager, reader, current, lease, record)
+    clock.set(1_010)
+    committed = _commit_lifecycle(store, reader, lease, lifecycle)
+
+    observed = reader.current(current)
+
+    assert observed is not None
+    assert observed.record == lifecycle
+    assert observed.revision == committed.revision
+    assert observed.committed_at_unix_ms == 1_010
 
 
 def test_current_rejects_stale_generation():
@@ -374,6 +443,84 @@ def test_current_rejects_wrong_generation_snapshot_digest():
     _commit_lifecycle(store, reader, lease, lifecycle)
 
     with pytest.raises(RestartIntentLifecycleCorrupt, match="generation snapshot"):
+        reader.current(current)
+
+
+def test_current_rejects_intent_committed_before_its_snapshot():
+    clock = ManualClock()
+    store = EntryOverrideStore(clock=clock)
+    (
+        _,
+        _,
+        _,
+        generation_manager,
+        reader,
+        lease,
+        current,
+    ) = _state(clock=clock, store=store)
+    record, _, lifecycle = _records(current, lease, lease)
+    _commit_intent(store, generation_manager, reader, current, lease, record)
+    _commit_lifecycle(store, reader, lease, lifecycle)
+    snapshot_key = generation_manager.snapshot_key(0)
+    snapshot_entry = store.get(snapshot_key)
+    head_entry = store.get(generation_manager.head_key)
+    assert snapshot_entry is not None
+    assert head_entry is not None
+    store.overrides[snapshot_key] = replace(
+        snapshot_entry,
+        committed_at_unix_ms=1_010,
+    )
+    store.overrides[generation_manager.head_key] = replace(
+        head_entry,
+        committed_at_unix_ms=1_010,
+    )
+    current = generation_manager.current()
+    assert current is not None
+
+    with pytest.raises(RestartIntentLifecycleCorrupt, match="predates"):
+        reader.current(current)
+
+
+def test_current_rejects_closure_guarded_by_an_older_lease_mutation():
+    clock = ManualClock()
+    store = EntryOverrideStore(clock=clock)
+    (
+        _,
+        _,
+        lease_manager,
+        generation_manager,
+        reader,
+        lease,
+        current,
+    ) = _state(clock=clock, store=store)
+    renewed = lease_manager.renew(lease)
+    record, _, lifecycle = _records(current, renewed, renewed)
+    _commit_intent(
+        store,
+        generation_manager,
+        reader,
+        current,
+        renewed,
+        record,
+    )
+    _commit_lifecycle(store, reader, renewed, lifecycle)
+    lifecycle_entry = store.get(reader.lifecycle_key)
+    assert lifecycle_entry is not None
+    older_lifecycle = replace(
+        lifecycle,
+        coordinator_fencing_token=lease.fencing_token,
+    )
+    store.overrides[reader.lifecycle_key] = replace(
+        lifecycle_entry,
+        value=older_lifecycle.to_json(),
+        guard_revision=lease.fencing_token,
+        guard_mutation_sequence=1,
+        guard_value_sequence=1,
+        guard_lifetime_sequence=1,
+        guard_committed_at_unix_ms=lease.granted_at_unix_ms,
+    )
+
+    with pytest.raises(RestartIntentLifecycleCorrupt, match="predates intent opening"):
         reader.current(current)
 
 
