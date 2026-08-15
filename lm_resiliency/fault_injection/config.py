@@ -716,6 +716,12 @@ def _validate_builtin_local_parameters(fault: FaultSpec) -> None:
             f"unsupported built-in local parameters for {fault.type.value} on "
             f"{surface.value}: {fields}"
         )
+    for selector in ("parameter", "state_key"):
+        if selector in fault.parameters:
+            _required_non_empty_string(
+                fault.parameters[selector],
+                f"{fault.type.value} parameters.{selector}",
+            )
 
 
 @dataclass(frozen=True, slots=True)

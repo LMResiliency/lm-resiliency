@@ -321,6 +321,18 @@ class LocalFaultExecutor:
                     "because matching operations may span training iterations"
                 )
             for fault in local_faults:
+                if (
+                    fault.target.surface in {FaultSurface.WEIGHT, FaultSurface.BIAS}
+                    and incident.lifetime.iterations != 1
+                    and self._context.model_parameter_is_optimizer_resynchronized(
+                        fault.target,
+                        parameter_name=_parameter_name(fault),
+                    )
+                ):
+                    raise ValueError(
+                        "optimizer-resynchronized model state faults require an "
+                        "iterations=1 lifetime"
+                    )
                 key = self._schedule_target_key(fault)
                 for other_key, other_incident, other_fault in scheduled:
                     if key != other_key:
@@ -685,11 +697,7 @@ class LocalFaultExecutor:
             return self._context.resolve_optimizer_state(
                 fault.target,
                 parameter_name=_parameter_name(fault),
-                state_key=(
-                    None
-                    if fault.parameters.get("state_key") is None
-                    else str(fault.parameters["state_key"])
-                ),
+                state_key=_state_key(fault),
             )
         return self._context.resolve_parameter(
             fault.target,
@@ -709,11 +717,7 @@ class LocalFaultExecutor:
             _tensor, owner_identity = self._context.resolve_optimizer_state_with_owner(
                 fault.target,
                 parameter_name=parameter_name,
-                state_key=(
-                    None
-                    if fault.parameters.get("state_key") is None
-                    else str(fault.parameters["state_key"])
-                ),
+                state_key=_state_key(fault),
             )
             return owner_identity
         return None
@@ -740,11 +744,7 @@ class LocalFaultExecutor:
                 self._context.resolve_optimizer_state_with_identity(
                     fault.target,
                     parameter_name=parameter_name,
-                    state_key=(
-                        None
-                        if fault.parameters.get("state_key") is None
-                        else str(fault.parameters["state_key"])
-                    ),
+                    state_key=_state_key(fault),
                 )
             )
             return (
@@ -778,13 +778,13 @@ class LocalFaultExecutor:
             fault.target,
             parameter_name=_parameter_name(fault),
         )
-        state_key = fault.parameters.get("state_key")
+        state_key = _state_key(fault)
         return (
             fault.target.execution_rank,
             FaultSurface.OPTIMIZER_STATE.value,
             id(parameter),
             None,
-            None if state_key is None else str(state_key),
+            state_key,
         )
 
     def _history_key(self, fault: FaultSpec) -> tuple[Any, ...]:
@@ -1203,7 +1203,16 @@ def _first_float_tensor(value: Any) -> torch.Tensor | None:
 
 def _parameter_name(fault: FaultSpec) -> str | None:
     value = fault.parameters.get("parameter")
-    return None if value is None else str(value)
+    if value is not None and not isinstance(value, str):
+        raise TypeError("fault parameters.parameter must be a string")
+    return value
+
+
+def _state_key(fault: FaultSpec) -> str | None:
+    value = fault.parameters.get("state_key")
+    if value is not None and not isinstance(value, str):
+        raise TypeError("fault parameters.state_key must be a string")
+    return value
 
 
 def _numeric_value(value: Any) -> float:

@@ -766,6 +766,17 @@ def test_comparison_rejects_wrong_failure_evidence(
     assert not evaluation["evaluations"][0][mismatch]
 
 
+def test_comparison_rejects_unexpected_source_family() -> None:
+    localization = _localization_payload()
+    localization["reports"][0]["sources"] = ["hidden.output", "output.output"]
+
+    occurrence = compare_payloads(_injection_payload(), localization)["evaluations"][0]
+
+    assert occurrence["observed"]["source_prefixes"] == ["hidden.", "output."]
+    assert not occurrence["source_match"]
+    assert not occurrence["localized"]
+
+
 def test_comparison_correlates_source_prefixes_with_failed_targets() -> None:
     injection = _injection_payload()
     second_action = copy.deepcopy(injection["manifest"]["incidents"][0]["faults"][0])

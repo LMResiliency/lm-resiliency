@@ -593,6 +593,34 @@ def test_fault_parameter_contracts_are_rejected() -> None:
 
 
 @pytest.mark.parametrize(
+    ("surface", "parameters", "error_type", "message"),
+    [
+        (FaultSurface.WEIGHT, {"parameter": 0}, TypeError, "parameters.parameter must be a string"),
+        (
+            FaultSurface.OPTIMIZER_STATE,
+            {"parameter": "weight", "state_key": True},
+            TypeError,
+            "parameters.state_key must be a string",
+        ),
+        (
+            FaultSurface.OPTIMIZER_STATE,
+            {"parameter": "weight", "state_key": "  "},
+            ValueError,
+            "parameters.state_key must be non-empty",
+        ),
+    ],
+)
+def test_state_selectors_require_non_empty_strings(
+    surface: FaultSurface,
+    parameters: dict[str, object],
+    error_type: type[Exception],
+    message: str,
+) -> None:
+    with pytest.raises(error_type, match=message):
+        _corruption(target=_target(surface=surface), **parameters)
+
+
+@pytest.mark.parametrize(
     ("operation", "parameters", "error_type", "message"),
     [
         (
@@ -3534,6 +3562,52 @@ def test_megatron_master_resync_is_not_retired_twice() -> None:
     session.close()
 
 
+@pytest.mark.parametrize(
+    "lifetime",
+    [IncidentLifetime(iterations=2), IncidentLifetime(until="recovery")],
+)
+def test_megatron_master_resync_rejects_multi_boundary_state_faults(
+    lifetime: IncidentLifetime,
+) -> None:
+    model = TinyModel().half()
+    model_parameter = model.layers[0].weight
+    main_parameter = nn.Parameter(model_parameter.detach().float().clone())
+    base_optimizer = torch.optim.SGD([main_parameter], lr=0.0)
+
+    class MixedPrecisionOptimizer:
+        def __init__(self):
+            self.float16_groups = [[model_parameter]]
+            self.fp32_from_float16_groups = [[main_parameter]]
+            self.optimizer = base_optimizer
+
+        def step(self):
+            with torch.no_grad():
+                model_parameter.copy_(main_parameter)
+            return True, None, None
+
+    baseline = model_parameter.detach().clone()
+    with pytest.raises(ValueError, match="optimizer-resynchronized.*iterations=1"):
+        enable_fault_injection(
+            [Wrapper(model)],
+            MixedPrecisionOptimizer(),
+            campaign=_campaign(
+                _incident(
+                    at=(1,),
+                    lifetime=lifetime,
+                    faults=(
+                        _corruption(
+                            target=_target(surface=FaultSurface.WEIGHT),
+                            scope=FaultScope.FULL,
+                        ),
+                    ),
+                )
+            ),
+            rank=0,
+        )
+
+    torch.testing.assert_close(model_parameter, baseline)
+
+
 def test_deepspeed_pipeline_uses_optimizer_instruction_map() -> None:
     engine = PipelineEngine(TinyModel())
     original_map = engine._INSTRUCTION_MAP
@@ -5411,6 +5485,38 @@ def test_repeated_local_matching_call_candidates_are_rejected() -> None:
             ),
             rank=0,
         )
+
+
+def test_unmatched_single_call_retires_before_later_incident() -> None:
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    shared_target = _target(surface=FaultSurface.OUTPUT)
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                incident_id="first-call",
+                at=(1,),
+                lifetime=IncidentLifetime(matching_calls=1),
+                faults=(_corruption(fault_id="first", target=shared_target),),
+            ),
+            _incident(
+                incident_id="later-call",
+                at=(2,),
+                lifetime=IncidentLifetime(matching_calls=1),
+                faults=(_corruption(fault_id="later", target=shared_target),),
+            ),
+        ),
+        rank=0,
+    )
+
+    optimizer.step()
+    assert session.records[0].status is InjectionStatus.CANCELLED
+
+    model(torch.ones(2, 4))
+    assert session.records[1].status is InjectionStatus.COMPLETED
+    session.close()
 
 
 def test_equivalent_target_selectors_collide_by_resolved_parameter() -> None:
@@ -7526,7 +7632,6 @@ def test_implicit_and_explicit_optimizer_state_keys_collide() -> None:
         fault_id="implicit-state",
         target=_target(surface=FaultSurface.OPTIMIZER_STATE),
         parameter="weight",
-        state_key=None,
     )
     explicit = _corruption(
         fault_id="explicit-state",

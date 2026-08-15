@@ -658,10 +658,12 @@ class FaultInjectionSession:
                 expiration_error: BaseException | None = None
                 for active in self._active:
                     lifetime = active.incident.lifetime
-                    if (
-                        not active.done
-                        and lifetime.iterations is not None
-                        and finished >= active.start_iteration + lifetime.iterations - 1
+                    if not active.done and (
+                        (
+                            lifetime.iterations is not None
+                            and finished >= active.start_iteration + lifetime.iterations - 1
+                        )
+                        or (lifetime.matching_calls == 1 and finished >= active.start_iteration)
                     ):
                         try:
                             active.complete()

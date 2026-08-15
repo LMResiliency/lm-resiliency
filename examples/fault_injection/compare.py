@@ -312,9 +312,9 @@ def _evaluate_occurrence(
         )
         for record in records
     )
-    source_match = not expected_source_prefixes or all(
-        any(source.startswith(prefix) for source in observed_sources)
-        for prefix in expected_source_prefixes
+    observed_source_prefixes = sorted({_source_family(source) for source in observed_sources})
+    source_match = (
+        not expected_source_prefixes or observed_source_prefixes == expected_source_prefixes
     )
     expected_targets_by_source = {
         prefix: _expected_targets_for_source(
@@ -407,6 +407,7 @@ def _evaluate_occurrence(
             "targets_by_layer": observed_targets_by_layer,
             "aggregate_layer_report": aggregate_layer_report,
             "sources": observed_sources,
+            "source_prefixes": observed_source_prefixes,
             "targets_by_source": observed_targets_by_source,
         },
         "kind_match": kind_match,
@@ -795,6 +796,12 @@ def _expected_action_source_prefix(action: Mapping[str, Any]) -> str | None:
             "add a logical component"
         )
     return None
+
+
+def _source_family(source: str) -> str:
+    """Normalize a SCOUT evidence source to its component-family prefix."""
+    family, separator, _detail = source.partition(".")
+    return f"{family}." if separator else source
 
 
 def _expected_targets_for_source(
