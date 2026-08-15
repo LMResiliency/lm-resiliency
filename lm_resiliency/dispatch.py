@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable, Literal
+from typing import Any, Callable, Literal
 
 import torch
 import torch.distributed as dist
@@ -13,10 +13,8 @@ from lm_resiliency.checkpointing.durable import DurableCheckpointConfig
 from lm_resiliency.checkpointing.manager import RecoveryMode
 from lm_resiliency.detection.replay_harness import ReplayHarnessConfig, ReplayResult
 from lm_resiliency.detection.reports import SCOUTFaultCallback
+from lm_resiliency.handle import ResiliencySession
 from lm_resiliency.orchestration import OrchestrationHooks
-
-if TYPE_CHECKING:
-    from lm_resiliency.handle import ResiliencyHandle
 
 FrameworkName = Literal["auto", "pytorch", "torchtitan", "megatron", "deepspeed"]
 
@@ -44,7 +42,7 @@ def enable_resiliency(
     load_fallback: Callable[[], Any] | None = None,
     durable_checkpoint: DurableCheckpointConfig | None = None,
     recovery_mode: RecoveryMode | str | None = None,
-) -> ResiliencyHandle:
+) -> ResiliencySession:
     """Enable resiliency through the matching framework integration.
 
     Framework selection is automatic for DeepSpeed engines and Megatron model-chunk

@@ -5,7 +5,7 @@ from lm_resiliency import (
     OrchestrationHooks,
     RecoveryDecision,
     RecoveryDecisionCallback,
-    ResiliencyHandle,
+    ResiliencySession,
     SCOUTFaultReport,
     enable_resiliency,
 )
@@ -18,7 +18,7 @@ from lm_resiliency.manager_api import (
 
 
 def check_entrypoint(model: object) -> None:
-    assert_type(enable_resiliency(model), ResiliencyHandle)
+    assert_type(enable_resiliency(model), ResiliencySession)
 
 
 def check_config(config: InMemoryCkptConfig) -> None:

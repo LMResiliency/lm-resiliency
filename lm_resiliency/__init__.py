@@ -25,7 +25,7 @@ from lm_resiliency.detection.reports import (
     replay_fault_reports,
 )
 from lm_resiliency.dispatch import FrameworkName, enable_resiliency
-from lm_resiliency.handle import ResiliencyHandle
+from lm_resiliency.handle import ResiliencyHandle, ResiliencySession
 from lm_resiliency.orchestration import OrchestrationHooks
 from lm_resiliency.recovery import RecoveryDecision, RecoveryDecisionCallback
 
@@ -47,6 +47,7 @@ __all__ = [
     "RecoveryDecision",
     "RecoveryDecisionCallback",
     "ResiliencyHandle",
+    "ResiliencySession",
     "SCOUTFaultCallback",
     "SCOUTFaultReport",
     "enable_resiliency",
