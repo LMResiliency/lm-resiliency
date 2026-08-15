@@ -33,6 +33,7 @@ class StoredGenerationSnapshot:
     record: GenerationSnapshotRecord
     revision: int
     committed_at_unix_ms: int
+    guard_committed_at_unix_ms: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,13 +166,16 @@ class GenerationStateReader:
             raise GenerationStateCorrupt("generation snapshot belongs to another run")
         if assignment.generation != expected_generation:
             raise GenerationStateCorrupt("generation snapshot key and payload disagree")
+        if not entry.is_initial_creation:
+            raise GenerationStateCorrupt("immutable generation snapshot was replaced or recreated")
         if entry.committed_at_unix_ms is None:
             raise GenerationStateCorrupt("generation snapshot has no authoritative commit time")
-        self._validate_guard_provenance(entry, record)
+        guard_committed_at_unix_ms = self._validate_guard_provenance(entry, record)
         return StoredGenerationSnapshot(
             record=record,
             revision=entry.revision,
             committed_at_unix_ms=entry.committed_at_unix_ms,
+            guard_committed_at_unix_ms=guard_committed_at_unix_ms,
         )
 
     def _validate_head_link(
@@ -186,7 +190,14 @@ class GenerationStateReader:
             raise GenerationStateCorrupt(
                 "generation head and snapshot commit timestamps do not match"
             )
-        self._validate_guard_provenance(head_entry, snapshot.record)
+        head_guard_committed_at = self._validate_guard_provenance(
+            head_entry,
+            snapshot.record,
+        )
+        if head_guard_committed_at != snapshot.guard_committed_at_unix_ms:
+            raise GenerationStateCorrupt(
+                "generation head and snapshot guard grant times do not match"
+            )
 
     def _read_snapshot_history(
         self,
@@ -229,6 +240,12 @@ class GenerationStateReader:
                 and predecessor.record.coordinator_id != successor.record.coordinator_id
             ):
                 raise GenerationStateCorrupt("one generation lease changes coordinator identity")
+            if (
+                predecessor.record.lease_id == successor.record.lease_id
+                and predecessor.record.coordinator_lease_duration_ms
+                != successor.record.coordinator_lease_duration_ms
+            ):
+                raise GenerationStateCorrupt("one generation lease changes its duration")
             if predecessor.record.lease_id != successor.record.lease_id:
                 if predecessor.record.lease_id in seen_lease_ids:
                     raise GenerationStateCorrupt(
@@ -243,7 +260,7 @@ class GenerationStateReader:
         self,
         entry: ControlStoreEntry,
         snapshot: GenerationSnapshotRecord,
-    ) -> None:
+    ) -> int:
         if entry.guard_key != self._coordinator_lease_key:
             raise GenerationStateCorrupt(
                 "generation state has no matching coordinator-lease guard key"
@@ -256,6 +273,22 @@ class GenerationStateReader:
             raise GenerationStateCorrupt(
                 "generation state guard digest does not match its lease identity"
             )
+        guard_committed_at_unix_ms = entry.guard_committed_at_unix_ms
+        if guard_committed_at_unix_ms is None:
+            raise GenerationStateCorrupt("generation state guard has no authoritative grant time")
+        committed_at_unix_ms = entry.committed_at_unix_ms
+        if committed_at_unix_ms is None:
+            raise GenerationStateCorrupt("generation state has no authoritative commit time")
+        if committed_at_unix_ms < guard_committed_at_unix_ms:
+            raise GenerationStateCorrupt("generation state predates its coordinator lease grant")
+        if (
+            committed_at_unix_ms
+            >= guard_committed_at_unix_ms + snapshot.coordinator_lease_duration_ms
+        ):
+            raise GenerationStateCorrupt(
+                "generation state was committed after its coordinator lease expired"
+            )
+        return guard_committed_at_unix_ms
 
 
 def _nonempty_string(value: object, path: str) -> str:

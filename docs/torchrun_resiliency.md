@@ -858,9 +858,10 @@ Coordinator state that spans multiple keys uses one guarded store transaction.
 The transaction first checks the coordinator lease revision, then every target
 revision, then one authoritative store-time window. It publishes all target
 values with the same commit timestamp and store-stamped guard key, guard
-revision, and guard-value digest, or publishes none. This is the primitive used
-to create an immutable generation snapshot and advance the generation head
-without allowing a stale or expired coordinator to commit either half alone.
+revision, guard-value digest, and authoritative guard commit time, or publishes
+none. This is the primitive used to create an immutable generation snapshot and
+advance the generation head without allowing a stale or expired coordinator to
+commit either half alone.
 
 Persisted generation state uses strict versioned records. A
 `GenerationSnapshotRecord` contains the immutable `RankAssignment`, the previous
@@ -875,9 +876,11 @@ from one run-scoped namespace. It requires the head and snapshot to agree on
 generation, digest, authoritative commit time, and store-stamped guard
 provenance, then verifies the complete predecessor digest, timestamp,
 fencing-token, and lease-identity chain back to generation zero. Lease
-identities cannot reappear after a different acquisition. Missing or
-contradictory history is corruption, not an empty or partially usable
-assignment.
+identities cannot reappear after a different acquisition, and one acquisition
+cannot change coordinator identity or lease duration. Every snapshot entry must
+retain store-stamped initial-creation provenance, and every generation commit
+must fall within the stamped lease grant and duration. Missing or contradictory
+history is corruption, not an empty or partially usable assignment.
 
 Coordinator ownership is stored under a schema-versioned, run-scoped lease key.
 The lease record binds the run, a unique coordinator-process incarnation, a

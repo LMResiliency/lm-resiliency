@@ -27,9 +27,11 @@ class ManualClock:
 
 
 def _guard(store: InMemoryControlStore):
-    return store.compare_set(
+    return store.compare_set_in_window(
         "run/coordinator-lease",
         expected_revision=None,
+        not_before_unix_ms=1,
+        deadline_unix_ms=None,
         value=b"lease-a",
     )
 
@@ -70,6 +72,9 @@ def test_guarded_transaction_commits_all_writes_at_one_store_time():
     assert {entry.guard_revision for entry in committed.values()} == {guard.revision}
     assert {entry.guard_value_digest for entry in committed.values()} == {
         hashlib.sha256(b"lease-a").hexdigest()
+    }
+    assert {entry.guard_committed_at_unix_ms for entry in committed.values()} == {
+        guard.committed_at_unix_ms
     }
     assert store.get("run/generation-head") == committed["run/generation-head"]
     assert store.get("run/generations/0") == committed["run/generations/0"]

@@ -70,13 +70,17 @@ class ControlStoreEntry:
     value: bytes
     revision: int
     committed_at_unix_ms: int | None = None
+    is_initial_creation: bool = True
     guard_key: str | None = None
     guard_revision: int | None = None
     guard_value_digest: str | None = None
+    guard_committed_at_unix_ms: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "value", _control_value(self.value))
         object.__setattr__(self, "revision", _required_revision(self.revision))
+        if not isinstance(self.is_initial_creation, bool):
+            raise TypeError("is_initial_creation must be a boolean")
         if self.committed_at_unix_ms is not None:
             object.__setattr__(
                 self,
@@ -108,6 +112,17 @@ class ControlStoreEntry:
                     "guard_value_digest",
                 ),
             )
+            if self.guard_committed_at_unix_ms is not None:
+                object.__setattr__(
+                    self,
+                    "guard_committed_at_unix_ms",
+                    _positive_integer(
+                        self.guard_committed_at_unix_ms,
+                        "guard_committed_at_unix_ms",
+                    ),
+                )
+        elif self.guard_committed_at_unix_ms is not None:
+            raise ValueError("control-store guard grant time requires guard provenance")
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,7 +204,8 @@ class ControlStore(Protocol):
         """Atomically publish writes while a guard revision is live.
 
         Every returned target entry carries store-stamped guard key, revision,
-        and value-digest provenance from the same linearization point.
+        value digest, and authoritative guard commit time from the same
+        linearization point.
         """
         ...
 
@@ -364,6 +380,7 @@ class InMemoryControlStore:
                     guard_key=normalized_guard_key,
                     guard_revision=normalized_guard_revision,
                     guard_value_digest=guard_value_digest,
+                    guard_committed_at_unix_ms=guard_entry.committed_at_unix_ms,
                 )
                 for key, write in normalized_writes.items()
             }
@@ -384,15 +401,19 @@ class InMemoryControlStore:
         guard_key: str | None = None,
         guard_revision: int | None = None,
         guard_value_digest: str | None = None,
+        guard_committed_at_unix_ms: int | None = None,
     ) -> ControlStoreEntry:
+        is_initial_creation = key not in self._last_revisions
         revision = self._next_revision(key)
         entry = ControlStoreEntry(
             value=value,
             revision=revision,
             committed_at_unix_ms=committed_at_unix_ms,
+            is_initial_creation=is_initial_creation,
             guard_key=guard_key,
             guard_revision=guard_revision,
             guard_value_digest=guard_value_digest,
+            guard_committed_at_unix_ms=guard_committed_at_unix_ms,
         )
         self._entries[key] = entry
         return entry
