@@ -150,6 +150,9 @@ SDC. An SDC in one group therefore rejects the candidate on every rank.
 ## Persistence and Recovery
 
 GEMINI serializes only completed slots.
+Each shard is written to a same-directory temporary file, flushed, and atomically renamed before it becomes visible to recovery.
+Restart mirrors use the same publication rule.
+Temporary files left by a terminated writer are ignored and removed before the next write to that shard, while latest-mode recovery walks older generations until it finds the newest shard set that every rank can load and validate.
 At a dense accepted boundary, it persists the latest local CPU checkpoint and received peer replica as recovery-verified.
 At a dynamic recipe-cycle boundary, it persists them as the new candidate and records candidate and recovery-verified steps separately.
 Each rank owns its status sidecar; several workers on one node never update the same mutable trust record.

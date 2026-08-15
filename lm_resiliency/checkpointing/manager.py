@@ -7,7 +7,6 @@ import atexit
 import enum
 import logging
 import pickle
-import shutil
 import signal
 import threading
 from pathlib import Path
@@ -23,6 +22,7 @@ from lm_resiliency.checkpointing.disk import (
     CheckpointStatus,
     CheckpointStatusStore,
     DiskSerializer,
+    atomic_copy_file,
 )
 from lm_resiliency.checkpointing.replication import ChunkedGlooBackend, PeerReplicator
 from lm_resiliency.checkpointing.state_dict import (
@@ -335,9 +335,25 @@ class InMemoryCheckpointManager:
         dist.all_reduce(tensor, op=dist.ReduceOp.MIN, group=self._process_group)
         return int(tensor.item())
 
-    def _consistent_step(self, disk: DiskSerializer) -> int:
-        """Latest step for which *every* rank has a shard on this disk tier."""
-        return self._collective_min_step(disk.find_latest_on_disk())
+    def _consistent_step(
+        self,
+        disk: DiskSerializer,
+        *,
+        before_step: int | None = None,
+    ) -> int:
+        """Newest exact generation present on every rank below ``before_step``."""
+        candidate = self._collective_min_step(disk.find_latest_on_disk(before_step=before_step))
+        while candidate > 0:
+            local_step = (
+                candidate
+                if disk.has_rank(candidate, self._rank)
+                else disk.find_latest_on_disk(before_step=candidate)
+            )
+            agreed = self._collective_min_step(local_step)
+            if agreed == candidate:
+                return candidate
+            candidate = agreed
+        return -1
 
     def _latest_memory_step(self) -> int:
         """Latest complete own checkpoint currently resident in local memory."""
@@ -429,7 +445,15 @@ class InMemoryCheckpointManager:
         """
         if not self.config.enable:
             return -1
-        step = max(self._recovery_steps(mode))
+        resolved = self._resolved_recovery_mode(mode)
+        memory_step, disk_step = self._recovery_steps(resolved)
+        if disk_step > memory_step:
+            loaded = self._load_latest_collectively_validated_disk_shard(
+                disk_step,
+                allow_older=resolved is RecoveryMode.LATEST_GEMINI,
+            )
+            disk_step = loaded[2] if loaded is not None else -1
+        step = max(memory_step, disk_step)
         return step if step > 0 else -1
 
     def local_recovery_step(self, mode: RecoveryMode | str | None = None) -> int:
@@ -480,10 +504,13 @@ class InMemoryCheckpointManager:
         latest = disk_step
         if latest <= 0:
             return None
-        loaded = self._load_collectively_validated_disk_shard(latest)
+        loaded = self._load_latest_collectively_validated_disk_shard(
+            latest,
+            allow_older=resolved is RecoveryMode.LATEST_GEMINI,
+        )
         if loaded is None:
             return None
-        metadata, tensors = loaded
+        metadata, tensors, latest = loaded
         state_dict = unflatten(metadata, tensors)
         self._metadata = metadata
         logger.info(f"Loaded checkpoint from {self._disk._folder} at step {latest}")
@@ -517,10 +544,13 @@ class InMemoryCheckpointManager:
         latest = disk_step
         if latest <= 0:
             return None
-        loaded = self._load_collectively_validated_disk_shard(latest)
+        loaded = self._load_latest_collectively_validated_disk_shard(
+            latest,
+            allow_older=resolved is RecoveryMode.LATEST_GEMINI,
+        )
         if loaded is None:
             return None
-        metadata, tensors = loaded
+        metadata, tensors, latest = loaded
         self._metadata = metadata
         extra = (metadata.non_tensor_data or {}).get(_EXTRA_KEY)
         logger.info(f"Loaded checkpoint tensors from {self._disk._folder} at step {latest}")
@@ -544,17 +574,34 @@ class InMemoryCheckpointManager:
 
         if local_error is not None:
             logger.error(
-                "Checkpoint validation failed at step %s: %s — all ranks are "
-                "falling back to framework recovery",
+                "Checkpoint validation failed at step %s: %s — all ranks will "
+                "consider an older eligible generation",
                 step,
                 local_error,
             )
         else:
             logger.error(
-                "A peer rejected its checkpoint shard at step %s — all ranks are "
-                "falling back to framework recovery",
+                "A peer rejected its checkpoint shard at step %s — all ranks will "
+                "consider an older eligible generation",
                 step,
             )
+        return None
+
+    def _load_latest_collectively_validated_disk_shard(
+        self,
+        step: int,
+        *,
+        allow_older: bool,
+    ) -> tuple[FlatStateDictMetadata, list[torch.Tensor], int] | None:
+        """Load the newest collectively valid generation, optionally descending."""
+        candidate = step
+        while candidate > 0:
+            loaded = self._load_collectively_validated_disk_shard(candidate)
+            if loaded is not None:
+                return loaded[0], loaded[1], candidate
+            if not allow_older:
+                break
+            candidate = self._consistent_step(self._disk, before_step=candidate)
         return None
 
     @property
@@ -748,7 +795,7 @@ class InMemoryCheckpointManager:
                     continue
                 output = destination / step_dir.name / shard.name
                 output.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(shard, output)
+                atomic_copy_file(shard, output)
                 latest = max(latest, step)
         status = self.checkpoint_status
         for rank in ranks:
