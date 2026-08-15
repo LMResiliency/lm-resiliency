@@ -417,6 +417,25 @@ def test_authenticated_closure_bounds_old_authority_by_next_mutation():
         )
 
 
+def test_authenticated_closure_rejects_unorderable_delete_recreate_history():
+    fixture = _fixture()
+    fixture.clock.set(1_020)
+    fixture.lease_manager.release(fixture.opening_lease)
+    _manager(fixture.store, fixture.clock, "coordinator-b").acquire()
+    lease_history = CoordinatorLeaseHistoryReader(
+        fixture.store,
+        run_id=RUN_ID,
+    ).read()
+
+    with pytest.raises(ValueError, match="generation is outside"):
+        AuthenticatedInitialRestartIntentClosure(
+            state=fixture.state,
+            generation_snapshot=fixture.generation,
+            immediate_successor=None,
+            lease_history=lease_history,
+        )
+
+
 def test_authenticated_closure_rejects_opening_outside_causal_window():
     fixture = _fixture()
     transaction_sequence = fixture.generation.transaction_sequence

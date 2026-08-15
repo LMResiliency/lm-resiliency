@@ -668,7 +668,10 @@ intent opening to precede the immediate successor generation in both
 transaction and store time, and verifies that generation creation, intent
 opening, and closure each committed inside their authoritative lease windows
 and before the next durable lease mutation. Construction is fail closed and
-performs no control-store reads or mutations.
+performs no control-store reads or mutations. Because retained value history
+does not identify the intervening delete transaction, an authority followed by
+a delete-and-recreate lifetime cannot authenticate an earlier commit; that
+case remains rejected until the store provides a durable deletion tombstone.
 
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be

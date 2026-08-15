@@ -319,6 +319,8 @@ class AuthenticatedInitialRestartIntentClosure:
         if authority_index + 1 == len(self.lease_history):
             return True
         successor = self.lease_history[authority_index + 1]
+        if successor.lifetime_sequence != authority.lifetime_sequence:
+            return False
         return (
             transaction_sequence < successor.transaction_sequence
             and committed_at_unix_ms <= successor.lease.granted_at_unix_ms
