@@ -86,8 +86,10 @@ class RestartAckReceiptRecord:
             raise ValueError(
                 "RestartAckReceiptRecord receipt is outside its agent registration lifetime"
             )
-        if self.received_at_unix_ms > intent.prepare_deadline_unix_ms:
-            raise ValueError("RestartAckReceiptRecord receipt is after the restart intent deadline")
+        if self.received_at_unix_ms >= intent.prepare_deadline_unix_ms:
+            raise ValueError(
+                "RestartAckReceiptRecord receipt is at or after the restart intent deadline"
+            )
 
     @property
     def digest(self) -> str:

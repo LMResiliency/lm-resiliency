@@ -1510,10 +1510,17 @@ def test_restart_ack_must_match_authenticated_agent():
         )
 
 
-def test_restart_ack_must_arrive_by_prepare_deadline():
-    with pytest.raises(ProtocolValidationError, match="received after"):
+@pytest.mark.parametrize(
+    "received_unix_ms",
+    [
+        2_000_000_000_000,
+        2_000_000_000_001,
+    ],
+)
+def test_restart_ack_must_arrive_before_prepare_deadline(received_unix_ms):
+    with pytest.raises(ProtocolValidationError, match="at or after"):
         _validate(
-            authenticated_ack_received_unix_ms={"node-a": 2_000_000_000_001},
+            authenticated_ack_received_unix_ms={"node-a": received_unix_ms},
         )
 
 

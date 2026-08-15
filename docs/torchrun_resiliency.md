@@ -922,7 +922,7 @@ The manager transport authenticates the acknowledgement sender. The
 coordinator checks the acknowledgement's run, node, and agent incarnation
 against that authenticated identity and requires the agent to match the
 inventory reporter. The coordinator also records receipt time outside the
-worker payload and rejects acknowledgements received after
+worker payload and rejects acknowledgements received at or after
 `prepare_deadline_unix_ms`. Payload identity fields and timestamps alone are
 not authentication. For latest recovery, the acknowledgement's canonical
 inventory digest must match the exact event used by the manifest; event-ID
@@ -933,10 +933,11 @@ the exact immutable restart-intent record, the authenticated agent-registration
 lifetime, its registration fencing token and authoritative grant time, and the
 coordinator-recorded receipt time. The envelope rejects a sender identity that
 does not match the acknowledgement, a receipt outside the authenticated
-registration lifetime, or a receipt after the intent deadline. The record is
-not self-authenticating: the acknowledgement persistence layer must still
-verify the registration and intent against authoritative control-store state
-before committing it.
+registration lifetime, or a receipt at or after the intent deadline. The
+deadline is exclusive so every accepted receipt has a representable guarded
+commit window. The record is not self-authenticating: the acknowledgement
+persistence layer must still verify the registration and intent against
+authoritative control-store state before committing it.
 
 Each intent/node acknowledgement key is create-once. Its guarded transaction
 conditions on the exact immutable intent revision, the still-open current
@@ -947,6 +948,13 @@ must also be no earlier than the authoritative intent-opening commit, so
 pre-intent transport data cannot be replayed as preparation evidence. The
 coordinator-lease authority and commit-time window are added by a separate
 prepared-write layer before this transaction can execute.
+
+The prepared-write authority is one verified durable coordinator-lease value.
+Its commit lower bound must follow the receipt, intent opening, and lease grant;
+its exclusive deadline is bounded by both the restart-intent deadline and the
+lease expiry. This immutable value still performs no store reads or writes.
+The next layer authenticates the authority against durable lease history before
+constructing it.
 
 For a crashed or unreachable node, no preparation is assumed.
 
