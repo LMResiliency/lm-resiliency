@@ -25,4 +25,4 @@ Before the first stable documentation tree is published, the site root redirects
 
 Publication workflows stage the complete versioned static tree on `gh-pages`. A dedicated trusted workflow then uploads the current staged tree as a GitHub Pages artifact and deploys it through GitHub's Pages deployment API. Repository Pages settings therefore need to use **GitHub Actions** as the publishing source rather than building directly from the `gh-pages` branch.
 
-The repository Markdown remains the source of truth for documentation changes. CI builds the site with warnings treated as errors before changes can satisfy the required CI gate.
+The repository Markdown remains the source of truth for documentation changes. CI builds the site with warnings treated as errors before changes can satisfy the required CI gate. A weekly workflow checks external links online with bounded retries, complementing the deterministic offline link and anchor check that runs on every pull request.

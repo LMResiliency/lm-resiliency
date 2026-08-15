@@ -29,6 +29,7 @@ def test_source_links_use_checked_out_revision(monkeypatch):
 def test_deployment_contracts_cover_every_destination():
     mkdocs = (ROOT / "mkdocs.yml").read_text()
     development = (ROOT / ".github/workflows/docs.yml").read_text()
+    online_links = (ROOT / ".github/workflows/docs-online-links.yml").read_text()
     release = (ROOT / ".github/workflows/release.yml").read_text()
     pages = (ROOT / ".github/workflows/pages.yml").read_text()
 
@@ -53,6 +54,15 @@ def test_deployment_contracts_cover_every_destination():
     assert 'python "$RELEASE_VERSION_HELPER" latest-stable-tag' in release
     assert "sort -V" not in release
     assert '"torch==2.13.0"' in release
+
+    assert "schedule:" in online_links
+    assert "workflow_dispatch:" in online_links
+    assert "pull_request:" not in online_links
+    assert "--exclude-all-private" in online_links
+    assert "--exclude '^https://doi\\.org/10\\.1145/3600006\\.3613145$'" in online_links
+    assert '--github-token "$GH_TOKEN"' in online_links
+    assert "--max-retries 3" in online_links
+    assert "--offline" not in online_links
 
     assert "workflow_run:" in pages
     assert "- Documentation" in pages
