@@ -34,6 +34,7 @@ class StoredGenerationSnapshot:
     revision: int
     committed_at_unix_ms: int
     guard_mutation_sequence: int
+    guard_value_sequence: int
     guard_lifetime_sequence: int
     guard_committed_at_unix_ms: int
 
@@ -203,6 +204,7 @@ class GenerationStateReader:
             raise GenerationStateCorrupt("generation snapshot has no authoritative commit time")
         (
             guard_mutation_sequence,
+            guard_value_sequence,
             guard_lifetime_sequence,
             guard_committed_at_unix_ms,
         ) = self._validate_guard_provenance(entry, record)
@@ -211,6 +213,7 @@ class GenerationStateReader:
             revision=entry.revision,
             committed_at_unix_ms=entry.committed_at_unix_ms,
             guard_mutation_sequence=guard_mutation_sequence,
+            guard_value_sequence=guard_value_sequence,
             guard_lifetime_sequence=guard_lifetime_sequence,
             guard_committed_at_unix_ms=guard_committed_at_unix_ms,
         )
@@ -235,12 +238,17 @@ class GenerationStateReader:
             )
         (
             head_guard_mutation,
+            head_guard_value,
             head_guard_lifetime,
             head_guard_committed_at,
         ) = self._validate_guard_provenance(head_entry, snapshot.record)
         if head_guard_mutation != snapshot.guard_mutation_sequence:
             raise GenerationStateCorrupt(
                 "generation head and snapshot guard mutation sequences do not match"
+            )
+        if head_guard_value != snapshot.guard_value_sequence:
+            raise GenerationStateCorrupt(
+                "generation head and snapshot guard value sequences do not match"
             )
         if head_guard_lifetime != snapshot.guard_lifetime_sequence:
             raise GenerationStateCorrupt(
@@ -280,15 +288,35 @@ class GenerationStateReader:
                 raise GenerationStateCorrupt("generation snapshot guard lifetimes move backward")
             if predecessor.guard_mutation_sequence > successor.guard_mutation_sequence:
                 raise GenerationStateCorrupt("generation snapshot guard mutations move backward")
+            if predecessor.guard_value_sequence > successor.guard_value_sequence:
+                raise GenerationStateCorrupt("generation snapshot guard values move backward")
             guard_mutation_delta = (
                 successor.guard_mutation_sequence - predecessor.guard_mutation_sequence
             )
+            guard_value_delta = successor.guard_value_sequence - predecessor.guard_value_sequence
             guard_lifetime_delta = (
                 successor.guard_lifetime_sequence - predecessor.guard_lifetime_sequence
             )
             if guard_mutation_delta < 2 * guard_lifetime_delta:
                 raise GenerationStateCorrupt(
                     "generation snapshot guard lifetime lacks delete-and-recreate mutations"
+                )
+            if guard_value_delta < guard_lifetime_delta:
+                raise GenerationStateCorrupt(
+                    "generation snapshot guard lifetime lacks a new value sequence"
+                )
+            if guard_value_delta > guard_mutation_delta:
+                raise GenerationStateCorrupt(
+                    "generation snapshot guard values advance faster than mutations"
+                )
+            if (
+                guard_mutation_delta > 0
+                and predecessor.record.coordinator_lease_digest
+                != successor.record.coordinator_lease_digest
+                and guard_value_delta == 0
+            ):
+                raise GenerationStateCorrupt(
+                    "different generation leases share one guard value sequence"
                 )
             if (
                 guard_mutation_delta > 0
@@ -342,6 +370,11 @@ class GenerationStateReader:
                 )
             if (
                 predecessor.record.lease_id == successor.record.lease_id
+                and predecessor.guard_value_sequence != successor.guard_value_sequence
+            ):
+                raise GenerationStateCorrupt("one generation lease value changed between renewals")
+            if (
+                predecessor.record.lease_id == successor.record.lease_id
                 and guard_mutation_delta > 0
                 and successor.guard_committed_at_unix_ms
                 > (
@@ -393,7 +426,7 @@ class GenerationStateReader:
         self,
         entry: ControlStoreEntry,
         snapshot: GenerationSnapshotRecord,
-    ) -> tuple[int, int, int]:
+    ) -> tuple[int, int, int, int]:
         if entry.guard_key != self._coordinator_lease_key:
             raise GenerationStateCorrupt(
                 "generation state has no matching coordinator-lease guard key"
@@ -411,6 +444,11 @@ class GenerationStateReader:
             raise GenerationStateCorrupt(
                 "generation state guard has no authoritative mutation sequence"
             )
+        guard_value_sequence = entry.guard_value_sequence
+        if guard_value_sequence is None:
+            raise GenerationStateCorrupt(
+                "generation state guard has no authoritative value sequence"
+            )
         guard_lifetime_sequence = entry.guard_lifetime_sequence
         if guard_lifetime_sequence is None:
             raise GenerationStateCorrupt(
@@ -419,6 +457,14 @@ class GenerationStateReader:
         if guard_mutation_sequence < 2 * guard_lifetime_sequence - 1:
             raise GenerationStateCorrupt(
                 "generation state guard mutation sequence cannot support its lifetime"
+            )
+        if guard_value_sequence < guard_lifetime_sequence:
+            raise GenerationStateCorrupt(
+                "generation state guard value sequence cannot support its lifetime"
+            )
+        if guard_value_sequence > guard_mutation_sequence:
+            raise GenerationStateCorrupt(
+                "generation state guard value sequence exceeds its mutations"
             )
         guard_committed_at_unix_ms = entry.guard_committed_at_unix_ms
         if guard_committed_at_unix_ms is None:
@@ -437,6 +483,7 @@ class GenerationStateReader:
             )
         return (
             guard_mutation_sequence,
+            guard_value_sequence,
             guard_lifetime_sequence,
             guard_committed_at_unix_ms,
         )

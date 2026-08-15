@@ -860,11 +860,12 @@ Coordinator state that spans multiple keys uses one guarded store transaction.
 The transaction first checks the coordinator lease revision, then every target
 revision, then one authoritative store-time window. It publishes all target
 values with the same commit timestamp and store-stamped guard key, guard
-revision, guard-value digest, ordered guard mutation sequence, guard-key lifetime
-sequence, and authoritative guard commit time, or publishes none. This is the
-primitive used to create an immutable generation snapshot and advance the
-generation head without allowing a stale or expired coordinator to commit
-either half alone.
+revision, guard-value digest, ordered guard mutation and value sequences,
+guard-key lifetime sequence, and authoritative guard commit time, or publishes
+none. The value sequence changes whenever the guarded bytes change or the key is
+recreated, but remains stable across same-value renewals. This is the primitive
+used to create an immutable generation snapshot and advance the generation head
+without allowing a stale or expired coordinator to commit either half alone.
 
 Persisted generation state uses strict versioned records.
 `GenerationSnapshotRecord` schema version 2 contains the immutable
@@ -899,10 +900,12 @@ grant time that a valid renewal chain could reach, so skipped valid renewals are
 accepted while resurrection after expiry is rejected. A same-key takeover with
 unobserved intervening mutations is ambiguous and rejected. An older generation
 commit cannot postdate the next guard mutation that fences it. Opaque fencing
-tokens cannot reappear after another guard mutation. The durable history of the
-generation-head key is the run initialization marker, so deleting both the head
-and generation zero cannot make an initialized run appear empty. Grant times,
-guard mutations, and key-lifetime sequences cannot move backward. Missing or
+tokens cannot reappear after another guard mutation. One lease identity must
+retain one guard value sequence, so changing A to B and back to A cannot be
+misread as skipped renewals. The durable history of the generation-head key is
+the run initialization marker, so deleting both the head and generation zero
+cannot make an initialized run appear empty. Grant times, guard mutation/value
+sequences, and key-lifetime sequences cannot move backward. Missing or
 contradictory history is corruption, not an empty or partially usable
 assignment.
 
