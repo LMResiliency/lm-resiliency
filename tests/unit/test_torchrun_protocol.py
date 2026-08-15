@@ -1323,6 +1323,67 @@ def test_fault_report_resource_endpoint_must_match_specific_rank():
         )
 
 
+def test_fault_report_gpu_endpoint_requires_rank_binding():
+    event = FaultEvent(
+        event_id="fault-unbound-gpu-endpoint",
+        incident_id="incident-a",
+        run_id=RUN_ID,
+        generation=4,
+        reporter=_worker(),
+        optimizer_step=41,
+        report={
+            "kind": "straggler",
+            "failed_ranks": [0],
+            "endpoint_kind": "gpu",
+            "endpoint_id": "GPU-1",
+            "endpoint_rank": 0,
+        },
+    )
+
+    with pytest.raises(ProtocolValidationError, match="GPU resource rank is missing"):
+        validate_event_reporter(
+            event,
+            _current_assignment(),
+            agent_identity=_agent(),
+            resource_to_node_id={"GPU-0": "node-a", "GPU-1": "node-a"},
+            resource_to_kind={"GPU-0": "gpu", "GPU-1": "gpu"},
+            resource_to_global_rank={"GPU-0": 0},
+        )
+
+
+def test_fault_report_accepts_node_shared_endpoint_without_rank_binding():
+    event = FaultEvent(
+        event_id="fault-shared-resource-endpoint",
+        incident_id="incident-a",
+        run_id=RUN_ID,
+        generation=4,
+        reporter=_worker(),
+        optimizer_step=41,
+        report={
+            "kind": "straggler",
+            "failed_ranks": [0],
+            "endpoint_kind": "nic",
+            "endpoint_id": "NIC-node-a",
+            "endpoint_rank": 0,
+        },
+    )
+
+    validate_event_reporter(
+        event,
+        _current_assignment(),
+        agent_identity=_agent(),
+        resource_to_node_id={
+            "GPU-0": "node-a",
+            "NIC-node-a": "node-a",
+        },
+        resource_to_kind={
+            "GPU-0": "gpu",
+            "NIC-node-a": "nic",
+        },
+        resource_to_global_rank={"GPU-0": 0},
+    )
+
+
 @pytest.mark.parametrize(
     ("failure_kind", "all_ranks_accessible"),
     [("sdc", True), ("machine_unavailable", True), ("hang", False)],

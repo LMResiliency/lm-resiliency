@@ -2560,7 +2560,11 @@ def validate_event_reporter(
                     "FaultEvent.report.endpoint_id: trusted resource kind does not match "
                     "endpoint kind"
                 )
-            elif resource_ranks.get(endpoint_id) != endpoint_rank:
+            elif endpoint_kind == "gpu" and endpoint_id not in resource_ranks:
+                raise ProtocolValidationError(
+                    "FaultEvent.report.endpoint_id: trusted GPU resource rank is missing"
+                )
+            elif endpoint_id in resource_ranks and resource_ranks[endpoint_id] != endpoint_rank:
                 raise ProtocolValidationError(
                     "FaultEvent.report.endpoint_id: trusted resource rank does not match "
                     "endpoint rank"

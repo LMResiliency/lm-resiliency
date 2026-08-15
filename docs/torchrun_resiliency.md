@@ -352,7 +352,9 @@ Requirements:
 - `failed_ranks`, `endpoint_rank`, `dataloader_culprit_ranks`, and
   `stage_culprit_ranks` are validated together. Culprit and endpoint ranks must
   be included in `failed_ranks`; node or resource endpoint IDs must resolve to
-  the endpoint rank through the trusted assignment and resource map.
+  the endpoint rank's node through the trusted assignment and resource map.
+  Rank-bound resources must also match the trusted resource-to-rank binding;
+  node-shared NIC, HCA, and link resources need no artificial rank binding.
 - The orchestration dispatcher allocates `incident_id` once and uses it for
   both the recovery and fault callbacks. The client must not infer correlation
   from callback timing.
