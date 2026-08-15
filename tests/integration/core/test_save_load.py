@@ -14,6 +14,7 @@ Run:
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import signal
@@ -24,6 +25,7 @@ import torch
 import torch.distributed as dist
 
 from lm_resiliency import InMemoryCkptConfig
+from lm_resiliency.checkpointing.state_dict import flatten
 from lm_resiliency.experimental import InMemoryCheckpointManager
 
 
@@ -102,7 +104,7 @@ def test_save_and_periodic_flush():
     disk_path = Path(tmp) / "step-5" / f"rank-{rank}.pt"
     assert_all(disk_path.exists(), f"Disk checkpoint not found at {disk_path}")
 
-    data = torch.load(disk_path, weights_only=False)
+    data = torch.load(disk_path, weights_only=True)
     loaded_tensors = data["tensors"]
     assert_all(torch.allclose(loaded_tensors[0], t1.cpu()), "t1 mismatch")
     assert_all(torch.allclose(loaded_tensors[1], t2.cpu()), "t2 mismatch")
@@ -154,7 +156,7 @@ def test_sigterm_flush():
 
     # Verify data correctness
     disk_path = Path(tmp) / f"step-{flushed}" / f"rank-{rank}.pt"
-    data = torch.load(disk_path, weights_only=False)
+    data = torch.load(disk_path, weights_only=True)
     loaded_tensors = data["tensors"]
     assert_all(torch.allclose(loaded_tensors[0], t1.cpu()), "t1 mismatch after SIGTERM")
     assert_all(torch.allclose(loaded_tensors[1], t2.cpu()), "t2 mismatch after SIGTERM")
@@ -289,6 +291,37 @@ def test_find_latest_min_reduce():
     assert_all(latest2 == 5, f"Expected 5 after deletion, got {latest2}")
     mgr2.close()
 
+    cleanup_tmp(tmp)
+    log("  PASSED")
+
+
+def test_invalid_shard_triggers_collective_fallback():
+    """One malformed rank shard makes every rank reject the generation."""
+    rank = dist.get_rank()
+    log("\n=== Test: Invalid Shard Collective Fallback ===")
+
+    tmp = make_shared_tmp()
+    config = InMemoryCkptConfig(
+        enable=True,
+        interval=5,
+        disk_flush_interval=0,
+        disk_folder=tmp,
+    )
+    mgr = InMemoryCheckpointManager(config)
+    metadata, tensors = flatten({"rank": rank, "weight": torch.ones(4) * rank})
+    path = mgr._disk.save_sync(metadata, tensors, step=7)
+    dist.barrier()
+
+    if rank == 0:
+        payload = torch.load(path, weights_only=True)
+        document = json.loads(payload["metadata_json"])
+        document["tensor_entries"][0]["key_path"] = ["missing"]
+        payload["metadata_json"] = json.dumps(document)
+        torch.save(payload, path)
+    dist.barrier()
+
+    assert_all(mgr.load() is None, "all ranks must reject a generation with one invalid shard")
+    mgr.close()
     cleanup_tmp(tmp)
     log("  PASSED")
 
@@ -432,6 +465,7 @@ def main():
     test_sigterm_flush()
     test_load_recovers_correct_state()
     test_find_latest_min_reduce()
+    test_invalid_shard_triggers_collective_fallback()
     test_save_load_with_state_dict()
     test_multiple_save_latest_wins()
 

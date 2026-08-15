@@ -156,6 +156,12 @@ If newer status cannot be established, recovery selects the common verified step
 With `verify_integrity=True`, it stores a CRC-32 for each shard and treats a checksum failure as an unavailable shard.
 Checksums detect stored-byte corruption; they cannot prove that the source GPU state was numerically correct.
 
+Node-local files use checkpoint format version 2. Tensors are loaded through PyTorch's `weights_only=True` path, while reconstruction metadata is represented by a schema-constrained JSON document. The metadata schema supports the built-in containers and scalar types used by framework state, NumPy RNG values, and dense CPU tensors such as PyTorch RNG state. GEMINI validates the payload fields, metadata types, tensor count, shapes, dtypes, reconstruction paths, and optional CRC values before recovery can apply state. Unsupported caller-owned metadata fails the checkpoint write instead of falling back to unrestricted pickle deserialization.
+
+The original `0.1.0` node-local format used unrestricted pickle metadata and is intentionally not loadable by newer versions. Complete an in-progress `0.1.0` recovery before upgrading, or use the framework-owned durable checkpoint as the upgrade boundary. Node-local GEMINI files remain a fast restart tier rather than a cross-version interchange format.
+
+Safe deserialization prevents a replaced file from invoking arbitrary pickle globals, but it does not establish who produced the tensor values. Treat the checkpoint directory as training-state storage: restrict filesystem ownership and write permissions to the training job, avoid following untrusted symlinks or copying files from untrusted sources, and use framework-owned durable checkpoints when stronger provenance is required. CRC-32 detects accidental byte corruption only; an attacker able to replace a shard can also replace its checksum.
+
 `SIGTERM` and `SIGINT` handlers synchronously flush the newest recoverable state during the scheduler grace period and then chain to the previous handler.
 `SIGKILL`, power loss, and complete node loss cannot be handled locally.
 Peer replicas and framework durable checkpoints cover those cases.
@@ -235,5 +241,7 @@ Hardware, state layout, capture cadence, and available copy or network overlap c
 - Node-local storage is a fast restart tier, not a replacement for framework-owned durable checkpoints.
 - `replication_jump` assumes a compatible rank placement and must be validated for the deployment.
 - Integrity checks detect corruption after capture, not corruption already present in source state.
+- Safe weights-only loading prevents arbitrary pickle execution but does not authenticate tensor values or their source.
+- Node-local checkpoint format version 2 does not load the unrestricted-pickle format written by `0.1.0`.
 - Signal-triggered flush requires a catchable signal and sufficient termination grace time.
 - Manager policy, relaunch, placement, and physical replacement remain external.

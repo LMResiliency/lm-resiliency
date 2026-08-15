@@ -2,17 +2,27 @@
 
 from __future__ import annotations
 
+import json
+import os
+from collections import defaultdict
 from types import SimpleNamespace
+from unittest.mock import patch
 
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
 
 from lm_resiliency.api import enable_resiliency
 from lm_resiliency.checkpointing.config import InMemoryCkptConfig
-from lm_resiliency.checkpointing.disk import ChecksumMismatch, DiskSerializer, shard_checksums
+from lm_resiliency.checkpointing.disk import (
+    CheckpointFormatError,
+    ChecksumMismatch,
+    DiskSerializer,
+    shard_checksums,
+)
 from lm_resiliency.checkpointing.manager import InMemoryCheckpointManager
-from lm_resiliency.checkpointing.state_dict import flatten
+from lm_resiliency.checkpointing.state_dict import FlatStateDictMetadata, flatten, unflatten
 from lm_resiliency.detection.c3 import C3Result, C3Status
 from lm_resiliency.detection.layer_replay import replay_result_has_sdc
 
@@ -93,7 +103,7 @@ def test_disk_integrity_round_trip_and_corruption(tmp_path):
     path = serializer.save_sync(metadata, tensors, step=3)
     serializer.load(3)
 
-    raw = torch.load(path, weights_only=False)
+    raw = torch.load(path, weights_only=True)
     raw["tensors"][0][0] += 7.0
     torch.save(raw, path)
     with pytest.raises(ChecksumMismatch):
@@ -116,13 +126,217 @@ def test_gemini_load_returns_none_on_corruption(tmp_path):
     manager.close()
 
     rank_file = next(tmp_path.glob("step-*/rank-0.pt"))
-    raw = torch.load(rank_file, weights_only=False)
+    raw = torch.load(rank_file, weights_only=True)
     raw["tensors"][0][0] += 9.0
     torch.save(raw, rank_file)
 
     corrupted_manager = InMemoryCheckpointManager(config)
     assert corrupted_manager.load() is None
     corrupted_manager.close()
+
+
+def test_disk_safe_format_round_trips_schema_constrained_metadata(tmp_path):
+    state = {
+        "tensor": torch.arange(4, dtype=torch.float32),
+        "python_rng": (3, (1, 2, 3), None),
+        "numpy_rng": np.arange(8, dtype=np.uint32),
+        "types": [torch.Size([2, 3]), torch.float16, torch.device("cpu")],
+        "bytes": b"checkpoint",
+    }
+    metadata, tensors = flatten(state)
+    serializer = DiskSerializer(str(tmp_path), rank=0)
+
+    path = serializer.save_sync(metadata, tensors, step=6)
+    raw = torch.load(path, weights_only=True)
+    assert raw["format"] == "lm-resiliency.gemini.node-local"
+    assert raw["version"] == 2
+    assert isinstance(raw["metadata_json"], str)
+
+    loaded_metadata, loaded_tensors = serializer.load(6)
+    restored = unflatten(loaded_metadata, loaded_tensors)
+    assert torch.equal(restored["tensor"], state["tensor"])
+    assert restored["python_rng"] == state["python_rng"]
+    assert np.array_equal(restored["numpy_rng"], state["numpy_rng"])
+    assert restored["types"] == state["types"]
+    assert restored["bytes"] == state["bytes"]
+
+
+def test_disk_safe_format_round_trips_tensor_valued_extra(tmp_path):
+    rng_state = torch.get_rng_state()
+    metadata = FlatStateDictMetadata(non_tensor_data={"extra": {"rng": rng_state}})
+    serializer = DiskSerializer(str(tmp_path), rank=0)
+
+    serializer.save_sync(metadata, [], step=7)
+    loaded_metadata, loaded_tensors = serializer.load(7)
+
+    assert loaded_tensors == []
+    assert torch.equal(loaded_metadata.non_tensor_data["extra"]["rng"], rng_state)
+
+
+def test_disk_load_rejects_pickle_payload_without_executing_it(tmp_path):
+    marker = tmp_path / "pickle-executed"
+    path = tmp_path / "step-8" / "rank-0.pt"
+    path.parent.mkdir(parents=True)
+
+    class Malicious:
+        def __reduce__(self):
+            return os.system, (f"touch {marker}",)
+
+    torch.save({"metadata": Malicious()}, path)
+    serializer = DiskSerializer(str(tmp_path), rank=0)
+
+    with pytest.raises(CheckpointFormatError, match="unsafe, malformed, or legacy"):
+        serializer.load(8)
+    assert not marker.exists()
+
+
+def test_disk_load_rejects_malformed_schema_before_recovery(tmp_path):
+    metadata, tensors = flatten({"w": torch.ones(2)})
+    serializer = DiskSerializer(str(tmp_path), rank=0)
+    path = serializer.save_sync(metadata, tensors, step=9)
+    raw = torch.load(path, weights_only=True)
+    document = json.loads(raw["metadata_json"])
+    document["tensor_entries"][0]["dtype"] = "not_a_dtype"
+    raw["metadata_json"] = json.dumps(document)
+    torch.save(raw, path)
+
+    with pytest.raises(CheckpointFormatError, match="dtype is unsupported"):
+        serializer.load(9)
+
+
+@pytest.mark.parametrize("key_path", [[], ["missing"]])
+def test_disk_load_rejects_tensor_paths_that_do_not_match_skeleton(tmp_path, key_path):
+    metadata, tensors = flatten({"w": torch.ones(2)})
+    serializer = DiskSerializer(str(tmp_path), rank=0)
+    path = serializer.save_sync(metadata, tensors, step=10)
+    raw = torch.load(path, weights_only=True)
+    document = json.loads(raw["metadata_json"])
+    document["tensor_entries"][0]["key_path"] = key_path
+    raw["metadata_json"] = json.dumps(document)
+    torch.save(raw, path)
+
+    with pytest.raises(CheckpointFormatError, match="key_path"):
+        serializer.load(10)
+
+
+def test_disk_save_rejects_unsupported_metadata_instead_of_using_pickle(tmp_path):
+    metadata, tensors = flatten({"w": torch.ones(2), "unsafe": object()})
+    serializer = DiskSerializer(str(tmp_path), rank=0)
+
+    with pytest.raises(TypeError, match="unsupported checkpoint metadata type: object"):
+        serializer.save_sync(metadata, tensors, step=10)
+
+
+def test_disk_save_rejects_structured_numpy_dtype(tmp_path):
+    metadata = FlatStateDictMetadata(
+        non_tensor_data={
+            "structured": np.array([(1, 2.0)], dtype=[("index", "<i4"), ("value", "<f4")])
+        }
+    )
+    serializer = DiskSerializer(str(tmp_path), rank=0)
+
+    with pytest.raises(TypeError, match="structured and subarray NumPy dtypes"):
+        serializer.save_sync(metadata, [], step=11)
+
+
+def test_disk_save_rejects_numpy_array_subclass(tmp_path):
+    masked = np.ma.array([1.0, 2.0], mask=[False, True])
+    metadata = FlatStateDictMetadata(non_tensor_data={"masked": masked})
+    serializer = DiskSerializer(str(tmp_path), rank=0)
+
+    with pytest.raises(TypeError, match="unsupported checkpoint metadata type: MaskedArray"):
+        serializer.save_sync(metadata, [], step=12)
+
+
+def test_disk_save_rejects_dictionary_subclass(tmp_path):
+    metadata = FlatStateDictMetadata(non_tensor_data={"extra": defaultdict(int, attempts=3)})
+    serializer = DiskSerializer(str(tmp_path), rank=0)
+
+    with pytest.raises(TypeError, match="unsupported checkpoint metadata type: defaultdict"):
+        serializer.save_sync(metadata, [], step=12)
+
+
+def test_manager_treats_unsafe_disk_checkpoint_as_unavailable(tmp_path):
+    step_dir = tmp_path / "step-11"
+    step_dir.mkdir()
+    torch.save({"legacy": "payload"}, step_dir / "rank-0.pt")
+    manager = InMemoryCheckpointManager(
+        InMemoryCkptConfig(
+            enable=True,
+            interval=1,
+            disk_flush_interval=0,
+            disk_folder=str(tmp_path),
+        )
+    )
+
+    assert manager.load() is None
+    manager.close()
+
+
+def test_manager_collectively_rejects_valid_shard_when_peer_is_invalid(tmp_path):
+    manager = InMemoryCheckpointManager(
+        InMemoryCkptConfig(
+            enable=True,
+            interval=1,
+            disk_flush_interval=0,
+            disk_folder=str(tmp_path),
+        )
+    )
+    metadata, tensors = flatten({"w": torch.ones(2)})
+    manager._disk.save_sync(metadata, tensors, step=13)
+
+    with (
+        patch.object(manager, "_recovery_steps", return_value=(-1, 13)),
+        patch.object(manager, "_collective_min_step", return_value=0) as collective,
+    ):
+        assert manager.load() is None
+
+    collective.assert_called_once_with(1)
+    manager.close()
+
+
+def test_load_tensors_collectively_rejects_invalid_local_shard(tmp_path):
+    step_dir = tmp_path / "step-14"
+    step_dir.mkdir()
+    torch.save({"legacy": "payload"}, step_dir / "rank-0.pt")
+    manager = InMemoryCheckpointManager(
+        InMemoryCkptConfig(
+            enable=True,
+            interval=1,
+            disk_flush_interval=0,
+            disk_folder=str(tmp_path),
+        )
+    )
+
+    with (
+        patch.object(manager, "_recovery_steps", return_value=(-1, 14)),
+        patch.object(manager, "_collective_min_step", return_value=0) as collective,
+    ):
+        assert manager.load_tensors() is None
+
+    collective.assert_called_once_with(0)
+    manager.close()
+
+
+def test_manager_votes_invalid_after_unexpected_local_load_error(tmp_path):
+    manager = InMemoryCheckpointManager(
+        InMemoryCkptConfig(
+            enable=True,
+            interval=1,
+            disk_flush_interval=0,
+            disk_folder=str(tmp_path),
+        )
+    )
+
+    with (
+        patch.object(manager, "_recovery_steps", return_value=(-1, 15)),
+        patch.object(manager._disk, "load", side_effect=RuntimeError("decoder failed")),
+        patch.object(manager, "_collective_min_step", return_value=0) as collective,
+    ):
+        assert manager.load() is None
+
+    collective.assert_called_once_with(0)
+    manager.close()
 
 
 def test_restart_destination_mirrors_flushed_checkpoint(tmp_path):

@@ -14,8 +14,16 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import torch
 
+from lm_resiliency.checkpointing._disk_format import (
+    FORMAT_NAME,
+    FORMAT_VERSION,
+    CheckpointFormatError,
+    encode_metadata,
+    validate_payload,
+)
 from lm_resiliency.checkpointing.state_dict import FlatStateDictMetadata
 
 logger = logging.getLogger(__name__)
@@ -190,7 +198,9 @@ class DiskSerializer:
     """Handles async checkpoint flush to disk and loading from disk.
 
     Checkpoints are stored as: {folder}/step-{step}/rank-{rank}.pt
-    Each file contains (metadata, tensors[, checksums]) for that rank.
+    Each file contains a versioned, weights-only payload for that rank. Tensor
+    reconstruction metadata is encoded with a schema-constrained JSON codec so
+    loading never needs to allow arbitrary pickle globals.
 
     Args:
         folder: Checkpoint directory.
@@ -231,10 +241,7 @@ class DiskSerializer:
                 step_dir = self._folder / f"step-{step}"
                 step_dir.mkdir(parents=True, exist_ok=True)
                 save_path = step_dir / f"rank-{self._rank}.pt"
-                torch.save(
-                    {"metadata": metadata, "tensors": tensors_copy, "checksums": checksums},
-                    save_path,
-                )
+                torch.save(_checkpoint_payload(metadata, tensors_copy, checksums), save_path)
                 self._latest_flushed_step = step
                 logger.info(f"Flushed checkpoint step {step} to {save_path}")
             except BaseException as e:
@@ -276,10 +283,7 @@ class DiskSerializer:
         save_path = step_dir / f"rank-{target_rank}.pt"
         tensors_copy = [t.clone() for t in tensors]
         checksums = shard_checksums(tensors_copy) if self._integrity else None
-        torch.save(
-            {"metadata": metadata, "tensors": tensors_copy, "checksums": checksums},
-            save_path,
-        )
+        torch.save(_checkpoint_payload(metadata, tensors_copy, checksums), save_path)
         self._latest_flushed_step = max(self._latest_flushed_step, step)
         logger.info(f"Flushed checkpoint step {step} (rank {target_rank}) to {save_path}")
         return save_path
@@ -294,10 +298,28 @@ class DiskSerializer:
         if not load_path.exists():
             raise FileNotFoundError(f"No checkpoint at {load_path}")
 
-        data = torch.load(load_path, weights_only=False)
-        tensors = data["tensors"]
+        try:
+            payload = torch.load(load_path, map_location="cpu", weights_only=True)
+        except Exception as error:  # noqa: BLE001 - every malformed shard must fail closed
+            raise CheckpointFormatError(
+                f"{load_path}: unsafe, malformed, or legacy checkpoint; "
+                f"only format version {FORMAT_VERSION} is supported"
+            ) from error
+        metadata, tensors, stored = validate_payload(payload)
+        for index, tensor in enumerate(tensors):
+            if type(tensor) is not torch.Tensor:
+                raise CheckpointFormatError(
+                    f"{load_path}: checkpoint tensor {index} must be a plain torch.Tensor"
+                )
+            if tensor.device.type != "cpu":
+                raise CheckpointFormatError(
+                    f"{load_path}: checkpoint tensor {index} must be materialized on CPU"
+                )
+            if tensor.layout is not torch.strided or tensor.is_quantized:
+                raise CheckpointFormatError(
+                    f"{load_path}: checkpoint tensor {index} must be dense, strided, and non-quantized"
+                )
         if self._integrity:
-            stored = data.get("checksums")
             if stored is not None:
                 actual = shard_checksums(tensors)
                 if actual != stored:
@@ -305,7 +327,7 @@ class DiskSerializer:
                         len(actual) - len(stored)
                     )
                     raise ChecksumMismatch(f"{load_path}: {bad} shard chunk(s) failed checksum")
-        return data["metadata"], tensors
+        return metadata, tensors
 
     def has_rank(self, step: int, rank: int) -> bool:
         """Whether a shard file for the given step and rank exists on this node."""
@@ -342,3 +364,43 @@ class DiskSerializer:
 
     def close(self) -> None:
         self.wait()
+
+
+def _validate_metadata_runtime_types(value: object) -> None:
+    """Reject metadata subclasses whose semantics the safe codec cannot preserve."""
+    if isinstance(value, torch.Tensor):
+        if type(value) is not torch.Tensor:
+            raise TypeError(f"unsupported checkpoint metadata type: {type(value).__name__}")
+        return
+    if isinstance(value, np.ndarray):
+        if type(value) is not np.ndarray:
+            raise TypeError(f"unsupported checkpoint metadata type: {type(value).__name__}")
+        return
+    if isinstance(value, np.generic):
+        if type(value) is not value.dtype.type:
+            raise TypeError(f"unsupported checkpoint metadata type: {type(value).__name__}")
+        return
+    if type(value) is dict:
+        for key, item in value.items():
+            _validate_metadata_runtime_types(key)
+            _validate_metadata_runtime_types(item)
+        return
+    if type(value) in (list, tuple, set, frozenset):
+        for item in value:
+            _validate_metadata_runtime_types(item)
+
+
+def _checkpoint_payload(
+    metadata: FlatStateDictMetadata,
+    tensors: list[torch.Tensor],
+    checksums: list[int] | None,
+) -> dict[str, object]:
+    """Build the only payload shape accepted by the safe loader."""
+    _validate_metadata_runtime_types(metadata.non_tensor_data)
+    return {
+        "format": FORMAT_NAME,
+        "version": FORMAT_VERSION,
+        "metadata_json": encode_metadata(metadata),
+        "tensors": tensors,
+        "checksums": checksums,
+    }
