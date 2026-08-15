@@ -589,8 +589,10 @@ three commits share one millisecond and one unchanged coordinator lease. The
 intent must also precede the referenced generation's successor snapshot when
 one exists, proving it opened while that generation was current. Coordinator
 lease digests and value sequences must advance together so an A-to-B-to-A lease
-value replay cannot authorize closure. The reader returns the lifecycle record
-with its opaque store revision and transaction sequence for future
+value replay cannot authorize closure. Same-value renewal grant times are
+bounded by the intervening mutation count and persisted lease duration, so a
+renewal after expiry cannot restore authority. The reader returns the lifecycle
+record with its opaque store revision and transaction sequence for future
 control-plane conditions and never mutates control-plane state.
 
 `suspected_node_ids` is the policy-approved replacement scope for the

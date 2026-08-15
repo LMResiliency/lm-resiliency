@@ -66,6 +66,7 @@ class StoredRestartIntentLifecycle:
 class _GuardProvenance:
     revision: int
     value_digest: str
+    lease_duration_ms: int
     transaction_sequence: int
     mutation_sequence: int
     value_sequence: int
@@ -286,6 +287,7 @@ def _guarded_provenance(
     return _GuardProvenance(
         revision=guard_revision_value,
         value_digest=guard_value_digest_value,
+        lease_duration_ms=lease_duration_ms,
         transaction_sequence=entry.transaction_sequence,
         mutation_sequence=guard_mutation_sequence,
         value_sequence=guard_value_sequence,
@@ -311,6 +313,16 @@ def _validate_provenance_order(
     same_value_digest = closing.value_digest == opening.value_digest
     if same_value_sequence != same_value_digest:
         raise RestartIntentLifecycleCorrupt("restart-intent lease value lineage is contradictory")
+    mutation_delta = closing.mutation_sequence - opening.mutation_sequence
+    if (
+        same_value_digest
+        and mutation_delta > 0
+        and closing.guard_committed_at_unix_ms
+        > (opening.guard_committed_at_unix_ms + mutation_delta * (opening.lease_duration_ms - 1))
+    ):
+        raise RestartIntentLifecycleCorrupt(
+            "restart-intent closure renews an expired coordinator lease"
+        )
     if closing.mutation_sequence == opening.mutation_sequence and (
         closing.revision != opening.revision
         or closing.value_digest != opening.value_digest

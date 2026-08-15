@@ -617,6 +617,41 @@ def test_current_rejects_replayed_coordinator_lease_value():
         reader.current(current)
 
 
+def test_current_rejects_closure_after_expired_same_value_renewal():
+    clock, store, _, generation_manager, reader, lease, current = _state()
+    record, _, lifecycle = _records(current, lease, lease)
+    _commit_intent(store, generation_manager, reader, current, lease, record)
+    lease_entry = store.get(reader.coordinator_lease_key)
+    assert lease_entry is not None
+    clock.set(lease.expires_at_unix_ms)
+    renewed = store.compare_set_in_window(
+        reader.coordinator_lease_key,
+        expected_revision=lease_entry.revision,
+        not_before_unix_ms=lease.expires_at_unix_ms,
+        deadline_unix_ms=None,
+        value=lease_entry.value,
+    )
+    lifecycle = replace(
+        lifecycle,
+        coordinator_fencing_token=renewed.revision,
+    )
+    store.compare_set_many_guarded(
+        {
+            reader.lifecycle_key: ControlStoreWrite(
+                expected_revision=None,
+                value=lifecycle.to_json(),
+            )
+        },
+        guard_key=reader.coordinator_lease_key,
+        expected_guard_revision=renewed.revision,
+        not_before_unix_ms=lease.expires_at_unix_ms,
+        deadline_unix_ms=lease.expires_at_unix_ms + lease.record.lease_duration_ms,
+    )
+
+    with pytest.raises(RestartIntentLifecycleCorrupt, match="renews an expired"):
+        reader.current(current)
+
+
 def test_current_rejects_closure_guarded_by_an_older_lease_mutation():
     clock = ManualClock()
     store = EntryOverrideStore(clock=clock)
