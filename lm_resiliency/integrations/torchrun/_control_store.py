@@ -71,9 +71,11 @@ class ControlStoreEntry:
     revision: int
     committed_at_unix_ms: int | None = None
     mutation_sequence: int = 1
+    lifetime_sequence: int = 1
     guard_key: str | None = None
     guard_revision: int | None = None
     guard_value_digest: str | None = None
+    guard_lifetime_sequence: int | None = None
     guard_committed_at_unix_ms: int | None = None
 
     def __post_init__(self) -> None:
@@ -83,6 +85,11 @@ class ControlStoreEntry:
             self,
             "mutation_sequence",
             _positive_integer(self.mutation_sequence, "mutation_sequence"),
+        )
+        object.__setattr__(
+            self,
+            "lifetime_sequence",
+            _positive_integer(self.lifetime_sequence, "lifetime_sequence"),
         )
         if self.committed_at_unix_ms is not None:
             object.__setattr__(
@@ -97,6 +104,7 @@ class ControlStoreEntry:
             self.guard_key,
             self.guard_revision,
             self.guard_value_digest,
+            self.guard_lifetime_sequence,
         )
         if any(value is not None for value in guard_values):
             if not all(value is not None for value in guard_values):
@@ -113,6 +121,14 @@ class ControlStoreEntry:
                 _sha256_digest(
                     self.guard_value_digest,
                     "guard_value_digest",
+                ),
+            )
+            object.__setattr__(
+                self,
+                "guard_lifetime_sequence",
+                _positive_integer(
+                    self.guard_lifetime_sequence,
+                    "guard_lifetime_sequence",
                 ),
             )
             if self.guard_committed_at_unix_ms is not None:
@@ -207,8 +223,8 @@ class ControlStore(Protocol):
         """Atomically publish writes while a guard revision is live.
 
         Every returned target entry carries store-stamped guard key, revision,
-        value digest, and authoritative guard commit time from the same
-        linearization point.
+        value digest, key-lifetime sequence, and authoritative guard commit
+        time from the same linearization point.
         """
         ...
 
@@ -221,6 +237,7 @@ class InMemoryControlStore:
         self._entries: dict[str, ControlStoreEntry] = {}
         self._last_revisions: dict[str, int] = {}
         self._mutation_sequences: dict[str, int] = {}
+        self._lifetime_sequences: dict[str, int] = {}
         self._clock = clock or _system_unix_ms
         self._last_now_unix_ms = 0
 
@@ -384,6 +401,7 @@ class InMemoryControlStore:
                     guard_key=normalized_guard_key,
                     guard_revision=normalized_guard_revision,
                     guard_value_digest=guard_value_digest,
+                    guard_lifetime_sequence=guard_entry.lifetime_sequence,
                     guard_committed_at_unix_ms=guard_entry.committed_at_unix_ms,
                 )
                 for key, write in normalized_writes.items()
@@ -405,17 +423,22 @@ class InMemoryControlStore:
         guard_key: str | None = None,
         guard_revision: int | None = None,
         guard_value_digest: str | None = None,
+        guard_lifetime_sequence: int | None = None,
         guard_committed_at_unix_ms: int | None = None,
     ) -> ControlStoreEntry:
+        if key not in self._entries:
+            self._lifetime_sequences[key] = self._lifetime_sequences.get(key, 0) + 1
         revision = self._next_revision(key)
         entry = ControlStoreEntry(
             value=value,
             revision=revision,
             committed_at_unix_ms=committed_at_unix_ms,
             mutation_sequence=self._mutation_sequences[key],
+            lifetime_sequence=self._lifetime_sequences[key],
             guard_key=guard_key,
             guard_revision=guard_revision,
             guard_value_digest=guard_value_digest,
+            guard_lifetime_sequence=guard_lifetime_sequence,
             guard_committed_at_unix_ms=guard_committed_at_unix_ms,
         )
         self._entries[key] = entry

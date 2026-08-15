@@ -33,6 +33,7 @@ class StoredGenerationSnapshot:
     record: GenerationSnapshotRecord
     revision: int
     committed_at_unix_ms: int
+    guard_lifetime_sequence: int
     guard_committed_at_unix_ms: int
 
 
@@ -170,11 +171,14 @@ class GenerationStateReader:
             raise GenerationStateCorrupt("immutable generation snapshot was replaced or recreated")
         if entry.committed_at_unix_ms is None:
             raise GenerationStateCorrupt("generation snapshot has no authoritative commit time")
-        guard_committed_at_unix_ms = self._validate_guard_provenance(entry, record)
+        guard_lifetime_sequence, guard_committed_at_unix_ms = self._validate_guard_provenance(
+            entry, record
+        )
         return StoredGenerationSnapshot(
             record=record,
             revision=entry.revision,
             committed_at_unix_ms=entry.committed_at_unix_ms,
+            guard_lifetime_sequence=guard_lifetime_sequence,
             guard_committed_at_unix_ms=guard_committed_at_unix_ms,
         )
 
@@ -194,10 +198,14 @@ class GenerationStateReader:
             raise GenerationStateCorrupt(
                 "generation head and snapshot commit timestamps do not match"
             )
-        head_guard_committed_at = self._validate_guard_provenance(
+        head_guard_lifetime, head_guard_committed_at = self._validate_guard_provenance(
             head_entry,
             snapshot.record,
         )
+        if head_guard_lifetime != snapshot.guard_lifetime_sequence:
+            raise GenerationStateCorrupt(
+                "generation head and snapshot guard lifetimes do not match"
+            )
         if head_guard_committed_at != snapshot.guard_committed_at_unix_ms:
             raise GenerationStateCorrupt(
                 "generation head and snapshot guard grant times do not match"
@@ -250,6 +258,13 @@ class GenerationStateReader:
                 != successor.record.coordinator_lease_duration_ms
             ):
                 raise GenerationStateCorrupt("one generation lease changes its duration")
+            if (
+                predecessor.record.lease_id == successor.record.lease_id
+                and predecessor.guard_lifetime_sequence != successor.guard_lifetime_sequence
+            ):
+                raise GenerationStateCorrupt(
+                    "one generation lease crosses a recreated guard lifetime"
+                )
             if predecessor.record.lease_id != successor.record.lease_id:
                 if predecessor.record.lease_id in seen_lease_ids:
                     raise GenerationStateCorrupt(
@@ -264,7 +279,7 @@ class GenerationStateReader:
         self,
         entry: ControlStoreEntry,
         snapshot: GenerationSnapshotRecord,
-    ) -> int:
+    ) -> tuple[int, int]:
         if entry.guard_key != self._coordinator_lease_key:
             raise GenerationStateCorrupt(
                 "generation state has no matching coordinator-lease guard key"
@@ -276,6 +291,11 @@ class GenerationStateReader:
         if entry.guard_value_digest != snapshot.coordinator_lease_digest:
             raise GenerationStateCorrupt(
                 "generation state guard digest does not match its lease identity"
+            )
+        guard_lifetime_sequence = entry.guard_lifetime_sequence
+        if guard_lifetime_sequence is None:
+            raise GenerationStateCorrupt(
+                "generation state guard has no authoritative lifetime sequence"
             )
         guard_committed_at_unix_ms = entry.guard_committed_at_unix_ms
         if guard_committed_at_unix_ms is None:
@@ -292,7 +312,7 @@ class GenerationStateReader:
             raise GenerationStateCorrupt(
                 "generation state was committed after its coordinator lease expired"
             )
-        return guard_committed_at_unix_ms
+        return guard_lifetime_sequence, guard_committed_at_unix_ms
 
 
 def _nonempty_string(value: object, path: str) -> str:

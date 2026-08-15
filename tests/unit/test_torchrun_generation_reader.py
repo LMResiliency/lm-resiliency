@@ -152,10 +152,17 @@ def _reader_from_history(
     records: tuple[GenerationSnapshotRecord, ...],
     *,
     head_committed_at_offset_ms: int = 0,
+    guard_lifetime_sequences: tuple[int, ...] | None = None,
 ) -> GenerationStateReader:
+    if guard_lifetime_sequences is None:
+        guard_lifetime_sequences = (1,) * len(records)
     store = StaticControlStore()
     reader = GenerationStateReader(store, run_id=RUN_ID)
-    for record in records:
+    for record, guard_lifetime_sequence in zip(
+        records,
+        guard_lifetime_sequences,
+        strict=True,
+    ):
         generation = record.assignment.generation
         store.entries[reader.snapshot_key(generation)] = ControlStoreEntry(
             value=record.to_json(),
@@ -164,6 +171,7 @@ def _reader_from_history(
             guard_key=reader.coordinator_lease_key,
             guard_revision=record.coordinator_fencing_token,
             guard_value_digest=record.coordinator_lease_digest,
+            guard_lifetime_sequence=guard_lifetime_sequence,
             guard_committed_at_unix_ms=1_000 + generation,
         )
     latest = records[-1]
@@ -180,6 +188,7 @@ def _reader_from_history(
         guard_key=reader.coordinator_lease_key,
         guard_revision=latest.coordinator_fencing_token,
         guard_value_digest=latest.coordinator_lease_digest,
+        guard_lifetime_sequence=guard_lifetime_sequences[-1],
         guard_committed_at_unix_ms=1_000 + latest.assignment.generation,
     )
     return reader
@@ -582,6 +591,20 @@ def test_generation_reader_rejects_same_timestamp_head_rollback():
     )
 
     with pytest.raises(GenerationStateCorrupt, match="mutation sequence"):
+        reader.current()
+
+
+def test_generation_reader_rejects_recreated_guard_with_reused_lease_identity():
+    records = _history(
+        ("coordinator-a", "lease-a", 1),
+        ("coordinator-a", "lease-a", 3),
+    )
+    reader = _reader_from_history(
+        records,
+        guard_lifetime_sequences=(1, 2),
+    )
+
+    with pytest.raises(GenerationStateCorrupt, match="recreated guard lifetime"):
         reader.current()
 
 

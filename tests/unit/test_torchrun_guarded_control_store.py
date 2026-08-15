@@ -73,6 +73,9 @@ def test_guarded_transaction_commits_all_writes_at_one_store_time():
     assert {entry.guard_value_digest for entry in committed.values()} == {
         hashlib.sha256(b"lease-a").hexdigest()
     }
+    assert {entry.guard_lifetime_sequence for entry in committed.values()} == {
+        guard.lifetime_sequence
+    }
     assert {entry.guard_committed_at_unix_ms for entry in committed.values()} == {
         guard.committed_at_unix_ms
     }
@@ -116,6 +119,47 @@ def test_guarded_transaction_atomically_updates_head_and_creates_successor():
     assert store.get("run/generation-head") == successor["run/generation-head"]
     assert store.get("run/generations/1") == successor["run/generations/1"]
     assert {entry.committed_at_unix_ms for entry in successor.values()} == {1_001}
+
+
+def test_guarded_transaction_stamps_recreated_guard_lifetime():
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    original_guard = _guard(store)
+    initial = store.compare_set_many_guarded(
+        _generation_writes(),
+        guard_key="run/coordinator-lease",
+        expected_guard_revision=original_guard.revision,
+        not_before_unix_ms=1_000,
+        deadline_unix_ms=1_100,
+    )
+    store.compare_delete(
+        "run/coordinator-lease",
+        expected_revision=original_guard.revision,
+    )
+    recreated_guard = _guard(store)
+    clock.now_unix_ms = 1_001
+
+    successor = store.compare_set_many_guarded(
+        {
+            "run/generation-head": ControlStoreWrite(
+                expected_revision=initial["run/generation-head"].revision,
+                value=b"generation-1",
+            ),
+            "run/generations/1": ControlStoreWrite(
+                expected_revision=None,
+                value=b"snapshot-1",
+            ),
+        },
+        guard_key="run/coordinator-lease",
+        expected_guard_revision=recreated_guard.revision,
+        not_before_unix_ms=1_000,
+        deadline_unix_ms=1_100,
+    )
+
+    assert original_guard.lifetime_sequence == 1
+    assert recreated_guard.lifetime_sequence == 2
+    assert initial["run/generation-head"].guard_lifetime_sequence == 1
+    assert successor["run/generation-head"].guard_lifetime_sequence == 2
 
 
 def test_guarded_transaction_rejects_stale_guard_without_partial_writes():

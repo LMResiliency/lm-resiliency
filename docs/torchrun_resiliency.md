@@ -877,12 +877,12 @@ generation, digest, authoritative commit time, and store-stamped guard
 provenance, then verifies the complete predecessor digest, timestamp,
 fencing-token, and lease-identity chain back to generation zero. Lease
 identities cannot reappear after a different acquisition, and one acquisition
-cannot change coordinator identity or lease duration. Every snapshot entry must
-retain store-stamped mutation sequence `1`, while the head mutation sequence
-must equal `generation + 1`; this rejects replacement, recreation, extra
-rewrites, and rollback. Every generation commit must fall within the stamped
-lease grant and duration. Missing or contradictory history is corruption, not
-an empty or partially usable assignment.
+cannot change coordinator identity, lease duration, or store-stamped guard-key
+lifetime. Every snapshot entry must retain store-stamped mutation sequence `1`,
+while the head mutation sequence must equal `generation + 1`; this rejects
+replacement, recreation, extra rewrites, and rollback. Every generation commit
+must fall within the stamped lease grant and duration. Missing or contradictory
+history is corruption, not an empty or partially usable assignment.
 
 Coordinator ownership is stored under a schema-versioned, run-scoped lease key.
 The lease record binds the run, a unique coordinator-process incarnation, a

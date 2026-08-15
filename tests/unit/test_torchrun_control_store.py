@@ -46,6 +46,9 @@ def test_control_store_create_update_delete_and_recreate():
     assert created.mutation_sequence == 1
     assert updated.mutation_sequence == 2
     assert recreated.mutation_sequence == 4
+    assert created.lifetime_sequence == 1
+    assert updated.lifetime_sequence == 1
+    assert recreated.lifetime_sequence == 2
     assert created.revision < updated.revision < tombstone_revision < recreated.revision
 
 
@@ -340,4 +343,20 @@ def test_control_store_entry_rejects_invalid_guard_provenance(
             value=b"value",
             revision=1,
             mutation_sequence=0,
+        )
+
+    with pytest.raises(ValueError):
+        ControlStoreEntry(
+            value=b"value",
+            revision=1,
+            lifetime_sequence=0,
+        )
+
+    with pytest.raises(ValueError):
+        ControlStoreEntry(
+            value=b"value",
+            revision=1,
+            guard_key="run/lease",
+            guard_revision=1,
+            guard_value_digest="a" * 64,
         )
