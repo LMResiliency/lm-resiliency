@@ -621,7 +621,9 @@ follow both the generation snapshot and the authenticated lease transaction.
 The lease mutation count cannot exceed the store-global transaction gap, a
 post-generation lease grant cannot predate the generation commit, and a lease
 ID or fencing token cannot reappear after a different acquisition in the
-verified generation history.
+verified generation history. Preparation obtains that history through one
+stable reader traversal rather than rereading the full predecessor chain for
+each generation.
 
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be

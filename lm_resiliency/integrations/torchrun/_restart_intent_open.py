@@ -17,6 +17,7 @@ from lm_resiliency.integrations.torchrun._coordinator_lease import (
 from lm_resiliency.integrations.torchrun._generation_reader import (
     CurrentGeneration,
     GenerationStateReader,
+    StoredGenerationSnapshot,
 )
 from lm_resiliency.integrations.torchrun._protocol import RestartIntent
 from lm_resiliency.integrations.torchrun._restart_intent_open_records import (
@@ -105,9 +106,8 @@ class RestartIntentOpenPreparer:
         intent: RestartIntent,
     ) -> PreparedInitialRestartIntentOpen:
         lease_entry = self._validate_lease(lease)
-        self._validate_current(current)
+        generation_history = self._validate_current(current)
         self._validate_intent(intent, current)
-        lease_id_history, fencing_token_history = self._generation_lease_history(current)
         self._require_never_opened()
         now_unix_ms = self._now_unix_ms()
         if now_unix_ms < lease.granted_at_unix_ms:
@@ -156,8 +156,12 @@ class RestartIntentOpenPreparer:
                 coordinator_lease_mutation_sequence=lease_entry.mutation_sequence,
                 coordinator_lease_value_sequence=lease_entry.value_sequence,
                 coordinator_lease_lifetime_sequence=lease_entry.lifetime_sequence,
-                generation_lease_id_history=lease_id_history,
-                generation_fencing_token_history=fencing_token_history,
+                generation_lease_id_history=tuple(
+                    snapshot.record.lease_id for snapshot in generation_history
+                ),
+                generation_fencing_token_history=tuple(
+                    snapshot.record.coordinator_fencing_token for snapshot in generation_history
+                ),
                 not_before_unix_ms=not_before_unix_ms,
                 deadline_unix_ms=min(
                     lease.expires_at_unix_ms,
@@ -193,13 +197,18 @@ class RestartIntentOpenPreparer:
             )
         return entry
 
-    def _validate_current(self, current: CurrentGeneration) -> None:
+    def _validate_current(
+        self,
+        current: CurrentGeneration,
+    ) -> tuple[StoredGenerationSnapshot, ...]:
         if not isinstance(current, CurrentGeneration):
             raise TypeError("current must be CurrentGeneration")
-        if self._generation_reader.current() != current:
+        observed = self._generation_reader.current_with_history()
+        if observed is None or observed[0] != current:
             raise RestartIntentOpenPreparationConflict(
                 "current generation does not match the committed generation head"
             )
+        return observed[1]
 
     def _validate_intent(
         self,
@@ -219,23 +228,6 @@ class RestartIntentOpenPreparer:
             raise ValueError(
                 f"restart intent suspects nodes outside the current generation: {unknown_nodes!r}"
             )
-
-    def _generation_lease_history(
-        self,
-        current: CurrentGeneration,
-    ) -> tuple[tuple[str, ...], tuple[int, ...]]:
-        generation = current.snapshot.record.assignment.generation
-        lease_ids: list[str] = []
-        fencing_tokens: list[int] = []
-        for predecessor_generation in range(generation + 1):
-            snapshot = self._generation_reader.get(predecessor_generation)
-            if snapshot is None:
-                raise RestartIntentOpenPreparationCorrupt(
-                    "current generation has an incomplete predecessor history"
-                )
-            lease_ids.append(snapshot.record.lease_id)
-            fencing_tokens.append(snapshot.record.coordinator_fencing_token)
-        return tuple(lease_ids), tuple(fencing_tokens)
 
     def _require_never_opened(self) -> None:
         if self._store.get(self._intent_head_key) is not None:
