@@ -79,21 +79,8 @@ class GenerationStateReader:
             result = self._read_current_history()
             if result is not None:
                 current, _ = result
-                successor_key = self.snapshot_key(current.snapshot.record.assignment.generation + 1)
-                if self._store.get(successor_key) is not None:
-                    observed_head = self._store.get(self._head_key)
-                    if (
-                        observed_head is not None
-                        and observed_head.revision != current.head_revision
-                    ):
-                        continue
-                    if observed_head is None:
-                        raise GenerationStateCorrupt(
-                            "generation head disappeared while checking its successor"
-                        )
-                    raise GenerationStateCorrupt(
-                        "generation snapshot is newer than the generation head"
-                    )
+                if self._head_changed_while_checking_successor(current):
+                    continue
                 return current
             if self._store.get(generation_zero_key) is None:
                 return None
@@ -116,6 +103,8 @@ class GenerationStateReader:
                     continue
                 raise GenerationStateCorrupt("generation snapshot exists without a generation head")
             current, history = result
+            if self._head_changed_while_checking_successor(current):
+                continue
             current_generation = current.snapshot.record.assignment.generation
             if normalized_generation <= current_generation:
                 return history[normalized_generation]
@@ -131,6 +120,20 @@ class GenerationStateReader:
                     "generation snapshot is newer than the generation head"
                 )
         raise GenerationStateError("generation head changed repeatedly during read")
+
+    def _head_changed_while_checking_successor(
+        self,
+        current: CurrentGeneration,
+    ) -> bool:
+        successor_key = self.snapshot_key(current.snapshot.record.assignment.generation + 1)
+        if self._store.get(successor_key) is None:
+            return False
+        observed_head = self._store.get(self._head_key)
+        if observed_head is not None and observed_head.revision != current.head_revision:
+            return True
+        if observed_head is None:
+            raise GenerationStateCorrupt("generation head disappeared while checking its successor")
+        raise GenerationStateCorrupt("generation snapshot is newer than the generation head")
 
     def _read_current_history(
         self,
@@ -265,6 +268,16 @@ class GenerationStateReader:
             ):
                 raise GenerationStateCorrupt("generation snapshots disagree on one lease identity")
             if (
+                predecessor.record.coordinator_fencing_token
+                == successor.record.coordinator_fencing_token
+                and (
+                    predecessor.guard_lifetime_sequence != successor.guard_lifetime_sequence
+                    or predecessor.guard_committed_at_unix_ms
+                    != successor.guard_committed_at_unix_ms
+                )
+            ):
+                raise GenerationStateCorrupt("generation snapshots disagree on one lease grant")
+            if (
                 predecessor.record.lease_id == successor.record.lease_id
                 and predecessor.record.coordinator_id != successor.record.coordinator_id
             ):
@@ -282,6 +295,16 @@ class GenerationStateReader:
                 raise GenerationStateCorrupt(
                     "one generation lease crosses a recreated guard lifetime"
                 )
+            if (
+                predecessor.record.lease_id != successor.record.lease_id
+                and predecessor.guard_lifetime_sequence == successor.guard_lifetime_sequence
+                and successor.guard_committed_at_unix_ms
+                < (
+                    predecessor.guard_committed_at_unix_ms
+                    + predecessor.record.coordinator_lease_duration_ms
+                )
+            ):
+                raise GenerationStateCorrupt("generation snapshot coordinator leases overlap")
             if predecessor.record.lease_id != successor.record.lease_id:
                 if predecessor.record.lease_id in seen_lease_ids:
                     raise GenerationStateCorrupt(
