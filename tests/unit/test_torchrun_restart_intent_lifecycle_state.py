@@ -283,6 +283,19 @@ def test_persisted_initial_closure_rejects_invalid_store_sequences(
         )
 
 
+def test_persisted_initial_closure_rejects_reused_head_revision():
+    state, _ = _state()
+
+    with pytest.raises(ValueError, match="replace exactly one"):
+        replace(
+            state,
+            closed_head_entry=replace(
+                state.closed_head_entry,
+                revision=state.open_head_entry.revision,
+            ),
+        )
+
+
 def test_persisted_initial_closure_rejects_noncanonical_guard_key():
     state, _ = _state()
 

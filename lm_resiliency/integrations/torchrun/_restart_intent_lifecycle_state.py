@@ -195,6 +195,7 @@ class PersistedInitialRestartIntentClosure:
             self.closed_head_entry.mutation_sequence != 2
             or self.closed_head_entry.value_sequence != 2
             or self.closed_head_entry.lifetime_sequence != 1
+            or self.closed_head_entry.revision == self.open_head_entry.revision
         ):
             raise ValueError(
                 "PersistedInitialRestartIntentClosure.closed_head_entry does not "
