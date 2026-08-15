@@ -39,30 +39,24 @@
 
 ## Quick Start
 
-### Install
+The runnable example is newer than the current `0.1.0` release, so keep the package source and example on the same repository revision for this Quick Start:
 
 ```bash
+git clone https://github.com/LMResiliency/lm-resiliency.git
+cd lm-resiliency
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install lm-resiliency
-```
-
-Install `[torchtitan]`, `[megatron]`, `[deepspeed]`, or `[all]` when integrating one of those frameworks.
-
-### Run a tiny end-to-end loop
-
-Run the CPU quick start installed by the wheel:
-
-```bash
-lm-resiliency-quickstart \
+python -m pip install -e .
+python examples/quickstart.py \
   --checkpoint-dir /tmp/lm-resiliency-quickstart/checkpoints
 ```
 
 The example trains a tiny causal LM through a complete forward, backward, and optimizer loop while GEMINI saves recovery state.
 Run it again with `--steps 6` to resume from the saved checkpoint.
-Because the command is installed by `lm-resiliency`, its example code always matches the installed package version.
 See [Examples](examples/README.md) for the recovery command and distributed production loops that exercise SCOUT.
+
+For integrations that do not need the repository examples, install the latest published package directly with `python -m pip install lm-resiliency`, adding `[torchtitan]`, `[megatron]`, `[deepspeed]`, or `[all]` as needed.
 
 ### Add resiliency to Megatron Core
 
