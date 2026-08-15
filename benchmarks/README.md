@@ -25,6 +25,7 @@ python benchmarks/run_healthy_path.py \
   --modes baseline gemini \
   --steps 3 \
   --warmup-steps 1 \
+  --interval 1 \
   --hidden-size 32 \
   --layers 2 \
   --heads 4 \

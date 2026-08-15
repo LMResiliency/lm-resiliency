@@ -197,6 +197,15 @@ def _oob_daemon_peak_rss_bytes(handle: Any) -> int | None:
     return _process_peak_rss_bytes(getattr(service, "pid", None))
 
 
+def _wait_for_oob_daemon(handle: Any) -> None:
+    replay_harness = getattr(handle, "replay_harness", None)
+    service = getattr(replay_harness, "_oob_service", None)
+    wait_until_ready = getattr(service, "wait_until_ready", None)
+    if not callable(wait_until_ready):
+        raise RuntimeError("SCOUT benchmark could not access its OOB daemon readiness signal")
+    wait_until_ready()
+
+
 def _git_revision() -> str | None:
     completed = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -205,6 +214,27 @@ def _git_revision() -> str | None:
         text=True,
     )
     return completed.stdout.strip() if completed.returncode == 0 else None
+
+
+def _git_worktree_dirty() -> bool | None:
+    completed = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=normal"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return bool(completed.stdout.strip()) if completed.returncode == 0 else None
+
+
+def _recorded_worktree_dirty() -> bool | None:
+    recorded = os.environ.get("LM_BENCHMARK_WORKTREE_DIRTY")
+    if recorded is None:
+        return _git_worktree_dirty()
+    if recorded == "1":
+        return True
+    if recorded == "0":
+        return False
+    return None
 
 
 def _run(args: argparse.Namespace) -> dict[str, Any]:
@@ -237,6 +267,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
 
     enable_checkpoint = args.mode in {"gemini", "combined"}
     enable_detection = args.mode in {"scout", "combined"}
+    effective_pin_memory = enable_checkpoint and device.type == "cuda" and args.pin_memory
     checkpoint_replication_jump = replication_jump(world_size) if enable_checkpoint else 1
     handle = None
     if enable_checkpoint or enable_detection:
@@ -252,7 +283,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 replication_jump=checkpoint_replication_jump,
                 replication_chunk_size=args.replication_chunk_size,
                 disk_flush_interval=0,
-                pin_memory=device.type == "cuda" and args.pin_memory,
+                pin_memory=effective_pin_memory,
             ),
             replay=ReplayHarnessConfig(
                 check_interval=args.interval,
@@ -273,6 +304,8 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
 
         if handle is not None and handle.ckpt_manager is not None:
             handle.ckpt_manager.maybe_wait()
+        if enable_detection:
+            _wait_for_oob_daemon(handle)
         dist.barrier()
         if device.type == "cuda":
             torch.cuda.synchronize(device)
@@ -307,6 +340,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         )
         rank_result = {
             "rank": rank,
+            "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
             "duration_seconds": measured_seconds,
             "step_times_ms": step_times_ms,
             "peak_parent_host_memory_bytes": peak_parent_host_memory_bytes,
@@ -323,12 +357,19 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         if rank != 0:
             return {}
         complete_results = [result for result in rank_results if result is not None]
+        device_names = [result["device_name"] for result in complete_results]
+        if device.type == "cuda" and len(set(device_names)) != 1:
+            raise RuntimeError(
+                "healthy-path qualification requires equivalent GPU models on every rank: "
+                f"{device_names}"
+            )
         job_step_times = aggregate_step_latencies(complete_results)
         max_duration = max(result["duration_seconds"] for result in complete_results)
         tokens = args.steps * args.batch_size * args.sequence_length * world_size
         return {
             "schema_version": 1,
             "commit_sha": os.environ.get("GITHUB_SHA") or _git_revision(),
+            "worktree_dirty": _recorded_worktree_dirty(),
             "mode": args.mode,
             "environment": {
                 "host": platform.node(),
@@ -337,7 +378,8 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 "torch": torch.__version__,
                 "cuda_runtime": torch.version.cuda,
                 "device": args.device,
-                "device_name": torch.cuda.get_device_name(0) if device.type == "cuda" else None,
+                "device_name": device_names[0] if device.type == "cuda" else None,
+                "device_names_by_rank": device_names,
             },
             "topology": {
                 "hosts": 1,
@@ -365,7 +407,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             "protection": {
                 "checkpoint_interval": args.interval if enable_checkpoint else None,
                 "replay_interval": args.interval if enable_detection else None,
-                "pin_memory": args.pin_memory if enable_checkpoint else None,
+                "pin_memory": effective_pin_memory if enable_checkpoint else None,
                 "replication": enable_checkpoint and world_size > 1,
                 "replication_chunk_size": (
                     args.replication_chunk_size if enable_checkpoint else None

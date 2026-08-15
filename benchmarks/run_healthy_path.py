@@ -16,7 +16,18 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from benchmarks.healthy_path import replication_jump  # noqa: E402
+from benchmarks.healthy_path import _git_worktree_dirty, replication_jump  # noqa: E402
+
+_RESULT_NAMES = {
+    "baseline.json",
+    "gemini.json",
+    "scout.json",
+    "combined.json",
+    "summary.json",
+    "summary.md",
+    "commands.json",
+    "checksums.txt",
+}
 
 
 def _free_local_port() -> int:
@@ -62,9 +73,10 @@ def summarize_results(
             comparisons.append(comparison)
             if not comparison["passed"]:
                 violations.append(comparison)
+    status = "not_qualified" if not comparisons else ("passed" if not violations else "failed")
     return {
         "schema_version": 1,
-        "status": "passed" if not violations else "failed",
+        "status": status,
         "commit_sha": runs["baseline"].get("commit_sha"),
         "thresholds": thresholds,
         "comparisons": comparisons,
@@ -93,11 +105,17 @@ def _write_markdown(path: Path, summary: dict[str, Any]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _write_checksums(output_dir: Path) -> None:
+def _prepare_output_dir(output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for name in _RESULT_NAMES:
+        (output_dir / name).unlink(missing_ok=True)
+
+
+def _write_checksums(output_dir: Path, generated_names: set[str]) -> None:
     lines = []
-    for path in sorted(item for item in output_dir.iterdir() if item.is_file()):
-        if path.name == "checksums.txt":
-            continue
+    for path in sorted(output_dir / name for name in generated_names):
+        if not path.is_file():
+            raise FileNotFoundError(f"benchmark output is missing: {path}")
         lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}")
     (output_dir / "checksums.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -112,7 +130,12 @@ def main() -> int:
     )
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument("--world-size", type=int, default=2)
-    parser.add_argument("--modes", nargs="+", default=["baseline", "gemini", "scout", "combined"])
+    parser.add_argument(
+        "--modes",
+        nargs="+",
+        choices=("baseline", "gemini", "scout", "combined"),
+        default=["baseline", "gemini", "scout", "combined"],
+    )
     parser.add_argument("--steps", type=int, default=40)
     parser.add_argument("--warmup-steps", type=int, default=10)
     parser.add_argument("--interval", type=int, default=5)
@@ -137,7 +160,18 @@ def main() -> int:
     if args.device == "cpu" and {"scout", "combined"}.intersection(args.modes):
         parser.error("SCOUT healthy-path modes require --device cuda")
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    thresholds = json.loads(args.thresholds.read_text())
+    protected_modes = {
+        mode
+        for policy in thresholds["metrics"].values()
+        for mode in policy["maximum_regression_percent"]
+        if mode != "baseline"
+    }
+    if args.enforce and not protected_modes.intersection(args.modes):
+        parser.error("--enforce requires at least one threshold-protected mode")
+
+    worktree_dirty = _git_worktree_dirty()
+    _prepare_output_dir(args.output_dir)
     runs = {}
     commands = []
     for mode in args.modes:
@@ -178,13 +212,15 @@ def main() -> int:
         ]
         commands.append(command)
         environment = os.environ.copy()
+        environment["LM_BENCHMARK_WORKTREE_DIRTY"] = (
+            "unknown" if worktree_dirty is None else ("1" if worktree_dirty else "0")
+        )
         environment["PYTHONPATH"] = os.pathsep.join(
             part for part in (str(ROOT), environment.get("PYTHONPATH")) if part
         )
         subprocess.run(command, cwd=ROOT, env=environment, check=True)
         runs[mode] = json.loads(output.read_text())
 
-    thresholds = json.loads(args.thresholds.read_text())
     summary = summarize_results(runs, thresholds)
     (args.output_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n",
@@ -195,7 +231,9 @@ def main() -> int:
         encoding="utf-8",
     )
     _write_markdown(args.output_dir / "summary.md", summary)
-    _write_checksums(args.output_dir)
+    generated_names = {f"{mode}.json" for mode in args.modes}
+    generated_names.update({"summary.json", "summary.md", "commands.json"})
+    _write_checksums(args.output_dir, generated_names)
     print(json.dumps(summary, sort_keys=True))
     return 1 if args.enforce and summary["status"] != "passed" else 0
 

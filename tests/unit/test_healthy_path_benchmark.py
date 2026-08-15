@@ -2,11 +2,17 @@ import pytest
 
 from benchmarks.healthy_path import (
     _process_peak_rss_bytes,
+    _wait_for_oob_daemon,
     aggregate_step_latencies,
     percentile,
     replication_jump,
 )
-from benchmarks.run_healthy_path import _write_checksums, regression_percent, summarize_results
+from benchmarks.run_healthy_path import (
+    _prepare_output_dir,
+    _write_checksums,
+    regression_percent,
+    summarize_results,
+)
 
 
 def test_percentile_interpolates_samples():
@@ -37,6 +43,23 @@ def test_process_peak_rss_reads_linux_high_water_mark(tmp_path):
     status.write_text("Name:\tscout\nVmHWM:\t2048 kB\n")
 
     assert _process_peak_rss_bytes(123, proc_root=tmp_path) == 2 * 1024 * 1024
+
+
+def test_benchmark_waits_for_oob_daemon_readiness():
+    class Service:
+        ready = False
+
+        def wait_until_ready(self):
+            self.ready = True
+
+    service = Service()
+    handle = type(
+        "Handle", (), {"replay_harness": type("Harness", (), {"_oob_service": service})()}
+    )()
+
+    _wait_for_oob_daemon(handle)
+
+    assert service.ready
 
 
 def test_regression_direction():
@@ -81,14 +104,43 @@ def test_summary_reports_threshold_violations():
     }
 
 
+def test_summary_does_not_qualify_without_protected_comparisons():
+    summary = summarize_results(
+        {"baseline": {"commit_sha": "abc", "metrics": {"throughput": 100.0}}},
+        {
+            "metrics": {
+                "throughput": {
+                    "direction": "higher",
+                    "maximum_regression_percent": {"gemini": 5.0},
+                }
+            }
+        },
+    )
+
+    assert summary["status"] == "not_qualified"
+    assert summary["comparisons"] == []
+
+
 def test_checksums_cover_each_result_once(tmp_path):
     (tmp_path / "baseline.json").write_text("{}\n")
     (tmp_path / "summary.json").write_text("{}\n")
+    (tmp_path / "stale-scout.json").write_text("stale\n")
 
-    _write_checksums(tmp_path)
-    _write_checksums(tmp_path)
+    _write_checksums(tmp_path, {"baseline.json", "summary.json"})
+    _write_checksums(tmp_path, {"baseline.json", "summary.json"})
 
     lines = (tmp_path / "checksums.txt").read_text().splitlines()
     assert len(lines) == 2
     assert lines[0].endswith("  baseline.json")
     assert lines[1].endswith("  summary.json")
+    assert "stale-scout" not in (tmp_path / "checksums.txt").read_text()
+
+
+def test_output_preparation_removes_only_known_benchmark_results(tmp_path):
+    (tmp_path / "scout.json").write_text("stale\n")
+    (tmp_path / "notes.txt").write_text("keep\n")
+
+    _prepare_output_dir(tmp_path)
+
+    assert not (tmp_path / "scout.json").exists()
+    assert (tmp_path / "notes.txt").read_text() == "keep\n"

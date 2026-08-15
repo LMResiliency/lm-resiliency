@@ -1,15 +1,45 @@
 """Unit tests for OOB daemon rendezvous setup."""
 
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+import pytest
 import torch.distributed as dist
 
 from lm_resiliency.detection.oob_service import (
     OOBHangConfig,
+    OOBHangService,
     _init_daemon_process_group,
     _rendezvous_method,
 )
+
+
+def _unstarted_service() -> OOBHangService:
+    return OOBHangService(global_rank=0, peer_ranks=[0], config=OOBHangConfig())
+
+
+def test_readiness_wait_uses_child_signal():
+    service = _unstarted_service()
+    service._process = Mock(is_alive=Mock(return_value=True), exitcode=None)
+    service._ready_event.set()
+
+    service.wait_until_ready(timeout_s=0.01)
+
+
+def test_readiness_wait_reports_live_child_timeout():
+    service = _unstarted_service()
+    service._process = Mock(is_alive=Mock(return_value=True), exitcode=None)
+
+    with pytest.raises(TimeoutError, match="not ready within"):
+        service.wait_until_ready(timeout_s=0.0)
+
+
+def test_readiness_wait_reports_early_child_exit():
+    service = _unstarted_service()
+    service._process = Mock(is_alive=Mock(return_value=False), exitcode=17)
+
+    with pytest.raises(RuntimeError, match="exited before readiness with code 17"):
+        service.wait_until_ready(timeout_s=0.0)
 
 
 def test_tcp_rendezvous_owns_a_store_instead_of_reusing_torchrun_agent_store():
