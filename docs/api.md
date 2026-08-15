@@ -569,6 +569,9 @@ if step >= 0 and destination is not None:
 `copy_checkpoint_to` copies flushed local and peer shards.
 Import `make_transfer` from `lm_resiliency.manager_api` when endpoint-addressed manager transfer is required.
 The `"torch_dist"` and `"nixl"` backends share the `CheckpointTransfer` contract.
+Every transfer is keyed, bounded by `timeout_s`, and validates endpoint, tensor layout, byte count, and per-chunk checksums before applying received buffers.
+`TorchDistTransfer` uses a dedicated Gloo pair group even when the training world uses NCCL; both endpoints create the same pair in coordinated order, or the manager may pass an already-created dedicated Gloo `process_group`.
+NIXL is one-sided while the torch-distributed backend requires both endpoints to participate, so `make_transfer("nixl", ...)` fails if NIXL is unavailable unless the manager explicitly sets `allow_backend_fallback=True` after arranging the two-sided protocol.
 
 Launcher retry, placement, replacement, and quarantine policy remain outside this repository.
 

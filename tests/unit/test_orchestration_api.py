@@ -328,7 +328,38 @@ def test_transfer_factory_validates_public_contract():
         transfer = make_transfer("torch_dist", rank=3, chunk_size=1024)
 
     assert transfer is transfer_cls.return_value
-    transfer_cls.assert_called_once_with(3, 1024)
+    transfer_cls.assert_called_once_with(
+        3,
+        1024,
+        timeout_s=120.0,
+        process_group=None,
+    )
+
+
+def test_nixl_fallback_requires_explicit_two_sided_opt_in():
+    store = MagicMock()
+    with patch(
+        "lm_resiliency.checkpointing.transfer.NixlCheckpointTransfer",
+        side_effect=RuntimeError("missing nixl"),
+    ):
+        with pytest.raises(RuntimeError, match="fallback was not enabled"):
+            make_transfer("nixl", rank=0, metadata_store=store)
+
+    with (
+        patch(
+            "lm_resiliency.checkpointing.transfer.NixlCheckpointTransfer",
+            side_effect=RuntimeError("missing nixl"),
+        ),
+        patch("lm_resiliency.checkpointing.transfer.TorchDistTransfer") as transfer_cls,
+    ):
+        transfer = make_transfer(
+            "nixl",
+            rank=0,
+            metadata_store=store,
+            allow_backend_fallback=True,
+        )
+
+    assert transfer is transfer_cls.return_value
 
 
 def test_checkpoint_only_handle_has_no_platform_dependency(tmp_path):

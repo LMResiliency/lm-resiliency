@@ -50,6 +50,8 @@ Validate this assumption when rank placement is not contiguous by node.
 The built-in replication path uses a dedicated Gloo process group.
 It is validated for correctness over TCP and is not a line-rate RDMA implementation.
 Production deployments can use manager-driven Torch Distributed or NIXL transfer APIs for replacement workflows, but automatic checkpoint replication currently uses Gloo.
+Manager-driven transfers bind a key to endpoint and tensor metadata, verify per-chunk checksums, and use bounded waits.
+The torch-distributed backend communicates on a dedicated Gloo group and requires both endpoints; fallback from one-sided NIXL is therefore explicit rather than automatic.
 
 `replication_chunk_size` limits the largest in-flight transfer unit.
 Choose it from measured training communication slack rather than assuming a fixed network rate:
