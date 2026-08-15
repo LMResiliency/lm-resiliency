@@ -9,7 +9,7 @@ import pytest
 
 from scripts import validation_evidence
 
-_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+_COMMIT = "0123456789abcdef" * 2 + "01234567"
 
 
 def _write_payload(bundle: Path) -> None:

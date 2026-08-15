@@ -15,8 +15,6 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
-import tomllib
-
 _SCHEMA_VERSION = 1
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _PAYLOAD_NAMES = {"summary.json", "environment.json", "commands.txt"}
@@ -49,9 +47,21 @@ def _write_json(path: Path, value: object) -> None:
 
 
 def _project() -> tuple[str, str]:
-    with (_REPOSITORY_ROOT / "pyproject.toml").open("rb") as handle:
-        project = tomllib.load(handle)["project"]
-    return project["name"], project["version"]
+    values = {}
+    in_project = False
+    for line in (_REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_project = stripped == "[project]"
+            continue
+        if not in_project:
+            continue
+        match = re.fullmatch(r'(name|version)\s*=\s*"([^"]+)"', stripped)
+        if match:
+            values[match.group(1)] = match.group(2)
+    if set(values) != {"name", "version"}:
+        raise ValueError("pyproject.toml must define literal project name and version strings")
+    return values["name"], values["version"]
 
 
 def _command_ids(path: Path) -> list[str]:
