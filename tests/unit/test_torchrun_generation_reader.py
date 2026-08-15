@@ -155,12 +155,14 @@ def _reader_from_history(
     records: tuple[GenerationSnapshotRecord, ...],
     *,
     head_committed_at_offset_ms: int = 0,
+    head_transaction_sequence: int | None = None,
     head_value_sequence: int | None = None,
     guard_mutation_sequences: tuple[int, ...] | None = None,
     guard_value_sequences: tuple[int, ...] | None = None,
     guard_lifetime_sequences: tuple[int, ...] | None = None,
     guard_grant_times_unix_ms: tuple[int, ...] | None = None,
     snapshot_commit_times_unix_ms: tuple[int, ...] | None = None,
+    snapshot_transaction_sequences: tuple[int, ...] | None = None,
     snapshot_value_sequences: tuple[int, ...] | None = None,
     snapshot_lifetime_sequences: tuple[int, ...] | None = None,
 ) -> GenerationStateReader:
@@ -228,6 +230,8 @@ def _reader_from_history(
         guard_grant_times_unix_ms = tuple(grant_times)
     if snapshot_commit_times_unix_ms is None:
         snapshot_commit_times_unix_ms = guard_grant_times_unix_ms
+    if snapshot_transaction_sequences is None:
+        snapshot_transaction_sequences = tuple(range(1, len(records) + 1))
     if snapshot_value_sequences is None:
         snapshot_value_sequences = (1,) * len(records)
     if snapshot_lifetime_sequences is None:
@@ -243,6 +247,7 @@ def _reader_from_history(
         guard_lifetime_sequence,
         guard_grant_time,
         snapshot_commit_time,
+        snapshot_transaction_sequence,
         snapshot_value_sequence,
         snapshot_lifetime_sequence,
     ) in zip(
@@ -252,6 +257,7 @@ def _reader_from_history(
         guard_lifetime_sequences,
         guard_grant_times_unix_ms,
         snapshot_commit_times_unix_ms,
+        snapshot_transaction_sequences,
         snapshot_value_sequences,
         snapshot_lifetime_sequences,
         strict=True,
@@ -261,6 +267,7 @@ def _reader_from_history(
             value=record.to_json(),
             revision=1,
             committed_at_unix_ms=snapshot_commit_time,
+            transaction_sequence=snapshot_transaction_sequence,
             value_sequence=snapshot_value_sequence,
             lifetime_sequence=snapshot_lifetime_sequence,
             guard_key=reader.coordinator_lease_key,
@@ -277,10 +284,13 @@ def _reader_from_history(
         generation=latest.assignment.generation,
         snapshot_digest=latest.digest,
     )
+    if head_transaction_sequence is None:
+        head_transaction_sequence = snapshot_transaction_sequences[-1]
     store.entries[reader.head_key] = ControlStoreEntry(
         value=head.to_json(),
         revision=len(records),
         committed_at_unix_ms=(snapshot_commit_times_unix_ms[-1] + head_committed_at_offset_ms),
+        transaction_sequence=head_transaction_sequence,
         mutation_sequence=len(records),
         value_sequence=head_value_sequence,
         guard_key=reader.coordinator_lease_key,
@@ -417,7 +427,7 @@ def test_generation_reader_reads_current_and_historical_snapshots():
     current_zero = reader.current()
     assert current_zero is not None
     clock.set(1_010)
-    _commit(
+    generation_one = _commit(
         store,
         reader,
         lease,
@@ -430,6 +440,14 @@ def test_generation_reader_reads_current_and_historical_snapshots():
 
     assert current is not None
     assert current.snapshot.record.assignment.generation == 1
+    assert (
+        current_zero.snapshot.transaction_sequence
+        == generation_zero[reader.snapshot_key(0)].transaction_sequence
+    )
+    assert (
+        current.snapshot.transaction_sequence
+        == generation_one[reader.snapshot_key(1)].transaction_sequence
+    )
     assert reader.get(0) == current_zero.snapshot
     assert reader.get(1) == current.snapshot
 
@@ -756,6 +774,41 @@ def test_generation_reader_rejects_head_digest_or_timestamp_substitution():
     )
     with pytest.raises(GenerationStateCorrupt, match="timestamps"):
         timestamp_reader.current()
+
+
+def test_generation_reader_rejects_head_transaction_sequence_substitution():
+    records = _history(("coordinator-a", "lease-a", 100))
+    reader = _reader_from_history(
+        records,
+        head_transaction_sequence=2,
+        snapshot_transaction_sequences=(1,),
+    )
+
+    with pytest.raises(GenerationStateCorrupt, match="transaction sequences"):
+        reader.current()
+
+
+@pytest.mark.parametrize(
+    "transaction_sequences",
+    [
+        (2, 2),
+        (3, 2),
+    ],
+)
+def test_generation_reader_rejects_nonadvancing_snapshot_transactions(
+    transaction_sequences,
+):
+    records = _history(
+        ("coordinator-a", "lease-a", 100),
+        ("coordinator-a", "lease-a", 100),
+    )
+    reader = _reader_from_history(
+        records,
+        snapshot_transaction_sequences=transaction_sequences,
+    )
+
+    with pytest.raises(GenerationStateCorrupt, match="transaction sequences do not advance"):
+        reader.current()
 
 
 def test_generation_reader_rejects_same_timestamp_head_rollback():
