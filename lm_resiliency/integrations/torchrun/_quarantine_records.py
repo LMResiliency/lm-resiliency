@@ -13,7 +13,7 @@ from typing import ClassVar
 class NodeQuarantineRecord:
     """One permanent node exclusion authorized by a committed restart plan."""
 
-    SCHEMA_VERSION: ClassVar[int] = 1
+    SCHEMA_VERSION: ClassVar[int] = 2
 
     run_id: str
     node_id: str
@@ -24,6 +24,10 @@ class NodeQuarantineRecord:
     incident_ids: tuple[str, ...]
     reason_code: str
     resource_ids: tuple[str, ...]
+    coordinator_id: str
+    lease_id: str
+    coordinator_lease_duration_ms: int
+    coordinator_fencing_token: int
 
     def __post_init__(self) -> None:
         _nonempty_string(self.run_id, "NodeQuarantineRecord.run_id")
@@ -58,6 +62,22 @@ class NodeQuarantineRecord:
             self.reason_code,
             "NodeQuarantineRecord.reason_code",
         )
+        _nonempty_string(
+            self.coordinator_id,
+            "NodeQuarantineRecord.coordinator_id",
+        )
+        _nonempty_string(
+            self.lease_id,
+            "NodeQuarantineRecord.lease_id",
+        )
+        _positive_integer(
+            self.coordinator_lease_duration_ms,
+            "NodeQuarantineRecord.coordinator_lease_duration_ms",
+        )
+        _positive_integer(
+            self.coordinator_fencing_token,
+            "NodeQuarantineRecord.coordinator_fencing_token",
+        )
 
     @property
     def digest(self) -> str:
@@ -75,6 +95,10 @@ class NodeQuarantineRecord:
             "incident_ids": list(self.incident_ids),
             "reason_code": self.reason_code,
             "resource_ids": list(self.resource_ids),
+            "coordinator_id": self.coordinator_id,
+            "lease_id": self.lease_id,
+            "coordinator_lease_duration_ms": self.coordinator_lease_duration_ms,
+            "coordinator_fencing_token": self.coordinator_fencing_token,
         }
 
     def to_json(self) -> bytes:
@@ -97,6 +121,10 @@ class NodeQuarantineRecord:
                 "incident_ids",
                 "reason_code",
                 "resource_ids",
+                "coordinator_id",
+                "lease_id",
+                "coordinator_lease_duration_ms",
+                "coordinator_fencing_token",
             },
         )
         _schema_version(
@@ -142,6 +170,22 @@ class NodeQuarantineRecord:
                 value["resource_ids"],
                 "NodeQuarantineRecord.resource_ids",
                 require_nonempty=False,
+            ),
+            coordinator_id=_nonempty_string(
+                value["coordinator_id"],
+                "NodeQuarantineRecord.coordinator_id",
+            ),
+            lease_id=_nonempty_string(
+                value["lease_id"],
+                "NodeQuarantineRecord.lease_id",
+            ),
+            coordinator_lease_duration_ms=_positive_integer(
+                value["coordinator_lease_duration_ms"],
+                "NodeQuarantineRecord.coordinator_lease_duration_ms",
+            ),
+            coordinator_fencing_token=_positive_integer(
+                value["coordinator_fencing_token"],
+                "NodeQuarantineRecord.coordinator_fencing_token",
             ),
         )
 

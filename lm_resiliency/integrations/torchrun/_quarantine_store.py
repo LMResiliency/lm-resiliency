@@ -12,6 +12,10 @@ from lm_resiliency.integrations.torchrun._control_store import (
     ControlStoreEntry,
     ControlStoreWrite,
 )
+from lm_resiliency.integrations.torchrun._coordinator_lease import (
+    CoordinatorLeaseRecord,
+    HeldCoordinatorLease,
+)
 from lm_resiliency.integrations.torchrun._protocol import RestartIntent, RestartPlan
 from lm_resiliency.integrations.torchrun._quarantine_records import (
     NodeQuarantineRecord,
@@ -27,6 +31,10 @@ class QuarantineStateError(RuntimeError):
 
 class QuarantineStateCorrupt(QuarantineStateError):
     """Raised when persisted quarantine state is malformed or contradictory."""
+
+
+class QuarantineLeaseLost(QuarantineStateError):
+    """Raised when quarantine writes use a stale or foreign coordinator lease."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,11 +92,13 @@ class NodeQuarantineRepository:
         self,
         plan: RestartPlan,
         intent: RestartIntent,
+        lease: HeldCoordinatorLease,
         *,
         authorized_resource_ids_by_node: Mapping[str, Sequence[str]],
         resource_to_node_id: Mapping[str, str],
     ) -> Mapping[str, ControlStoreWrite]:
         """Build create-once writes from coordinator-authorized fault evidence."""
+        self._validate_lease(lease)
         self._validate_plan_intent(plan, intent)
         quarantined_nodes = set(plan.quarantined_node_ids)
         resources_by_node = _resources_by_node(authorized_resource_ids_by_node)
@@ -119,6 +129,10 @@ class NodeQuarantineRepository:
                 incident_ids=plan.incident_ids,
                 reason_code=plan.reason_code,
                 resource_ids=resource_ids,
+                coordinator_id=lease.record.coordinator_id,
+                lease_id=lease.record.lease_id,
+                coordinator_lease_duration_ms=lease.record.lease_duration_ms,
+                coordinator_fencing_token=lease.fencing_token,
             )
         return MappingProxyType(
             {
@@ -150,11 +164,35 @@ class NodeQuarantineRepository:
             raise ValueError("restart plan incidents do not match the supplied intent")
         if plan.reason_code != intent.reason_code:
             raise ValueError("restart plan reason does not match the supplied intent")
+        if (
+            intent.minimum_recovery_mode == "recovery_verified"
+            and plan.recovery_mode != "recovery_verified"
+        ):
+            raise ValueError("restart plan recovery mode is weaker than the supplied intent")
         unsupported = sorted(set(plan.quarantined_node_ids) - set(intent.suspected_node_ids))
         if unsupported:
             raise ValueError(
                 f"restart plan quarantines nodes outside the intent scope: {unsupported!r}"
             )
+
+    def _validate_lease(self, lease: HeldCoordinatorLease) -> None:
+        if not isinstance(lease, HeldCoordinatorLease):
+            raise TypeError("lease must be HeldCoordinatorLease")
+        if lease.record.run_id != self._run_id:
+            raise QuarantineLeaseLost("coordinator lease belongs to another run")
+        entry = self._store.get(self._coordinator_lease_key)
+        if entry is None or entry.revision != lease.fencing_token:
+            raise QuarantineLeaseLost(
+                "coordinator lease changed before quarantine write preparation"
+            )
+        try:
+            record = CoordinatorLeaseRecord.from_json(entry.value)
+        except (TypeError, ValueError) as error:
+            raise QuarantineStateCorrupt("coordinator lease is malformed") from error
+        if entry.committed_at_unix_ms is None:
+            raise QuarantineStateCorrupt("coordinator lease has no authoritative grant time")
+        if record != lease.record or entry.committed_at_unix_ms != lease.granted_at_unix_ms:
+            raise QuarantineLeaseLost("coordinator lease handle does not match persisted ownership")
 
     def _decode_entry(
         self,
@@ -192,6 +230,28 @@ class NodeQuarantineRepository:
         ):
             raise QuarantineStateCorrupt(
                 "persisted node quarantine has incomplete guard provenance"
+            )
+        expected_lease = CoordinatorLeaseRecord(
+            run_id=record.run_id,
+            coordinator_id=record.coordinator_id,
+            lease_id=record.lease_id,
+            lease_duration_ms=record.coordinator_lease_duration_ms,
+        )
+        if entry.guard_revision != record.coordinator_fencing_token:
+            raise QuarantineStateCorrupt(
+                "node quarantine fencing token does not match guard provenance"
+            )
+        if entry.guard_value_digest != hashlib.sha256(expected_lease.to_json()).hexdigest():
+            raise QuarantineStateCorrupt(
+                "node quarantine lease identity does not match guard provenance"
+            )
+        if (
+            entry.committed_at_unix_ms < entry.guard_committed_at_unix_ms
+            or entry.committed_at_unix_ms
+            >= entry.guard_committed_at_unix_ms + record.coordinator_lease_duration_ms
+        ):
+            raise QuarantineStateCorrupt(
+                "node quarantine committed outside its coordinator lease window"
             )
         return StoredNodeQuarantine(record=record, entry=entry)
 
@@ -259,6 +319,7 @@ def _nonempty_string(value: object, path: str) -> str:
 
 __all__ = [
     "NodeQuarantineRepository",
+    "QuarantineLeaseLost",
     "QuarantineStateCorrupt",
     "QuarantineStateError",
     "StoredNodeQuarantine",
