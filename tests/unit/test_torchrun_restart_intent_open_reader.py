@@ -7,10 +7,7 @@ from dataclasses import replace
 
 import pytest
 
-from lm_resiliency.integrations.torchrun._control_store import (
-    ControlStoreWrite,
-    InMemoryControlStore,
-)
+from lm_resiliency.integrations.torchrun._control_store import InMemoryControlStore
 from lm_resiliency.integrations.torchrun._coordinator_lease import (
     CoordinatorLeaseManager,
     HeldCoordinatorLease,
@@ -36,6 +33,7 @@ from lm_resiliency.integrations.torchrun._restart_intent_open_execution import (
     RestartIntentOpenExecutor,
 )
 from lm_resiliency.integrations.torchrun._restart_intent_open_reader import (
+    RestartIntentOpenStateClosed,
     RestartIntentOpenStateCorrupt,
     RestartIntentOpenStateReader,
 )
@@ -175,9 +173,26 @@ def _closure_records(
     )
 
 
+def _commit_closure(
+    clock: ManualClock,
+    store: InMemoryControlStore,
+    lease: HeldCoordinatorLease,
+    opened: CommittedInitialRestartIntentOpen,
+) -> None:
+    records = _closure_records(opened, lease)
+    clock.set(1_010)
+    store.compare_set_many_guarded(
+        records.writes,
+        guard_key=opened.prepared.coordinator_lease_key,
+        expected_guard_revision=lease.fencing_token,
+        not_before_unix_ms=1_010,
+        deadline_unix_ms=lease.expires_at_unix_ms,
+        conditions=records.conditions,
+    )
+
+
 def test_open_reader_returns_none_before_initial_open():
-    clock = ManualClock()
-    store = InMemoryControlStore(clock=clock)
+    store = InMemoryControlStore(clock=ManualClock())
 
     assert RestartIntentOpenStateReader(store, run_id=RUN_ID).read() is None
 
@@ -185,9 +200,7 @@ def test_open_reader_returns_none_before_initial_open():
 def test_open_reader_reconstructs_committed_open_from_persisted_state():
     _, _, _, _, _, opened, reader = _state()
 
-    observed = reader.read()
-
-    assert observed == opened
+    assert reader.read() == opened
 
 
 def test_open_reader_survives_lease_renewal_and_replacement_after_open():
@@ -197,9 +210,7 @@ def test_open_reader_survives_lease_renewal_and_replacement_after_open():
     clock.set(renewed.expires_at_unix_ms)
     replacement = _manager(store, clock, "coordinator-b").acquire()
 
-    observed = reader.read()
-
-    assert observed == opened
+    assert reader.read() == opened
     assert replacement.fencing_token != opened.prepared.lease.fencing_token
 
 
@@ -208,16 +219,9 @@ def test_open_reader_rejects_generation_advance_while_intent_is_open():
     current = generation_manager.current()
     assert current is not None
     clock.set(1_010)
-    generation_manager.commit_successor(
-        lease,
-        current,
-        _assignment(generation=1),
-    )
+    generation_manager.commit_successor(lease, current, _assignment(generation=1))
 
-    with pytest.raises(
-        RestartIntentOpenStateCorrupt,
-        match="current generation",
-    ):
+    with pytest.raises(RestartIntentOpenStateCorrupt, match="current generation"):
         reader.read()
 
 
@@ -273,32 +277,24 @@ def test_open_reader_rejects_deleted_current_head():
         reader.read()
 
 
-def test_open_reader_rejects_live_head_without_durable_history():
+def test_open_reader_rejects_live_records_without_durable_history():
     _, store, _, _, _, opened, reader = _state()
     del store._last_revisions[opened.prepared.intent_head_key]
 
-    with pytest.raises(RestartIntentOpenStateCorrupt, match="no durable history"):
+    with pytest.raises(RestartIntentOpenStateCorrupt, match="head has no durable history"):
         reader.read()
 
-
-def test_open_reader_rejects_live_intent_without_durable_history():
-    _, store, _, _, _, opened, reader = _state()
+    store._last_revisions[opened.prepared.intent_head_key] = opened.head_entry.revision
     del store._last_revisions[opened.prepared.intent_key]
-
     with pytest.raises(RestartIntentOpenStateCorrupt, match="intent has no durable history"):
         reader.read()
 
 
-def test_open_reader_rejects_closed_head_without_lifecycle_state():
-    _, store, _, _, _, opened, reader = _state()
-    records = _closure_records(opened, opened.prepared.lease)
-    store.compare_set(
-        opened.prepared.intent_head_key,
-        expected_revision=opened.head_entry.revision,
-        value=records.closed_head.to_json(),
-    )
+def test_open_reader_reports_closed_marker_without_authenticating_closure():
+    clock, store, _, _, lease, opened, reader = _state()
+    _commit_closure(clock, store, lease, opened)
 
-    with pytest.raises(RestartIntentOpenStateCorrupt, match="no lifecycle state"):
+    with pytest.raises(RestartIntentOpenStateClosed, match="not verified"):
         reader.read()
 
 
@@ -308,7 +304,7 @@ def test_open_reader_retries_atomic_closure_between_initial_reads(monkeypatch):
     original_get = store.get
     triggered = False
 
-    def racing_get(key):
+    def racing_get(key: str):
         nonlocal triggered
         if key == reader.lifecycle_head_key and not triggered:
             triggered = True
@@ -325,252 +321,7 @@ def test_open_reader_retries_atomic_closure_between_initial_reads(monkeypatch):
 
     monkeypatch.setattr(store, "get", racing_get)
 
-    assert reader.read() is None
-
-
-def test_open_reader_returns_none_after_atomic_initial_closure():
-    clock, store, _, _, lease, opened, reader = _state()
-    records = _closure_records(opened, lease)
-    clock.set(1_010)
-    store.compare_set_many_guarded(
-        records.writes,
-        guard_key=opened.prepared.coordinator_lease_key,
-        expected_guard_revision=lease.fencing_token,
-        not_before_unix_ms=1_010,
-        deadline_unix_ms=lease.expires_at_unix_ms,
-        conditions=records.conditions,
-    )
-
-    assert reader.read() is None
-
-
-@pytest.mark.parametrize("tamper", ["value", "link", "metadata"])
-def test_open_reader_rejects_unverified_lifecycle_state(tamper):
-    clock, store, _, _, lease, opened, reader = _state()
-    records = _closure_records(opened, lease)
-    clock.set(1_010)
-    committed = store.compare_set_many_guarded(
-        records.writes,
-        guard_key=opened.prepared.coordinator_lease_key,
-        expected_guard_revision=lease.fencing_token,
-        not_before_unix_ms=1_010,
-        deadline_unix_ms=lease.expires_at_unix_ms,
-        conditions=records.conditions,
-    )
-    lifecycle_entry = committed[records.lifecycle_head_key]
-    if tamper == "value":
-        lifecycle_entry = replace(lifecycle_entry, value=b"invalid")
-    elif tamper == "link":
-        lifecycle_entry = replace(
-            lifecycle_entry,
-            value=replace(
-                records.lifecycle_head,
-                intent_id="intent-b",
-            ).to_json(),
-        )
-    else:
-        lifecycle_entry = replace(
-            lifecycle_entry,
-            transaction_sequence=lifecycle_entry.transaction_sequence + 1,
-        )
-    store._entries[records.lifecycle_head_key] = lifecycle_entry
-
-    with pytest.raises(RestartIntentOpenStateCorrupt, match="lifecycle|transaction"):
-        reader.read()
-
-
-@pytest.mark.parametrize("tamper", ["deleted", "value", "link", "metadata"])
-def test_open_reader_rejects_unverified_immutable_closure(tamper):
-    clock, store, _, _, lease, opened, reader = _state()
-    records = _closure_records(opened, lease)
-    clock.set(1_010)
-    committed = store.compare_set_many_guarded(
-        records.writes,
-        guard_key=opened.prepared.coordinator_lease_key,
-        expected_guard_revision=lease.fencing_token,
-        not_before_unix_ms=1_010,
-        deadline_unix_ms=lease.expires_at_unix_ms,
-        conditions=records.conditions,
-    )
-    closure_entry = committed[records.closure_key]
-    if tamper == "deleted":
-        store.compare_delete(
-            records.closure_key,
-            expected_revision=closure_entry.revision,
-        )
-    elif tamper == "value":
-        store._entries[records.closure_key] = replace(
-            closure_entry,
-            value=b"invalid",
-        )
-    elif tamper == "link":
-        store._entries[records.closure_key] = replace(
-            closure_entry,
-            value=replace(
-                records.lifecycle,
-                closed_intent=replace(
-                    records.lifecycle.closed_intent,
-                    intent_id="intent-b",
-                ),
-            ).to_json(),
-        )
-    else:
-        store._entries[records.closure_key] = replace(
-            closure_entry,
-            transaction_sequence=closure_entry.transaction_sequence + 1,
-        )
-
-    with pytest.raises(
-        RestartIntentOpenStateCorrupt,
-        match="closure|lifecycle|transaction",
-    ):
-        reader.read()
-
-
-def test_open_reader_rejects_noncanonical_closing_lease_provenance():
-    clock, store, _, _, lease, opened, reader = _state()
-    records = _closure_records(opened, lease)
-    clock.set(1_010)
-    store.compare_set_many_guarded(
-        records.writes,
-        guard_key=opened.prepared.coordinator_lease_key,
-        expected_guard_revision=lease.fencing_token,
-        not_before_unix_ms=1_010,
-        deadline_unix_ms=lease.expires_at_unix_ms,
-        conditions=records.conditions,
-    )
-    for key in (
-        records.intent_head_key,
-        records.lifecycle_head_key,
-        records.closure_key,
-    ):
-        substituted = replace(
-            store._entries[key],
-            guard_key="other/coordinator-lease",
-        )
-        store._entries[key] = substituted
-        store._histories[key][-1] = substituted
-
-    with pytest.raises(RestartIntentOpenStateCorrupt, match="noncanonical"):
-        reader.read()
-
-
-def test_open_reader_rejects_closure_of_another_persisted_head():
-    clock, store, _, _, lease, opened, reader = _state()
-    records = _closure_records(opened, lease)
-    clock.set(1_010)
-    store.compare_set_many_guarded(
-        records.writes,
-        guard_key=opened.prepared.coordinator_lease_key,
-        expected_guard_revision=lease.fencing_token,
-        not_before_unix_ms=1_010,
-        deadline_unix_ms=lease.expires_at_unix_ms,
-        conditions=records.conditions,
-    )
-    other_head = replace(
-        opened.prepared.head,
-        intent_id="intent-b",
-    )
-    other_closure = replace(
-        records.lifecycle,
-        closed_intent=other_head,
-    )
-    other_lifecycle_head = replace(
-        records.lifecycle_head,
-        intent_id="intent-b",
-        lifecycle_digest=other_closure.digest,
-    )
-    substitutions = {
-        records.intent_head_key: replace(
-            records.closed_head,
-            intent_id="intent-b",
-            lifecycle_head_digest=other_lifecycle_head.digest,
-        ).to_json(),
-        records.lifecycle_head_key: other_lifecycle_head.to_json(),
-        records.closure_key: other_closure.to_json(),
-    }
-    for key, value in substitutions.items():
-        substituted = replace(store._entries[key], value=value)
-        store._entries[key] = substituted
-        store._histories[key][-1] = substituted
-
-    with pytest.raises(RestartIntentOpenStateCorrupt, match="predecessor"):
-        reader.read()
-
-
-def test_open_reader_rejects_skipped_initial_closure_index():
-    clock, store, _, _, lease, opened, reader = _state()
-    records = _closure_records(opened, lease)
-    lifecycle_head = replace(records.lifecycle_head, closure_index=2)
-    closed_head = replace(
-        records.closed_head,
-        closure_index=2,
-        lifecycle_head_digest=lifecycle_head.digest,
-    )
-    closure_key = reader.closure_key(2)
-    clock.set(1_010)
-    store.compare_set_many_guarded(
-        {
-            records.intent_head_key: ControlStoreWrite(
-                expected_revision=opened.head_entry.revision,
-                value=closed_head.to_json(),
-            ),
-            records.lifecycle_head_key: ControlStoreWrite(
-                expected_revision=None,
-                value=lifecycle_head.to_json(),
-                require_never_created=True,
-            ),
-            closure_key: ControlStoreWrite(
-                expected_revision=None,
-                value=records.lifecycle.to_json(),
-                require_never_created=True,
-            ),
-        },
-        guard_key=opened.prepared.coordinator_lease_key,
-        expected_guard_revision=lease.fencing_token,
-        not_before_unix_ms=1_010,
-        deadline_unix_ms=lease.expires_at_unix_ms,
-        conditions={opened.prepared.intent_key: opened.intent_entry.revision},
-    )
-
-    with pytest.raises(RestartIntentOpenStateCorrupt, match="index"):
-        reader.read()
-
-
-@pytest.mark.parametrize("tamper", ["transaction_order", "lease_window"])
-def test_open_reader_rejects_closure_outside_causal_lease_window(tamper):
-    clock, store, _, _, lease, opened, reader = _state()
-    records = _closure_records(opened, lease)
-    clock.set(1_010)
-    store.compare_set_many_guarded(
-        records.writes,
-        guard_key=opened.prepared.coordinator_lease_key,
-        expected_guard_revision=lease.fencing_token,
-        not_before_unix_ms=1_010,
-        deadline_unix_ms=lease.expires_at_unix_ms,
-        conditions=records.conditions,
-    )
-    for key in (
-        records.intent_head_key,
-        records.lifecycle_head_key,
-        records.closure_key,
-    ):
-        entry = store._entries[key]
-        substituted = (
-            replace(
-                entry,
-                transaction_sequence=opened.transaction_sequence,
-            )
-            if tamper == "transaction_order"
-            else replace(
-                entry,
-                committed_at_unix_ms=lease.expires_at_unix_ms,
-            )
-        )
-        store._entries[key] = substituted
-        store._histories[key][-1] = substituted
-
-    with pytest.raises(RestartIntentOpenStateCorrupt, match="causal lease window"):
+    with pytest.raises(RestartIntentOpenStateClosed, match="not verified"):
         reader.read()
 
 
@@ -582,7 +333,7 @@ def test_open_reader_rejects_closure_outside_causal_lease_window(tamper):
     ],
 )
 def test_open_reader_preserves_retryable_dependency_errors(
-    dependency_error,
+    dependency_error: RuntimeError,
     monkeypatch,
 ):
     _, _, _, _, _, _, reader = _state()
@@ -602,9 +353,11 @@ def test_open_reader_preserves_retryable_dependency_errors(
 def test_open_reader_rejects_opening_authority_missing_from_history():
     clock, store, lease_manager, _, lease, _, reader = _state()
     clock.set(lease.expires_at_unix_ms)
-    lease_manager = _manager(store, clock, "coordinator-b")
-    lease_manager.acquire()
-    store._histories[lease_manager.lease_key] = store._histories[lease_manager.lease_key][1:]
+    replacement_manager = _manager(store, clock, "coordinator-b")
+    replacement_manager.acquire()
+    store._histories[replacement_manager.lease_key] = store._histories[
+        replacement_manager.lease_key
+    ][1:]
 
     with pytest.raises(RestartIntentOpenStateCorrupt, match="dependencies"):
         reader.read()

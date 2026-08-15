@@ -645,7 +645,11 @@ intent's generation to remain current, locates the exact opening authority in
 verified durable coordinator-lease history, and reuses the existing
 prepared/committed validators. Missing records, noncanonical bytes,
 contradictory lifecycle state, deleted heads, and lease provenance absent from
-durable history fail closed. The reader performs no mutation.
+durable history fail closed. When the current head is a closed marker, the
+reader raises `RestartIntentOpenStateClosed` instead of treating the opening as
+absent. That signal does not authenticate the closure; the lifecycle reader
+must verify the linked closure records separately. The open-state reader
+performs no mutation.
 
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be
