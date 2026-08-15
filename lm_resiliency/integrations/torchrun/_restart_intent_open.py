@@ -6,7 +6,10 @@ import hashlib
 import threading
 from collections.abc import Callable
 
-from lm_resiliency.integrations.torchrun._control_store import ControlStore
+from lm_resiliency.integrations.torchrun._control_store import (
+    ControlStore,
+    ControlStoreEntry,
+)
 from lm_resiliency.integrations.torchrun._coordinator_lease import (
     CoordinatorLeaseRecord,
     HeldCoordinatorLease,
@@ -101,7 +104,7 @@ class RestartIntentOpenPreparer:
         current: CurrentGeneration,
         intent: RestartIntent,
     ) -> PreparedInitialRestartIntentOpen:
-        self._validate_lease(lease)
+        lease_entry = self._validate_lease(lease)
         self._validate_current(current)
         self._validate_intent(intent, current)
         self._require_never_opened()
@@ -131,30 +134,39 @@ class RestartIntentOpenPreparer:
             coordinator_lease_duration_ms=lease.record.lease_duration_ms,
             coordinator_fencing_token=lease.fencing_token,
         )
-        return PreparedInitialRestartIntentOpen(
-            record=record,
-            head=RestartIntentHeadRecord(
-                run_id=self._run_id,
-                generation=intent.generation,
-                intent_id=intent.intent_id,
-                intent_digest=record.digest,
-            ),
-            current=current,
-            lease=lease,
-            intent_key=self.intent_key(intent.intent_id),
-            intent_head_key=self._intent_head_key,
-            lifecycle_head_key=self._lifecycle_head_key,
-            coordinator_lease_key=self.coordinator_lease_key,
-            generation_head_key=self.generation_head_key,
-            generation_snapshot_key=self._generation_reader.snapshot_key(intent.generation),
-            not_before_unix_ms=not_before_unix_ms,
-            deadline_unix_ms=min(
-                lease.expires_at_unix_ms,
-                intent.prepare_deadline_unix_ms,
-            ),
-        )
+        try:
+            return PreparedInitialRestartIntentOpen(
+                record=record,
+                head=RestartIntentHeadRecord(
+                    run_id=self._run_id,
+                    generation=intent.generation,
+                    intent_id=intent.intent_id,
+                    intent_digest=record.digest,
+                ),
+                current=current,
+                lease=lease,
+                intent_key=self.intent_key(intent.intent_id),
+                intent_head_key=self._intent_head_key,
+                lifecycle_head_key=self._lifecycle_head_key,
+                coordinator_lease_key=self.coordinator_lease_key,
+                generation_head_key=self.generation_head_key,
+                generation_snapshot_key=self._generation_reader.snapshot_key(intent.generation),
+                coordinator_lease_transaction_sequence=lease_entry.transaction_sequence,
+                coordinator_lease_mutation_sequence=lease_entry.mutation_sequence,
+                coordinator_lease_value_sequence=lease_entry.value_sequence,
+                coordinator_lease_lifetime_sequence=lease_entry.lifetime_sequence,
+                not_before_unix_ms=not_before_unix_ms,
+                deadline_unix_ms=min(
+                    lease.expires_at_unix_ms,
+                    intent.prepare_deadline_unix_ms,
+                ),
+            )
+        except ValueError as error:
+            raise RestartIntentOpenPreparationCorrupt(
+                "coordinator lease lineage contradicts the current generation"
+            ) from error
 
-    def _validate_lease(self, lease: HeldCoordinatorLease) -> None:
+    def _validate_lease(self, lease: HeldCoordinatorLease) -> ControlStoreEntry:
         if not isinstance(lease, HeldCoordinatorLease):
             raise TypeError("lease must be HeldCoordinatorLease")
         if lease.record.run_id != self._run_id:
@@ -176,6 +188,7 @@ class RestartIntentOpenPreparer:
             raise RestartIntentOpenPreparationLeaseLost(
                 "coordinator lease handle does not match persisted ownership"
             )
+        return entry
 
     def _validate_current(self, current: CurrentGeneration) -> None:
         if not isinstance(current, CurrentGeneration):

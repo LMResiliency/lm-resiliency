@@ -612,9 +612,12 @@ writes. The preparer performs no mutation. The initial-open executor submits
 that guarded transaction, translates lease, deadline, clock, generation, and
 lifecycle conflicts, and verifies that both returned entries share the expected
 bytes, commit time, transaction sequence, generation order, and lease
-provenance. The committed lease sequence must equal the generation snapshot's
-sequence for the same fencing token or advance consistently for a renewed or
-replacement lease.
+provenance. Preparation preserves the authenticated lease entry's transaction,
+mutation, value, and lifetime sequences. Those sequences must equal the
+generation snapshot's authority for the same fencing token or advance
+consistently for a nonexpired renewal or nonoverlapping replacement. Execution
+requires both committed entries to match that exact lease provenance and to
+follow both the generation snapshot and the authenticated lease transaction.
 
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be

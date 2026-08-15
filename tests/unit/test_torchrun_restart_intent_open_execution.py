@@ -120,6 +120,12 @@ class TamperedTransactionResultStore(InMemoryControlStore):
                     guard_value_sequence=1,
                     guard_lifetime_sequence=1,
                 )
+        elif self._tamper == "lease_order":
+            for key in (intent_key, head_key):
+                committed[key] = replace(
+                    committed[key],
+                    transaction_sequence=3,
+                )
         else:
             raise AssertionError(f"unsupported tamper {self._tamper!r}")
         return committed
@@ -221,6 +227,11 @@ def test_execute_initial_open_accepts_lease_renewed_after_generation_commit():
 
     committed = executor.execute_initial_open(prepared)
 
+    assert committed.transaction_sequence > prepared.coordinator_lease_transaction_sequence
+    assert (
+        committed.intent_entry.guard_mutation_sequence
+        == prepared.coordinator_lease_mutation_sequence
+    )
     assert committed.intent_entry.guard_mutation_sequence > current.snapshot.guard_mutation_sequence
     assert committed.intent_entry.guard_value_sequence == current.snapshot.guard_value_sequence
     assert (
@@ -322,12 +333,13 @@ def test_execute_initial_open_rejects_store_time_before_preparation():
         "commit_time",
         "generation_order",
         "guard_lineage",
+        "lease_order",
     ],
 )
 def test_execute_initial_open_rejects_tampered_transaction_results(tamper):
     _, _, _, _, executor, _, _, prepared = _state(
         store_tamper=tamper,
-        renew_before_prepare=tamper == "guard_lineage",
+        renew_before_prepare=tamper in {"guard_lineage", "lease_order"},
     )
 
     with pytest.raises(RestartIntentOpenExecutionCorrupt, match="transaction"):

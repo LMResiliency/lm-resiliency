@@ -32,6 +32,10 @@ class PreparedInitialRestartIntentOpen:
     coordinator_lease_key: str
     generation_head_key: str
     generation_snapshot_key: str
+    coordinator_lease_transaction_sequence: int
+    coordinator_lease_mutation_sequence: int
+    coordinator_lease_value_sequence: int
+    coordinator_lease_lifetime_sequence: int
     not_before_unix_ms: int
     deadline_unix_ms: int
 
@@ -102,11 +106,28 @@ class PreparedInitialRestartIntentOpen:
                 "generation_snapshot_committed_at_unix_ms",
                 self.current.snapshot.committed_at_unix_ms,
             ),
+            (
+                "coordinator_lease_transaction_sequence",
+                self.coordinator_lease_transaction_sequence,
+            ),
+            (
+                "coordinator_lease_mutation_sequence",
+                self.coordinator_lease_mutation_sequence,
+            ),
+            (
+                "coordinator_lease_value_sequence",
+                self.coordinator_lease_value_sequence,
+            ),
+            (
+                "coordinator_lease_lifetime_sequence",
+                self.coordinator_lease_lifetime_sequence,
+            ),
             ("coordinator_lease_granted_at_unix_ms", self.lease.granted_at_unix_ms),
             ("not_before_unix_ms", self.not_before_unix_ms),
             ("deadline_unix_ms", self.deadline_unix_ms),
         ):
             _positive_integer(integer_value, f"PreparedInitialRestartIntentOpen.{path}")
+        self._validate_lease_lineage()
         if self.not_before_unix_ms < self.lease.granted_at_unix_ms:
             raise ValueError(
                 "PreparedInitialRestartIntentOpen cannot precede its coordinator lease grant"
@@ -125,6 +146,77 @@ class PreparedInitialRestartIntentOpen:
             )
         if self.deadline_unix_ms > self.record.intent.prepare_deadline_unix_ms:
             raise ValueError("PreparedInitialRestartIntentOpen deadline exceeds its restart intent")
+
+    def _validate_lease_lineage(self) -> None:
+        snapshot = self.current.snapshot
+        snapshot_record = snapshot.record
+        if self.lease.fencing_token == snapshot_record.coordinator_fencing_token:
+            if (
+                self.coordinator_lease_transaction_sequence >= snapshot.transaction_sequence
+                or self.coordinator_lease_mutation_sequence != snapshot.guard_mutation_sequence
+                or self.coordinator_lease_value_sequence != snapshot.guard_value_sequence
+                or self.coordinator_lease_lifetime_sequence != snapshot.guard_lifetime_sequence
+                or self.lease.granted_at_unix_ms != snapshot.guard_committed_at_unix_ms
+                or self.record.coordinator_lease_digest != snapshot_record.coordinator_lease_digest
+            ):
+                raise ValueError(
+                    "PreparedInitialRestartIntentOpen lease lineage contradicts its generation"
+                )
+            return
+        if self.coordinator_lease_transaction_sequence <= snapshot.transaction_sequence:
+            raise ValueError(
+                "PreparedInitialRestartIntentOpen lease mutation does not follow its generation"
+            )
+        if (
+            self.coordinator_lease_mutation_sequence <= snapshot.guard_mutation_sequence
+            or self.coordinator_lease_value_sequence < snapshot.guard_value_sequence
+            or self.coordinator_lease_lifetime_sequence < snapshot.guard_lifetime_sequence
+            or self.lease.granted_at_unix_ms < snapshot.guard_committed_at_unix_ms
+        ):
+            raise ValueError(
+                "PreparedInitialRestartIntentOpen lease lineage predates its generation"
+            )
+        mutation_delta = self.coordinator_lease_mutation_sequence - snapshot.guard_mutation_sequence
+        value_delta = self.coordinator_lease_value_sequence - snapshot.guard_value_sequence
+        lifetime_delta = self.coordinator_lease_lifetime_sequence - snapshot.guard_lifetime_sequence
+        if (
+            mutation_delta < 2 * lifetime_delta
+            or value_delta < lifetime_delta
+            or value_delta > mutation_delta - lifetime_delta
+        ):
+            raise ValueError(
+                "PreparedInitialRestartIntentOpen lease lineage has impossible sequence deltas"
+            )
+        same_lease_id = self.lease.record.lease_id == snapshot_record.lease_id
+        if same_lease_id:
+            if self.lease.record.coordinator_id != snapshot_record.coordinator_id:
+                raise ValueError("PreparedInitialRestartIntentOpen changes one lease's coordinator")
+            if self.lease.record.lease_duration_ms != snapshot_record.coordinator_lease_duration_ms:
+                raise ValueError("PreparedInitialRestartIntentOpen changes one lease's duration")
+            if lifetime_delta != 0 or value_delta != 0:
+                raise ValueError(
+                    "PreparedInitialRestartIntentOpen changes one lease's store identity"
+                )
+            latest_valid_grant = snapshot.guard_committed_at_unix_ms + mutation_delta * (
+                snapshot_record.coordinator_lease_duration_ms - 1
+            )
+            if self.lease.granted_at_unix_ms > latest_valid_grant:
+                raise ValueError(
+                    "PreparedInitialRestartIntentOpen renews an expired coordinator lease"
+                )
+            return
+        if value_delta == 0:
+            raise ValueError(
+                "PreparedInitialRestartIntentOpen changes lease identity without a new value"
+            )
+        if lifetime_delta == 0 and mutation_delta != 1:
+            raise ValueError(
+                "PreparedInitialRestartIntentOpen lease replacement has ambiguous mutations"
+            )
+        if lifetime_delta == 0 and self.lease.granted_at_unix_ms < (
+            snapshot.guard_committed_at_unix_ms + snapshot_record.coordinator_lease_duration_ms
+        ):
+            raise ValueError("PreparedInitialRestartIntentOpen coordinator leases overlap")
 
     @property
     def expected_guard_revision(self) -> int:

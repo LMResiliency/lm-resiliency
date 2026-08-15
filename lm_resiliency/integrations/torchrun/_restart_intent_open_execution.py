@@ -93,6 +93,11 @@ class CommittedInitialRestartIntentOpen:
                 or entry.guard_revision != self.prepared.expected_guard_revision
                 or entry.guard_value_digest != self.prepared.record.coordinator_lease_digest
                 or entry.guard_committed_at_unix_ms != self.prepared.lease.granted_at_unix_ms
+                or entry.guard_mutation_sequence
+                != self.prepared.coordinator_lease_mutation_sequence
+                or entry.guard_value_sequence != self.prepared.coordinator_lease_value_sequence
+                or entry.guard_lifetime_sequence
+                != self.prepared.coordinator_lease_lifetime_sequence
             ):
                 raise ValueError(
                     f"CommittedInitialRestartIntentOpen.{path} has invalid lease provenance"
@@ -113,7 +118,6 @@ class CommittedInitialRestartIntentOpen:
             raise ValueError(
                 "CommittedInitialRestartIntentOpen entries do not share one transaction"
             )
-        self._validate_guard_lineage()
         if (
             intent_committed_at_unix_ms < self.prepared.not_before_unix_ms
             or intent_committed_at_unix_ms >= self.prepared.deadline_unix_ms
@@ -121,64 +125,12 @@ class CommittedInitialRestartIntentOpen:
             raise ValueError(
                 "CommittedInitialRestartIntentOpen commit is outside its prepared time window"
             )
-        if (
-            self.intent_entry.transaction_sequence
-            <= self.prepared.current.snapshot.transaction_sequence
+        if self.intent_entry.transaction_sequence <= max(
+            self.prepared.current.snapshot.transaction_sequence,
+            self.prepared.coordinator_lease_transaction_sequence,
         ):
             raise ValueError(
-                "CommittedInitialRestartIntentOpen does not follow its generation snapshot"
-            )
-
-    def _validate_guard_lineage(self) -> None:
-        guard_mutation_sequence = self.intent_entry.guard_mutation_sequence
-        guard_value_sequence = self.intent_entry.guard_value_sequence
-        guard_lifetime_sequence = self.intent_entry.guard_lifetime_sequence
-        if (
-            guard_mutation_sequence is None
-            or guard_value_sequence is None
-            or guard_lifetime_sequence is None
-        ):
-            raise ValueError(
-                "CommittedInitialRestartIntentOpen has incomplete guard sequence provenance"
-            )
-        snapshot = self.prepared.current.snapshot
-        if self.prepared.expected_guard_revision == snapshot.record.coordinator_fencing_token:
-            if (
-                guard_mutation_sequence != snapshot.guard_mutation_sequence
-                or guard_value_sequence != snapshot.guard_value_sequence
-                or guard_lifetime_sequence != snapshot.guard_lifetime_sequence
-            ):
-                raise ValueError(
-                    "CommittedInitialRestartIntentOpen changed one fencing token's lineage"
-                )
-            return
-        if (
-            guard_mutation_sequence <= snapshot.guard_mutation_sequence
-            or guard_value_sequence < snapshot.guard_value_sequence
-            or guard_lifetime_sequence < snapshot.guard_lifetime_sequence
-        ):
-            raise ValueError(
-                "CommittedInitialRestartIntentOpen guard lineage predates its generation"
-            )
-        mutation_delta = guard_mutation_sequence - snapshot.guard_mutation_sequence
-        value_delta = guard_value_sequence - snapshot.guard_value_sequence
-        lifetime_delta = guard_lifetime_sequence - snapshot.guard_lifetime_sequence
-        if (
-            mutation_delta < 2 * lifetime_delta
-            or value_delta < lifetime_delta
-            or value_delta > mutation_delta - lifetime_delta
-        ):
-            raise ValueError(
-                "CommittedInitialRestartIntentOpen guard lineage has impossible sequence deltas"
-            )
-        current_lease_digest = self.prepared.record.coordinator_lease_digest
-        snapshot_lease_digest = snapshot.record.coordinator_lease_digest
-        if current_lease_digest == snapshot_lease_digest:
-            if value_delta != 0 or lifetime_delta != 0:
-                raise ValueError("CommittedInitialRestartIntentOpen resurrects a prior lease value")
-        elif value_delta == 0:
-            raise ValueError(
-                "CommittedInitialRestartIntentOpen changes lease identity without a new value"
+                "CommittedInitialRestartIntentOpen does not follow its generation and lease"
             )
 
     @property

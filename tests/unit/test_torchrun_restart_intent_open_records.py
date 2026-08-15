@@ -123,6 +123,10 @@ def _prepared() -> PreparedInitialRestartIntentOpen:
         coordinator_lease_key=f"{RUN_PREFIX}/coordinator-lease",
         generation_head_key=f"{RUN_PREFIX}/generation-head",
         generation_snapshot_key=f"{RUN_PREFIX}/generations/0",
+        coordinator_lease_transaction_sequence=1,
+        coordinator_lease_mutation_sequence=1,
+        coordinator_lease_value_sequence=1,
+        coordinator_lease_lifetime_sequence=1,
         not_before_unix_ms=1_000,
         deadline_unix_ms=1_050,
     )
@@ -166,6 +170,10 @@ def test_prepared_initial_open_is_immutable():
         {"generation_head_key": "other"},
         {"generation_snapshot_key": "other"},
         {"lease": replace(_prepared().lease, granted_at_unix_ms=1_001)},
+        {"coordinator_lease_transaction_sequence": 4},
+        {"coordinator_lease_mutation_sequence": 2},
+        {"coordinator_lease_value_sequence": 2},
+        {"coordinator_lease_lifetime_sequence": 2},
         {"not_before_unix_ms": 999},
         {"deadline_unix_ms": 1_051},
     ],
@@ -237,6 +245,10 @@ def test_prepared_initial_open_binds_complete_held_lease():
 @pytest.mark.parametrize(
     ("field", "value"),
     [
+        ("coordinator_lease_transaction_sequence", 0),
+        ("coordinator_lease_mutation_sequence", 0),
+        ("coordinator_lease_value_sequence", 0),
+        ("coordinator_lease_lifetime_sequence", 0),
         ("not_before_unix_ms", 0),
         ("deadline_unix_ms", 0),
     ],
