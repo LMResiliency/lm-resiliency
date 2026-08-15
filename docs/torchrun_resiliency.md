@@ -673,6 +673,17 @@ does not identify the intervening delete transaction, an authority followed by
 a delete-and-recreate lifetime cannot authenticate an earlier commit; that
 case remains rejected until the store provides a durable deletion tombstone.
 
+A read-only `InitialRestartIntentLifecycleReader` authenticates that first
+closure separately. It stably verifies the retained open-head predecessor,
+immutable intent, durable closed marker, immutable closure record, lifecycle
+head, referenced generation snapshot, and the opening and closing authorities
+from durable coordinator-lease history. The opening must commit while its
+generation is current, and the three closure values must share one later
+guarded transaction inside the closing lease window. Missing, rewritten,
+unlinked, noncanonical, or causally impossible state fails closed. The reader
+returns the exact verified records and store entries needed by the next
+lifecycle transition and performs no mutation.
+
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be
 absent from the next assignment. Policy may additionally quarantine a removed
