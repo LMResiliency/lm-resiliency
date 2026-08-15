@@ -896,6 +896,14 @@ reader raises <code>RestartIntentOpenStateClosed</code> instead of treating the 
 absent. That signal does not authenticate the closure; the lifecycle reader
 must verify the linked closure records separately. The open-state reader
 performs no mutation.</p>
+<p>A frozen <code>PersistedInitialRestartIntentClosure</code> value decodes the first
+closure's immutable intent, retained open head, durable closed marker,
+immutable closure record, and lifecycle head from their authoritative store
+entries. It requires canonical bytes, one linked initial closure, immutable
+create-once records, exactly one current-head replacement, canonical
+coordinator-lease guard keys, shared opening and closure transactions, and
+causal transaction order. Generation and durable lease-history authentication
+remain the responsibility of the lifecycle reader that constructs this value.</p>
 <p><code>suspected_node_ids</code> is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be
 absent from the next assignment. Policy may additionally quarantine a removed
