@@ -592,7 +592,11 @@ atomically replaces the open current-intent head with this marker while
 advancing the lifecycle head and creating the immutable closure record. The
 next intent replaces the marker instead of relying on deletion, so a restarted
 reader can prove closure from persisted state. Atomic opening and closure
-transactions are separate control-plane components.
+transactions are separate control-plane components. The initial-open preparer
+authenticates the coordinator lease and exact current generation, validates the
+intent scope, and emits immutable create-once writes plus revision conditions
+without mutating the store. It supports only a never-opened lifecycle; reopening
+from a closed marker requires the later fail-closed lifecycle reader.
 
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be
