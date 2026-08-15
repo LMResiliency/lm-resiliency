@@ -333,6 +333,40 @@ def test_lifecycle_reader_rejects_open_authority_absent_from_lease_history():
         reader.read()
 
 
+def test_lifecycle_reader_bounds_open_commit_by_next_lease_mutation():
+    clock, store, lease_manager, _, lease, opened, reader = _open_state()
+    clock.set(1_010)
+    lease_manager.renew(lease)
+    next_authority = reader._lease_history_reader.read()[-1]
+    changes = {
+        "committed_at_unix_ms": next_authority.lease.granted_at_unix_ms,
+        "transaction_sequence": next_authority.transaction_sequence,
+    }
+    _replace_entry(store, opened.prepared.intent_head_key, **changes)
+    _replace_entry(store, opened.prepared.intent_key, **changes)
+
+    with pytest.raises(RestartIntentLifecycleReadCorrupt, match="lease.*window"):
+        reader.read()
+
+
+def test_lifecycle_reader_authenticates_generation_lease_history():
+    _, store, _, generation_manager, _, _, reader = _open_state()
+    snapshot_key = generation_manager.snapshot_key(0)
+    snapshot_entry = store.get(snapshot_key)
+    head_entry = store.get(generation_manager.head_key)
+    assert snapshot_entry is not None
+    assert head_entry is not None
+    assert snapshot_entry.guard_mutation_sequence is not None
+    changes = {
+        "guard_mutation_sequence": snapshot_entry.guard_mutation_sequence + 1,
+    }
+    _replace_entry(store, snapshot_key, **changes)
+    _replace_entry(store, generation_manager.head_key, **changes)
+
+    with pytest.raises(RestartIntentLifecycleReadCorrupt, match="generation coordinator lease"):
+        reader.read()
+
+
 def test_lifecycle_reader_rejects_open_entries_without_commit_times():
     _, store, _, _, _, opened, reader = _open_state()
     _replace_entry(

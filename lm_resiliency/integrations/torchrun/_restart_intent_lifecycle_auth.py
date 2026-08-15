@@ -143,6 +143,13 @@ class AuthenticatedInitialRestartIntentClosure:
             raise ValueError(
                 "AuthenticatedInitialRestartIntentClosure references the wrong generation"
             )
+        active_nodes = set(generation_record.assignment.slot_to_node_id.values())
+        unknown_nodes = sorted(set(intent.suspected_node_ids) - active_nodes)
+        if unknown_nodes:
+            raise ValueError(
+                "AuthenticatedInitialRestartIntentClosure suspects nodes outside its "
+                f"generation: {unknown_nodes!r}"
+            )
         successor = self.immediate_successor
         if successor is not None and (
             successor.record.assignment.run_id != intent.run_id

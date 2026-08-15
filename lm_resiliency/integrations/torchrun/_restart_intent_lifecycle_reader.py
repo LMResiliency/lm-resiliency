@@ -155,6 +155,7 @@ class InitialRestartIntentLifecycleReader:
                     intent_observation,
                     generation_result,
                     opening_authority,
+                    lease_history,
                 )
                 return None
             lifecycle_head = self._decode_lifecycle_head(lifecycle_observation)
@@ -320,6 +321,7 @@ class InitialRestartIntentLifecycleReader:
         intent_observation: _ObservedKey,
         generation_result: (tuple[CurrentGeneration, tuple[StoredGenerationSnapshot, ...]] | None),
         opening_authority: CoordinatorLeaseAuthority,
+        lease_history: tuple[CoordinatorLeaseAuthority, ...],
     ) -> None:
         if generation_result is None:
             raise RestartIntentLifecycleReadCorrupt(
@@ -333,6 +335,28 @@ class InitialRestartIntentLifecycleReader:
         ):
             raise RestartIntentLifecycleReadCorrupt(
                 "current generation does not match the open restart intent"
+            )
+        generation_authority = self._generation_authority(
+            snapshot,
+            lease_history,
+        )
+        if lease_history.index(generation_authority) > lease_history.index(opening_authority):
+            raise RestartIntentLifecycleReadCorrupt(
+                "open restart-intent lease predates its generation authority"
+            )
+        if (
+            snapshot.transaction_sequence <= generation_authority.transaction_sequence
+            or snapshot.committed_at_unix_ms < generation_authority.lease.granted_at_unix_ms
+            or snapshot.committed_at_unix_ms >= generation_authority.lease.expires_at_unix_ms
+            or not _commit_precedes_next_authority(
+                lease_history,
+                generation_authority,
+                transaction_sequence=snapshot.transaction_sequence,
+                committed_at_unix_ms=snapshot.committed_at_unix_ms,
+            )
+        ):
+            raise RestartIntentLifecycleReadCorrupt(
+                "current generation is outside its coordinator lease window"
             )
         intent_entry = _required_entry(intent_observation, "immutable restart intent")
         committed_at_unix_ms = intent_entry.committed_at_unix_ms
@@ -354,10 +378,45 @@ class InitialRestartIntentLifecycleReader:
                 opening_authority.lease.expires_at_unix_ms,
                 intent.intent.prepare_deadline_unix_ms,
             )
+            or not _commit_precedes_next_authority(
+                lease_history,
+                opening_authority,
+                transaction_sequence=intent_entry.transaction_sequence,
+                committed_at_unix_ms=committed_at_unix_ms,
+            )
         ):
             raise RestartIntentLifecycleReadCorrupt(
                 "open restart intent is outside its generation, lease, or deadline window"
             )
+
+    def _generation_authority(
+        self,
+        snapshot: StoredGenerationSnapshot,
+        lease_history: tuple[CoordinatorLeaseAuthority, ...],
+    ) -> CoordinatorLeaseAuthority:
+        record = CoordinatorLeaseRecord(
+            run_id=snapshot.record.assignment.run_id,
+            coordinator_id=snapshot.record.coordinator_id,
+            lease_id=snapshot.record.lease_id,
+            lease_duration_ms=snapshot.record.coordinator_lease_duration_ms,
+        )
+        matches = tuple(
+            authority
+            for authority in lease_history
+            if (
+                authority.lease.record == record
+                and authority.lease.fencing_token == snapshot.record.coordinator_fencing_token
+                and authority.lease.granted_at_unix_ms == snapshot.guard_committed_at_unix_ms
+                and authority.mutation_sequence == snapshot.guard_mutation_sequence
+                and authority.value_sequence == snapshot.guard_value_sequence
+                and authority.lifetime_sequence == snapshot.guard_lifetime_sequence
+            )
+        )
+        if len(matches) != 1:
+            raise RestartIntentLifecycleReadCorrupt(
+                "generation coordinator lease is absent from durable lease history"
+            )
+        return matches[0]
 
     def _opening_authority(
         self,
@@ -549,6 +608,25 @@ def _transaction_provenance(entry: ControlStoreEntry) -> tuple[object, ...]:
         entry.guard_mutation_sequence,
         entry.guard_value_sequence,
         entry.guard_lifetime_sequence,
+    )
+
+
+def _commit_precedes_next_authority(
+    lease_history: tuple[CoordinatorLeaseAuthority, ...],
+    authority: CoordinatorLeaseAuthority,
+    *,
+    transaction_sequence: int,
+    committed_at_unix_ms: int,
+) -> bool:
+    authority_index = lease_history.index(authority)
+    if authority_index + 1 == len(lease_history):
+        return True
+    successor = lease_history[authority_index + 1]
+    if successor.lifetime_sequence != authority.lifetime_sequence:
+        return False
+    return (
+        transaction_sequence < successor.transaction_sequence
+        and committed_at_unix_ms <= successor.lease.granted_at_unix_ms
     )
 
 
