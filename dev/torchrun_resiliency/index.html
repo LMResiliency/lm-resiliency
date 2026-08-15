@@ -571,6 +571,13 @@ framework parallel coordinates stable.</p>
 <p><code>GROUP_RANK</code>, hostname, PID, and global rank alone are not valid quarantine
 keys. A quarantine record uses <code>node_id</code> and may also contain GPU, NIC, HCA, or
 other resource IDs.</p>
+<p>Version 1 persists an immutable whole-node <code>NodeQuarantineRecord</code> for every
+excluded node. The record binds the stable run and node identities to the
+committed plan and intent, the failed and effective successor generations, the
+incident set, policy reason, and any affected resource IDs retained as evidence
+scope. The resource list may be empty when evidence supports only node-level
+exclusion; it does not narrow the effect of the record. A node quarantine is
+permanent for the run and must be create-only under the coordinator lease.</p>
 <p><code>node_id</code> must come from a trusted scheduler, cloud instance identity, or
 deployment inventory. A worker-provided hostname is diagnostic metadata and
 must not be allowed to choose its own quarantine identity. If no stable node
