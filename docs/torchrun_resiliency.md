@@ -638,6 +638,14 @@ verified generation history. Preparation obtains that history through one
 stable reader traversal rather than rereading the full predecessor chain for
 each generation.
 
+A non-mutating `RestartIntentClosurePreparer` reconstructs the current
+committed opening, double-collects verified coordinator-lease history, requires
+the supplied closing lease to be the live durable tail, selects the contiguous
+authority slice beginning at the opening lease, and samples a monotonic commit
+lower bound after those reads. It returns
+`PreparedInitialRestartIntentClosure`; a separate executor owns the guarded
+store transaction and committed-result verification.
+
 A read-only `RestartIntentOpenStateReader` reconstructs the same
 `CommittedInitialRestartIntentOpen` contract after coordinator failover. It
 stably reads the current-intent head and immutable intent, requires the
