@@ -30,6 +30,7 @@ def test_deployment_contracts_cover_every_destination():
     mkdocs = (ROOT / "mkdocs.yml").read_text()
     development = (ROOT / ".github/workflows/docs.yml").read_text()
     release = (ROOT / ".github/workflows/release.yml").read_text()
+    pages = (ROOT / ".github/workflows/pages.yml").read_text()
 
     assert "site_url:" not in mkdocs
     assert "git rm -rf --ignore-unmatch ." in development
@@ -50,3 +51,18 @@ def test_deployment_contracts_cover_every_destination():
     assert 'python "$RELEASE_VERSION_HELPER" latest-stable-tag' in release
     assert "sort -V" not in release
     assert '"torch==2.13.0"' in release
+
+    assert "workflow_run:" in pages
+    assert "- Documentation" in pages
+    assert "- Release" in pages
+    assert "github.event.workflow_run.conclusion == 'success'" in pages
+    assert "github.event.workflow_run.event == 'push'" in pages
+    assert "workflow_dispatch" not in pages
+    assert "ref: gh-pages" in pages
+    assert "group: pages-deploy" in pages
+    assert "cancel-in-progress: true" in pages
+    assert "pages: write" in pages
+    assert "id-token: write" in pages
+    assert "name: github-pages" in pages
+    assert "actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9" in pages
+    assert "actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128" in pages
