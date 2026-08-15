@@ -13,6 +13,7 @@ from lm_resiliency.integrations.torchrun._coordinator_lease import (
 )
 from lm_resiliency.integrations.torchrun._protocol import RestartIntent
 from lm_resiliency.integrations.torchrun._restart_intent_records import (
+    RestartIntentHeadRecord,
     RestartIntentRecord,
 )
 
@@ -38,6 +39,16 @@ def _record() -> RestartIntentRecord:
         lease_id="lease-a",
         coordinator_lease_duration_ms=30_000,
         coordinator_fencing_token=7,
+    )
+
+
+def _head() -> RestartIntentHeadRecord:
+    record = _record()
+    return RestartIntentHeadRecord(
+        run_id=record.intent.run_id,
+        generation=record.intent.generation,
+        intent_id=record.intent.intent_id,
+        intent_digest=record.digest,
     )
 
 
@@ -70,6 +81,20 @@ def test_restart_intent_record_round_trips_canonical_json():
     assert record.coordinator_lease_digest == hashlib.sha256(lease_record.to_json()).hexdigest()
 
 
+def test_restart_intent_head_round_trips_canonical_json():
+    head = _head()
+
+    encoded = head.to_json()
+    decoded = RestartIntentHeadRecord.from_json(encoded)
+
+    assert decoded == head
+    assert encoded == (
+        b'{"generation":4,"intent_digest":"'
+        + _record().digest.encode("ascii")
+        + b'","intent_id":"intent-a","run_id":"training-run","schema_version":1}'
+    )
+
+
 def test_restart_intent_record_is_immutable():
     record = _record()
 
@@ -77,6 +102,13 @@ def test_restart_intent_record_is_immutable():
         record.lease_id = "other"
     with pytest.raises(AttributeError):
         record.intent.incident_ids = ()
+
+
+def test_restart_intent_head_is_immutable():
+    head = _head()
+
+    with pytest.raises(AttributeError):
+        head.intent_id = "other"
 
 
 @pytest.mark.parametrize(
@@ -107,6 +139,22 @@ def test_restart_intent_record_requires_restart_intent():
             coordinator_lease_duration_ms=30_000,
             coordinator_fencing_token=7,
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("run_id", "", "run_id"),
+        ("generation", -1, "generation"),
+        ("generation", True, "generation"),
+        ("intent_id", "", "intent_id"),
+        ("intent_digest", "", "intent_digest"),
+        ("intent_digest", "A" * 64, "intent_digest"),
+    ],
+)
+def test_restart_intent_head_validates_constructor_fields(field, value, message):
+    with pytest.raises(ValueError, match=message):
+        replace(_head(), **{field: value})
 
 
 @pytest.mark.parametrize(
@@ -181,6 +229,45 @@ def test_restart_intent_record_rejects_invalid_wire_values(mutate, message):
 
 
 @pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda value: value.pop("intent_id"),
+            "missing fields",
+        ),
+        (
+            lambda value: value.update({"unknown": True}),
+            "unknown fields",
+        ),
+        (
+            lambda value: value.update({"schema_version": 2}),
+            "unsupported value",
+        ),
+        (
+            lambda value: value.update({"schema_version": 1.0}),
+            "unsupported value",
+        ),
+        (
+            lambda value: value.update({"generation": -1}),
+            "generation",
+        ),
+        (
+            lambda value: value.update({"intent_digest": "A" * 64}),
+            "intent_digest",
+        ),
+    ],
+)
+def test_restart_intent_head_rejects_invalid_wire_values(mutate, message):
+    value = json.loads(_head().to_json())
+    mutate(value)
+
+    with pytest.raises(ValueError, match=message):
+        RestartIntentHeadRecord.from_json(
+            json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        )
+
+
+@pytest.mark.parametrize(
     "encoded",
     [
         b"not-json",
@@ -205,6 +292,28 @@ def test_restart_intent_record_rejects_malformed_or_duplicate_json(encoded):
         RestartIntentRecord.from_json(encoded)
 
 
+@pytest.mark.parametrize(
+    "encoded",
+    [
+        b"not-json",
+        b"[]",
+        b'{"schema_version":1,"schema_version":1}',
+        (
+            b'{"generation":4,"intent_digest":"'
+            + b"a" * 64
+            + b'","intent_id":"intent-a","intent_id":"intent-b",'
+            b'"run_id":"training-run","schema_version":1}'
+        ),
+    ],
+)
+def test_restart_intent_head_rejects_malformed_or_duplicate_json(encoded):
+    with pytest.raises(ValueError):
+        RestartIntentHeadRecord.from_json(encoded)
+
+
 def test_restart_intent_record_requires_encoded_bytes():
     with pytest.raises(ValueError, match="encoded bytes"):
         RestartIntentRecord.from_json(_record().to_json().decode("utf-8"))
+
+    with pytest.raises(ValueError, match="encoded bytes"):
+        RestartIntentHeadRecord.from_json(_head().to_json().decode("utf-8"))

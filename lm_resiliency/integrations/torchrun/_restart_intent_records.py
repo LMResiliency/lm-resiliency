@@ -139,6 +139,77 @@ class RestartIntentRecord:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class RestartIntentHeadRecord:
+    """Pointer from the current-intent head to one immutable intent record."""
+
+    SCHEMA_VERSION: ClassVar[int] = 1
+
+    run_id: str
+    generation: int
+    intent_id: str
+    intent_digest: str
+
+    def __post_init__(self) -> None:
+        _nonempty_string(self.run_id, "RestartIntentHeadRecord.run_id")
+        _nonnegative_integer(
+            self.generation,
+            "RestartIntentHeadRecord.generation",
+        )
+        _nonempty_string(self.intent_id, "RestartIntentHeadRecord.intent_id")
+        _digest(self.intent_digest, "RestartIntentHeadRecord.intent_digest")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.SCHEMA_VERSION,
+            "run_id": self.run_id,
+            "generation": self.generation,
+            "intent_id": self.intent_id,
+            "intent_digest": self.intent_digest,
+        }
+
+    def to_json(self) -> bytes:
+        return _canonical_json(self.to_dict())
+
+    @classmethod
+    def from_json(cls, encoded: bytes) -> RestartIntentHeadRecord:
+        value = _json_object(encoded, cls.__name__)
+        _fields(
+            value,
+            path=cls.__name__,
+            required={
+                "schema_version",
+                "run_id",
+                "generation",
+                "intent_id",
+                "intent_digest",
+            },
+        )
+        _schema_version(
+            value["schema_version"],
+            cls.__name__,
+            expected=cls.SCHEMA_VERSION,
+        )
+        return cls(
+            run_id=_nonempty_string(
+                value["run_id"],
+                "RestartIntentHeadRecord.run_id",
+            ),
+            generation=_nonnegative_integer(
+                value["generation"],
+                "RestartIntentHeadRecord.generation",
+            ),
+            intent_id=_nonempty_string(
+                value["intent_id"],
+                "RestartIntentHeadRecord.intent_id",
+            ),
+            intent_digest=_digest(
+                value["intent_digest"],
+                "RestartIntentHeadRecord.intent_digest",
+            ),
+        )
+
+
 def _canonical_json(value: Mapping[str, object]) -> bytes:
     return json.dumps(
         value,
@@ -197,6 +268,12 @@ def _positive_integer(value: object, path: str) -> int:
     return value
 
 
+def _nonnegative_integer(value: object, path: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{path} must be a non-negative integer")
+    return value
+
+
 def _digest(value: object, path: str) -> str:
     if (
         not isinstance(value, str)
@@ -222,4 +299,7 @@ def _reject_duplicate_object_fields(
     return value
 
 
-__all__ = ["RestartIntentRecord"]
+__all__ = [
+    "RestartIntentHeadRecord",
+    "RestartIntentRecord",
+]
