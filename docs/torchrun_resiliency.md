@@ -579,21 +579,14 @@ the last closed intent head to the coordinator lease that performed closure;
 that lease may be a renewal of the lease that opened the intent. The record
 schemas do not define a store mutation API. Lease-fenced intent creation,
 lifecycle observation and closure, and other lifecycle transitions are
-separate control-plane components. `RestartIntentLifecycleReader` provides the
-read-only observation boundary: it validates the exact committed generation,
-the permanent lifecycle record, the referenced create-once intent and
-generation snapshot, and the distinct opening and closing lease provenance.
-Store-global transaction sequences must prove the strict causal order
-`generation snapshot < intent creation < lifecycle closure`, even when all
-three commits share one millisecond and one unchanged coordinator lease. The
-intent must also precede the referenced generation's successor snapshot when
-one exists, proving it opened while that generation was current. Coordinator
-lease digests and value sequences must advance together so an A-to-B-to-A lease
-value replay cannot authorize closure. Same-value renewal grant times are
-bounded by the intervening mutation count and persisted lease duration, so a
-renewal after expiry cannot restore authority. The reader returns the lifecycle
-record with its opaque store revision and transaction sequence for future
-control-plane conditions and never mutates control-plane state.
+separate control-plane components. Each closure record is immutable and has a
+canonical digest. A strict `RestartIntentLifecycleHeadRecord` identifies the
+latest closure by run, positive closure index, generation, intent ID, and
+closure-record digest. The head is the only mutable lifecycle pointer; later
+readers require its store mutation and value sequences to equal the closure
+index so replaying an older A record after B cannot appear to roll lifecycle
+state back. Atomic current-intent closure and lifecycle-head advancement are
+separate control-plane components.
 
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be
