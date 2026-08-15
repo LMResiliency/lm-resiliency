@@ -847,12 +847,13 @@ current-head update, and an exact immutable-intent condition, but does not
 authenticate a closing lease or mutate the store. A frozen
 <code>PreparedInitialRestartIntentClosure</code> descriptor binds those records to a
 contiguous coordinator-lease authority slice beginning at the exact lease that
-opened the intent. It accepts same-lease renewal, nonoverlapping replacement,
-and delete/recreate transitions, while rejecting skipped mutations, expired
-renewals, overlapping leases, and recurrence of any generation or opening
-lease identity or fencing token after replacement. It bounds the future
-transaction to the final live lease but performs no store reads or mutations.
-A later preparer selects the slice from verified durable lease history. A frozen
+opened the intent. It accepts same-lease renewal and nonoverlapping in-place
+replacement while rejecting skipped mutations, expired renewals, overlapping
+leases, recurrence of any generation or opening lease identity or fencing
+token after replacement, and delete/recreate transitions that lack a durable
+deletion tombstone. It bounds the future transaction to the final live lease
+but performs no store reads or mutations. A later preparer selects the slice
+from verified durable lease history. A frozen
 <code>PreparedInitialRestartIntentOpen</code> descriptor binds the first intent record,
 current-intent head, exact generation revisions, coordinator fencing token,
 canonical run-scoped keys, and lease/intent commit window. It exposes immutable
@@ -884,6 +885,15 @@ ID or fencing token cannot reappear after a different acquisition in the
 verified generation history. Preparation obtains that history through one
 stable reader traversal rather than rereading the full predecessor chain for
 each generation.</p>
+<p>A non-mutating <code>RestartIntentClosurePreparer</code> reconstructs the current
+committed opening, double-collects verified coordinator-lease history, requires
+the supplied closing lease to be the live durable tail, selects the contiguous
+authority slice beginning at the opening lease, and samples a monotonic commit
+lower bound after those reads. It returns
+<code>PreparedInitialRestartIntentClosure</code>; a separate executor owns the guarded
+store transaction and committed-result verification. Lease-key lifetime
+changes remain rejected until the store retains authoritative deletion
+evidence.</p>
 <p>A read-only <code>RestartIntentOpenStateReader</code> reconstructs the same
 <code>CommittedInitialRestartIntentOpen</code> contract after coordinator failover. It
 stably reads the current-intent head and immutable intent, requires the
