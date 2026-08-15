@@ -99,13 +99,21 @@ jobs:
             git rm -rf --ignore-unmatch .
           fi
 
-          rm -rf dev
-          mkdir -p dev
-          cp -a "$SITE_DIR"/. dev/
-          touch .nojekyll
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for attempt in $(seq 1 5); do
+            if test "$attempt" -gt 1; then
+              git fetch origin gh-pages
+              git reset --hard origin/gh-pages
+            fi
 
-          if [[ ! -f index.html ]]; then
-            cat > index.html <<'EOF'
+            rm -rf dev
+            mkdir -p dev
+            cp -a "$SITE_DIR"/. dev/
+            touch .nojekyll
+
+            if [[ ! -f index.html ]]; then
+              cat > index.html <<'EOF'
           <!doctype html>
           <meta charset="utf-8">
           <meta http-equiv="refresh" content="0; url=dev/">
@@ -113,17 +121,14 @@ jobs:
           <title>LM Resiliency documentation</title>
           <p>Redirecting to <a href="dev/">development documentation</a>.</p>
           EOF
-          fi
+            fi
 
-          git add -A
-          if git diff --cached --quiet; then
-            echo "Development documentation is already current"
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "Publish documentation dev"
-          for attempt in $(seq 1 5); do
+            git add -A
+            if git diff --cached --quiet; then
+              echo "Development documentation is already current"
+              exit 0
+            fi
+            git commit -m "Publish documentation dev"
             if git push origin gh-pages; then
               exit 0
             fi
@@ -131,6 +136,4 @@ jobs:
               echo "Failed to publish development documentation after $attempt attempts" >&2
               exit 1
             fi
-            git fetch origin gh-pages
-            git rebase origin/gh-pages
           done

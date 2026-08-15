@@ -434,12 +434,12 @@ jobs:
       cancel-in-progress: false
 
     steps:
-      - name: Check out trusted publishing base
+      - name: Check out validated release revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: main
+          ref: ${{ github.sha }}
 
       - name: Set up release version parser
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -448,6 +448,9 @@ jobs:
 
       - name: Install release version parser
         run: python -m pip install -c requirements/tool-versions.txt packaging
+
+      - name: Preserve release-pinned version helper
+        run: cp scripts/release_versions.py "$RUNNER_TEMP/release_versions.py"
 
       - name: Download release documentation
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -458,6 +461,7 @@ jobs:
       - name: Publish versioned documentation tree
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION_HELPER: ${{ runner.temp }}/release_versions.py
           SITE_DIR: ${{ runner.temp }}/release-documentation-site
         shell: bash
         run: |
@@ -507,7 +511,7 @@ jobs:
               latest_tag=$(
                 gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
                   --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' |
-                  python scripts/release_versions.py latest-stable-tag
+                  python "$RELEASE_VERSION_HELPER" latest-stable-tag
               )
               test -n "$latest_tag"
               if [[ "$release_tag" == "$latest_tag" ]]; then
