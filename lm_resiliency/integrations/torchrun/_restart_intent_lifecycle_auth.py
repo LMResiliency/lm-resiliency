@@ -35,6 +35,7 @@ class AuthenticatedInitialRestartIntentClosure:
     immediate_successor: StoredGenerationSnapshot | None
     lease_history: tuple[CoordinatorLeaseAuthority, ...]
     generation_authority: CoordinatorLeaseAuthority = field(init=False)
+    successor_authority: CoordinatorLeaseAuthority | None = field(init=False)
     opening_authority: CoordinatorLeaseAuthority = field(init=False)
     closing_authority: CoordinatorLeaseAuthority = field(init=False)
 
@@ -65,7 +66,18 @@ class AuthenticatedInitialRestartIntentClosure:
                 "tuple of CoordinatorLeaseAuthority values"
             )
         self._validate_generation()
-        generation_authority = self._generation_authority()
+        generation_authority = self._snapshot_authority(
+            self.generation_snapshot,
+            "generation",
+        )
+        successor_authority = (
+            None
+            if self.immediate_successor is None
+            else self._snapshot_authority(
+                self.immediate_successor,
+                "immediate successor",
+            )
+        )
         opening_authority = self._entry_authority(
             self.state.intent_entry,
             CoordinatorLeaseRecord(
@@ -95,12 +107,14 @@ class AuthenticatedInitialRestartIntentClosure:
             opening_authority,
             closing_authority,
         )
+        self._validate_successor_window(successor_authority)
         self._validate_causal_windows(
             generation_authority,
             opening_authority,
             closing_authority,
         )
         object.__setattr__(self, "generation_authority", generation_authority)
+        object.__setattr__(self, "successor_authority", successor_authority)
         object.__setattr__(self, "opening_authority", opening_authority)
         object.__setattr__(self, "closing_authority", closing_authority)
 
@@ -168,8 +182,11 @@ class AuthenticatedInitialRestartIntentClosure:
                     f"retains suspected nodes: {retained_suspects!r}"
                 )
 
-    def _generation_authority(self) -> CoordinatorLeaseAuthority:
-        snapshot = self.generation_snapshot
+    def _snapshot_authority(
+        self,
+        snapshot: StoredGenerationSnapshot,
+        label: str,
+    ) -> CoordinatorLeaseAuthority:
         record = CoordinatorLeaseRecord(
             run_id=snapshot.record.assignment.run_id,
             coordinator_id=snapshot.record.coordinator_id,
@@ -183,7 +200,7 @@ class AuthenticatedInitialRestartIntentClosure:
             mutation_sequence=snapshot.guard_mutation_sequence,
             value_sequence=snapshot.guard_value_sequence,
             lifetime_sequence=snapshot.guard_lifetime_sequence,
-            label="generation",
+            label=label,
         )
 
     def _entry_authority(
@@ -321,6 +338,32 @@ class AuthenticatedInitialRestartIntentClosure:
             raise ValueError(
                 "AuthenticatedInitialRestartIntentClosure closure is outside its "
                 "causal lease window"
+            )
+
+    def _validate_successor_window(
+        self,
+        authority: CoordinatorLeaseAuthority | None,
+    ) -> None:
+        successor = self.immediate_successor
+        if successor is None:
+            if authority is not None:
+                raise AssertionError("successor authority exists without a successor")
+            return
+        if authority is None:
+            raise AssertionError("successor exists without an authority")
+        if (
+            successor.transaction_sequence <= authority.transaction_sequence
+            or successor.committed_at_unix_ms < authority.lease.granted_at_unix_ms
+            or successor.committed_at_unix_ms >= authority.lease.expires_at_unix_ms
+            or not self._commit_precedes_next_authority(
+                authority,
+                transaction_sequence=successor.transaction_sequence,
+                committed_at_unix_ms=successor.committed_at_unix_ms,
+            )
+        ):
+            raise ValueError(
+                "AuthenticatedInitialRestartIntentClosure immediate successor is "
+                "outside its lease window"
             )
 
     def _commit_precedes_next_authority(

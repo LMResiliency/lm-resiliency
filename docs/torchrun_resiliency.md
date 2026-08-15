@@ -667,11 +667,14 @@ closing authorities, requires them to occur in order, requires generation and
 intent opening to precede the immediate successor generation in both
 transaction and store time, and verifies that generation creation, intent
 opening, and closure each committed inside their authoritative lease windows
-and before the next durable lease mutation. Construction is fail closed and
-performs no control-store reads or mutations. Because retained value history
-does not identify the intervening delete transaction, an authority followed by
-a delete-and-recreate lifetime cannot authenticate an earlier commit; that
-case remains rejected until the store provides a durable deletion tombstone.
+and before the next durable lease mutation. When an immediate successor
+exists, its exact guard must also resolve to durable lease history and its
+generation commit must fall inside that authority's lease window. Construction
+is fail closed and performs no control-store reads or mutations. Because
+retained value history does not identify the intervening delete transaction,
+an authority followed by a delete-and-recreate lifetime cannot authenticate an
+earlier commit; that case remains rejected until the store provides a durable
+deletion tombstone.
 
 A read-only `InitialRestartIntentLifecycleReader` observes that first closure
 separately. It takes stable snapshots of the current-intent head, its retained

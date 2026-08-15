@@ -260,6 +260,7 @@ def test_authenticated_closure_accepts_immediate_generation_successor():
     )
 
     assert authenticated.immediate_successor == successor
+    assert authenticated.successor_authority == authenticated.generation_authority
 
     with pytest.raises(ValueError, match="opening is outside"):
         AuthenticatedInitialRestartIntentClosure(
@@ -274,7 +275,7 @@ def test_authenticated_closure_accepts_immediate_generation_successor():
                 run_id=RUN_ID,
             ).read(),
         )
-    with pytest.raises(ValueError, match="opening is outside"):
+    with pytest.raises(ValueError, match="successor is outside"):
         AuthenticatedInitialRestartIntentClosure(
             state=fixture.state,
             generation_snapshot=fixture.generation,
@@ -286,6 +287,45 @@ def test_authenticated_closure_accepts_immediate_generation_successor():
                 fixture.store,
                 run_id=RUN_ID,
             ).read(),
+        )
+
+
+def test_authenticated_closure_authenticates_successor_lease_authority():
+    fixture = _fixture()
+    current = fixture.generation_manager.current()
+    assert current is not None
+    fixture.clock.set(1_020)
+    fixture.generation_manager.commit_successor(
+        fixture.opening_lease,
+        current,
+        _assignment(generation=1, node_id="node-c"),
+    )
+    successor = GenerationStateReader(fixture.store, run_id=RUN_ID).get(1)
+    assert successor is not None
+    lease_history = CoordinatorLeaseHistoryReader(
+        fixture.store,
+        run_id=RUN_ID,
+    ).read()
+
+    with pytest.raises(ValueError, match="successor authority is absent"):
+        AuthenticatedInitialRestartIntentClosure(
+            state=fixture.state,
+            generation_snapshot=fixture.generation,
+            immediate_successor=replace(
+                successor,
+                guard_mutation_sequence=successor.guard_mutation_sequence + 1,
+            ),
+            lease_history=lease_history,
+        )
+    with pytest.raises(ValueError, match="successor is outside its lease window"):
+        AuthenticatedInitialRestartIntentClosure(
+            state=fixture.state,
+            generation_snapshot=fixture.generation,
+            immediate_successor=replace(
+                successor,
+                transaction_sequence=lease_history[0].transaction_sequence,
+            ),
+            lease_history=lease_history,
         )
 
 
