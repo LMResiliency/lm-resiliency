@@ -649,6 +649,14 @@ store transaction and committed-result verification. Lease-key lifetime
 changes remain rejected until the store retains authoritative deletion
 evidence.
 
+`RestartIntentClosureExecutor` submits that prepared transaction and returns a
+frozen `CommittedInitialRestartIntentClosure` only after verifying the exact
+three-key result, immutable closure/lifecycle creation, one in-place
+current-head replacement, shared transaction identity, closing-lease
+provenance, prepared time window, and causal order after both opening and lease
+authority. Store revision, history, deadline, and clock failures are translated
+into closure-specific fail-closed errors.
+
 A read-only `RestartIntentOpenStateReader` reconstructs the same
 `CommittedInitialRestartIntentOpen` contract after coordinator failover. It
 stably reads the current-intent head and immutable intent, requires the
