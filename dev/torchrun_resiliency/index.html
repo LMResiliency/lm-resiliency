@@ -855,8 +855,22 @@ transaction's lower time bound; the store remains authoritative at execution.
 The prepared transaction also carries a never-created lifecycle-head
 condition. The store checks both current absence and durable key history at the
 same linearization point as the lease, generation conditions, and intent
-writes. The preparer performs no mutation. The following execution component
-owns the guarded transaction and verifies the returned store metadata.</p>
+writes. The preparer performs no mutation. The initial-open executor submits
+that guarded transaction, translates lease, deadline, clock, generation, and
+lifecycle conflicts, and verifies that both returned entries share the expected
+bytes, commit time, transaction sequence, generation order, and lease
+provenance. Preparation preserves the authenticated lease entry's transaction,
+mutation, value, and lifetime sequences. Those sequences must equal the
+generation snapshot's authority for the same fencing token or advance
+consistently for a nonexpired renewal or nonoverlapping replacement. Execution
+requires both committed entries to match that exact lease provenance and to
+follow both the generation snapshot and the authenticated lease transaction.
+The lease mutation count cannot exceed the store-global transaction gap, a
+post-generation lease grant cannot predate the generation commit, and a lease
+ID or fencing token cannot reappear after a different acquisition in the
+verified generation history. Preparation obtains that history through one
+stable reader traversal rather than rereading the full predecessor chain for
+each generation.</p>
 <p><code>suspected_node_ids</code> is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be
 absent from the next assignment. Policy may additionally quarantine a removed
