@@ -904,6 +904,18 @@ create-once records, exactly one current-head replacement, canonical
 coordinator-lease guard keys, shared opening and closure transactions, and
 causal transaction order. Generation and durable lease-history authentication
 remain the responsibility of the lifecycle reader that constructs this value.</p>
+<p>A frozen <code>AuthenticatedInitialRestartIntentClosure</code> value binds that decoded
+closure to the referenced immutable generation and verified durable
+coordinator-lease history. It resolves the exact generation, opening, and
+closing authorities, requires them to occur in order, requires generation and
+intent opening to precede the immediate successor generation in both
+transaction and store time, and verifies that generation creation, intent
+opening, and closure each committed inside their authoritative lease windows
+and before the next durable lease mutation. Construction is fail closed and
+performs no control-store reads or mutations. Because retained value history
+does not identify the intervening delete transaction, an authority followed by
+a delete-and-recreate lifetime cannot authenticate an earlier commit; that
+case remains rejected until the store provides a durable deletion tombstone.</p>
 <p><code>suspected_node_ids</code> is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be
 absent from the next assignment. Policy may additionally quarantine a removed
