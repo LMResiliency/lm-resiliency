@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from collections import defaultdict
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -19,6 +20,7 @@ from lm_resiliency.checkpointing.disk import (
     CheckpointFormatError,
     ChecksumMismatch,
     DiskSerializer,
+    atomic_copy_file,
     shard_checksums,
 )
 from lm_resiliency.checkpointing.manager import InMemoryCheckpointManager
@@ -108,6 +110,64 @@ def test_disk_integrity_round_trip_and_corruption(tmp_path):
     torch.save(raw, path)
     with pytest.raises(ChecksumMismatch):
         serializer.load(3)
+
+
+def test_disk_save_does_not_publish_partial_replacement(tmp_path):
+    serializer = DiskSerializer(str(tmp_path), rank=0)
+    metadata, tensors = flatten({"w": torch.ones(2)})
+    path = serializer.save_sync(metadata, tensors, step=3)
+
+    def write_partial_then_fail(_payload, handle):
+        handle.write(b"partial checkpoint")
+        raise OSError("disk full")
+
+    replacement_metadata, replacement_tensors = flatten({"w": torch.full((2,), 9.0)})
+    with (
+        patch("lm_resiliency.checkpointing.disk.torch.save", side_effect=write_partial_then_fail),
+        pytest.raises(OSError, match="disk full"),
+    ):
+        serializer.save_sync(replacement_metadata, replacement_tensors, step=3)
+
+    loaded_metadata, loaded_tensors = serializer.load(3)
+    assert torch.equal(unflatten(loaded_metadata, loaded_tensors)["w"], torch.ones(2))
+    assert not list(path.parent.glob("*.tmp"))
+    assert not list(path.parent.glob(".*.tmp"))
+
+
+def test_disk_save_cleans_temp_file_from_dead_writer(tmp_path):
+    step_dir = tmp_path / "step-3"
+    step_dir.mkdir()
+    stale = step_dir / ".rank-0.pt.pid-999999999.stale.tmp"
+    stale.write_bytes(b"partial checkpoint")
+    metadata, tensors = flatten({"w": torch.ones(2)})
+
+    DiskSerializer(str(tmp_path), rank=0).save_sync(metadata, tensors, step=3)
+
+    assert not stale.exists()
+
+
+def test_atomic_copy_does_not_publish_partial_replacement(tmp_path):
+    metadata, tensors = flatten({"w": torch.ones(2)})
+    source = DiskSerializer(str(tmp_path / "source"), rank=0).save_sync(metadata, tensors, step=3)
+    destination_serializer = DiskSerializer(str(tmp_path / "destination"), rank=0)
+    destination = destination_serializer.save_sync(*flatten({"w": torch.full((2,), 7.0)}), step=3)
+
+    def copy_partial_then_fail(_source, temporary):
+        Path(temporary).write_bytes(b"partial checkpoint")
+        raise OSError("copy interrupted")
+
+    with (
+        patch(
+            "lm_resiliency.checkpointing.disk.shutil.copy2",
+            side_effect=copy_partial_then_fail,
+        ),
+        pytest.raises(OSError, match="copy interrupted"),
+    ):
+        atomic_copy_file(source, destination)
+
+    loaded_metadata, loaded_tensors = destination_serializer.load(3)
+    assert torch.equal(unflatten(loaded_metadata, loaded_tensors)["w"], torch.full((2,), 7.0))
+    assert not list(destination.parent.glob(".*.tmp"))
 
 
 def test_gemini_load_returns_none_on_corruption(tmp_path):
@@ -291,7 +351,7 @@ def test_manager_collectively_rejects_valid_shard_when_peer_is_invalid(tmp_path)
     ):
         assert manager.load() is None
 
-    collective.assert_called_once_with(1)
+    assert [entry.args[0] for entry in collective.call_args_list] == [1, -1]
     manager.close()
 
 
@@ -314,7 +374,7 @@ def test_load_tensors_collectively_rejects_invalid_local_shard(tmp_path):
     ):
         assert manager.load_tensors() is None
 
-    collective.assert_called_once_with(0)
+    assert [entry.args[0] for entry in collective.call_args_list] == [0, -1]
     manager.close()
 
 
@@ -335,7 +395,52 @@ def test_manager_votes_invalid_after_unexpected_local_load_error(tmp_path):
     ):
         assert manager.load() is None
 
-    collective.assert_called_once_with(0)
+    assert [entry.args[0] for entry in collective.call_args_list] == [0, -1]
+    manager.close()
+
+
+def test_manager_recovers_older_generation_when_newest_is_malformed(tmp_path):
+    metadata, tensors = flatten({"w": torch.full((2,), 3.0)})
+    DiskSerializer(str(tmp_path), rank=0).save_sync(metadata, tensors, step=3)
+    newest = tmp_path / "step-4" / "rank-0.pt"
+    newest.parent.mkdir()
+    newest.write_bytes(b"torn checkpoint")
+
+    manager = InMemoryCheckpointManager(
+        InMemoryCkptConfig(
+            enable=True,
+            interval=1,
+            disk_flush_interval=0,
+            disk_folder=str(tmp_path),
+        )
+    )
+
+    assert manager.find_latest() == 3
+    recovered = manager.load()
+    assert recovered is not None
+    state, step = recovered
+    assert step == 3
+    assert torch.equal(state["w"], torch.full((2,), 3.0))
+    manager.close()
+
+
+def test_consistent_disk_step_descends_to_exact_common_generation(tmp_path):
+    manager = InMemoryCheckpointManager(
+        InMemoryCkptConfig(
+            enable=True,
+            interval=1,
+            disk_flush_interval=0,
+            disk_folder=str(tmp_path),
+        )
+    )
+    metadata, tensors = flatten({"w": torch.ones(2)})
+    manager._disk.save_sync(metadata, tensors, step=8)
+    manager._disk.save_sync(metadata, tensors, step=10)
+
+    with patch.object(manager, "_collective_min_step", side_effect=[9, 8, 8]) as collective:
+        assert manager._consistent_step(manager._disk) == 8
+
+    assert [entry.args[0] for entry in collective.call_args_list] == [10, 8, 8]
     manager.close()
 
 
