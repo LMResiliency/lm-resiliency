@@ -565,6 +565,15 @@ boundary, prepare eligible checkpoint state, and wait for either a committed
 plan or an explicit abort. The stock torchrun agent still considers the worker
 group healthy during this preparation phase.
 
+The persisted form is an immutable, strict `RestartIntentRecord`. It embeds the
+canonical intent and binds it to the exact committed generation-snapshot digest
+plus the complete coordinator lease identity, duration, and opaque fencing
+token that authorized it. Duplicate or unknown fields, unsupported schema
+versions, malformed nested intents, and noncanonical SHA-256 digests fail
+closed. The record schema does not define a store mutation API; lease-fenced
+intent creation and compare-and-swap semantics are separate control-plane
+components.
+
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be
 absent from the next assignment. Policy may additionally quarantine a removed
