@@ -1,0 +1,814 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>MoE Execution Regimes - LM Resiliency</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "MoE Execution Regimes";
+        var mkdocs_page_input_path = "moe_execution_regimes.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> LM Resiliency
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../api/">API Guide</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../compatibility/">Compatibility</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../gemini/">GEMINI</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../scout/">SCOUT</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../torchrun_resiliency/">Torchrun Resiliency</a>
+                </li>
+              </ul>
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">MoE Execution Regimes</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#coverage-contract">Coverage Contract</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#discovery-workflow">Discovery Workflow</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#enumerate-physical-shapes">Enumerate Physical Shapes</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#record-the-environment">Record the Environment</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#profile-the-production-expert-stage">Profile the Production Expert Stage</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#build-and-audit-the-catalog">Build and Audit the Catalog</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#configure-online-replay">Configure Online Replay</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#validation-method">Validation Method</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#scalar-compression-results">Scalar Compression Results</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#projection-and-range-results">Projection and Range Results</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#grouped-kernel-results">Grouped-Kernel Results</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#heterogeneous-routing">Heterogeneous Routing</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#reproduction">Reproduction</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#qualification-checklist">Qualification Checklist</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#boundaries">Boundaries</a>
+    </li>
+    </ul>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../validation/">Validation</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../release/">Release Process</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">LM Resiliency</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">MoE Execution Regimes</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/LMResiliency/lm-resiliency/edit/main/docs/moe_execution_regimes.md">Edit on LMResiliency/lm-resiliency</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="moe-execution-regimes">MoE Execution Regimes<a class="headerlink" href="#moe-execution-regimes" title="Permanent link">&para;</a></h1>
+<p>SCOUT maps variable expert-GEMM row counts to a bounded replay catalog.
+Catalog discovery is offline and bound to one GPU, software stack, model configuration, precision recipe, backend, and parallelism configuration.</p>
+<p>The scalar catalog domain is <code>n_exec</code>, the physical row count received by one expert GEMM after dispatch, capacity handling, token dropping, padding, and alignment.
+Local and global expert counts are environment metadata unless the production kernel physically executes several expert problems together.
+Changing the number of jointly executed experts can change regime boundaries and requires a separately qualified catalog.</p>
+<p>The implementation is in <a href="https://github.com/LMResiliency/lm-resiliency/blob/ddd49235ea73b258f67af00afa4ca54e922785f0/lm_resiliency/detection/moe_regimes.py"><code>lm_resiliency/detection/moe_regimes.py</code></a>.</p>
+<h2 id="coverage-contract">Coverage Contract<a class="headerlink" href="#coverage-contract" title="Permanent link">&para;</a></h2>
+<p>Every observation records:</p>
+<ul>
+<li>ordered kernel names and launch geometry;</li>
+<li>algorithm, tile, block shape, tail path, and alignment;</li>
+<li>workspace, pressure, and overlap class;</li>
+<li>direct or persistent scheduling mode;</li>
+<li>logical-work count and CTA-to-work mapping;</li>
+<li>disjoint semantic-role counts; and</li>
+<li>declaration and independent qualification evidence.</li>
+</ul>
+<p><code>exact_launch</code> retains every distinct physical shape.
+<code>plan_and_pressure</code> may compress scalable work only when every hard execution property agrees.</p>
+<p>Within one regime, representative <code>A</code> covers target <code>B</code> only when <code>A</code> executes at least as many instances of every modeled semantic role.
+Discovery retains the smallest observed frontier that covers all admitted shapes.
+The recipe count is therefore an objective result, not a configured target.</p>
+<p><code>max_replay_recipes</code> is an acceptance ceiling.
+Discovery never merges hard boundaries to satisfy it.</p>
+<p>Semantic roles require two independent sources, such as generated kernel metadata and an instrumented logical-work trace.
+Missing requests, unstable fingerprints, unknown execution fields, mismatched role partitions, or non-independent evidence force exact fallback or reject the catalog.</p>
+<p>This contract covers permanent or reproducible faults tied to modeled roles and execution regimes.</p>
+<h2 id="discovery-workflow">Discovery Workflow<a class="headerlink" href="#discovery-workflow" title="Permanent link">&para;</a></h2>
+<h3 id="enumerate-physical-shapes">Enumerate Physical Shapes<a class="headerlink" href="#enumerate-physical-shapes" title="Permanent link">&para;</a></h3>
+<p>Enumerate every admitted <code>n_exec</code> for each homogeneous layer, expert, and EP position:</p>
+<pre><code class="language-python">from lm_resiliency.detection.moe_regimes import build_profile_requests
+
+requests = build_profile_requests(
+    layer_ids=range(num_hidden_layers),
+    expert_ids=experts_at_ep_position,
+    ep_position=0,
+    n_exec_values=all_admitted_physical_lengths,
+)
+</code></pre>
+<p>Build separate execution classes when projections, precision recipes, kernels, or other execution-defining settings differ.
+Do not enumerate combinations of complete <code>tokens_per_expert</code> vectors for a scalar catalog.</p>
+<h3 id="record-the-environment">Record the Environment<a class="headerlink" href="#record-the-environment" title="Permanent link">&para;</a></h3>
+<p>Use <code>current_moe_environment()</code> to record the backend and version, precision, model dimensions, routing and alignment policy, parallelism, GPU, CUDA, PyTorch, NCCL, driver, and deployment-specific execution settings.
+Placeholder values such as <code>"unknown"</code> and <code>"&lt;version&gt;"</code> are rejected.
+Loading under a different identity raises <code>CatalogEnvironmentMismatch</code>.</p>
+<h3 id="profile-the-production-expert-stage">Profile the Production Expert Stage<a class="headerlink" href="#profile-the-production-expert-stage" title="Permanent link">&para;</a></h3>
+<p>Profile the same fused or grouped expert path used by training:</p>
+<pre><code class="language-python">from lm_resiliency.detection.moe_regimes import (
+    TorchCudaExecutionProfiler,
+    profile_requests,
+    save_observations,
+    save_profile_requests,
+)
+
+profiler = TorchCudaExecutionProfiler(
+    run_production_expert_stage,
+    hints=qualified_backend_hints,
+    warmup=3,
+)
+observations = profile_requests(requests, profiler)
+
+save_observations(observations, &quot;moe-observations.jsonl&quot;)
+save_profile_requests(requests, &quot;moe-manifest.json&quot;)
+</code></pre>
+<p>Profiling repeats each request three times by default.
+Discovery rejects missing observations or conflicting fingerprints for the same shape.
+Profiler launch geometry alone is insufficient because it does not identify logical-work roles.</p>
+<h3 id="build-and-audit-the-catalog">Build and Audit the Catalog<a class="headerlink" href="#build-and-audit-the-catalog" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">from lm_resiliency.detection.moe_regimes import discover_execution_regimes
+
+catalog = discover_execution_regimes(
+    observations,
+    environment=environment,
+    equivalence_policy=&quot;plan_and_pressure&quot;,
+    expected_requests=requests,
+    max_replay_recipes=50,
+)
+catalog.save(&quot;moe-regimes-ep0.json&quot;)
+</code></pre>
+<p>The installed CLI builds the same catalog from saved observations:</p>
+<pre><code class="language-bash">lm-resiliency-discover-moe-regimes \
+  --observations moe-observations.jsonl \
+  --environment moe-environment.json \
+  --manifest moe-manifest.json \
+  --output moe-regimes-ep0.json \
+  --max-replay-recipes 50
+</code></pre>
+<p>Audit exact and compressed catalogs from the same observations, complete request coverage, fingerprint stability, hard boundaries, representative role dominance, serialization, environment mismatch rejection, omitted-role challenges, wrong-count challenges, and independent fault injections.</p>
+<h3 id="configure-online-replay">Configure Online Replay<a class="headerlink" href="#configure-online-replay" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">from lm_resiliency import (
+    GroupedExpertMaterializer,
+    ReplayHarnessConfig,
+    ReplayWorkload,
+    enable_resiliency,
+)
+
+catalog.validate_environment(current_environment)
+
+workload = ReplayWorkload.from_moe_catalog(
+    catalog,
+    replay_modules=[model.post_dispatch_expert_stage],
+    materializer=GroupedExpertMaterializer(),
+)
+
+resiliency = enable_resiliency(
+    model,
+    optimizer,
+    interval=10,
+    replay=ReplayHarnessConfig(
+        workload=workload,
+        capture_inputs_by_value=True,
+        rotate_layers=False,
+    ),
+)
+</code></pre>
+<p><code>GroupedExpertMaterializer</code> converts scalar <code>n_exec</code> into <code>[n_exec] * local_expert_count</code> and resizes packed token-aligned inputs.
+Use a backend-specific materializer when physical shape is not represented by packed rows and one count vector.</p>
+<p>The replay harness compares schedule signatures across peers, advances only after a successful replay, and checkpoints its catalog position.
+For <code>K</code> recipes at interval <code>I</code>, one complete cycle takes <code>K * I</code> optimizer steps.</p>
+<h2 id="validation-method">Validation Method<a class="headerlink" href="#validation-method" title="Permanent link">&para;</a></h2>
+<p>The validation campaigns used an instrumented Triton persistent grouped-GEMM with BF16 on NVIDIA A100-SXM4-40GB GPUs.
+The environment used NVIDIA driver 580.126.16, PyTorch 2.13.0+cu130, CUDA 13.0, and Triton 3.7.1.</p>
+<p>Each admitted scalar shape was executed three times.
+The campaigns recorded launch geometry, declared semantic roles from generated metadata, independently qualified roles from device traces, built exact and compressed catalogs, injected every selected work-item occurrence, and challenged omitted roles, incorrect counts, and environment drift.</p>
+<p>The primary scalar range was <code>n_exec=1..3457</code>.
+Controlled projection and grouped-expert matrices exhaustively covered 512, 1,024, and 2,048 scalar shapes.</p>
+<h2 id="scalar-compression-results">Scalar Compression Results<a class="headerlink" href="#scalar-compression-results" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th style="text-align: right;">Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Scalar physical shapes</td>
+<td style="text-align: right;">3,457</td>
+</tr>
+<tr>
+<td>Stable observations</td>
+<td style="text-align: right;">10,371</td>
+</tr>
+<tr>
+<td>Exact recipes</td>
+<td style="text-align: right;">3,457</td>
+</tr>
+<tr>
+<td>Execution regimes</td>
+<td style="text-align: right;">4</td>
+</tr>
+<tr>
+<td>Compressed recipes</td>
+<td style="text-align: right;">16</td>
+</tr>
+<tr>
+<td>Recipe reduction</td>
+<td style="text-align: right;">99.54%</td>
+</tr>
+<tr>
+<td>Compression ratio</td>
+<td style="text-align: right;">216.06x</td>
+</tr>
+<tr>
+<td>Target role-occurrence obligations</td>
+<td style="text-align: right;">1,134,224</td>
+</tr>
+<tr>
+<td>Representative work-item injections</td>
+<td style="text-align: right;">5,960/5,960</td>
+</tr>
+<tr>
+<td>Representative kernel-role classes</td>
+<td style="text-align: right;">237</td>
+</tr>
+<tr>
+<td>Healthy distributed replay</td>
+<td style="text-align: right;">Passed on 8 and 16 A100s</td>
+</tr>
+<tr>
+<td>Fault localization</td>
+<td style="text-align: right;">Rank 7 on 8 GPUs; rank 15 on 16 GPUs</td>
+</tr>
+<tr>
+<td>Omitted-role challenge</td>
+<td style="text-align: right;">Fell back to exact</td>
+</tr>
+<tr>
+<td>Wrong-count challenge</td>
+<td style="text-align: right;">Rejected compression</td>
+</tr>
+<tr>
+<td>Environment-drift challenge</td>
+<td style="text-align: right;">Rejected stale catalog</td>
+</tr>
+</tbody>
+</table>
+<p>The objective 16-recipe catalog comprised:</p>
+<table>
+<thead>
+<tr>
+<th>Forward / input-gradient / weight-gradient pressure</th>
+<th style="text-align: right;">Scalar members</th>
+<th>Representatives</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>underfilled / underfilled / underfilled</code></td>
+<td style="text-align: right;">832</td>
+<td>31, 32, 63, 800, 831, 832</td>
+</tr>
+<tr>
+<td><code>underfilled / underfilled / one-repeat</code></td>
+<td style="text-align: right;">896</td>
+<td>1696, 1727, 1728</td>
+</tr>
+<tr>
+<td><code>underfilled / underfilled / multi-repeat</code></td>
+<td style="text-align: right;">1,664</td>
+<td>3360, 3391, 3392</td>
+</tr>
+<tr>
+<td><code>one-repeat / one-repeat / multi-repeat</code></td>
+<td style="text-align: right;">65</td>
+<td>3424, 3455, 3456, 3457</td>
+</tr>
+</tbody>
+</table>
+<p>Representatives clustered at row-tail, reduction-tail, and persistent-pressure transitions.</p>
+<h2 id="projection-and-range-results">Projection and Range Results<a class="headerlink" href="#projection-and-range-results" title="Permanent link">&para;</a></h2>
+<p>The projection matrix profiled one physical expert across <code>n_exec=1..512</code>, <code>1..1024</code>, and <code>1..2048</code>.
+Each domain column reports <code>execution regimes / compressed recipes</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Preset</th>
+<th style="text-align: right;">Local-expert metadata</th>
+<th style="text-align: right;">Projection</th>
+<th style="text-align: right;">512</th>
+<th style="text-align: right;">1,024</th>
+<th style="text-align: right;">2,048</th>
+<th style="text-align: right;">2,048 reduction</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>large-1-local</code></td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">4096 x 14336</td>
+<td style="text-align: right;">3 / 12</td>
+<td style="text-align: right;">3 / 12</td>
+<td style="text-align: right;">3 / 12</td>
+<td style="text-align: right;">99.41%</td>
+</tr>
+<tr>
+<td><code>large-2-local</code></td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">4096 x 14336</td>
+<td style="text-align: right;">3 / 12</td>
+<td style="text-align: right;">3 / 12</td>
+<td style="text-align: right;">3 / 12</td>
+<td style="text-align: right;">99.41%</td>
+</tr>
+<tr>
+<td><code>wide-2-local</code></td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">6144 x 10752</td>
+<td style="text-align: right;">3 / 10</td>
+<td style="text-align: right;">3 / 10</td>
+<td style="text-align: right;">3 / 10</td>
+<td style="text-align: right;">99.51%</td>
+</tr>
+<tr>
+<td><code>medium-4-local</code></td>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">4096 x 4096</td>
+<td style="text-align: right;">3 / 12</td>
+<td style="text-align: right;">3 / 12</td>
+<td style="text-align: right;">3 / 12</td>
+<td style="text-align: right;">99.41%</td>
+</tr>
+<tr>
+<td><code>narrow-8-local</code></td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">5120 x 1536</td>
+<td style="text-align: right;">4 / 15</td>
+<td style="text-align: right;">5 / 18</td>
+<td style="text-align: right;">5 / 18</td>
+<td style="text-align: right;">99.12%</td>
+</tr>
+<tr>
+<td><code>fine-16-local</code></td>
+<td style="text-align: right;">16</td>
+<td style="text-align: right;">2048 x 1024</td>
+<td style="text-align: right;">3 / 16</td>
+<td style="text-align: right;">4 / 19</td>
+<td style="text-align: right;">4 / 19</td>
+<td style="text-align: right;">99.07%</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Domain</th>
+<th style="text-align: right;">Exact recipes per preset</th>
+<th style="text-align: right;">Observations per preset</th>
+<th style="text-align: right;">Shards per preset</th>
+<th style="text-align: right;">Maximum compressed recipes</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>1..512</code></td>
+<td style="text-align: right;">512</td>
+<td style="text-align: right;">1,536</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">16</td>
+<td>Passed</td>
+</tr>
+<tr>
+<td><code>1..1024</code></td>
+<td style="text-align: right;">1,024</td>
+<td style="text-align: right;">3,072</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">19</td>
+<td>Passed</td>
+</tr>
+<tr>
+<td><code>1..2048</code></td>
+<td style="text-align: right;">2,048</td>
+<td style="text-align: right;">6,144</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">19</td>
+<td>Passed</td>
+</tr>
+</tbody>
+</table>
+<p>All 96 profile shards passed numerical and fingerprint-stability checks and contributed 55,296 stable observations.
+Increasing the exact domain from 512 to 2,048 did not increase the recipe count for the large, wide, or medium projections.
+The narrow and fine projections crossed one additional pressure boundary between 512 and 1,024 and added no further recipes between 1,024 and 2,048.</p>
+<p>The identical <code>large-1-local</code> and <code>large-2-local</code> results confirm that expert-count metadata alone does not create a recipe axis.
+Projection dimensions changed the objective count only when they changed execution geometry or crossed a hard pressure boundary.</p>
+<h2 id="grouped-kernel-results">Grouped-Kernel Results<a class="headerlink" href="#grouped-kernel-results" title="Permanent link">&para;</a></h2>
+<p>The grouped campaign physically allocated and executed <code>E={1,2,4,8,16}</code> distinct experts:</p>
+<pre><code class="language-text">tokens_per_expert = [n_exec] * E
+packed_rows = n_exec * E
+</code></pre>
+<p>Each domain column reports <code>execution regimes / compressed recipes</code>.</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: right;">Actual experts</th>
+<th style="text-align: right;">512</th>
+<th style="text-align: right;">1,024</th>
+<th style="text-align: right;">2,048</th>
+<th style="text-align: right;">2,048 reduction</th>
+<th style="text-align: right;">2,048 role injections</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">1 / 6</td>
+<td style="text-align: right;">2 / 9</td>
+<td style="text-align: right;">3 / 12</td>
+<td style="text-align: right;">99.41%</td>
+<td style="text-align: right;">171/171</td>
+</tr>
+<tr>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">2 / 9</td>
+<td style="text-align: right;">3 / 12</td>
+<td style="text-align: right;">4 / 18</td>
+<td style="text-align: right;">99.12%</td>
+<td style="text-align: right;">285/285</td>
+</tr>
+<tr>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">3 / 12</td>
+<td style="text-align: right;">4 / 15</td>
+<td style="text-align: right;">5 / 27</td>
+<td style="text-align: right;">98.68%</td>
+<td style="text-align: right;">520/520</td>
+</tr>
+<tr>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">4 / 18</td>
+<td style="text-align: right;">5 / 30</td>
+<td style="text-align: right;">5 / 42</td>
+<td style="text-align: right;">97.95%</td>
+<td style="text-align: right;">870/870</td>
+</tr>
+<tr>
+<td style="text-align: right;">16</td>
+<td style="text-align: right;">5 / 24</td>
+<td style="text-align: right;">5 / 36</td>
+<td style="text-align: right;">5 / 48</td>
+<td style="text-align: right;">97.66%</td>
+<td style="text-align: right;">1,040/1,040</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Domain</th>
+<th style="text-align: right;">Exact recipes per expert count</th>
+<th style="text-align: right;">Observations per expert count</th>
+<th style="text-align: right;">Total observations</th>
+<th style="text-align: right;">Maximum compressed recipes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>1..512</code></td>
+<td style="text-align: right;">512</td>
+<td style="text-align: right;">1,536</td>
+<td style="text-align: right;">7,680</td>
+<td style="text-align: right;">24</td>
+</tr>
+<tr>
+<td><code>1..1024</code></td>
+<td style="text-align: right;">1,024</td>
+<td style="text-align: right;">3,072</td>
+<td style="text-align: right;">15,360</td>
+<td style="text-align: right;">36</td>
+</tr>
+<tr>
+<td><code>1..2048</code></td>
+<td style="text-align: right;">2,048</td>
+<td style="text-align: right;">6,144</td>
+<td style="text-align: right;">30,720</td>
+<td style="text-align: right;">48</td>
+</tr>
+</tbody>
+</table>
+<p>All numerical checks, repeated fingerprints, catalog round trips, and 4,757 selected-role injections passed in the extended campaigns.
+Repeating the campaigns with the two hosts exchanged reproduced catalog identities, recipe counts, injection counts, and heterogeneous coverage counts.</p>
+<p>The exact count remained equal to the scalar-domain size and independent of <code>E</code>.
+The compressed count grew when physical grouped execution introduced new pressure regimes or non-dominated role-count frontiers.
+At <code>E=16</code>, the 2,048-shape catalog required 48 recipes, so the tested 50-recipe ceiling must not be extrapolated to larger domains.</p>
+<h3 id="heterogeneous-routing">Heterogeneous Routing<a class="headerlink" href="#heterogeneous-routing" title="Permanent link">&para;</a></h3>
+<p>Uniform catalogs were challenged with tile and pressure boundaries, one-active-expert cases, alternating and cyclic patterns, and 128 seeded random vectors.
+Cycle role-envelope coverage required selected recipes in a target's hard regime to dominate every target role count collectively.</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: right;">Domain</th>
+<th style="text-align: right;">Actual experts</th>
+<th style="text-align: right;">Vectors</th>
+<th style="text-align: right;">Hard regime represented</th>
+<th style="text-align: right;">Single-recipe dominance</th>
+<th style="text-align: right;">Cycle role-envelope coverage</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">512</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">245</td>
+<td style="text-align: right;">245/245</td>
+<td style="text-align: right;">135/245</td>
+<td style="text-align: right;">245/245</td>
+<td>Pass</td>
+</tr>
+<tr>
+<td style="text-align: right;">512</td>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">343</td>
+<td style="text-align: right;">343/343</td>
+<td style="text-align: right;">135/343</td>
+<td style="text-align: right;">271/343</td>
+<td>Fail</td>
+</tr>
+<tr>
+<td style="text-align: right;">512</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">377</td>
+<td style="text-align: right;">377/377</td>
+<td style="text-align: right;">96/377</td>
+<td style="text-align: right;">240/377</td>
+<td>Fail</td>
+</tr>
+<tr>
+<td style="text-align: right;">512</td>
+<td style="text-align: right;">16</td>
+<td style="text-align: right;">385</td>
+<td style="text-align: right;">385/385</td>
+<td style="text-align: right;">35/385</td>
+<td style="text-align: right;">111/385</td>
+<td>Fail</td>
+</tr>
+<tr>
+<td style="text-align: right;">1,024</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">266</td>
+<td style="text-align: right;">266/266</td>
+<td style="text-align: right;">157/266</td>
+<td style="text-align: right;">239/266</td>
+<td>Fail</td>
+</tr>
+<tr>
+<td style="text-align: right;">1,024</td>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">373</td>
+<td style="text-align: right;">373/373</td>
+<td style="text-align: right;">183/373</td>
+<td style="text-align: right;">302/373</td>
+<td>Fail</td>
+</tr>
+<tr>
+<td style="text-align: right;">1,024</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">407</td>
+<td style="text-align: right;">407/407</td>
+<td style="text-align: right;">110/407</td>
+<td style="text-align: right;">284/407</td>
+<td>Fail</td>
+</tr>
+<tr>
+<td style="text-align: right;">1,024</td>
+<td style="text-align: right;">16</td>
+<td style="text-align: right;">385</td>
+<td style="text-align: right;">385/385</td>
+<td style="text-align: right;">54/385</td>
+<td style="text-align: right;">138/385</td>
+<td>Fail</td>
+</tr>
+<tr>
+<td style="text-align: right;">2,048</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">287</td>
+<td style="text-align: right;">287/287</td>
+<td style="text-align: right;">167/287</td>
+<td style="text-align: right;">254/287</td>
+<td>Fail</td>
+</tr>
+<tr>
+<td style="text-align: right;">2,048</td>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">403</td>
+<td style="text-align: right;">403/403</td>
+<td style="text-align: right;">168/403</td>
+<td style="text-align: right;">286/403</td>
+<td>Fail</td>
+</tr>
+<tr>
+<td style="text-align: right;">2,048</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">407</td>
+<td style="text-align: right;">407/407</td>
+<td style="text-align: right;">142/407</td>
+<td style="text-align: right;">304/407</td>
+<td>Fail</td>
+</tr>
+<tr>
+<td style="text-align: right;">2,048</td>
+<td style="text-align: right;">16</td>
+<td style="text-align: right;">385</td>
+<td style="text-align: right;">385/385</td>
+<td style="text-align: right;">69/385</td>
+<td style="text-align: right;">185/385</td>
+<td>Fail</td>
+</tr>
+</tbody>
+</table>
+<p>Every heterogeneous target belonged to a represented hard regime, but uniform scalar cycles did not cover arbitrary heterogeneous routing for <code>E&gt;=2</code> in the extended domains.
+For example, <code>[1, 1024]</code> combines a queue-first tail role with high pressure in a way no selected uniform representative covers.</p>
+<p>Uniform domains of up to 2,048 shapes therefore compressed to 12-48 recipes across 1-16 jointly executed experts without exponential growth.
+Broader heterogeneous coverage requires qualified vector templates, a different materializer, or a narrower backend-specific fault model.</p>
+<h2 id="reproduction">Reproduction<a class="headerlink" href="#reproduction" title="Permanent link">&para;</a></h2>
+<p>Run the scalar campaign:</p>
+<pre><code class="language-bash">python tests/validation/moe/validate_moe_regime_compression.py profile \
+  --artifact-dir /tmp/scout-moe-scalar-compression
+</code></pre>
+<p>Run one projection preset:</p>
+<pre><code class="language-bash">python tests/validation/moe/evaluate_moe_architecture_matrix.py \
+  --preset medium-4-local \
+  --max-n-exec 2048 \
+  --artifact-dir /tmp/scout-moe-scalar-matrix/medium-4-local
+</code></pre>
+<p>Run one grouped-expert matrix member:</p>
+<pre><code class="language-bash">python tests/validation/moe/validate_grouped_kernel_expert_count.py \
+  --actual-experts 4 \
+  --max-n-exec 2048 \
+  --artifact-dir /tmp/scout-grouped-kernel-experts/e4 \
+  --fault-occurrences roles
+</code></pre>
+<p>Run distributed replay:</p>
+<pre><code class="language-bash">torchrun --nproc-per-node=8 \
+  tests/validation/moe/validate_moe_regime_compression.py distributed \
+  --catalog /tmp/scout-moe-scalar-compression/catalog-compressed.json
+</code></pre>
+<p>For parallel acquisition, profile disjoint scalar intervals and pass each completed artifact directory to a final invocation with <code>--profile-shards</code>.
+Catalog discovery runs once over the merged exhaustive observation set.</p>
+<h2 id="qualification-checklist">Qualification Checklist<a class="headerlink" href="#qualification-checklist" title="Permanent link">&para;</a></h2>
+<p>Before production use:</p>
+<ol>
+<li>Profile the exact target GPU and software stack.</li>
+<li>Cover every admitted physical shape and homogeneous execution class.</li>
+<li>Compare forward outputs, input gradients, and parameter gradients with trusted references.</li>
+<li>Verify stable repeated fingerprints and every hard regime boundary.</li>
+<li>Qualify semantic roles from independent evidence.</li>
+<li>Verify representative coverage of every target obligation.</li>
+<li>Run omitted-role, wrong-count, and environment-drift challenges.</li>
+<li>Inject every selected role occurrence with an independent software oracle.</li>
+<li>Run one complete healthy catalog cycle on the target topology.</li>
+<li>Inject a rank-specific reproducible fault and require localization within one <code>K * I</code> cycle.</li>
+<li>Retain exact recipes when the backend cannot expose sufficient semantics.</li>
+</ol>
+<p>Report exact and compressed recipe counts, compression ratio, role obligations, injected occurrences, topology, environment identity, and claim boundaries.</p>
+<h2 id="boundaries">Boundaries<a class="headerlink" href="#boundaries" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Results qualify the instrumented Triton backend, A100, BF16, tested projections, grouped expert counts, and stated scalar domains.</li>
+<li>Transformer Engine used exact recipes because independent CTA-role semantics were unavailable.</li>
+<li>Other backends, dimensions, precisions, GPUs, compilers, and scheduling policies require separate catalogs.</li>
+<li>Software injection covers modeled semantic roles for permanent or reproducible triggers.</li>
+<li>One-shot transients and common-mode defects remain outside the result.</li>
+<li>Uniform scalar grouped-expert catalogs are not qualified for arbitrary heterogeneous routing vectors.</li>
+</ul>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../torchrun_resiliency/" class="btn btn-neutral float-left" title="Torchrun Resiliency"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../validation/" class="btn btn-neutral float-right" title="Validation">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/LMResiliency/lm-resiliency" class="fa fa-code-fork" style="color: #fcfcfc"> LMResiliency/lm-resiliency</a>
+        </span>
+    
+    
+      <span><a href="../torchrun_resiliency/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../validation/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

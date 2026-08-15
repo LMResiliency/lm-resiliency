@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Compatibility - LM Resiliency</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Compatibility";
+        var mkdocs_page_input_path = "compatibility.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> LM Resiliency
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../api/">API Guide</a>
+                </li>
+              </ul>
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">Compatibility</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#version-matrix">Version Matrix</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#compatibility-policy">Compatibility Policy</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#api-compatibility">API Compatibility</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#static-typing">Static Typing</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#manager-compatibility">Manager Compatibility</a>
+    </li>
+    </ul>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../gemini/">GEMINI</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../scout/">SCOUT</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../torchrun_resiliency/">Torchrun Resiliency</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../moe_execution_regimes/">MoE Execution Regimes</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../validation/">Validation</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../release/">Release Process</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">LM Resiliency</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">Compatibility</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/LMResiliency/lm-resiliency/edit/main/docs/compatibility.md">Edit on LMResiliency/lm-resiliency</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="compatibility">Compatibility<a class="headerlink" href="#compatibility" title="Permanent link">&para;</a></h1>
+<p><code>lm-resiliency</code> supports the version ranges below.
+The lower bounds and primary development versions pass the complete CPU unit suite.
+Distributed GPU validation covers the exact framework versions listed as tested.</p>
+<h2 id="version-matrix">Version Matrix<a class="headerlink" href="#version-matrix" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Supported</th>
+<th>Tested</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Python</td>
+<td><code>&gt;=3.10,&lt;3.13</code></td>
+<td>3.10, 3.11, and 3.12</td>
+</tr>
+<tr>
+<td>NumPy</td>
+<td><code>&gt;=1.26,&lt;3</code></td>
+<td>1.26.4 and 2.5.1</td>
+</tr>
+<tr>
+<td>PyTorch</td>
+<td><code>&gt;=2.10,&lt;2.14</code></td>
+<td>2.10.0, 2.11.0, 2.12.0, and 2.13.0</td>
+</tr>
+<tr>
+<td>TorchTitan</td>
+<td><code>&gt;=0.2.2,&lt;0.3</code></td>
+<td>0.2.2</td>
+</tr>
+<tr>
+<td>Megatron Core</td>
+<td><code>&gt;=0.18.2,&lt;0.19</code></td>
+<td>0.18.2</td>
+</tr>
+<tr>
+<td>DeepSpeed</td>
+<td><code>&gt;=0.19.4,&lt;0.20</code></td>
+<td>0.19.4</td>
+</tr>
+<tr>
+<td>Transformer Engine grouped experts</td>
+<td>Integration-provided</td>
+<td>2.10.0</td>
+</tr>
+</tbody>
+</table>
+<p>The complete CPU unit suite qualifies these representative combinations:</p>
+<table>
+<thead>
+<tr>
+<th>CI target</th>
+<th>Python</th>
+<th>NumPy</th>
+<th>PyTorch</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>minimum</code></td>
+<td>3.10</td>
+<td>1.26.4</td>
+<td>2.10.0</td>
+</tr>
+<tr>
+<td><code>python-3.11-torch-2.11</code></td>
+<td>3.11</td>
+<td>1.26.4</td>
+<td>2.11.0</td>
+</tr>
+<tr>
+<td><code>torch-2.12</code></td>
+<td>3.12</td>
+<td>2.5.1</td>
+<td>2.12.0</td>
+</tr>
+<tr>
+<td><code>primary</code></td>
+<td>3.12</td>
+<td>2.5.1</td>
+<td>2.13.0</td>
+</tr>
+</tbody>
+</table>
+<p>The primary combination also passes the distributed framework campaign.
+Production Megatron grouped-expert validation used PyTorch 2.10.0 and Transformer Engine 2.10.0.</p>
+<p>CUDA, NCCL, GPU, and topology details for distributed runs are recorded in <a href="../validation/">Validation</a>.</p>
+<h2 id="compatibility-policy">Compatibility Policy<a class="headerlink" href="#compatibility-policy" title="Permanent link">&para;</a></h2>
+<p>Patch releases inside the declared ranges are supported unless an upstream regression is documented.
+New Python or framework minor series are unsupported until the CPU suite and applicable distributed integration tests pass.
+Each newly qualified minor series requires an explicit metadata update instead of an open-ended upper bound.
+Framework adapters may use framework-specific topology and optimizer APIs, so successful dependency resolution alone is not treated as compatibility evidence.
+Compatibility defects within a declared range are handled as release bugs and may require narrowing the range in a patch release.
+Contract tests require every declared Python and PyTorch minor series to appear in the CI matrix and require every CI combination to appear in this guide.</p>
+<h2 id="api-compatibility">API Compatibility<a class="headerlink" href="#api-compatibility" title="Permanent link">&para;</a></h2>
+<p>Stable exports from <code>lm_resiliency</code>, <code>lm_resiliency.manager_api</code>, and explicit framework integration entry points remain backward compatible across <code>0.1.x</code> patch releases.
+The documented <code>lm-resiliency-quickstart</code> and <code>lm-resiliency-discover-moe-regimes</code> commands and their existing options follow the same patch-release compatibility policy.
+Removing or changing a stable interface requires a new minor release and migration notes.
+Objects under <code>lm_resiliency.experimental</code> and unlisted module paths may change in any <code>0.x</code> release.
+The exact stable exports are listed in the <a href="../api/#public-api-stability">API guide</a> and enforced by contract tests.</p>
+<h2 id="static-typing">Static Typing<a class="headerlink" href="#static-typing" title="Permanent link">&para;</a></h2>
+<p>Published wheels include the PEP 561 <code>py.typed</code> marker, so downstream type checkers may consume the package's inline annotations.
+CI follows normal imports and checks the stable package root, manager API, orchestration/recovery records, and a downstream fixture that asserts concrete exported types.
+Known pre-existing errors in internal checkpointing, detection, framework-integration, and feature-wiring modules are scoped with explicit mypy overrides; their annotations remain visible to the checked public dependency closure instead of being replaced with <code>Any</code> by skipped imports.
+The static gate is therefore a checked public-contract baseline, not a claim that every internal module is already mypy-clean.
+Runtime contract tests and distributed validation remain authoritative for behavior that static typing cannot prove.</p>
+<h2 id="manager-compatibility">Manager Compatibility<a class="headerlink" href="#manager-compatibility" title="Permanent link">&para;</a></h2>
+<p>The separately distributed manager must depend on the same <code>0.x</code> minor series, for example <code>lm-resiliency&gt;=0.1,&lt;0.2</code>.
+The manager repository owns wheel-to-wheel compatibility testing because this repository does not include manager code or manager tests.
+That test must build both wheels, install them into a clean environment, and exercise <code>OrchestrationHooks</code>, normalized SCOUT reports, restart flushing, and checkpoint transfer through public imports.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../api/" class="btn btn-neutral float-left" title="API Guide"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../gemini/" class="btn btn-neutral float-right" title="GEMINI">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/LMResiliency/lm-resiliency" class="fa fa-code-fork" style="color: #fcfcfc"> LMResiliency/lm-resiliency</a>
+        </span>
+    
+    
+      <span><a href="../api/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../gemini/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

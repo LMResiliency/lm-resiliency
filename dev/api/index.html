@@ -1,0 +1,890 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>API Guide - LM Resiliency</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "API Guide";
+        var mkdocs_page_input_path = "api.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> LM Resiliency
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">API Guide</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#public-api-stability">Public API Stability</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#enable-resiliency">Enable Resiliency</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#framework-support">Framework Support</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#evaluate-fault-localization">Evaluate Fault Localization</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#native-pytorch">Native PyTorch</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#configure-protection">Configure Protection</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#instrument-a-dataloader">Instrument a DataLoader</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#instrument-checkpoint-io">Instrument Checkpoint I/O</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#add-caller-owned-state">Add Caller-Owned State</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#configure-recovery">Configure Recovery</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#configure-moe-replay">Configure MoE Replay</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#configure-alltoall-replay">Configure AllToAll Replay</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#report-faults">Report Faults</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#certify-durable-checkpoints">Certify Durable Checkpoints</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#select-recovery-trust">Select Recovery Trust</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#manager-integration">Manager Integration</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#monitor-hardware-health">Monitor Hardware Health</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#lifecycle">Lifecycle</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#advanced-integration">Advanced Integration</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#command-line-interface">Command-Line Interface</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#related-guides">Related Guides</a>
+    </li>
+    </ul>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../compatibility/">Compatibility</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../gemini/">GEMINI</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../scout/">SCOUT</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../torchrun_resiliency/">Torchrun Resiliency</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../moe_execution_regimes/">MoE Execution Regimes</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../validation/">Validation</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../release/">Release Process</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">LM Resiliency</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">API Guide</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/LMResiliency/lm-resiliency/edit/main/docs/api.md">Edit on LMResiliency/lm-resiliency</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="api-guide">API Guide<a class="headerlink" href="#api-guide" title="Permanent link">&para;</a></h1>
+<p><code>lm-resiliency</code> exposes one entry point for enabling GEMINI checkpointing and SCOUT failure localization.
+This guide covers the public integration contract; component design and validation details are linked at the end.</p>
+<h2 id="public-api-stability">Public API Stability<a class="headerlink" href="#public-api-stability" title="Permanent link">&para;</a></h2>
+<p>The package separates supported interfaces from low-level research components:</p>
+<table>
+<thead>
+<tr>
+<th>Namespace</th>
+<th>Contract</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>lm_resiliency</code></td>
+<td>Stable training integration API</td>
+</tr>
+<tr>
+<td><code>lm_resiliency.manager_api</code></td>
+<td>Stable platform-neutral manager API</td>
+</tr>
+<tr>
+<td><code>lm_resiliency.integrations.&lt;framework&gt;</code></td>
+<td>Stable explicit framework entry points</td>
+</tr>
+<tr>
+<td><code>lm_resiliency.experimental</code></td>
+<td>Unstable low-level components</td>
+</tr>
+</tbody>
+</table>
+<p>The stable package-root exports are:</p>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Exports</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Activation and lifecycle</td>
+<td><code>enable_resiliency</code>, <code>FrameworkName</code>, <code>ResiliencySession</code>, <code>ResiliencyHandle</code></td>
+</tr>
+<tr>
+<td>Configuration</td>
+<td><code>InMemoryCkptConfig</code>, <code>ReplayHarnessConfig</code></td>
+</tr>
+<tr>
+<td>Dynamic and MoE replay</td>
+<td><code>ReplayWorkload</code>, <code>GroupedExpertMaterializer</code>, <code>LeadingDimensionMaterializer</code></td>
+</tr>
+<tr>
+<td>AllToAll replay</td>
+<td><code>AllToAllReplayPolicy</code>, <code>AllToAllCapture</code>, <code>AllToAllTrafficMatrix</code>, <code>BalancedAndPermutationPolicy</code></td>
+</tr>
+<tr>
+<td>Durable certification</td>
+<td><code>DurableCheckpointConfig</code>, <code>CallbackDurableCheckpointAdapter</code></td>
+</tr>
+<tr>
+<td>Fault reporting</td>
+<td><code>SCOUTFaultReport</code>, <code>SCOUTFaultCallback</code>, <code>OrchestrationHooks</code>, <code>replay_fault_reports</code></td>
+</tr>
+<tr>
+<td>Recovery handoff</td>
+<td><code>RecoveryDecision</code>, <code>RecoveryDecisionCallback</code></td>
+</tr>
+<tr>
+<td>Checkpoint tuning</td>
+<td><code>estimate_chunk_size</code></td>
+</tr>
+<tr>
+<td>Fault injection evaluation</td>
+<td><code>enable_fault_injection</code>, <code>SCHEMA_VERSION</code>, <code>FaultCampaign</code>, <code>FaultIncident</code>, <code>IncidentTrigger</code>, <code>IncidentLifetime</code>, <code>IterationRange</code>, <code>ClockSpec</code>, <code>ClockType</code>, <code>ClockOrigin</code>, <code>FaultSpec</code>, <code>FaultTarget</code>, <code>FailureType</code>, <code>FaultSurface</code>, <code>FaultScope</code>, <code>FaultMagnitude</code>, <code>CorruptionOperation</code>, <code>SafetyClass</code>, <code>RetriggerPolicy</code>, <code>FaultExecutor</code>, <code>CallbackFaultExecutor</code>, <code>FaultExecutionRequest</code>, <code>FaultExecutionResult</code>, <code>UnsupportedFaultError</code>, <code>FaultInjectionSession</code>, <code>InjectionStatus</code>, <code>FaultInjectionRecord</code>, <code>LocalizationResult</code>, <code>FaultEvaluation</code>, <code>CampaignReport</code>, <code>CampaignJournal</code>, <code>CampaignStateStore</code>, <code>MemoryCampaignStateStore</code>, <code>JsonCampaignStateStore</code></td>
+</tr>
+</tbody>
+</table>
+<p>The stable manager API exports are:</p>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Exports</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Coordination</td>
+<td><code>OrchestrationHooks</code>, <code>RestartDestinationResolver</code>, <code>RecoveryDecision</code>, <code>RecoveryDecisionCallback</code></td>
+</tr>
+<tr>
+<td>Fault reports</td>
+<td><code>SCOUTFaultReport</code>, <code>SCOUTFaultCallback</code>, <code>replay_fault_reports</code>, <code>dispatch_replay_faults</code></td>
+</tr>
+<tr>
+<td>Checkpoint transfer</td>
+<td><code>CheckpointTransfer</code>, <code>TransferMetadataStore</code>, <code>make_transfer</code></td>
+</tr>
+<tr>
+<td>Hardware health</td>
+<td><code>HealthConfig</code>, <code>HardwareHealthMonitor</code>, <code>HealthEvent</code>, <code>HealthReading</code>, <code>HealthSeverity</code>, <code>HealthSource</code>, <code>NvmlSource</code></td>
+</tr>
+<tr>
+<td>Configuration drift</td>
+<td><code>local_fingerprint</code>, <code>find_drift</code>, <code>format_drift</code></td>
+</tr>
+</tbody>
+</table>
+<p>Other module paths are internal unless this guide identifies them as supported.
+Objects under <code>lm_resiliency.experimental</code> may change within the <code>0.x</code> release series.</p>
+<h2 id="enable-resiliency">Enable Resiliency<a class="headerlink" href="#enable-resiliency" title="Permanent link">&para;</a></h2>
+<p>Initialize <code>torch.distributed</code>, create the framework training objects, and call <code>enable_resiliency</code> once on every rank:</p>
+<pre><code class="language-python">from lm_resiliency import enable_resiliency
+
+resiliency = enable_resiliency(
+    model,
+    optimizer,
+    interval=10,
+)
+
+train()
+</code></pre>
+<p>Call <code>enable_resiliency</code> after framework initialization and before the training loop.
+The returned handle owns hooks, background workers, and process groups created by the integration.
+The integration releases these resources automatically at normal process exit.</p>
+<p><code>interval</code> is the shared optimizer-step cadence.
+When GEMINI and SCOUT are both enabled, checkpoint capture and validation use the coordinated cadence described in <a href="../gemini/#checkpoint-validation">GEMINI checkpointing</a>.</p>
+<h2 id="framework-support">Framework Support<a class="headerlink" href="#framework-support" title="Permanent link">&para;</a></h2>
+<p>The package infers the framework from the first training object:</p>
+<table>
+<thead>
+<tr>
+<th>Framework</th>
+<th>First argument</th>
+<th>SCOUT parallelism</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PyTorch</td>
+<td><code>torch.nn.Module</code></td>
+<td>DDP, FSDP2, HSDP, TP, SP, CP, PP, EP, expert TP</td>
+</tr>
+<tr>
+<td>TorchTitan</td>
+<td>Initialized <code>Trainer</code></td>
+<td>DP, FSDP2, HSDP, TP, SP, CP, PP, EP, expert TP</td>
+</tr>
+<tr>
+<td>Megatron Core</td>
+<td>Model chunks in a list or tuple</td>
+<td>DP, TP, SP, CP, PP, virtual PP, EP, expert TP</td>
+</tr>
+<tr>
+<td>DeepSpeed</td>
+<td>DeepSpeed engine</td>
+<td>DP, ZeRO 1-3, TP, PP, Ulysses SP, EP, expert TP</td>
+</tr>
+</tbody>
+</table>
+<p>SCOUT derives equivalent-peer groups from each framework's topology.
+Dense replay uses data-parallel or FSDP peers while preserving the model-parallel coordinates required by the replayed layer.
+Expert replay uses expert-data-parallel peers while preserving EP and expert-TP coordinates.
+Exact localization requires at least three equivalent peers.</p>
+<p>Use the package-root API for every framework.
+Pass <code>framework="pytorch"</code>, <code>"torchtitan"</code>, <code>"megatron"</code>, or <code>"deepspeed"</code> only when a custom wrapper makes automatic dispatch ambiguous.</p>
+<p>TorchTitan accepts its initialized trainer directly:</p>
+<pre><code class="language-python">resiliency = enable_resiliency(trainer, interval=10)
+trainer.train()
+</code></pre>
+<p>The adapter checkpoints and restores trainer, scheduler, dataloader, optimizer, and model state.
+It also coordinates TorchTitan's durable loader with an earlier GEMINI recovery.</p>
+<p>Megatron accepts the model chunks, optimizer, and scheduler created before its production <code>train()</code> call:</p>
+<pre><code class="language-python">from megatron.training import get_args
+
+from lm_resiliency import enable_resiliency
+
+
+def attach_resiliency(model_chunks, optimizer, scheduler):
+    resiliency = enable_resiliency(
+        model_chunks,
+        optimizer,
+        opt_param_scheduler=scheduler,
+        interval=10,
+    )
+    get_args().iteration = resiliency.step_count
+    return resiliency
+</code></pre>
+<p>Call this helper immediately after Megatron creates the three training objects, then continue into its existing <code>train()</code> call.
+Capture and restore caller-owned sample or dataset state with <code>extra_state_fn</code> and <code>load_extra_state_fn</code>.</p>
+<p>DeepSpeed owns its optimizer, so pass only the engine:</p>
+<pre><code class="language-python">resiliency = enable_resiliency(engine, interval=10)
+</code></pre>
+<p>Unsupported arguments for the selected adapter raise <code>TypeError</code>.</p>
+<h2 id="evaluate-fault-localization">Evaluate Fault Localization<a class="headerlink" href="#evaluate-fault-localization" title="Permanent link">&para;</a></h2>
+<p>The fault injection evaluation kit binds a declarative campaign to PyTorch,
+TorchTitan, Megatron Core, or DeepSpeed training objects:</p>
+<pre><code class="language-python">from lm_resiliency import (
+    CorruptionOperation,
+    FailureType,
+    FaultCampaign,
+    FaultIncident,
+    FaultScope,
+    FaultSpec,
+    FaultSurface,
+    FaultTarget,
+    IncidentLifetime,
+    IncidentTrigger,
+    enable_fault_injection,
+)
+
+campaign = FaultCampaign(
+    name=&quot;output-sdc&quot;,
+    incidents=(
+        FaultIncident(
+            incident_id=&quot;hidden-sdc&quot;,
+            trigger=IncidentTrigger(at=(20,)),
+            lifetime=IncidentLifetime(matching_calls=1),
+            faults=(
+                FaultSpec(
+                    fault_id=&quot;hidden-sign-flip&quot;,
+                    type=FailureType.TENSOR_CORRUPTION,
+                    target=FaultTarget(
+                        rank=0,
+                        module_path=&quot;layers.2&quot;,
+                        surface=FaultSurface.OUTPUT,
+                    ),
+                    parameters={
+                        &quot;operation&quot;: CorruptionOperation.SIGN_FLIP.value,
+                        &quot;scope&quot;: FaultScope.FULL.value,
+                    },
+                ),
+            ),
+        ),
+    ),
+)
+faults = enable_fault_injection(model, optimizer, campaign=campaign)
+</code></pre>
+<p>The framework optimizer boundary advances the <code>training_iteration</code> clock
+automatically; the training loop remains unchanged.
+The injector records verified ground truth independently of SCOUT and GEMINI,
+then <code>faults.evaluate(...)</code> compares neutral localization results with expected
+ranks, resources, and components.
+Custom <code>CampaignStateStore</code> implementations must provide atomic
+<code>compare_and_swap(expected, updated)</code> in addition to <code>load()</code> and <code>save()</code>, so
+overlapping old and replacement workers cannot both claim a restart-stable
+occurrence.
+See <a href="../fault_injection/">Fault injection evaluation</a> for manifests, framework
+targets, permanent and intermittent schedules, destructive executors, scoring,
+and safety boundaries.</p>
+<h2 id="native-pytorch">Native PyTorch<a class="headerlink" href="#native-pytorch" title="Permanent link">&para;</a></h2>
+<p>Call the package-root API after constructing the model and optimizer.
+Replicated models and <code>DistributedDataParallel</code> use the standard PyTorch state-dict path.</p>
+<p>FSDP2 and HSDP models created with <code>torch.distributed.fsdp.fully_shard()</code> use a local-shard path automatically:</p>
+<pre><code class="language-python">from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import fully_shard
+
+from lm_resiliency import enable_resiliency
+
+
+mesh = init_device_mesh(
+    &quot;cuda&quot;,
+    (dp_replicate, dp_shard),
+    mesh_dim_names=(&quot;dp_replicate&quot;, &quot;dp_shard&quot;),
+)
+for layer in model.layers:
+    fully_shard(layer, mesh=mesh)
+fully_shard(model, mesh=mesh)
+
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+resiliency = enable_resiliency(model, optimizer, interval=10)
+</code></pre>
+<p>Use a one-dimensional mesh for pure FSDP2.
+The integration infers FSDP2 or HSDP from the parameter DeviceMesh, checkpoints local DTensor shards, and unshards only the sampled module during SCOUT replay.
+For HSDP, SCOUT compares ranks at the same shard coordinate across <code>dp_replicate</code>.
+Pure FSDP without natural replicas uses shard peers.
+For a nonstandard mesh, pass an object with <code>dp_replicate</code> and <code>dp_shard</code> attributes as <code>parallelism_info</code>.
+When an initialized TorchTitan <code>Trainer</code> is passed, the adapter reads its <code>ParallelDims</code> object automatically.
+For lower-level TorchTitan model-and-optimizer integration, pass <code>parallelism_info</code> explicitly.</p>
+<p>SCOUT creates independent Gloo and NCCL detection groups from the model topology.
+To provide custom groups, pass both <code>group</code> and <code>nccl_group</code>; supplying only one raises <code>ValueError</code>.</p>
+<h2 id="configure-protection">Configure Protection<a class="headerlink" href="#configure-protection" title="Permanent link">&para;</a></h2>
+<p>GEMINI and SCOUT are enabled by default.
+Disable either component when only one is required:</p>
+<pre><code class="language-python"># GEMINI only.
+resiliency = enable_resiliency(
+    model,
+    optimizer,
+    enable_detection=False,
+)
+
+# SCOUT only.
+resiliency = enable_resiliency(
+    model,
+    optimizer,
+    enable_checkpoint=False,
+)
+</code></pre>
+<p>Use component configuration objects for nondefault behavior:</p>
+<pre><code class="language-python">from lm_resiliency import (
+    InMemoryCkptConfig,
+    ReplayHarnessConfig,
+    enable_resiliency,
+)
+
+resiliency = enable_resiliency(
+    model,
+    optimizer,
+    interval=10,
+    checkpoint=InMemoryCkptConfig(
+        replication_jump=8,
+        disk_folder=&quot;/local_nvme/gemini&quot;,
+        verify_integrity=True,
+    ),
+    replay=ReplayHarnessConfig(
+        rotate_layers=True,
+        embedding_check_interval=10,
+        hidden_check_interval=10,
+        output_check_interval=20,
+        optimizer_check_interval=10,
+        straggler_confirmation_rounds=2,
+        hang_stall_threshold_s=30.0,
+    ),
+)
+</code></pre>
+<p>The top-level <code>interval</code> overrides <code>InMemoryCkptConfig.interval</code> and the base <code>ReplayHarnessConfig.check_interval</code>.
+Explicit embedding, hidden, output, and optimizer check intervals continue to override that base replay cadence.
+See <a href="../gemini/#configuration">GEMINI configuration</a> and <a href="../scout/#configuration">SCOUT configuration</a> for configuration guidance.</p>
+<h2 id="instrument-a-dataloader">Instrument a DataLoader<a class="headerlink" href="#instrument-a-dataloader" title="Permanent link">&para;</a></h2>
+<p>SCOUT can measure sampled <code>DataLoader.next()</code> stalls from its out-of-band monitor:</p>
+<pre><code class="language-python">train_dataloader = resiliency.instrument_dataloader(
+    train_dataloader,
+    name=&quot;train&quot;,
+)
+</code></pre>
+<p>Instrument the DataLoader before creating its long-lived iterator.
+The original DataLoader is returned unchanged when SCOUT is disabled.</p>
+<h2 id="instrument-checkpoint-io">Instrument Checkpoint I/O<a class="headerlink" href="#instrument-checkpoint-io" title="Permanent link">&para;</a></h2>
+<p>Wrap framework-owned checkpoint calls so the out-of-band observer can localize blocked or slow reads and writes:</p>
+<pre><code class="language-python">with resiliency.checkpoint_io(&quot;write&quot;, name=&quot;periodic&quot;):
+    save_checkpoint()
+
+with resiliency.checkpoint_io(&quot;read&quot;, name=&quot;recovery&quot;):
+    load_checkpoint()
+</code></pre>
+<p>SCOUT-certified durable checkpoint callbacks and fallback loads are instrumented automatically.
+Use the context manager for other framework checkpoint paths.</p>
+<h2 id="add-caller-owned-state">Add Caller-Owned State<a class="headerlink" href="#add-caller-owned-state" title="Permanent link">&para;</a></h2>
+<p>The PyTorch adapter can include scheduler, sampler, or other caller-owned state:</p>
+<pre><code class="language-python">def capture_extra_state():
+    return {
+        &quot;scheduler&quot;: scheduler.state_dict(),
+        &quot;sampler&quot;: sampler.state_dict(),
+    }
+
+
+def restore_extra_state(state):
+    scheduler.load_state_dict(state[&quot;scheduler&quot;])
+    sampler.load_state_dict(state[&quot;sampler&quot;])
+
+
+resiliency = enable_resiliency(
+    model,
+    optimizer,
+    extra_state_fn=capture_extra_state,
+    load_extra_state_fn=restore_extra_state,
+)
+</code></pre>
+<p>Do not include model or optimizer state.
+The framework adapter captures those objects.</p>
+<h2 id="configure-recovery">Configure Recovery<a class="headerlink" href="#configure-recovery" title="Permanent link">&para;</a></h2>
+<p>Provide the framework's durable loader as the fallback:</p>
+<pre><code class="language-python">resiliency = enable_resiliency(
+    model,
+    optimizer,
+    load_fallback=load_durable_checkpoint,
+)
+</code></pre>
+<p>GEMINI first attempts its available memory and node-local tiers.
+It calls <code>load_fallback</code> only when no recoverable GEMINI checkpoint exists.</p>
+<p>Use <code>resiliency.step_count</code> when the training loop needs an explicit resume point:</p>
+<pre><code class="language-python">for step in range(resiliency.step_count, max_steps):
+    train_step()
+</code></pre>
+<h2 id="configure-moe-replay">Configure MoE Replay<a class="headerlink" href="#configure-moe-replay" title="Permanent link">&para;</a></h2>
+<p>Bind a qualified execution-regime catalog to the post-dispatch expert stage:</p>
+<pre><code class="language-python">from lm_resiliency import (
+    GroupedExpertMaterializer,
+    ReplayHarnessConfig,
+    ReplayWorkload,
+    enable_resiliency,
+)
+
+workload = ReplayWorkload.from_moe_catalog(
+    catalog,
+    replay_modules=[model.post_dispatch_expert_stage],
+    materializer=GroupedExpertMaterializer(),
+)
+
+resiliency = enable_resiliency(
+    model,
+    optimizer,
+    replay=ReplayHarnessConfig(
+        workload=workload,
+        capture_inputs_by_value=True,
+        rotate_layers=False,
+    ),
+)
+</code></pre>
+<p><code>GroupedExpertMaterializer</code> supports the common <code>(tokens, tokens_per_expert, probabilities)</code> contract.
+For scalar recipe <code>n_exec</code>, it sets every local expert count to <code>n_exec</code> and resizes token-aligned inputs to <code>n_exec * local_expert_count</code> rows.
+Use <code>counts_input</code> for a different count argument and <code>alignment</code> for backend row alignment.</p>
+<p>Use <code>LeadingDimensionMaterializer</code> only when the expert boundary has no separate count or offset metadata.
+<code>ReplayWorkload.from_moe_catalog()</code> marks the workload as expert replay, so Megatron, DeepSpeed, and mesh-based adapters select expert-data-parallel peers automatically.
+For a custom expert workload built with <code>ReplayWorkload.from_shapes()</code>, pass <code>peer_role="expert"</code>.
+See <a href="../moe_execution_regimes/">MoE execution regimes</a> for catalog qualification and exact fallback.</p>
+<h2 id="configure-alltoall-replay">Configure AllToAll Replay<a class="headerlink" href="#configure-alltoall-replay" title="Permanent link">&para;</a></h2>
+<p>SCOUT captures Python-visible AllToAll tensor layouts, split matrices, sequence positions, and process-group membership.
+At each replay check, the configured policy generates bounded representative traffic matrices.
+The shared executor materializes deterministic rank-tagged payloads, executes the matrices on the captured process group, verifies routing exactly, and reports timing through C3 and Cross-PG localization.</p>
+<p>The default <code>BalancedAndPermutationPolicy</code> executes at most two matrices:</p>
+<ul>
+<li>a balanced matrix for concurrent peer traffic; and</li>
+<li>a cyclic permutation matrix that places each sender's payload on one route while keeping per-rank send and receive volume equal.</li>
+</ul>
+<p>The default payload budget is 4 MiB per rank and one tensor row is the minimum allocation unit.
+The matrices depend on process-group size, tensor row width, and sequence position rather than observed token routing, so equivalent data-parallel replicas remain comparable.
+This is representative coverage, not exhaustive coverage of every possible routing matrix.</p>
+<p>Change the payload bound through <code>ReplayHarnessConfig</code>:</p>
+<pre><code class="language-python">from lm_resiliency import (
+    BalancedAndPermutationPolicy,
+    ReplayHarnessConfig,
+    enable_resiliency,
+)
+
+resiliency = enable_resiliency(
+    model,
+    optimizer,
+    replay=ReplayHarnessConfig(
+        all_to_all_policy=BalancedAndPermutationPolicy(
+            max_payload_bytes_per_rank=2 * 1024 * 1024,
+        ),
+    ),
+)
+</code></pre>
+<p>To define another policy, implement <code>AllToAllReplayPolicy.generate(capture)</code> and return one or more square <code>AllToAllTrafficMatrix</code> values.
+<code>capture.observed_splits</code> exposes the reconstructed training matrix for trace-based policies.
+Return matrices in deterministic order on equivalent replicas.
+Set <code>all_to_all_policy=None</code> to disable this replay surface.</p>
+<h2 id="report-faults">Report Faults<a class="headerlink" href="#report-faults" title="Permanent link">&para;</a></h2>
+<p>Direct integrations have two callback paths:</p>
+<table>
+<thead>
+<tr>
+<th>Callback</th>
+<th>Payload</th>
+<th>Signals</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>fault_callback</code></td>
+<td><code>ReplayResult</code></td>
+<td>SDC and replay-localized stragglers</td>
+</tr>
+<tr>
+<td><code>oob_fault_callback</code></td>
+<td><code>SCOUTFaultReport</code></td>
+<td>Hangs, DataLoader stalls, and checkpoint I/O stalls</td>
+</tr>
+</tbody>
+</table>
+<p><code>replay_fault_reports(result)</code> converts a <code>ReplayResult</code> into JSON-ready <code>SCOUTFaultReport</code> records.
+For confirmed communication stragglers, SCOUT automatically intersects slow process groups and reports the shared rank's host as <code>scope="node"</code>.
+The report includes the endpoint rank and host, supporting and contradictory group evidence, and confidence.
+Use <code>OrchestrationHooks</code> when an external manager needs one normalized callback.</p>
+<h2 id="certify-durable-checkpoints">Certify Durable Checkpoints<a class="headerlink" href="#certify-durable-checkpoints" title="Permanent link">&para;</a></h2>
+<p><code>DurableCheckpointConfig</code> connects SCOUT evidence to framework-owned checkpoint bytes:</p>
+<pre><code class="language-python">from lm_resiliency import (
+    CallbackDurableCheckpointAdapter,
+    DurableCheckpointConfig,
+    enable_resiliency,
+)
+
+adapter = CallbackDurableCheckpointAdapter(
+    save_candidate_fn=save_candidate,
+    load_checkpoint_fn=load_checkpoint,
+    commit_candidate_fn=commit_candidate,
+    quarantine_candidate_fn=quarantine_candidate,
+)
+
+resiliency = enable_resiliency(
+    model,
+    optimizer,
+    durable_checkpoint=DurableCheckpointConfig(
+        manifest_dir=&quot;/shared/checkpoints/scout&quot;,
+        environment_id=job_environment_id,
+        adapter=adapter,
+    ),
+)
+</code></pre>
+<p>Certification requires SCOUT.
+An accepted dense check certifies its checkpoint immediately because the dense shape catalog has one entry.
+Dynamic MoE training runs one configured replay-shape recipe per scheduled check.
+After the first complete MoE catalog cycle, the framework persists the boundary as <code>CANDIDATE</code>.
+The following complete clean cycle promotes that checkpoint to <code>RECOVERY_VERIFIED</code> and creates the next candidate.
+The manifest directory must have durability equivalent to the framework checkpoint store.
+Detected SDC and inaccessible-machine recovery select only the
+recovery-verified manifest and do not call an unconstrained <code>load_fallback</code>.
+See <a href="../scout/#checkpoint-certification-and-recovery">SCOUT checkpoint certification</a> for the callback contract.</p>
+<h2 id="select-recovery-trust">Select Recovery Trust<a class="headerlink" href="#select-recovery-trust" title="Permanent link">&para;</a></h2>
+<p>The launcher can classify a failure before recovery:</p>
+<pre><code class="language-python">mode = resiliency.prepare_recovery(
+    &quot;hang&quot;,
+    all_ranks_accessible=True,
+)
+</code></pre>
+<p>The high-level choices are:</p>
+<table>
+<thead>
+<tr>
+<th>Failure condition</th>
+<th>Selected checkpoint</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Accessible straggler</td>
+<td>Latest complete GEMINI checkpoint</td>
+</tr>
+<tr>
+<td>Hang or uncertain failure, all ranks accessible, full-catalog replay complete and clean</td>
+<td>Latest complete GEMINI checkpoint</td>
+</tr>
+<tr>
+<td>Full-catalog replay detects SDC, is incomplete, or returns missing evidence</td>
+<td><code>RECOVERY_VERIFIED</code></td>
+</tr>
+<tr>
+<td>SDC already detected</td>
+<td><code>RECOVERY_VERIFIED</code></td>
+</tr>
+<tr>
+<td>Required rank or machine inaccessible</td>
+<td><code>RECOVERY_VERIFIED</code></td>
+</tr>
+</tbody>
+</table>
+<p>On relaunch, pass the selected mode when it is known externally:</p>
+<pre><code class="language-python">from lm_resiliency import RecoveryMode, enable_resiliency
+
+resiliency = enable_resiliency(
+    model,
+    optimizer,
+    recovery_mode=RecoveryMode.RECOVERY_VERIFIED,
+)
+</code></pre>
+<p>An SDC decision is also persisted beside GEMINI checkpoint metadata so a
+same-storage restart cannot silently choose a newer candidate.</p>
+<h2 id="manager-integration">Manager Integration<a class="headerlink" href="#manager-integration" title="Permanent link">&para;</a></h2>
+<p><code>OrchestrationHooks</code> provides a platform-neutral boundary for fault reports, checkpoint selection, and restart destinations:</p>
+<pre><code class="language-python">from lm_resiliency import enable_resiliency
+from lm_resiliency.manager_api import OrchestrationHooks
+
+hooks = OrchestrationHooks(
+    report_fault=lambda report: control.report_fault(rank, report),
+    report_recovery=lambda decision: control.report_recovery(rank, decision),
+    restart_destination=control.restart_destination,
+)
+
+resiliency = enable_resiliency(
+    model,
+    optimizer,
+    orchestration=hooks,
+)
+</code></pre>
+<p><code>report_recovery</code> receives a JSON-ready <code>RecoveryDecision</code> before the corresponding automatic fault report.
+The decision identifies the failure class, selected trust mode, checkpoint source, step, optional durable checkpoint ID, availability, and selection reason.
+Checkpoint lookup in the reporting process is rank-local and noncollective because a fault may have already made the training process group unusable.
+The manager can conservatively combine worker decisions, include the selected decision in its restart command, and pass <code>recovery_mode</code> to the relaunched integration.
+The restarted GEMINI loader retains responsibility for selecting a rank-consistent generation collectively.</p>
+<p>In-process SDC automatically emits a recovery-verified decision, while a replay-localized straggler emits a latest-GEMINI decision.
+An OOB hang emits a conservative recovery-verified decision without entering a blocked training process or invoking replay.
+An instrumented DataLoader stall emits a latest-GEMINI decision because the reporting worker remains accessible.
+An instrumented checkpoint I/O stall also emits a latest-GEMINI decision.
+Explicit calls to <code>prepare_recovery(...)</code> emit the resulting decision and retain it as <code>last_recovery_decision</code>.</p>
+<p>Before replacing or migrating a worker, preserve its latest recoverable state:</p>
+<pre><code class="language-python">step = resiliency.flush_for_restart()
+destination = control.restart_destination()
+
+if step &gt;= 0 and destination is not None:
+    resiliency.copy_checkpoint_to(destination)
+</code></pre>
+<p><code>copy_checkpoint_to</code> copies flushed local and peer shards.
+Import <code>make_transfer</code> from <code>lm_resiliency.manager_api</code> when endpoint-addressed manager transfer is required.
+The <code>"torch_dist"</code> and <code>"nixl"</code> backends share the <code>CheckpointTransfer</code> contract.</p>
+<p>Launcher retry, placement, replacement, and quarantine policy remain outside this repository.</p>
+<h2 id="monitor-hardware-health">Monitor Hardware Health<a class="headerlink" href="#monitor-hardware-health" title="Permanent link">&para;</a></h2>
+<p>The optional hardware-health API complements replay and out-of-band consensus with direct telemetry for permanent or imminent device failures.
+It is not enabled automatically by <code>enable_resiliency()</code>.</p>
+<pre><code class="language-python">from lm_resiliency.manager_api import (
+    HardwareHealthMonitor,
+    HealthConfig,
+    NvmlSource,
+)
+
+monitor = HardwareHealthMonitor(
+    HealthConfig(poll_interval_s=5.0),
+    [NvmlSource(device_index=physical_gpu_index)],
+    on_event=manager_health_callback,
+)
+monitor.start()
+</code></pre>
+<p>The caller resolves <code>physical_gpu_index</code> and supplies <code>manager_health_callback</code>.
+<code>on_event</code> receives one deduplicated <code>HealthEvent</code> for each fatal device-and-metric pair.
+The built-in NVML source covers uncorrectable ECC, row-remap failure, NVLink error growth, temperature near shutdown, and device loss.
+Custom <code>HealthSource</code> implementations can supply XID, PCIe, InfiniBand, NIC, HCA, or fabric telemetry.
+Warnings such as correctable ECC growth, pending row remaps, nonfatal XIDs, and elevated temperature are logged but do not invoke <code>on_event</code>.</p>
+<p>Call <code>monitor.close()</code> when the manager or worker lifecycle ends.
+See <a href="../scout/#hardware-telemetry">SCOUT hardware telemetry</a> for thresholds, localization granularity, and manager ownership.</p>
+<h2 id="lifecycle">Lifecycle<a class="headerlink" href="#lifecycle" title="Permanent link">&para;</a></h2>
+<p>Every framework adapter returns the same lifecycle surface:</p>
+<table>
+<thead>
+<tr>
+<th>API</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>step_count</code></td>
+<td>Completed optimizer steps, including the recovered resume point</td>
+</tr>
+<tr>
+<td><code>instrument_dataloader(...)</code></td>
+<td>Adds sampled DataLoader-stall instrumentation</td>
+</tr>
+<tr>
+<td><code>checkpoint_io(...)</code></td>
+<td>Marks a framework checkpoint read or write for OOB localization</td>
+</tr>
+<tr>
+<td><code>flush_for_restart()</code></td>
+<td>Flushes recoverable GEMINI state and returns its step, or <code>-1</code></td>
+</tr>
+<tr>
+<td><code>set_restart_destination(...)</code></td>
+<td>Sets an optional restart-mirror resolver</td>
+</tr>
+<tr>
+<td><code>copy_checkpoint_to(...)</code></td>
+<td>Copies flushed checkpoint shards</td>
+</tr>
+<tr>
+<td><code>prepare_recovery(...)</code></td>
+<td>Runs any required emergency recipe cycle and selects latest or recovery-verified trust</td>
+</tr>
+<tr>
+<td><code>last_recovery_decision</code></td>
+<td>Most recent JSON-ready checkpoint decision emitted to orchestration</td>
+</tr>
+<tr>
+<td><code>close()</code></td>
+<td>Optionally releases resources before process exit</td>
+</tr>
+</tbody>
+</table>
+<p>Normal training scripts do not need to call <code>close()</code>.
+Call it only when a long-lived process must tear down one training session before starting another.</p>
+<h2 id="advanced-integration">Advanced Integration<a class="headerlink" href="#advanced-integration" title="Permanent link">&para;</a></h2>
+<p>Framework-specific entry points remain available for explicit devices, process groups, and nonstandard topology metadata:</p>
+<ul>
+<li><code>lm_resiliency.integrations.pytorch.enable_resiliency</code></li>
+<li><code>lm_resiliency.integrations.torchtitan.enable_resiliency</code></li>
+<li><code>lm_resiliency.integrations.megatron.enable_resiliency</code></li>
+<li><code>lm_resiliency.integrations.deepspeed.enable_resiliency</code></li>
+</ul>
+<p>Prefer the package-root API unless the automatic adapter cannot represent the topology.
+Import low-level checkpoint managers, replay detectors, topology objects, and concrete transfer implementations from <code>lm_resiliency.experimental</code> only when accepting an unstable API.</p>
+<h2 id="command-line-interface">Command-Line Interface<a class="headerlink" href="#command-line-interface" title="Permanent link">&para;</a></h2>
+<p>The package installs <code>lm-resiliency-discover-moe-regimes</code> for building a SCOUT replay catalog from saved profiler observations, an environment description, and a complete request manifest.
+See <a href="../moe_execution_regimes/#build-and-audit-the-catalog">MoE execution regimes</a> for the command and catalog-qualification requirements.</p>
+<h2 id="related-guides">Related Guides<a class="headerlink" href="#related-guides" title="Permanent link">&para;</a></h2>
+<ul>
+<li><a href="https://github.com/LMResiliency/lm-resiliency/blob/ddd49235ea73b258f67af00afa4ca54e922785f0/examples/README.md">Production-loop examples</a></li>
+<li><a href="../fault_injection/">Fault injection evaluation</a></li>
+<li><a href="../gemini/">GEMINI</a></li>
+<li><a href="../scout/">SCOUT</a></li>
+<li><a href="../moe_execution_regimes/">MoE execution regimes</a></li>
+<li><a href="../validation/">Validation summary</a></li>
+</ul>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href=".." class="btn btn-neutral float-left" title="Home"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../compatibility/" class="btn btn-neutral float-right" title="Compatibility">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/LMResiliency/lm-resiliency" class="fa fa-code-fork" style="color: #fcfcfc"> LMResiliency/lm-resiliency</a>
+        </span>
+    
+    
+      <span><a href=".." style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../compatibility/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

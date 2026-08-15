@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>GEMINI - LM Resiliency</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "GEMINI";
+        var mkdocs_page_input_path = "gemini.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> LM Resiliency
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../api/">API Guide</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../compatibility/">Compatibility</a>
+                </li>
+              </ul>
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">GEMINI</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#architecture">Architecture</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#buffer-layout">Buffer Layout</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#peer-replication">Peer Replication</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#configuration">Configuration</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#checkpoint-validation">Checkpoint Validation</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#durable-moe-certification">Durable MoE Certification</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#persistence-and-recovery">Persistence and Recovery</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#public-integration">Public Integration</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#measured-overhead">Measured Overhead</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#boundaries">Boundaries</a>
+    </li>
+    </ul>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../scout/">SCOUT</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../torchrun_resiliency/">Torchrun Resiliency</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../moe_execution_regimes/">MoE Execution Regimes</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../validation/">Validation</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../release/">Release Process</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">LM Resiliency</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">GEMINI</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/LMResiliency/lm-resiliency/edit/main/docs/gemini.md">Edit on LMResiliency/lm-resiliency</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="gemini">GEMINI<a class="headerlink" href="#gemini" title="Permanent link">&para;</a></h1>
+<p>GEMINI captures training state into host memory, replicates it to a peer, and optionally persists it to node-local storage.
+It provides a fast recovery tier for PyTorch, TorchTitan, Megatron Core, and DeepSpeed while leaving durable global checkpointing to the training framework.</p>
+<p>For the system design and evaluation, see <a href="https://doi.org/10.1145/3600006.3613145">GEMINI: Fast Failure Recovery in Distributed Training with In-Memory Checkpoints</a>.
+This guide defines the operational contract of the current implementation.</p>
+<h2 id="architecture">Architecture<a class="headerlink" href="#architecture" title="Permanent link">&para;</a></h2>
+<p>Checkpoint work is pipelined after each capture:</p>
+<ol>
+<li>GEMINI copies the current model, optimizer, and caller-owned state from GPU to pinned CPU memory.</li>
+<li>A background completion worker waits for the host copy and immediately starts replication to a paired rank.</li>
+<li>Node-local serialization runs independently at the configured flush cadence.</li>
+</ol>
+<p>The asynchronous GPU-to-CPU copy records a CUDA event.
+<code>maybe_wait()</code> waits for the completion worker and therefore guarantees that peer replication has been launched.
+This boundary prevents a checkpoint from mixing state from two optimizer steps.</p>
+<p>Replication can span several training steps, but it must complete before the source buffer is reused at the next capture.
+Transfers are divided into fixed-size chunks to bound head-of-line interference with training communication.</p>
+<h2 id="buffer-layout">Buffer Layout<a class="headerlink" href="#buffer-layout" title="Permanent link">&para;</a></h2>
+<p>Replicated mode allocates four host slots lazily on the first capture:</p>
+<table>
+<thead>
+<tr>
+<th>Slot</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>own_current</code></td>
+<td>Receives the current GPU-to-CPU copy and becomes the replication source</td>
+</tr>
+<tr>
+<td><code>own_previous</code></td>
+<td>Retains the prior completed local recovery copy</td>
+</tr>
+<tr>
+<td><code>peer_current</code></td>
+<td>Receives the peer's current replica</td>
+</tr>
+<tr>
+<td><code>peer_previous</code></td>
+<td>Retains the prior completed peer recovery copy</td>
+</tr>
+</tbody>
+</table>
+<p>Each slot owns its tensor buffers, structural metadata, step, and non-tensor state.
+Non-tensor state includes scheduler, sampler, RNG, and training-position data supplied by the framework adapter or <code>extra_state_fn</code>.
+The metadata travels with peer replication so recovery reconstructs the complete captured state.</p>
+<p>HSDP can skip explicit peer replication because the replica dimension already holds corresponding shards.
+In that mode GEMINI uses two own slots.</p>
+<h2 id="peer-replication">Peer Replication<a class="headerlink" href="#peer-replication" title="Permanent link">&para;</a></h2>
+<p><code>replication_jump</code> pairs ranks separated by a fixed world-rank distance.
+The default selects one visible node width so paired ranks normally reside on different hosts.</p>
+<p>For a world size of 16 and <code>replication_jump=8</code>, rank <code>0</code> pairs with rank <code>8</code>, rank <code>1</code> with rank <code>9</code>, and so on.
+Validate this assumption when rank placement is not contiguous by node.</p>
+<p>The built-in replication path uses a dedicated Gloo process group.
+It is validated for correctness over TCP and is not a line-rate RDMA implementation.
+Production deployments can use manager-driven Torch Distributed or NIXL transfer APIs for replacement workflows, but automatic checkpoint replication currently uses Gloo.</p>
+<p><code>replication_chunk_size</code> limits the largest in-flight transfer unit.
+Choose it from measured training communication slack rather than assuming a fixed network rate:</p>
+<pre><code class="language-python">from lm_resiliency import estimate_chunk_size
+
+chunk_size = estimate_chunk_size(
+    nic_bandwidth_gbps=400,
+    layer_compute_ms=9.4,
+    ag_time_ms=1.0,
+    max_ag_delay_fraction=0.05,
+)
+</code></pre>
+<p>The default is 16 MiB.
+The estimator returns a bound derived from the supplied bandwidth and prefetch timing; it is not an automatic network profiler.</p>
+<h2 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">&para;</a></h2>
+<pre><code class="language-python">from lm_resiliency import InMemoryCkptConfig
+
+config = InMemoryCkptConfig(
+    enable=True,
+    interval=10,
+    replication_jump=-1,
+    replication_chunk_size=16 * 1024 * 1024,
+    disk_flush_interval=100,
+    disk_folder=&quot;./checkpoints&quot;,
+    verify_integrity=False,
+    skip_replication_if_hsdp=True,
+    pin_memory=True,
+)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>interval</code></td>
+<td>Capture cadence in optimizer steps when GEMINI runs independently</td>
+</tr>
+<tr>
+<td><code>replication_jump</code></td>
+<td>Peer rank spacing; <code>-1</code> uses the visible GPU count</td>
+</tr>
+<tr>
+<td><code>replication_chunk_size</code></td>
+<td>Bytes per replication send</td>
+</tr>
+<tr>
+<td><code>disk_flush_interval</code></td>
+<td>Node-local flush cadence; <code>0</code> disables periodic flush</td>
+</tr>
+<tr>
+<td><code>disk_folder</code></td>
+<td>Node-local checkpoint directory</td>
+</tr>
+<tr>
+<td><code>verify_integrity</code></td>
+<td>Store and verify CRC-32 for serialized shards</td>
+</tr>
+<tr>
+<td><code>skip_replication_if_hsdp</code></td>
+<td>Use natural HSDP replicas instead of explicit peer transfer</td>
+</tr>
+<tr>
+<td><code>pin_memory</code></td>
+<td>Allocate page-locked host buffers for asynchronous copies</td>
+</tr>
+</tbody>
+</table>
+<p>The unified <code>enable_resiliency(..., interval=N)</code> call overrides the component interval.</p>
+<h2 id="checkpoint-validation">Checkpoint Validation<a class="headerlink" href="#checkpoint-validation" title="Permanent link">&para;</a></h2>
+<p>When GEMINI and SCOUT are enabled together, <code>interval=N</code> is the GEMINI capture frequency and the default interval for each SCOUT recipe class.
+SCOUT runs first.
+A healthy result, or a straggler result without SDC, permits GEMINI to capture that step.
+An SDC result prevents the capture.
+Dense recipe classes can override the default interval independently, but a checkpoint boundary still requires an accepted SCOUT result at that step.</p>
+<p>For <code>N=10</code>:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: right;">Step</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">1-9</td>
+<td>Training</td>
+</tr>
+<tr>
+<td style="text-align: right;">10, Healthy or Straggler without SDC</td>
+<td>Capture step 10 and replicate it after D2H completion</td>
+</tr>
+<tr>
+<td style="text-align: right;">10, SDC</td>
+<td>Skip step 10 capture and require verified recovery</td>
+</tr>
+</tbody>
+</table>
+<p>For dense replay, the shape catalog has <code>K=1</code>.
+The checkpoint captured after an accepted check becomes <code>RECOVERY_VERIFIED</code> immediately and does not enter a second validation cycle.
+Dynamic catalogs, including a MoE catalog that compresses to one recipe, use the candidate protocol below.</p>
+<p>This policy assumes unsafe state remains observable at the validation boundary through persistent corruption or recurring failure.
+One-shot transient corruption is outside the SCOUT guarantee.</p>
+<h2 id="durable-moe-certification">Durable MoE Certification<a class="headerlink" href="#durable-moe-certification" title="Permanent link">&para;</a></h2>
+<p>Normal MoE training checks one recipe every <code>N</code> steps rather than running all
+<code>K</code> recipes at one boundary. After the first complete accepted cycle:</p>
+<ol>
+<li>GEMINI persists the latest CPU checkpoint and received peer replica as
+   <code>CANDIDATE</code>.</li>
+<li>The framework writes the corresponding durable candidate.</li>
+<li>The candidate remains excluded from conservative SDC recovery.</li>
+</ol>
+<p>After the following complete accepted cycle, the prior candidate becomes
+<code>RECOVERY_VERIFIED</code>, and the current boundary becomes the next candidate.
+Verification therefore covers two consecutive <code>K</code>-recipe cycles.</p>
+<p>An SDC result rejects the current candidate and preserves the preceding
+<code>RECOVERY_VERIFIED</code> generation.
+See <a href="../scout/#checkpoint-certification-and-recovery">SCOUT checkpoint certification</a> for checkpoint states, global trust decisions, and failure recovery.</p>
+<p>SCOUT comparison groups remain topology-specific, but checkpoint acceptance is
+job-wide. Before any save, promotion, or rejection, all checkpoint ranks agree
+whether the scheduled cycle completed and whether any comparison group found
+SDC. An SDC in one group therefore rejects the candidate on every rank.</p>
+<h2 id="persistence-and-recovery">Persistence and Recovery<a class="headerlink" href="#persistence-and-recovery" title="Permanent link">&para;</a></h2>
+<p>GEMINI serializes only completed slots.
+At a dense accepted boundary, it persists the latest local CPU checkpoint and received peer replica as recovery-verified.
+At a dynamic recipe-cycle boundary, it persists them as the new candidate and records candidate and recovery-verified steps separately.
+Each rank owns its status sidecar; several workers on one node never update the same mutable trust record.
+A persisted peer shard carries the corresponding peer status so recovery can reconstruct the verified generation after node loss.
+If newer status cannot be established, recovery selects the common verified step conservatively.
+With <code>verify_integrity=True</code>, it stores a CRC-32 for each shard and treats a checksum failure as an unavailable shard.
+Checksums detect stored-byte corruption; they cannot prove that the source GPU state was numerically correct.</p>
+<p>Node-local files use checkpoint format version 2. Tensors are loaded through PyTorch's <code>weights_only=True</code> path, while reconstruction metadata is represented by a schema-constrained JSON document. The metadata schema supports the built-in containers and scalar types used by framework state, NumPy RNG values, and dense CPU tensors such as PyTorch RNG state. GEMINI validates the payload fields, metadata types, tensor count, shapes, dtypes, reconstruction paths, and optional CRC values before recovery can apply state. Unsupported caller-owned metadata fails the checkpoint write instead of falling back to unrestricted pickle deserialization.</p>
+<p>The original <code>0.1.0</code> node-local format used unrestricted pickle metadata and is intentionally not loadable by newer versions. Complete an in-progress <code>0.1.0</code> recovery before upgrading, or use the framework-owned durable checkpoint as the upgrade boundary. Node-local GEMINI files remain a fast restart tier rather than a cross-version interchange format.</p>
+<p>Safe deserialization prevents a replaced file from invoking arbitrary pickle globals, but it does not establish who produced the tensor values. Treat the checkpoint directory as training-state storage: restrict filesystem ownership and write permissions to the training job, avoid following untrusted symlinks or copying files from untrusted sources, and use framework-owned durable checkpoints when stronger provenance is required. CRC-32 detects accidental byte corruption only; an attacker able to replace a shard can also replace its checksum.</p>
+<p><code>SIGTERM</code> and <code>SIGINT</code> handlers synchronously flush the newest recoverable state during the scheduler grace period and then chain to the previous handler.
+<code>SIGKILL</code>, power loss, and complete node loss cannot be handled locally.
+Peer replicas and framework durable checkpoints cover those cases.</p>
+<p>For an accessible straggler, recovery selects the newest rank-consistent GEMINI step available from:</p>
+<ol>
+<li>complete local GEMINI state;</li>
+<li>a complete peer replica;</li>
+<li>node-local serialized state; or</li>
+<li>the caller's framework fallback.</li>
+</ol>
+<p>Every rank participates in recovery-step selection.
+A newer step present on only part of the job is not selected.</p>
+<p>Detected SDC or an inaccessible machine selects the persisted <code>RECOVERY_VERIFIED</code> step.
+For a hang or uncertain failure with all ranks accessible, SCOUT replays the full enabled catalog.
+A complete clean sweep selects the latest GEMINI checkpoint.
+Detected SDC, missing evidence, or an incomplete sweep selects <code>RECOVERY_VERIFIED</code>.</p>
+<h2 id="public-integration">Public Integration<a class="headerlink" href="#public-integration" title="Permanent link">&para;</a></h2>
+<p>Use the unified entry point for normal training:</p>
+<pre><code class="language-python">from lm_resiliency import enable_resiliency
+
+resiliency = enable_resiliency(
+    model,
+    optimizer,
+    interval=10,
+    load_fallback=load_durable_checkpoint,
+)
+</code></pre>
+<p>The lower-level <code>InMemoryCheckpointManager</code> is available for research and custom adapter development, but is not part of the stable API:</p>
+<pre><code class="language-python">from lm_resiliency import InMemoryCkptConfig
+from lm_resiliency.experimental import InMemoryCheckpointManager
+
+manager = InMemoryCheckpointManager(InMemoryCkptConfig(interval=10))
+
+for step in range(1, max_steps + 1):
+    loss = train_step()
+    loss.backward()
+
+    # Complete the prior capture before parameters are modified again.
+    manager.maybe_wait()
+    optimizer.step()
+    optimizer.zero_grad()
+
+    if step % manager.config.interval == 0:
+        manager.save(state_dict(), step)
+
+manager.close()
+</code></pre>
+<p>On recovery, call collective <code>find_latest()</code> before <code>load()</code>.
+Framework integrations call the manager at safe optimizer boundaries and include their complete recovery state.</p>
+<h2 id="measured-overhead">Measured Overhead<a class="headerlink" href="#measured-overhead" title="Permanent link">&para;</a></h2>
+<p>The following measurements used eight A100-SXM4-80GB GPUs and approximately 1 billion parameters per rank after sharding:</p>
+<table>
+<thead>
+<tr>
+<th>Workload</th>
+<th style="text-align: right;">Checkpoint size</th>
+<th style="text-align: right;">Blocking per capture</th>
+<th style="text-align: right;">Amortized overhead</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TorchTitan/Megatron-style FSDP, 8.855 s step, interval 5</td>
+<td style="text-align: right;">12.05 GB/rank</td>
+<td style="text-align: right;">7.7 ms</td>
+<td style="text-align: right;">1.5 ms/step, or 0.017%</td>
+</tr>
+<tr>
+<td>DeepSpeed ZeRO-2, interval 5</td>
+<td style="text-align: right;">14.00 GB/rank</td>
+<td style="text-align: right;">2.36 ms</td>
+<td style="text-align: right;">0.015% of the measured step</td>
+</tr>
+</tbody>
+</table>
+<p>These values measure the synchronization-visible portion of asynchronous capture.
+They do not infer overhead from small differences between independent end-to-end step-time runs.
+Hardware, state layout, capture cadence, and available copy or network overlap can change the result.
+The reproducible <a href="https://github.com/LMResiliency/lm-resiliency/blob/ddd49235ea73b258f67af00afa4ca54e922785f0/benchmarks/README.md">healthy-path benchmark</a> records current-package baseline, GEMINI, SCOUT, and combined measurements and applies explicit scheduled-run thresholds.
+The table above remains historical evidence for its stated A100 workload and is not a baseline for different benchmark shapes or hardware.</p>
+<h2 id="boundaries">Boundaries<a class="headerlink" href="#boundaries" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Built-in peer replication uses Gloo over TCP; RDMA and line-rate transport performance are not claimed.</li>
+<li>Node-local storage is a fast restart tier, not a replacement for framework-owned durable checkpoints.</li>
+<li><code>replication_jump</code> assumes a compatible rank placement and must be validated for the deployment.</li>
+<li>Integrity checks detect corruption after capture, not corruption already present in source state.</li>
+<li>Safe weights-only loading prevents arbitrary pickle execution but does not authenticate tensor values or their source.</li>
+<li>Node-local checkpoint format version 2 does not load the unrestricted-pickle format written by <code>0.1.0</code>.</li>
+<li>Signal-triggered flush requires a catchable signal and sufficient termination grace time.</li>
+<li>Manager policy, relaunch, placement, and physical replacement remain external.</li>
+</ul>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../compatibility/" class="btn btn-neutral float-left" title="Compatibility"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../scout/" class="btn btn-neutral float-right" title="SCOUT">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/LMResiliency/lm-resiliency" class="fa fa-code-fork" style="color: #fcfcfc"> LMResiliency/lm-resiliency</a>
+        </span>
+    
+    
+      <span><a href="../compatibility/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../scout/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>
