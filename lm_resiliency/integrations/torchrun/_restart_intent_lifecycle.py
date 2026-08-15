@@ -57,6 +57,17 @@ class StoredRestartIntentLifecycle:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _GuardProvenance:
+    revision: int
+    value_digest: str
+    mutation_sequence: int
+    value_sequence: int
+    lifetime_sequence: int
+    committed_at_unix_ms: int
+    guard_committed_at_unix_ms: int
+
+
 class RestartIntentLifecycleReader:
     """Read the permanent last-closed-intent fence for one run."""
 
@@ -101,6 +112,10 @@ class RestartIntentLifecycleReader:
                     raise RestartIntentLifecycleCorrupt(
                         "restart-intent lifecycle record was deleted"
                     )
+                if self._generation_reader.current() != generation:
+                    raise RestartIntentLifecycleConflict(
+                        "generation changed during restart-intent lifecycle observation"
+                    )
                 return None
             stored = self._decode_entry(entry, generation)
             observed = self._store.get(self._lifecycle_key)
@@ -139,7 +154,7 @@ class RestartIntentLifecycleReader:
             raise RestartIntentLifecycleCorrupt(
                 "restart-intent lifecycle record references a missing intent"
             )
-        closed_intent, closed_intent_committed_at_unix_ms = self._decode_closed_intent(
+        closed_intent, opening_provenance = self._decode_closed_intent(
             closed_intent_entry,
             record,
         )
@@ -148,7 +163,11 @@ class RestartIntentLifecycleReader:
             raise RestartIntentLifecycleCorrupt(
                 "closed restart intent does not identify its generation snapshot"
             )
-        committed_at_unix_ms = _guarded_commit_time(
+        if opening_provenance.committed_at_unix_ms < snapshot.committed_at_unix_ms:
+            raise RestartIntentLifecycleCorrupt(
+                "closed restart intent predates its generation snapshot"
+            )
+        closing_provenance = _guarded_provenance(
             entry,
             guard_key=self.coordinator_lease_key,
             guard_revision=record.coordinator_fencing_token,
@@ -156,10 +175,11 @@ class RestartIntentLifecycleReader:
             lease_duration_ms=record.coordinator_lease_duration_ms,
             path="restart-intent lifecycle record",
         )
+        _validate_provenance_order(opening_provenance, closing_provenance)
         if (
             entry.lifetime_sequence != 1
             or entry.value_sequence != entry.mutation_sequence
-            or committed_at_unix_ms < closed_intent_committed_at_unix_ms
+            or closing_provenance.committed_at_unix_ms < opening_provenance.committed_at_unix_ms
         ):
             raise RestartIntentLifecycleCorrupt(
                 "restart-intent lifecycle record has invalid store provenance"
@@ -167,14 +187,14 @@ class RestartIntentLifecycleReader:
         return StoredRestartIntentLifecycle(
             record=record,
             revision=entry.revision,
-            committed_at_unix_ms=committed_at_unix_ms,
+            committed_at_unix_ms=closing_provenance.committed_at_unix_ms,
         )
 
     def _decode_closed_intent(
         self,
         entry: ControlStoreEntry,
         lifecycle: RestartIntentLifecycleRecord,
-    ) -> tuple[RestartIntentRecord, int]:
+    ) -> tuple[RestartIntentRecord, _GuardProvenance]:
         try:
             record = RestartIntentRecord.from_json(entry.value)
         except (TypeError, ValueError) as error:
@@ -191,7 +211,7 @@ class RestartIntentLifecycleReader:
             raise RestartIntentLifecycleCorrupt(
                 "restart-intent lifecycle record does not identify its closed intent"
             )
-        committed_at_unix_ms = _guarded_commit_time(
+        provenance = _guarded_provenance(
             entry,
             guard_key=self.coordinator_lease_key,
             guard_revision=record.coordinator_fencing_token,
@@ -207,10 +227,10 @@ class RestartIntentLifecycleReader:
             raise RestartIntentLifecycleCorrupt(
                 "closed restart-intent record has invalid store provenance"
             )
-        return record, committed_at_unix_ms
+        return record, provenance
 
 
-def _guarded_commit_time(
+def _guarded_provenance(
     entry: ControlStoreEntry,
     *,
     guard_key: str,
@@ -218,20 +238,69 @@ def _guarded_commit_time(
     guard_value_digest: str,
     lease_duration_ms: int,
     path: str,
-) -> int:
+) -> _GuardProvenance:
     guard_committed_at_unix_ms = entry.guard_committed_at_unix_ms
     committed_at_unix_ms = entry.committed_at_unix_ms
+    guard_revision_value = entry.guard_revision
+    guard_value_digest_value = entry.guard_value_digest
+    guard_mutation_sequence = entry.guard_mutation_sequence
+    guard_value_sequence = entry.guard_value_sequence
+    guard_lifetime_sequence = entry.guard_lifetime_sequence
     if (
         entry.guard_key != guard_key
-        or entry.guard_revision != guard_revision
-        or entry.guard_value_digest != guard_value_digest
+        or guard_revision_value != guard_revision
+        or guard_value_digest_value != guard_value_digest
         or guard_committed_at_unix_ms is None
         or committed_at_unix_ms is None
+        or guard_mutation_sequence is None
+        or guard_value_sequence is None
+        or guard_lifetime_sequence is None
         or committed_at_unix_ms < guard_committed_at_unix_ms
         or committed_at_unix_ms >= guard_committed_at_unix_ms + lease_duration_ms
     ):
         raise RestartIntentLifecycleCorrupt(f"{path} has invalid guard provenance")
-    return committed_at_unix_ms
+    if (
+        guard_lifetime_sequence > guard_mutation_sequence
+        or guard_value_sequence > guard_mutation_sequence - guard_lifetime_sequence + 1
+    ):
+        raise RestartIntentLifecycleCorrupt(f"{path} has invalid guard sequence provenance")
+    return _GuardProvenance(
+        revision=guard_revision_value,
+        value_digest=guard_value_digest_value,
+        mutation_sequence=guard_mutation_sequence,
+        value_sequence=guard_value_sequence,
+        lifetime_sequence=guard_lifetime_sequence,
+        committed_at_unix_ms=committed_at_unix_ms,
+        guard_committed_at_unix_ms=guard_committed_at_unix_ms,
+    )
+
+
+def _validate_provenance_order(
+    opening: _GuardProvenance,
+    closing: _GuardProvenance,
+) -> None:
+    if (
+        closing.mutation_sequence < opening.mutation_sequence
+        or closing.value_sequence < opening.value_sequence
+        or closing.lifetime_sequence < opening.lifetime_sequence
+        or closing.guard_committed_at_unix_ms < opening.guard_committed_at_unix_ms
+    ):
+        raise RestartIntentLifecycleCorrupt("restart-intent closure predates intent opening")
+    if (
+        closing.value_sequence == opening.value_sequence
+        and closing.value_digest != opening.value_digest
+    ):
+        raise RestartIntentLifecycleCorrupt("restart-intent lease value lineage is contradictory")
+    if closing.mutation_sequence == opening.mutation_sequence and (
+        closing.revision != opening.revision
+        or closing.value_digest != opening.value_digest
+        or closing.value_sequence != opening.value_sequence
+        or closing.lifetime_sequence != opening.lifetime_sequence
+        or closing.guard_committed_at_unix_ms != opening.guard_committed_at_unix_ms
+    ):
+        raise RestartIntentLifecycleCorrupt(
+            "restart-intent opening and closure disagree on one lease mutation"
+        )
 
 
 def _nonempty_string(value: object, path: str) -> str:
