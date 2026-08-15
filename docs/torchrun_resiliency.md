@@ -574,24 +574,12 @@ closed. A strict `RestartIntentHeadRecord` identifies the single current intent
 by run, generation, intent ID, and canonical intent-record digest. The head
 payload is immutable; its future store key is compare-and-swap managed so
 opening an intent can atomically create both the create-once intent record and
-the current pointer. `RestartIntentWriteRepository` authenticates the
-coordinator lease, validates the exact committed generation and suspected-node
-scope, and prepares a create-once immutable intent write plus a
-create-if-absent current-head write. Lifecycle closure atomically removes the
-transient head so a later failure can open another intent and updates a
-permanent last-closed-intent lifecycle key. Its strict
-`RestartIntentLifecycleRecord` binds the closed intent-head digest to the
-coordinator lease that actually performed closure; that lease may be a renewal
-of the lease that opened the intent. Every prepared open conditions on the
-exact observed lifecycle-key revision, or on its verified never-created state
-for the first intent. An abort or completed plan therefore invalidates every
-older prepared open before the head becomes reusable. The prepared transaction
-also conditions on the exact generation-head and immutable snapshot revisions
-without rewriting either, and uses the earlier of lease expiry and the
-preparation deadline as its store-time commit deadline. Preparation does not
-mutate the store or make an intent authoritative. Transaction execution,
-response verification, reading the current intent, and lifecycle transitions
-remain separate control-plane components.
+the current pointer. The strict `RestartIntentLifecycleRecord` separately binds
+the last closed intent head to the coordinator lease that performed closure;
+that lease may be a renewal of the lease that opened the intent. The record
+schemas do not define a store mutation API. Lease-fenced intent creation,
+lifecycle observation and closure, and other lifecycle transitions are
+separate control-plane components.
 
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be
