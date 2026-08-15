@@ -46,11 +46,13 @@ Do not file a public issue containing sensitive conduct details.
 
 A maintainer will acknowledge a report within three business days and will review and investigate it promptly and fairly.
 Report details will be shared only with the people needed to investigate and respond.
-Except when required by law or needed to address an immediate safety risk, maintainers will ask the reporter before sharing details outside that group.
+Except when required by law or needed to address an immediate safety risk, maintainers will obtain the reporter's consent before sharing details outside that group.
 
-If a report concerns a maintainer, identify the conflict in the email subject so that maintainer can be excluded from the investigation and response.
-The remaining conflict-free maintainer will handle the report.
-If no conflict-free project maintainer remains, the acknowledging maintainer will offer to engage a mutually acceptable independent reviewer and will not share report details with that reviewer without the reporter's consent.
+If a report concerns a current maintainer, or the reporter does not want any current maintainer to access it, do not use the project mailbox.
+For conduct on GitHub, use GitHub's private [abuse-reporting process](https://docs.github.com/en/communities/maintaining-your-safety-on-github/reporting-abuse-or-spam) and choose the option to report to GitHub Support rather than repository administrators.
+For conduct in another project community space, use that platform operator's private safety or abuse-reporting channel and identify the maintainer conflict.
+These external routes are the conflict-safe escalation path because the project does not currently have an independent moderation team.
+The project will cooperate with an external reviewer only with the reporter's consent, except when required by law or needed to address an immediate safety risk.
 
 This mailbox is for conduct reports, not security vulnerabilities.
 Report vulnerabilities through the separate private process in [SECURITY.md](SECURITY.md).
