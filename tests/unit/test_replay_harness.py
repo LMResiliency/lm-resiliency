@@ -1017,18 +1017,46 @@ class TestHookRemoval:
 
             assert service_cls.call_args.kwargs["report_callback"] is oob_callback
             service_cls.return_value.start.assert_called_once()
+            service_cls.return_value.wait_until_ready.assert_called_once()
             instrumentation_cls.assert_called_once_with(
                 model,
                 model.layers,
                 1,
                 progress_event=service_cls.return_value.progress_event,
+                tracker_name=service_cls.return_value.tracker_name,
+                tracker_token=service_cls.return_value.tracker_token,
             )
             dataloader = harness.instrument_dataloader([1, 2])
             assert dataloader._scout_detection_interval == 7
+            harness.mark_step_boundary()
+            service_cls.return_value.ensure_healthy.assert_called_once()
             harness.remove_hooks()
 
         service_cls.return_value.close.assert_called_once()
         instrumentation_cls.return_value.close.assert_called_once()
+
+    def test_oob_startup_failure_cleans_up_partial_instrumentation(self):
+        model = LlamaLikeModel(num_layers=2, hidden_dim=32)
+
+        with (
+            patch.object(dist, "is_initialized", return_value=True),
+            patch.object(dist, "get_world_size", return_value=2),
+            patch.object(dist, "get_rank", return_value=0),
+            patch(
+                "lm_resiliency.detection.replay_harness.HangInstrumentation"
+            ) as instrumentation_cls,
+            patch("lm_resiliency.detection.replay_harness.OOBHangService") as service_cls,
+        ):
+            service_cls.return_value.wait_until_ready.side_effect = TimeoutError("not ready")
+            with pytest.raises(TimeoutError, match="not ready"):
+                ModelReplayHarness(
+                    model,
+                    config=ReplayHarnessConfig(check_interval=7),
+                    layers=model.layers,
+                )
+
+        instrumentation_cls.return_value.close.assert_called_once()
+        service_cls.return_value.close.assert_called_once()
 
     def test_remove_hooks(self):
         model = LlamaLikeModel(num_layers=4, hidden_dim=32)
