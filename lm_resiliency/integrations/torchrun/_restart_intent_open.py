@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import threading
+from collections.abc import Callable
 
 from lm_resiliency.integrations.torchrun._control_store import ControlStore
 from lm_resiliency.integrations.torchrun._coordinator_lease import (
@@ -45,12 +47,27 @@ class RestartIntentOpenPreparationCorrupt(RestartIntentOpenPreparationError):
     """Raised when persisted ownership or lifecycle state is malformed."""
 
 
+class RestartIntentOpenPreparationClockError(RestartIntentOpenPreparationError):
+    """Raised when the coordinator preparation clock moves backward."""
+
+
 class RestartIntentOpenPreparer:
     """Authenticate and prepare the first restart intent for one run."""
 
-    def __init__(self, store: ControlStore, *, run_id: str) -> None:
+    def __init__(
+        self,
+        store: ControlStore,
+        *,
+        run_id: str,
+        clock: Callable[[], int],
+    ) -> None:
         self._store = store
         self._run_id = _nonempty_string(run_id, "run_id")
+        if not callable(clock):
+            raise TypeError("clock must be callable")
+        self._clock = clock
+        self._clock_lock = threading.Lock()
+        self._last_now_unix_ms = 0
         self._generation_reader = GenerationStateReader(store, run_id=self._run_id)
         run_digest = hashlib.sha256(self._run_id.encode("utf-8")).hexdigest()
         self._run_prefix = f"{_CONTROL_PREFIX}/runs/{run_digest}"
@@ -88,15 +105,17 @@ class RestartIntentOpenPreparer:
         self._validate_current(current)
         self._validate_intent(intent, current)
         self._require_never_opened()
+        now_unix_ms = self._now_unix_ms()
         not_before_unix_ms = max(
             lease.granted_at_unix_ms,
             current.snapshot.committed_at_unix_ms,
+            now_unix_ms,
         )
-        if lease.expires_at_unix_ms <= not_before_unix_ms:
+        if lease.expires_at_unix_ms <= now_unix_ms:
             raise RestartIntentOpenPreparationLeaseLost(
                 "coordinator lease expired before restart-intent preparation"
             )
-        if intent.prepare_deadline_unix_ms <= not_before_unix_ms:
+        if intent.prepare_deadline_unix_ms <= now_unix_ms:
             raise RestartIntentOpenPreparationDeadlineElapsed(
                 "restart-intent preparation deadline has already elapsed"
             )
@@ -194,6 +213,19 @@ class RestartIntentOpenPreparer:
                 "restart-intent lifecycle exists without current-head history"
             )
 
+    def _now_unix_ms(self) -> int:
+        with self._clock_lock:
+            now_unix_ms = _positive_integer(
+                self._clock(),
+                "restart-intent preparation clock",
+            )
+            if now_unix_ms < self._last_now_unix_ms:
+                raise RestartIntentOpenPreparationClockError(
+                    "restart-intent preparation clock moved backward"
+                )
+            self._last_now_unix_ms = now_unix_ms
+            return now_unix_ms
+
 
 def _nonempty_string(value: object, path: str) -> str:
     if not isinstance(value, str) or not value.strip():
@@ -201,7 +233,14 @@ def _nonempty_string(value: object, path: str) -> str:
     return value
 
 
+def _positive_integer(value: object, path: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{path} must be a positive integer")
+    return value
+
+
 __all__ = [
+    "RestartIntentOpenPreparationClockError",
     "RestartIntentOpenPreparationConflict",
     "RestartIntentOpenPreparationCorrupt",
     "RestartIntentOpenPreparationDeadlineElapsed",

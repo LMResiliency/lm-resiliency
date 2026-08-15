@@ -18,6 +18,7 @@ from lm_resiliency.integrations.torchrun._protocol import (
     SlotAssignment,
 )
 from lm_resiliency.integrations.torchrun._restart_intent_open import (
+    RestartIntentOpenPreparationClockError,
     RestartIntentOpenPreparationConflict,
     RestartIntentOpenPreparationCorrupt,
     RestartIntentOpenPreparationDeadlineElapsed,
@@ -89,7 +90,7 @@ def _state():
         clock=clock,
     )
     generation_manager = GenerationStateManager(store, run_id=RUN_ID)
-    preparer = RestartIntentOpenPreparer(store, run_id=RUN_ID)
+    preparer = RestartIntentOpenPreparer(store, run_id=RUN_ID, clock=clock)
     lease = lease_manager.acquire()
     generation_manager.initialize(lease, _assignment())
     current = generation_manager.current()
@@ -279,10 +280,48 @@ def test_prepare_initial_open_requires_remaining_prepare_window():
         )
 
 
+def test_prepare_initial_open_rejects_deadlines_elapsed_after_state_commit():
+    clock, _, _, _, preparer, lease, current = _state()
+    clock.set(1_050)
+
+    with pytest.raises(
+        RestartIntentOpenPreparationDeadlineElapsed,
+        match="elapsed",
+    ):
+        preparer.prepare_initial_open(lease, current, _intent())
+
+    clock.set(1_100)
+    with pytest.raises(RestartIntentOpenPreparationLeaseLost, match="expired"):
+        preparer.prepare_initial_open(
+            lease,
+            current,
+            _intent(prepare_deadline_unix_ms=2_000),
+        )
+
+
+def test_prepare_initial_open_uses_observed_time_as_transaction_lower_bound():
+    clock, _, _, _, preparer, lease, current = _state()
+    clock.set(1_020)
+
+    prepared = preparer.prepare_initial_open(lease, current, _intent())
+
+    assert prepared.not_before_unix_ms == 1_020
+
+
+def test_prepare_initial_open_rejects_backward_clock():
+    clock, _, _, _, preparer, lease, current = _state()
+    preparer.prepare_initial_open(lease, current, _intent())
+    clock.set(999)
+
+    with pytest.raises(RestartIntentOpenPreparationClockError, match="backward"):
+        preparer.prepare_initial_open(lease, current, _intent())
+
+
 def test_restart_intent_keys_hide_plaintext_identity():
     store = InMemoryControlStore()
-    preparer_a = RestartIntentOpenPreparer(store, run_id="run-a")
-    preparer_b = RestartIntentOpenPreparer(store, run_id="run-b")
+    clock = ManualClock()
+    preparer_a = RestartIntentOpenPreparer(store, run_id="run-a", clock=clock)
+    preparer_b = RestartIntentOpenPreparer(store, run_id="run-b", clock=clock)
 
     first = preparer_a.intent_key("intent-a")
     second = preparer_a.intent_key("intent-b")
@@ -291,3 +330,12 @@ def test_restart_intent_keys_hide_plaintext_identity():
     assert len({first, second, third}) == 3
     assert "run-a" not in first
     assert "intent-a" not in first
+
+
+def test_restart_intent_preparer_requires_clock():
+    with pytest.raises(TypeError, match="clock"):
+        RestartIntentOpenPreparer(
+            InMemoryControlStore(),
+            run_id=RUN_ID,
+            clock=None,
+        )

@@ -602,9 +602,11 @@ lease and requires the intent record to match its identity, duration, fencing
 token, and authoritative grant time. A later preparer authenticates that handle
 against persisted ownership before constructing the descriptor. The initial
 preparer also revalidates the exact generation, intent scope, never-opened
-lifecycle state, and remaining lease/intent window. It performs no mutation;
-the following execution component owns the guarded transaction and verifies
-the returned store metadata.
+lifecycle state, and remaining lease/intent window against a monotonic
+coordinator clock sampled after those reads. The observation becomes the
+transaction's lower time bound; the store remains authoritative at execution.
+The preparer performs no mutation. The following execution component owns the
+guarded transaction and verifies the returned store metadata.
 
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be
