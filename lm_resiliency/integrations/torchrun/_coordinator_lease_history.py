@@ -40,6 +40,10 @@ class CoordinatorLeaseAuthority:
             self.value_sequence,
             self.lifetime_sequence,
         )
+        if self.transaction_sequence < self.mutation_sequence:
+            raise ValueError(
+                "CoordinatorLeaseAuthority.transaction_sequence is too small for mutation_sequence"
+            )
 
     @classmethod
     def from_entry(

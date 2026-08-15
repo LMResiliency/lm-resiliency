@@ -976,8 +976,9 @@ gaps between adjacent immutable entries. Failed operations append nothing.
 Each retained coordinator-lease value is decoded into an immutable authority
 record only after validating canonical run-scoped lease bytes, authoritative
 commit time, unguarded lease storage, and possible mutation/value/lifetime
-sequence lineage. Complete history traversal and adjacent-transition validation
-build on this strict value boundary.
+sequence lineage. A lease key's mutation count also cannot exceed the
+store-global transaction sequence. Complete history traversal and
+adjacent-transition validation build on this strict value boundary.
 
 Coordinator state that spans multiple keys uses one guarded store transaction.
 The transaction first checks the coordinator lease revision, then any

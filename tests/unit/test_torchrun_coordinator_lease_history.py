@@ -102,6 +102,17 @@ def test_coordinator_lease_authority_rejects_impossible_sequences(
         )
 
 
+def test_coordinator_lease_authority_rejects_transaction_before_mutation():
+    with pytest.raises(ValueError, match="transaction_sequence is too small"):
+        CoordinatorLeaseAuthority.from_entry(
+            dataclasses.replace(
+                _entry(mutation_sequence=2, value_sequence=1),
+                transaction_sequence=1,
+            ),
+            run_id="training-run",
+        )
+
+
 def test_coordinator_lease_authority_rejects_malformed_or_wrong_run():
     with pytest.raises(CoordinatorLeaseAuthorityCorrupt, match="malformed"):
         CoordinatorLeaseAuthority.from_entry(
