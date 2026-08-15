@@ -55,8 +55,15 @@ jobs:
           python benchmarks/run_healthy_path.py \
             --device cuda \
             --world-size 2 \
-            --output-dir "$RUNNER_TEMP/gpu-qualification/healthy-path" \
+            --output-dir "$RUNNER_TEMP/healthy-path" \
             --enforce
+
+      - name: Verify revision-bound GPU evidence
+        if: always()
+        run: |
+          python scripts/validation_evidence.py verify \
+            --bundle "$RUNNER_TEMP/gpu-qualification" \
+            --expected-commit "$GITHUB_SHA"
 
       - name: Publish job summary
         if: always()
@@ -64,8 +71,8 @@ jobs:
           if test -f "$RUNNER_TEMP/gpu-qualification/summary.md"; then
             cat "$RUNNER_TEMP/gpu-qualification/summary.md" >> "$GITHUB_STEP_SUMMARY"
           fi
-          if test -f "$RUNNER_TEMP/gpu-qualification/healthy-path/summary.md"; then
-            cat "$RUNNER_TEMP/gpu-qualification/healthy-path/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          if test -f "$RUNNER_TEMP/healthy-path/summary.md"; then
+            cat "$RUNNER_TEMP/healthy-path/summary.md" >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Upload qualification evidence
@@ -75,4 +82,13 @@ jobs:
           name: gpu-qualification-${{ github.sha }}
           path: ${{ runner.temp }}/gpu-qualification
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
+
+      - name: Upload healthy-path evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: healthy-path-${{ github.sha }}
+          path: ${{ runner.temp }}/healthy-path
+          if-no-files-found: warn
+          retention-days: 90
