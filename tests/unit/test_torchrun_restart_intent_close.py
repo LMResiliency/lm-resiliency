@@ -271,19 +271,15 @@ def test_prepared_initial_closure_accepts_renewal_and_multiple_replacements():
     assert len(prepared.lease_authority_chain) == 4
 
 
-def test_prepared_initial_closure_accepts_delete_and_recreate():
+def test_prepared_initial_closure_rejects_delete_and_recreate():
     clock, store, opened, lease = _open_state()
     clock.set(1_010)
     _manager(store, clock, "coordinator-a").release(lease)
-    replacement = _manager(store, clock, "coordinator-b").acquire()
+    _manager(store, clock, "coordinator-b").acquire()
+    history = CoordinatorLeaseHistoryReader(store, run_id=RUN_ID).read()
 
-    prepared = _prepared(
-        opened,
-        CoordinatorLeaseHistoryReader(store, run_id=RUN_ID).read(),
-    )
-
-    assert prepared.lease == replacement
-    assert prepared.coordinator_lease_lifetime_sequence == 2
+    with pytest.raises(ValueError, match="delete/recreate"):
+        _prepared(opened, history)
 
 
 def test_prepared_initial_closure_rejects_expired_renewal_and_overlap():

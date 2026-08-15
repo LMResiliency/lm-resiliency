@@ -173,6 +173,20 @@ def test_closure_preparer_accepts_renewed_and_replacement_leases():
     assert len(replacement_prepared.lease_authority_chain) == 3
 
 
+def test_closure_preparer_rejects_delete_and_recreate_lease_history():
+    clock, store, lease_manager, lease, _ = _open_state()
+    clock.set(1_010)
+    lease_manager.release(lease)
+    replacement = _manager(store, clock, "coordinator-b").acquire()
+
+    with pytest.raises(RestartIntentClosurePreparationCorrupt, match="cannot authorize"):
+        RestartIntentClosurePreparer(
+            store,
+            run_id=RUN_ID,
+            clock=clock,
+        ).prepare_initial_closure(replacement)
+
+
 def test_closure_preparer_rejects_missing_or_closed_intent():
     clock = ManualClock()
     store = InMemoryControlStore(clock=clock)

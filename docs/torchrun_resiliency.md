@@ -600,12 +600,13 @@ current-head update, and an exact immutable-intent condition, but does not
 authenticate a closing lease or mutate the store. A frozen
 `PreparedInitialRestartIntentClosure` descriptor binds those records to a
 contiguous coordinator-lease authority slice beginning at the exact lease that
-opened the intent. It accepts same-lease renewal, nonoverlapping replacement,
-and delete/recreate transitions, while rejecting skipped mutations, expired
-renewals, overlapping leases, and recurrence of any generation or opening
-lease identity or fencing token after replacement. It bounds the future
-transaction to the final live lease but performs no store reads or mutations.
-A later preparer selects the slice from verified durable lease history. A frozen
+opened the intent. It accepts same-lease renewal and nonoverlapping in-place
+replacement while rejecting skipped mutations, expired renewals, overlapping
+leases, recurrence of any generation or opening lease identity or fencing
+token after replacement, and delete/recreate transitions that lack a durable
+deletion tombstone. It bounds the future transaction to the final live lease
+but performs no store reads or mutations. A later preparer selects the slice
+from verified durable lease history. A frozen
 `PreparedInitialRestartIntentOpen` descriptor binds the first intent record,
 current-intent head, exact generation revisions, coordinator fencing token,
 canonical run-scoped keys, and lease/intent commit window. It exposes immutable
@@ -644,7 +645,9 @@ the supplied closing lease to be the live durable tail, selects the contiguous
 authority slice beginning at the opening lease, and samples a monotonic commit
 lower bound after those reads. It returns
 `PreparedInitialRestartIntentClosure`; a separate executor owns the guarded
-store transaction and committed-result verification.
+store transaction and committed-result verification. Lease-key lifetime
+changes remain rejected until the store retains authoritative deletion
+evidence.
 
 A read-only `RestartIntentOpenStateReader` reconstructs the same
 `CommittedInitialRestartIntentOpen` contract after coordinator failover. It

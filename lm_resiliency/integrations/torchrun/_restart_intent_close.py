@@ -172,11 +172,10 @@ class PreparedInitialRestartIntentClosure:
                 raise ValueError("PreparedInitialRestartIntentClosure coordinator leases overlap")
             return
         if lifetime_delta == 1:
-            if mutation_delta != 2 or value_delta != 1:
-                raise ValueError(
-                    "PreparedInitialRestartIntentClosure recreated lease has invalid lineage"
-                )
-            return
+            raise ValueError(
+                "PreparedInitialRestartIntentClosure cannot authenticate a "
+                "delete/recreate lease transition without a durable deletion tombstone"
+            )
         raise ValueError(
             "PreparedInitialRestartIntentClosure lease chain omits one or more "
             "replacement authorities"
