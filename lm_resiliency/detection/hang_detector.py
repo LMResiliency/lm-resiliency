@@ -139,6 +139,8 @@ class HangDetectionDaemon:
         checkpoint_io_latency_threshold_s: float = 30.0,
         checkpoint_io_min_slowdown_ratio: float = 2.0,
         checkpoint_io_confirmation_rounds: int = 2,
+        tracker_name: str | None = None,
+        tracker_token: bytes | None = None,
     ) -> None:
         self._rank = rank
         self._world_size = world_size
@@ -175,7 +177,11 @@ class HangDetectionDaemon:
             raise ValueError("confirmation_interval_s must be positive")
 
         self._c3 = C3(group=group)
-        self._reader = OpTrackerReader(rank=rank)
+        self._reader = OpTrackerReader(
+            rank=rank,
+            shm_name=tracker_name,
+            owner_token=tracker_token,
+        )
         self._last_op_id: int = -1
         self._last_step: int = -1
         self._last_change_time: float = time.time()

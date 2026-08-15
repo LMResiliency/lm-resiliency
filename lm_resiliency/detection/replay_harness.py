@@ -822,6 +822,7 @@ class ModelReplayHarness:
 
         Returns ReplayResult if detection ran this step, None otherwise.
         """
+        self._ensure_oob_healthy()
         self._step_count += 1
         self._snapshot_all_to_all_recipes()
         schedule_readiness = self._ensure_schedule_readiness()
@@ -868,6 +869,7 @@ class ModelReplayHarness:
 
     def mark_step_boundary(self) -> None:
         """Publish an externally counted step without running scheduled replay."""
+        self._ensure_oob_healthy()
         if self._hang_instrumentation is not None:
             self._hang_instrumentation.step_boundary()
 
@@ -1502,8 +1504,22 @@ class ModelReplayHarness:
             self._layers,
             global_rank,
             progress_event=self._oob_service.progress_event,
+            tracker_name=self._oob_service.tracker_name,
+            tracker_token=self._oob_service.tracker_token,
         )
-        self._oob_service.start()
+        try:
+            self._oob_service.start()
+            self._oob_service.wait_until_ready()
+        except BaseException:
+            self._hang_instrumentation.close()
+            self._hang_instrumentation = None
+            self._oob_service.close()
+            self._oob_service = None
+            raise
+
+    def _ensure_oob_healthy(self) -> None:
+        if self._oob_service is not None:
+            self._oob_service.ensure_healthy()
 
     @property
     def last_result(self) -> ReplayResult | None:

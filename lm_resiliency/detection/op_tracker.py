@@ -18,6 +18,7 @@ confirmed across ranks after a sustained stall.
 from __future__ import annotations
 
 import enum
+import os
 import struct
 import time
 from dataclasses import dataclass
@@ -28,9 +29,12 @@ from typing import Any
 # collective metadata fingerprint (int64), active diagnostic stage
 # (kind, key, sequence, start_ns), and most recently completed diagnostic stage
 # (kind, key, sequence, duration_ns).
-_SHM_FMT = "qd" + ("q" * 10)
-_SHM_SIZE = struct.calcsize(_SHM_FMT)
+_OWNER_FMT = "q16s"
+_OWNER_SIZE = struct.calcsize(_OWNER_FMT)
+_PROGRESS_FMT = "qd" + ("q" * 10)
+_SHM_SIZE = _OWNER_SIZE + struct.calcsize(_PROGRESS_FMT)
 _SHM_NAME_PREFIX = "scout_op_tracker_rank_"
+_DEFAULT_OWNER_TOKEN = bytes(16)
 _PROGRESS_SIGNAL_INTERVAL_NS = 500_000_000
 
 
@@ -71,8 +75,20 @@ class ProgressSnapshot:
     completed_stage_duration_ns: int
 
 
-def _shm_name(rank: int) -> str:
-    return f"{_SHM_NAME_PREFIX}{rank}"
+def _shm_name(rank: int, namespace: str | None = None) -> str:
+    return namespace or f"{_SHM_NAME_PREFIX}{rank}"
+
+
+def _pid_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _diagnostic_stage(value: int) -> DiagnosticStage:
@@ -96,7 +112,14 @@ class OpTracker:
         rank: This process's global rank.
     """
 
-    def __init__(self, rank: int, progress_event: Any | None = None) -> None:
+    def __init__(
+        self,
+        rank: int,
+        progress_event: Any | None = None,
+        *,
+        shm_name: str | None = None,
+        owner_token: bytes | None = None,
+    ) -> None:
         self._rank = rank
         self._progress_event = progress_event
         self._last_progress_signal_ns = 0
@@ -112,24 +135,39 @@ class OpTracker:
         self._completed_stage_key: int = 0
         self._completed_stage_sequence: int = 0
         self._completed_stage_duration_ns: int = 0
-        self._shm_name = _shm_name(rank)
+        self._shm_name = _shm_name(rank, shm_name)
+        self._owner_token = _DEFAULT_OWNER_TOKEN if owner_token is None else owner_token
+        if len(self._owner_token) != 16:
+            raise ValueError("SCOUT op tracker owner token must contain exactly 16 bytes")
 
-        # Create or attach to existing shared memory
+        # Never attach to another live publisher. A dead owner may leave its
+        # segment behind after SIGKILL, in which case the exact channel name is
+        # safe to reclaim.
         try:
             self._shm = shared_memory.SharedMemory(name=self._shm_name, create=True, size=_SHM_SIZE)
         except FileExistsError:
+            existing = shared_memory.SharedMemory(name=self._shm_name, create=False)
+            try:
+                if existing.size < _OWNER_SIZE:
+                    raise FileExistsError(
+                        f"SCOUT op tracker channel {self._shm_name!r} has an unknown live owner"
+                    )
+                owner_pid, _ = struct.unpack_from(_OWNER_FMT, existing.buf, 0)
+                if _pid_is_alive(owner_pid):
+                    raise FileExistsError(
+                        f"SCOUT op tracker channel {self._shm_name!r} is owned by live "
+                        f"process {owner_pid}"
+                    )
+                existing.unlink()
+            finally:
+                existing.close()
             self._shm = shared_memory.SharedMemory(
-                name=self._shm_name, create=False, size=_SHM_SIZE
+                name=self._shm_name,
+                create=True,
+                size=_SHM_SIZE,
             )
-            if self._shm.size < _SHM_SIZE:
-                self._shm.close()
-                stale = shared_memory.SharedMemory(name=self._shm_name, create=False)
-                stale.unlink()
-                stale.close()
-                self._shm = shared_memory.SharedMemory(
-                    name=self._shm_name, create=True, size=_SHM_SIZE
-                )
 
+        struct.pack_into(_OWNER_FMT, self._shm.buf, 0, os.getpid(), self._owner_token)
         self._write(force_signal=True)
 
     def advance(self, metadata_fingerprint: int = 0, *, force_signal: bool = False) -> None:
@@ -202,9 +240,9 @@ class OpTracker:
 
     def _write(self, *, force_signal: bool = False) -> None:
         struct.pack_into(
-            _SHM_FMT,
+            _PROGRESS_FMT,
             self._shm.buf,
-            0,
+            _OWNER_SIZE,
             self._op_id,
             time.time(),
             self._step,
@@ -232,7 +270,13 @@ class OpTracker:
         """Release shared memory. Call during shutdown."""
         try:
             self._shm.close()
-            self._shm.unlink()
+            current = shared_memory.SharedMemory(name=self._shm_name, create=False)
+            try:
+                _, token = struct.unpack_from(_OWNER_FMT, current.buf, 0)
+                if token == self._owner_token:
+                    current.unlink()
+            finally:
+                current.close()
         except FileNotFoundError:
             pass
 
@@ -251,15 +295,36 @@ class OpTrackerReader:
         rank: The rank whose shared memory to read.
     """
 
-    def __init__(self, rank: int) -> None:
+    def __init__(
+        self,
+        rank: int,
+        *,
+        shm_name: str | None = None,
+        owner_token: bytes | None = None,
+    ) -> None:
         self._rank = rank
-        self._shm_name = _shm_name(rank)
+        self._shm_name = _shm_name(rank, shm_name)
+        self._owner_token = _DEFAULT_OWNER_TOKEN if owner_token is None else owner_token
+        if len(self._owner_token) != 16:
+            raise ValueError("SCOUT op tracker owner token must contain exactly 16 bytes")
         self._shm: shared_memory.SharedMemory | None = None
 
     def attach(self) -> bool:
         """Attach to the training process's shared memory. Returns False if not found."""
         try:
-            self._shm = shared_memory.SharedMemory(name=self._shm_name, create=False)
+            candidate = shared_memory.SharedMemory(name=self._shm_name, create=False)
+            if candidate.size < _SHM_SIZE:
+                candidate.close()
+                raise RuntimeError(
+                    f"SCOUT op tracker channel {self._shm_name!r} has an incompatible layout"
+                )
+            _, token = struct.unpack_from(_OWNER_FMT, candidate.buf, 0)
+            if token != self._owner_token:
+                candidate.close()
+                raise RuntimeError(
+                    f"SCOUT op tracker channel {self._shm_name!r} ownership token mismatch"
+                )
+            self._shm = candidate
             return True
         except FileNotFoundError:
             return False
@@ -296,7 +361,7 @@ class OpTrackerReader:
                 completed_stage_sequence=0,
                 completed_stage_duration_ns=0,
             )
-        values = struct.unpack_from(_SHM_FMT, self._shm.buf, 0)
+        values = struct.unpack_from(_PROGRESS_FMT, self._shm.buf, _OWNER_SIZE)
         return ProgressSnapshot(
             op_id=values[0],
             heartbeat=values[1],
