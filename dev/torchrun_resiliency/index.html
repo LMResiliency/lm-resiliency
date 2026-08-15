@@ -884,6 +884,18 @@ ID or fencing token cannot reappear after a different acquisition in the
 verified generation history. Preparation obtains that history through one
 stable reader traversal rather than rereading the full predecessor chain for
 each generation.</p>
+<p>A read-only <code>RestartIntentOpenStateReader</code> reconstructs the same
+<code>CommittedInitialRestartIntentOpen</code> contract after coordinator failover. It
+stably reads the current-intent head and immutable intent, requires the
+intent's generation to remain current, locates the exact opening authority in
+verified durable coordinator-lease history, and reuses the existing
+prepared/committed validators. Missing records, noncanonical bytes,
+contradictory lifecycle state, deleted heads, and lease provenance absent from
+durable history fail closed. When the current head is a closed marker, the
+reader raises <code>RestartIntentOpenStateClosed</code> instead of treating the opening as
+absent. That signal does not authenticate the closure; the lifecycle reader
+must verify the linked closure records separately. The open-state reader
+performs no mutation.</p>
 <p><code>suspected_node_ids</code> is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be
 absent from the next assignment. Policy may additionally quarantine a removed
