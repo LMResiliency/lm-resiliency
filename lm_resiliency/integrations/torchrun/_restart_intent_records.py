@@ -360,6 +360,10 @@ class RestartIntentLifecycleHeadRecord:
             "RestartIntentLifecycleHeadRecord.lifecycle_digest",
         )
 
+    @property
+    def digest(self) -> str:
+        return hashlib.sha256(self.to_json()).hexdigest()
+
     def to_dict(self) -> dict[str, object]:
         return {
             "schema_version": self.SCHEMA_VERSION,
@@ -413,6 +417,97 @@ class RestartIntentLifecycleHeadRecord:
             lifecycle_digest=_digest(
                 value["lifecycle_digest"],
                 "RestartIntentLifecycleHeadRecord.lifecycle_digest",
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RestartIntentClosedHeadRecord:
+    """Persistent marker that the current restart intent was closed."""
+
+    SCHEMA_VERSION: ClassVar[int] = 1
+
+    run_id: str
+    closure_index: int
+    generation: int
+    intent_id: str
+    lifecycle_head_digest: str
+
+    def __post_init__(self) -> None:
+        _nonempty_string(
+            self.run_id,
+            "RestartIntentClosedHeadRecord.run_id",
+        )
+        _positive_integer(
+            self.closure_index,
+            "RestartIntentClosedHeadRecord.closure_index",
+        )
+        _nonnegative_integer(
+            self.generation,
+            "RestartIntentClosedHeadRecord.generation",
+        )
+        _nonempty_string(
+            self.intent_id,
+            "RestartIntentClosedHeadRecord.intent_id",
+        )
+        _digest(
+            self.lifecycle_head_digest,
+            "RestartIntentClosedHeadRecord.lifecycle_head_digest",
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.SCHEMA_VERSION,
+            "run_id": self.run_id,
+            "closure_index": self.closure_index,
+            "generation": self.generation,
+            "intent_id": self.intent_id,
+            "lifecycle_head_digest": self.lifecycle_head_digest,
+        }
+
+    def to_json(self) -> bytes:
+        return _canonical_json(self.to_dict())
+
+    @classmethod
+    def from_json(cls, encoded: bytes) -> RestartIntentClosedHeadRecord:
+        value = _json_object(encoded, cls.__name__)
+        _fields(
+            value,
+            path=cls.__name__,
+            required={
+                "schema_version",
+                "run_id",
+                "closure_index",
+                "generation",
+                "intent_id",
+                "lifecycle_head_digest",
+            },
+        )
+        _schema_version(
+            value["schema_version"],
+            cls.__name__,
+            expected=cls.SCHEMA_VERSION,
+        )
+        return cls(
+            run_id=_nonempty_string(
+                value["run_id"],
+                "RestartIntentClosedHeadRecord.run_id",
+            ),
+            closure_index=_positive_integer(
+                value["closure_index"],
+                "RestartIntentClosedHeadRecord.closure_index",
+            ),
+            generation=_nonnegative_integer(
+                value["generation"],
+                "RestartIntentClosedHeadRecord.generation",
+            ),
+            intent_id=_nonempty_string(
+                value["intent_id"],
+                "RestartIntentClosedHeadRecord.intent_id",
+            ),
+            lifecycle_head_digest=_digest(
+                value["lifecycle_head_digest"],
+                "RestartIntentClosedHeadRecord.lifecycle_head_digest",
             ),
         )
 
@@ -507,6 +602,7 @@ def _reject_duplicate_object_fields(
 
 
 __all__ = [
+    "RestartIntentClosedHeadRecord",
     "RestartIntentHeadRecord",
     "RestartIntentLifecycleHeadRecord",
     "RestartIntentLifecycleRecord",
