@@ -854,6 +854,21 @@ mistake a recreated record for an older value with identical bytes. Higher
 coordinator records add lease fencing and run/schema namespaces in subsequent
 layers rather than weakening this storage primitive.
 
+Coordinator ownership is stored under a schema-versioned, run-scoped lease key.
+The lease record binds the run, a unique coordinator-process incarnation, a
+unique lease acquisition, and its acquisition and expiry times. The record's
+control-store revision is the fencing token; acquisition, renewal, expiry
+takeover, release, and reacquisition therefore always produce a newer token.
+Every later authoritative coordinator mutation must carry the currently held
+token and fail closed when it is stale.
+
+Lease time comes from one authoritative, nondecreasing control-plane clock
+shared by all contenders. A clock that moves backward aborts lease operations.
+Expiry is inclusive: at `expires_at_unix_ms` the old holder may no longer renew,
+and a contender may take over. Retrying acquisition with the same active
+`coordinator_id` is idempotent, so the ID must uniquely identify one live
+process incarnation and must not be reused after process restart.
+
 ### Slot-aware rendezvous
 
 `SlotAwareRendezvousHandler` implements the existing `RendezvousHandler`
