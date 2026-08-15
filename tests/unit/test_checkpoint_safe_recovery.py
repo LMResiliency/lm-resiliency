@@ -35,6 +35,16 @@ def test_disk_save_rejects_tensor_subclass_metadata(tmp_path):
         serializer.save_sync(metadata, [], step=20)
 
 
+def test_disk_save_rejects_requires_grad_tensor_metadata(tmp_path):
+    metadata = FlatStateDictMetadata(
+        non_tensor_data={"activation": torch.ones(2, requires_grad=True)}
+    )
+    serializer = DiskSerializer(str(tmp_path), rank=0)
+
+    with pytest.raises(TypeError, match="tensors requiring gradients"):
+        serializer.save_sync(metadata, [], step=20)
+
+
 def test_disk_save_rejects_numpy_scalar_subclass(tmp_path):
     metadata = FlatStateDictMetadata(non_tensor_data={"tagged": _TaggedFloat(1.5)})
     serializer = DiskSerializer(str(tmp_path), rank=0)

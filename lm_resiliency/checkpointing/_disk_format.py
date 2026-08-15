@@ -208,6 +208,8 @@ def _encode_value(value: Any, *, depth: int) -> dict[str, Any]:
     if isinstance(value, torch.Tensor):
         if value.device.type != "cpu":
             raise TypeError("only CPU tensors are supported in checkpoint metadata")
+        if value.requires_grad:
+            raise TypeError("tensors requiring gradients are not supported in checkpoint metadata")
         if value.layout is not torch.strided or value.is_quantized:
             raise TypeError(
                 "only dense, non-quantized tensors are supported in checkpoint metadata"
