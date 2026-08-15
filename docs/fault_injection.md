@@ -40,7 +40,8 @@ Later scheduled safe incidents use the same rank-consistent preflight and arming
 consensus at their optimizer boundary. Iterations without a scheduled campaign
 candidate add no distributed synchronization. The optional `rank=` override is
 reserved for non-distributed testing; in an initialized distributed job it must
-match the process's global rank.
+match the process's global rank. Overrides must be non-boolean integers;
+coercible strings and fractional values are rejected.
 Framework integration wraps the optimizer boundary itself rather than relying
 on a success-only post-step hook. When an optimizer attempt fails on one rank,
 every rank that attempted that scheduled boundary participates in failure
@@ -611,6 +612,8 @@ The executor result's `verified` and `active` fields must be JSON booleans;
 truthy strings and integers are rejected.
 Activation and deactivation evidence must be strictly JSON-serializable; invalid
 evidence fails the action immediately and active effects are deactivated.
+If deactivation is interrupted, the record is failed before the interrupt is
+re-raised and the session retains cleanup ownership until a retry succeeds.
 An executor that returns an active effect must provide a deactivation callback.
 A callback executor without deactivation must declare `one_shot=True`, which is
 an explicit promise that activation returns `active=false`. This capability is
@@ -797,6 +800,9 @@ Positive SCOUT `layer_id` evidence is also associated with the failed ranks and
 resources in the same report, including exact rank-resource pairs. Swapping
 correct pair sets between layers is not successful localization even when each
 layer has the correct independent rank and resource projections.
+For embedding, output-head, resource, and other non-layer targets, any positive
+`layer_id` is contradictory evidence and fails localization; an omitted layer
+or the aggregate `-1` sentinel remains valid.
 `kind`, when supplied, must be a non-empty string. Supplying component evidence
 for an occurrence whose injected targets have no expected component is an
 overclaim and fails attribution.
@@ -818,6 +824,9 @@ exact `(rank, resource)` pairs in the report that supplied it. Correct
 per-prefix rank and resource projections with their pairs crossed do not count
 as localization. Repeated actions with the same source and target are
 deduplicated for this set comparison.
+Parameter and optimizer-state SDC actions require both their `hidden.*`
+component evidence and SCOUT's `optimizer.*` updated-weight evidence; both
+families retain the same expected target association.
 Example detection counts also require a report with the expected failure kind;
 an unrelated report at the same iteration is retained as evidence but does not
 count as detecting the injected occurrence. For correlated incidents containing
@@ -854,6 +863,8 @@ an entire occurrence therefore cannot reduce the certification denominator.
 The example treats the embedded manifest as the authenticated source of
 expected fault type, target, parameters, rank, resource, and component
 evidence. Each injection record must match that manifest exactly.
+Embedded `incident_id` values must be unique; duplicate IDs are rejected rather
+than allowing a later incident to replace an earlier action map.
 `injection_succeeded` and `verified` must be JSON booleans and must agree with
 the record lifecycle status; truthy strings, inconsistent statuses, and
 record-level target tampering are rejected before localization scoring.

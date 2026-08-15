@@ -212,7 +212,7 @@ def _evaluate_occurrence(
         {
             prefix
             for action in expected_by_fault_id.values()
-            if (prefix := _expected_action_source_prefix(action)) is not None
+            for prefix in _expected_action_source_prefixes(action)
         }
     )
     at_iteration = [
@@ -342,7 +342,7 @@ def _evaluate_occurrence(
     }
     if not expected_layers:
         layer_match = not observed_layers
-        layer_evidence = "not_required" if layer_match else "unexpected"
+        layer_evidence = "not_required" if layer_match else "unexpected_layer"
     elif (
         set(expected_layers) == set(observed_layers)
         and observed_targets_by_layer == expected_targets_by_layer
@@ -800,6 +800,17 @@ def _expected_action_source_prefix(action: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _expected_action_source_prefixes(action: Mapping[str, Any]) -> tuple[str, ...]:
+    primary = _expected_action_source_prefix(action)
+    if primary is None:
+        return ()
+    target = _action_target(action)
+    surface = _required_string(target.get("surface"), "manifest target surface")
+    if primary == "hidden." and surface in {"weight", "bias", "optimizer_state"}:
+        return (primary, "optimizer.")
+    return (primary,)
+
+
 def _source_family(source: str) -> str:
     """Normalize a SCOUT evidence source to its component-family prefix."""
     family, separator, _detail = source.partition(".")
@@ -811,7 +822,7 @@ def _expected_targets_for_source(
     prefix: str,
 ) -> dict[str, Any]:
     matching = tuple(
-        action for action in actions if _expected_action_source_prefix(action) == prefix
+        action for action in actions if prefix in _expected_action_source_prefixes(action)
     )
     return {
         "ranks": sorted(

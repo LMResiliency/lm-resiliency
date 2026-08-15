@@ -5029,6 +5029,54 @@ def test_external_executor_evidence_must_be_json_serializable() -> None:
     assert events == ["activate", "deactivate"]
 
 
+def test_invalid_external_evidence_retains_cleanup_ownership_across_interrupt() -> None:
+    events: list[str] = []
+
+    def activate(_request):
+        events.append("activate")
+        return FaultExecutionResult(
+            verified=True,
+            active=True,
+            evidence={"tensor": torch.tensor(1.0)},
+        )
+
+    def deactivate(_request, _result):
+        events.append("deactivate")
+        if events.count("deactivate") == 1:
+            raise KeyboardInterrupt("stop evidence cleanup")
+        return None
+
+    executor = CallbackFaultExecutor(
+        name="interrupting-invalid-evidence",
+        supported_types={FailureType.PROCESS_TERMINATION},
+        activate=activate,
+        deactivate=deactivate,
+        max_safety=SafetyClass.ISOLATED_DESTRUCTIVE,
+    )
+    model = TinyModel()
+    optimizer = _optimizer(model)
+    session = enable_fault_injection(
+        model,
+        optimizer,
+        campaign=_campaign(
+            _incident(
+                at=(2,),
+                lifetime=IncidentLifetime(until="campaign_end"),
+                faults=(_external_fault(FailureType.PROCESS_TERMINATION),),
+            )
+        ),
+        executors=(executor,),
+        rank=0,
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="stop evidence cleanup"):
+        _step(model, optimizer)
+
+    assert events == ["activate", "deactivate", "deactivate"]
+    assert session.records[0].status is InjectionStatus.FAILED
+    session.close()
+
+
 def test_external_executor_evidence_is_a_deep_snapshot() -> None:
     nested_values = [1]
     executor = CallbackFaultExecutor(

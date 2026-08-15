@@ -766,17 +766,6 @@ def test_comparison_rejects_wrong_failure_evidence(
     assert not evaluation["evaluations"][0][mismatch]
 
 
-def test_comparison_rejects_unexpected_source_family() -> None:
-    localization = _localization_payload()
-    localization["reports"][0]["sources"] = ["hidden.output", "output.output"]
-
-    occurrence = compare_payloads(_injection_payload(), localization)["evaluations"][0]
-
-    assert occurrence["observed"]["source_prefixes"] == ["hidden.", "output."]
-    assert not occurrence["source_match"]
-    assert not occurrence["localized"]
-
-
 def test_comparison_rejects_positive_layer_for_non_layer_target() -> None:
     injection = _injection_payload()
     target = {
@@ -793,19 +782,40 @@ def test_comparison_rejects_positive_layer_for_non_layer_target() -> None:
 
     occurrence = compare_payloads(injection, localization)["evaluations"][0]
 
-    assert occurrence["layer_evidence"] == "unexpected"
+    assert occurrence["layer_evidence"] == "unexpected_layer"
     assert not occurrence["layer_match"]
     assert not occurrence["localized"]
 
 
-def test_comparison_rejects_duplicate_manifest_incident_ids() -> None:
-    injection = _injection_payload()
-    injection["manifest"]["incidents"].append(copy.deepcopy(injection["manifest"]["incidents"][0]))
+def test_comparison_rejects_unexpected_source_family() -> None:
     localization = _localization_payload()
+    localization["reports"][0]["sources"] = ["hidden.output", "output.output"]
+
+    occurrence = compare_payloads(_injection_payload(), localization)["evaluations"][0]
+
+    assert occurrence["observed"]["source_prefixes"] == ["hidden.", "output."]
+    assert not occurrence["source_match"]
+    assert not occurrence["localized"]
+
+
+def test_comparison_requires_optimizer_evidence_for_parameter_state_faults() -> None:
+    injection = _injection_payload()
+    target = injection["manifest"]["incidents"][0]["faults"][0]["target"]
+    target["surface"] = "weight"
+    injection["injections"][0]["target"] = copy.deepcopy(target)
+    localization = _localization_payload()
+    localization["reports"][0]["sources"] = [
+        "hidden.parameter_state",
+        "optimizer.optimizer_updated_weight",
+    ]
     _refresh_manifest_identity(injection, localization)
 
-    with pytest.raises(ValueError, match="incident_id values must be unique"):
-        compare_payloads(injection, localization)
+    occurrence = compare_payloads(injection, localization)["evaluations"][0]
+
+    assert occurrence["expected"]["source_prefixes"] == ["hidden.", "optimizer."]
+    assert occurrence["source_match"]
+    assert occurrence["source_target_match"]
+    assert occurrence["localized"]
 
 
 def test_comparison_correlates_source_prefixes_with_failed_targets() -> None:
@@ -1760,3 +1770,15 @@ def test_comparison_rejects_tampered_embedded_manifest() -> None:
 
     with pytest.raises(ValueError, match="does not match its manifest_identity"):
         compare_payloads(injection, _localization_payload())
+
+
+def test_comparison_rejects_duplicate_manifest_incident_ids() -> None:
+    injection = _injection_payload()
+    duplicate = copy.deepcopy(injection["manifest"]["incidents"][0])
+    duplicate["faults"][0]["fault_id"] = "duplicate-action"
+    injection["manifest"]["incidents"].append(duplicate)
+    localization = _localization_payload()
+    _refresh_manifest_identity(injection, localization)
+
+    with pytest.raises(ValueError, match="incident_id values must be unique"):
+        compare_payloads(injection, localization)

@@ -149,6 +149,7 @@ class _ExternalEffect:
     executor: FaultExecutor
     result: FaultExecutionResult
     done: bool = False
+    retry_cleanup_on_interrupt: bool = False
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def complete(self, *, cancelled: bool = False) -> None:
@@ -197,11 +198,16 @@ class _ExternalEffect:
                 if cleanup_error is not None:
                     self.record.error += f"; rollback cleanup also failed: {cleanup_error}"
                 self.record.completed_at_ns = time.monotonic_ns()
-            self.done = True
             if cleanup_error is not None:
+                self.done = not (
+                    self.retry_cleanup_on_interrupt and not isinstance(cleanup_error, Exception)
+                )
+                if not isinstance(cleanup_error, Exception):
+                    raise cleanup_error
                 raise RuntimeError(
                     f"fault rollback cleanup failed: {cleanup_error}"
                 ) from cleanup_error
+            self.done = True
 
 
 @dataclass(slots=True)
@@ -1085,12 +1091,18 @@ class FaultInjectionSession:
                             request,
                             record,
                         )
+                        active = _ActiveFault(incident, iteration, effect)
+                        activated.append(active)
+                        if not active.done:
+                            self._active.append(active)
                     else:
-                        effect = self._activate_external(request, record)
-                    active = _ActiveFault(incident, iteration, effect)
-                    activated.append(active)
-                    if not active.done:
-                        self._active.append(active)
+                        self._activate_external(
+                            request,
+                            record,
+                            incident,
+                            iteration,
+                            activated,
+                        )
         except BaseException as error:
             cleanup_error: BaseException | None = None
             for active in reversed(activated):
@@ -1109,6 +1121,9 @@ class FaultInjectionSession:
         self,
         request: FaultExecutionRequest,
         record: FaultInjectionRecord,
+        incident: FaultIncident,
+        iteration: int,
+        activated: list[_ActiveFault],
     ) -> _ExternalEffect:
         executor = self._executor_for(request.fault)
         with record._lock:
@@ -1154,21 +1169,40 @@ class FaultInjectionSession:
                 record.activated_at_ns = time.monotonic_ns()
                 record.completed_at_ns = time.monotonic_ns()
             raise ValueError(record.error)
+        effect = _ExternalEffect(
+            request=request,
+            record=record,
+            executor=executor,
+            result=result,
+            done=not result.active,
+        )
+        active = _ActiveFault(incident, iteration, effect)
+        activated.append(active)
+        if not active.done:
+            self._active.append(active)
         try:
             evidence = _json_mapping(result.evidence, "fault executor activation evidence")
-        except Exception as error:
-            deactivation_error: Exception | None = None
+        except BaseException as error:
+            deactivation_error: BaseException | None = None
             if result.active:
                 try:
                     executor.deactivate(request, result)
-                except Exception as caught:
+                except BaseException as caught:
                     deactivation_error = caught
+                    effect.retry_cleanup_on_interrupt = not isinstance(caught, Exception)
+                else:
+                    effect.done = True
             with record._lock:
                 record.status = InjectionStatus.FAILED
                 record.error = str(error)
                 if deactivation_error is not None:
                     record.error += f"; deactivation also failed: {deactivation_error}"
                 record.completed_at_ns = time.monotonic_ns()
+            if deactivation_error is not None and not isinstance(
+                deactivation_error,
+                Exception,
+            ):
+                raise deactivation_error
             raise ValueError(record.error) from error
         with record._lock:
             record.verified = result.verified
@@ -1181,6 +1215,8 @@ class FaultInjectionSession:
                     executor.deactivate(request, result)
                 except Exception as error:
                     deactivation_error = error
+                finally:
+                    effect.done = True
             with record._lock:
                 record.status = InjectionStatus.FAILED
                 record.error = "fault executor could not verify activation"
@@ -1201,6 +1237,7 @@ class FaultInjectionSession:
             try:
                 executor.deactivate(request, result)
             except Exception as error:
+                effect.done = True
                 with record._lock:
                     record.status = InjectionStatus.FAILED
                     record.error = (
@@ -1209,6 +1246,7 @@ class FaultInjectionSession:
                     )
                     record.completed_at_ns = time.monotonic_ns()
                 raise RuntimeError(record.error) from error
+            effect.done = True
             with record._lock:
                 record.status = InjectionStatus.FAILED
                 record.error = (
@@ -1222,13 +1260,7 @@ class FaultInjectionSession:
             record.status = InjectionStatus.ACTIVE if result.active else InjectionStatus.COMPLETED
             if not result.active:
                 record.completed_at_ns = time.monotonic_ns()
-        return _ExternalEffect(
-            request=request,
-            record=record,
-            executor=executor,
-            result=result,
-            done=not result.active,
-        )
+        return effect
 
     def _executor_for(self, fault: FaultSpec) -> FaultExecutor:
         executor = next(
