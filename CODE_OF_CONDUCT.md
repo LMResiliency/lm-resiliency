@@ -40,9 +40,24 @@ Examples of representing the community include using an official email address, 
 
 ## Enforcement
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be reported privately using a maintainer's private contact method on GitHub.
+Instances of abusive, harassing, or otherwise unacceptable behavior may be reported privately by email to `lm.resiliency.dev@gmail.com`, which is monitored by `@lmresiliencydev`.
 Do not file a public issue containing sensitive conduct details.
-All complaints will be reviewed and investigated promptly and fairly.
+
+Reports received through this mailbox or the conflict mailbox below will be acknowledged within three business days and reviewed and investigated promptly and fairly.
+Report details will be shared only with the people needed to investigate and respond.
+Except when required by law or needed to address an immediate safety risk, maintainers will obtain the reporter's consent before sharing details outside that group.
+
+If a report concerns `@lmresiliencydev`, do not use the project mailbox; email `wangzhuangowl@gmail.com`, which is monitored by `@zhuangwang93`.
+If a report concerns `@zhuangwang93`, use the project mailbox so `@lmresiliencydev` can handle it.
+If both maintainers are conflicted, do not use either mailbox.
+For conduct on GitHub, use GitHub's private [abuse-reporting process](https://docs.github.com/en/communities/maintaining-your-safety-on-github/reporting-abuse-or-spam) and choose the option to report to GitHub Support rather than repository administrators.
+For conduct in another hosted project space or at an event, use the platform operator's, event organizer's, or venue's private safety or abuse-reporting channel and identify the maintainer conflict.
+These external routes follow the receiving organization's response policy and timeline.
+They are the conflict-safe escalation path because the project does not currently have an independent moderation team.
+The project will cooperate with an external reviewer only with the reporter's consent, except when required by law or needed to address an immediate safety risk.
+
+This mailbox is for conduct reports, not security vulnerabilities.
+Report vulnerabilities through the separate private process in [SECURITY.md](SECURITY.md).
 
 Community leaders must respect the privacy and security of the reporter of any incident.
 
