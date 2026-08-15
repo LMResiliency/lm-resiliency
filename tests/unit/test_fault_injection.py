@@ -2506,6 +2506,51 @@ def test_deepspeed_zero3_weight_uses_local_partition_storage() -> None:
     session.close()
 
 
+def test_deepspeed_zero3_master_resync_is_not_retired_twice() -> None:
+    model = TinyModel()
+    placeholder = nn.Parameter(torch.empty(0))
+    partition = torch.linspace(-1.0, 1.0, 16)
+    master = partition.clone()
+    placeholder.ds_tensor = partition
+    placeholder._z3_optimizer = object()
+    model.layers[0].weight = placeholder
+    engine = FakeDeepSpeedEngine(model)
+    engine.zero_optimization_stage = lambda: 3
+
+    def resync_step() -> None:
+        with torch.no_grad():
+            master.sub_(0.125)
+            partition.copy_(master)
+        engine.global_steps += 1
+
+    engine.step = resync_step
+    session = enable_fault_injection(
+        engine,
+        campaign=_campaign(
+            _incident(
+                at=(1,),
+                lifetime=IncidentLifetime(iterations=1),
+                faults=(
+                    _corruption(
+                        target=_target(surface=FaultSurface.WEIGHT),
+                        operation=CorruptionOperation.SCALE,
+                        scope=FaultScope.FULL,
+                        factor=2.0,
+                    ),
+                ),
+            )
+        ),
+        rank=0,
+    )
+
+    assert not torch.equal(partition, master)
+    engine.step()
+
+    torch.testing.assert_close(partition, master)
+    assert session.records[0].status is InjectionStatus.COMPLETED
+    session.close()
+
+
 def test_deepspeed_direct_checkpoint_tensor_load_preserves_recovered_state() -> None:
     model = TinyModel()
     engine = FakeDeepSpeedEngine(model)

@@ -1593,6 +1593,40 @@ def test_example_validates_reset_policy_before_distributed_setup(
     init_process_group.assert_not_called()
 
 
+def test_example_destroys_process_group_after_topology_validation_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    monkeypatch.setenv("LOCAL_RANK", "0")
+    monkeypatch.setattr(torch.cuda, "set_device", lambda _rank: None)
+    monkeypatch.setattr(
+        fault_injection_example.dist,
+        "init_process_group",
+        lambda **_kwargs: events.append("init"),
+    )
+    monkeypatch.setattr(fault_injection_example.dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(fault_injection_example.dist, "get_world_size", lambda: 7)
+    monkeypatch.setattr(
+        fault_injection_example.dist,
+        "destroy_process_group",
+        lambda: events.append("destroy"),
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "pytorch.py",
+            "--artifact-dir",
+            str(tmp_path / "artifacts"),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="requires exactly eight"):
+        fault_injection_example.main()
+
+    assert events == ["init", "destroy"]
+
+
 def test_example_rejects_multi_call_gradient_affecting_reset() -> None:
     campaign = FaultCampaign.from_dict(
         {

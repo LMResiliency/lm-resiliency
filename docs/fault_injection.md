@@ -434,6 +434,8 @@ training while the effect was active.
 Megatron optimizers may replace a model FP16/BF16 parameter from its distinct
 FP32 main parameter after the update. That resynchronized value is preserved at
 retirement instead of having the injected delta subtracted a second time.
+DeepSpeed ZeRO-3 applies the same rule to a rank-owned `ds_tensor` partition
+that is replaced from its FP32 master partition during the optimizer step.
 FSDP2/HSDP `DTensor` state is mutated and verified through the rank-local shard.
 Model `load_state_dict()` marks only active weight and bias state as externally
 replaced; optimizer `load_state_dict()` marks only optimizer-state effects.

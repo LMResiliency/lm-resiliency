@@ -12,6 +12,10 @@ torchrun --standalone --nproc-per-node=8 --module \
   --artifact-dir /tmp/lm-resiliency-fault-evaluation
 ```
 
+After distributed initialization, topology validation and all later setup run
+inside the teardown boundary. A world-size or target-rank failure therefore
+destroys the process group before the original error escapes.
+
 The checked-in [campaign.json](campaign.json) distributes 46 incident
 definitions across all eight global ranks. They produce 48 scheduled
 occurrences and 53 rank-local fault actions.

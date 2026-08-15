@@ -220,11 +220,19 @@ class TrainingContext:
         parameter_name: str | None,
     ) -> bool:
         """Return whether the optimizer replaces this model parameter after each step."""
-        if self.framework != "megatron":
-            return False
         parameter = self._resolve_model_parameter(target, parameter_name=parameter_name)
-        mapped = _resolve_megatron_optimizer_parameter(self.optimizer, parameter)
-        return mapped is not None and mapped[0] is not parameter
+        if self.framework == "megatron":
+            mapped = _resolve_megatron_optimizer_parameter(self.optimizer, parameter)
+            return mapped is not None and mapped[0] is not parameter
+        if self.framework == "deepspeed":
+            partition = getattr(parameter, "ds_tensor", None)
+            return (
+                parameter.numel() == 0
+                and isinstance(partition, torch.Tensor)
+                and partition.numel() > 0
+                and getattr(parameter, "_z3_optimizer", None) is not None
+            )
+        return False
 
     def _resolve_model_parameter(
         self,

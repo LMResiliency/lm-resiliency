@@ -152,54 +152,56 @@ def main() -> None:
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
     dist.init_process_group(backend="cpu:gloo,cuda:nccl")
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
-    if world_size != 8:
-        raise RuntimeError("the systematic campaign requires exactly eight DDP replicas")
-    _validate_target_ranks(campaign, world_size)
-
-    torch.manual_seed(123)
-    model = DistributedDataParallel(
-        TinyCausalLM().to(device),
-        device_ids=[local_rank],
-    )
-    optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4)
-    localizations = LocalizationCollector()
-
-    # Register SCOUT first so detection runs before a one-iteration fault is retired.
-    resiliency = enable_resiliency(
-        model,
-        optimizer,
-        interval=1,
-        checkpoint=InMemoryCkptConfig(
-            enable=True,
-            interval=1,
-            replication_jump=max(1, world_size // 2),
-            disk_flush_interval=0,
-            disk_folder=str(args.artifact_dir / "gemini"),
-        ),
-        replay=ReplayHarnessConfig(
-            check_interval=1,
-            layer_index=0,
-            rotate_layers=False,
-            enable_temporal=False,
-            scale_factors=[],
-            straggler_min_slowdown_ratio=100.0,
-            straggler_min_slowdown_ms=10.0,
-            straggler_confirmation_rounds=1,
-        ),
-        device=device,
-        orchestration=OrchestrationHooks(report_fault=localizations.record),
-    )
+    resiliency = None
     faults = None
-    state_reset = EvaluationStateReset(
-        model,
-        optimizer,
-        reset_iterations,
-        hold_iterations,
-        synchronize=dist.barrier,
-    )
+    state_reset = None
     try:
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        if world_size != 8:
+            raise RuntimeError("the systematic campaign requires exactly eight DDP replicas")
+        _validate_target_ranks(campaign, world_size)
+
+        torch.manual_seed(123)
+        model = DistributedDataParallel(
+            TinyCausalLM().to(device),
+            device_ids=[local_rank],
+        )
+        optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4)
+        localizations = LocalizationCollector()
+
+        # Register SCOUT first so detection runs before a one-iteration fault is retired.
+        resiliency = enable_resiliency(
+            model,
+            optimizer,
+            interval=1,
+            checkpoint=InMemoryCkptConfig(
+                enable=True,
+                interval=1,
+                replication_jump=max(1, world_size // 2),
+                disk_flush_interval=0,
+                disk_folder=str(args.artifact_dir / "gemini"),
+            ),
+            replay=ReplayHarnessConfig(
+                check_interval=1,
+                layer_index=0,
+                rotate_layers=False,
+                enable_temporal=False,
+                scale_factors=[],
+                straggler_min_slowdown_ratio=100.0,
+                straggler_min_slowdown_ms=10.0,
+                straggler_confirmation_rounds=1,
+            ),
+            device=device,
+            orchestration=OrchestrationHooks(report_fault=localizations.record),
+        )
+        state_reset = EvaluationStateReset(
+            model,
+            optimizer,
+            reset_iterations,
+            hold_iterations,
+            synchronize=dist.barrier,
+        )
         faults = enable_fault_injection(
             model,
             optimizer,
@@ -513,7 +515,7 @@ def _teardown(
     actions = (
         None if state_reset is None else state_reset.close,
         None if faults is None else faults.close,
-        resiliency.close,
+        None if resiliency is None else resiliency.close,
         destroy_process_group,
     )
     for action in actions:
