@@ -1170,7 +1170,13 @@ never-created authoritative key from one that was removed. <code>get_history(key
 returns every committed value entry in mutation order, including overwritten
 values and values from earlier key lifetimes. Deletes do not invent a payload;
 their revision, mutation, transaction, and lifetime effects remain visible as
-gaps between adjacent immutable entries. Failed operations append nothing.</p>
+gaps between adjacent immutable entries. Failed operations append nothing.
+Each retained coordinator-lease value is decoded into an immutable authority
+record only after validating canonical run-scoped lease bytes, authoritative
+commit time, unguarded lease storage, and possible mutation/value/lifetime
+sequence lineage. A lease key's mutation count also cannot exceed the
+store-global transaction sequence. Complete history traversal and
+adjacent-transition validation build on this strict value boundary.</p>
 <p>Coordinator state that spans multiple keys uses one guarded store transaction.
 The transaction first checks the coordinator lease revision, then any
 side-effect-free revision conditions, every target revision, and one
