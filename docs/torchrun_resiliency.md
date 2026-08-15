@@ -608,8 +608,11 @@ transaction's lower time bound; the store remains authoritative at execution.
 The prepared transaction also carries a never-created lifecycle-head
 condition. The store checks both current absence and durable key history at the
 same linearization point as the lease, generation conditions, and intent
-writes. The preparer performs no mutation. The following execution component
-owns the guarded transaction and verifies the returned store metadata.
+writes. The preparer performs no mutation. The initial-open executor submits
+that guarded transaction, translates lease, deadline, clock, generation, and
+lifecycle conflicts, and verifies that both returned entries share the expected
+bytes, commit time, transaction sequence, generation order, and lease
+provenance.
 
 `suspected_node_ids` is the policy-approved replacement scope for the
 incident. Every listed node must belong to the committed generation and must be
