@@ -13,6 +13,10 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from benchmarks.healthy_path import replication_jump  # noqa: E402
 
 
 def _free_local_port() -> int:
@@ -125,6 +129,11 @@ def main() -> int:
         parser.error("world size must be positive")
     if "baseline" not in args.modes:
         parser.error("modes must include baseline")
+    if {"gemini", "combined"}.intersection(args.modes):
+        try:
+            replication_jump(args.world_size)
+        except ValueError as error:
+            parser.error(str(error))
     if args.device == "cpu" and {"scout", "combined"}.intersection(args.modes):
         parser.error("SCOUT healthy-path modes require --device cuda")
 

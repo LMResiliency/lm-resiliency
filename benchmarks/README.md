@@ -1,6 +1,6 @@
 # Healthy-Path Benchmarks
 
-The native-PyTorch benchmark runs baseline, GEMINI-only, SCOUT-only, and combined modes in fresh `torchrun` processes. It records the exact revision, Python/PyTorch/CUDA environment, topology dimensions, workload and seed, checkpoint size and cadence, pinning and replication settings, replay cadence, throughput, p50/p95 step latency, and peak host/GPU memory.
+The native-PyTorch benchmark runs baseline, GEMINI-only, SCOUT-only, and combined modes in fresh `torchrun` processes. It records the exact revision, Python/PyTorch/CUDA environment, topology dimensions, workload and seed, checkpoint size and cadence, pinning and replication settings, replay cadence, throughput, job-level p50/p95 step latency, and peak host/GPU memory. Job latency uses the slowest rank at each step. SCOUT modes report parent and OOB-daemon peak host memory separately and as a combined per-rank peak.
 
 Run a two-GPU comparison:
 
@@ -13,6 +13,8 @@ python benchmarks/run_healthy_path.py \
 ```
 
 The controller writes one JSON record per mode plus `summary.json`, `summary.md`, `commands.json`, and SHA-256 checksums. Thresholds live in [thresholds.json](thresholds.json). They are stability alarms for this small representative workload, not replacements for the historical workload-specific percentages in the project documentation. The two-peer SCOUT cases measure healthy-path cost but do not qualify exact fault attribution, which requires at least three equivalent peers.
+
+GEMINI uses pairwise replication and therefore requires an even world size above one. Odd world sizes remain valid for baseline/SCOUT-only comparisons when those modes are selected explicitly.
 
 For a fast CPU harness smoke without a performance claim:
 

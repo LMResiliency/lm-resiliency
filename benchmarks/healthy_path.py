@@ -89,6 +89,27 @@ def percentile(values: list[float], quantile: float) -> float:
     return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
 
 
+def replication_jump(world_size: int) -> int:
+    """Return the pairwise GEMINI replication jump for a supported world size."""
+    if world_size < 1:
+        raise ValueError("world size must be positive")
+    if world_size > 1 and world_size % 2:
+        raise ValueError("GEMINI healthy-path modes require an even world size")
+    return max(1, world_size // 2)
+
+
+def aggregate_step_latencies(rank_results: list[dict[str, Any]]) -> list[float]:
+    """Collapse rank timings to the slowest latency for each synchronous step."""
+    sample_counts = {len(result["step_times_ms"]) for result in rank_results}
+    if len(sample_counts) != 1:
+        raise ValueError("all ranks must report the same number of timed steps")
+    sample_count = sample_counts.pop() if sample_counts else 0
+    return [
+        max(float(result["step_times_ms"][offset]) for result in rank_results)
+        for offset in range(sample_count)
+    ]
+
+
 def _tokens(
     rank: int,
     step: int,
@@ -154,6 +175,28 @@ def _max_rss_bytes() -> int:
     return value if sys.platform == "darwin" else value * 1024
 
 
+def _process_peak_rss_bytes(pid: int | None, *, proc_root: Path = Path("/proc")) -> int | None:
+    """Read Linux's peak resident set for a live SCOUT daemon."""
+    if pid is None:
+        return None
+    try:
+        status = (proc_root / str(pid) / "status").read_text()
+    except OSError:
+        return None
+    for line in status.splitlines():
+        if line.startswith("VmHWM:"):
+            fields = line.split()
+            if len(fields) == 3 and fields[2] == "kB":
+                return int(fields[1]) * 1024
+    return None
+
+
+def _oob_daemon_peak_rss_bytes(handle: Any) -> int | None:
+    replay_harness = getattr(handle, "replay_harness", None)
+    service = getattr(replay_harness, "_oob_service", None)
+    return _process_peak_rss_bytes(getattr(service, "pid", None))
+
+
 def _git_revision() -> str | None:
     completed = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -194,6 +237,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
 
     enable_checkpoint = args.mode in {"gemini", "combined"}
     enable_detection = args.mode in {"scout", "combined"}
+    checkpoint_replication_jump = replication_jump(world_size) if enable_checkpoint else 1
     handle = None
     if enable_checkpoint or enable_detection:
         handle = enable_resiliency(
@@ -205,7 +249,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             checkpoint=InMemoryCkptConfig(
                 enable=enable_checkpoint,
                 interval=args.interval,
-                replication_jump=max(1, world_size // 2),
+                replication_jump=checkpoint_replication_jump,
                 replication_chunk_size=args.replication_chunk_size,
                 disk_flush_interval=0,
                 pin_memory=device.type == "cuda" and args.pin_memory,
@@ -257,11 +301,18 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         measured_seconds = time.perf_counter() - measured_started
         dist.barrier()
 
+        peak_parent_host_memory_bytes = _max_rss_bytes()
+        peak_oob_host_memory_bytes = (
+            _oob_daemon_peak_rss_bytes(handle) if enable_detection else None
+        )
         rank_result = {
             "rank": rank,
             "duration_seconds": measured_seconds,
             "step_times_ms": step_times_ms,
-            "peak_host_memory_bytes": _max_rss_bytes(),
+            "peak_parent_host_memory_bytes": peak_parent_host_memory_bytes,
+            "peak_oob_host_memory_bytes": peak_oob_host_memory_bytes,
+            "peak_host_memory_bytes": peak_parent_host_memory_bytes
+            + (peak_oob_host_memory_bytes or 0),
             "peak_gpu_memory_bytes": (
                 torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None
             ),
@@ -272,7 +323,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         if rank != 0:
             return {}
         complete_results = [result for result in rank_results if result is not None]
-        all_step_times = [value for result in complete_results for value in result["step_times_ms"]]
+        job_step_times = aggregate_step_latencies(complete_results)
         max_duration = max(result["duration_seconds"] for result in complete_results)
         tokens = args.steps * args.batch_size * args.sequence_length * world_size
         return {
@@ -327,8 +378,24 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             },
             "metrics": {
                 "throughput_tokens_per_second": tokens / max_duration,
-                "step_latency_p50_ms": percentile(all_step_times, 0.50),
-                "step_latency_p95_ms": percentile(all_step_times, 0.95),
+                "step_latency_p50_ms": percentile(job_step_times, 0.50),
+                "step_latency_p95_ms": percentile(job_step_times, 0.95),
+                "step_latencies_ms": job_step_times,
+                "peak_parent_host_memory_bytes": max(
+                    result["peak_parent_host_memory_bytes"] for result in complete_results
+                ),
+                "peak_oob_host_memory_bytes": (
+                    max(
+                        result["peak_oob_host_memory_bytes"]
+                        for result in complete_results
+                        if result["peak_oob_host_memory_bytes"] is not None
+                    )
+                    if any(
+                        result["peak_oob_host_memory_bytes"] is not None
+                        for result in complete_results
+                    )
+                    else None
+                ),
                 "peak_host_memory_bytes": max(
                     result["peak_host_memory_bytes"] for result in complete_results
                 ),
