@@ -83,6 +83,12 @@ class GenerationStateManager(GenerationStateReader):
             raise ValueError("successor assignment must preserve logical rank ranges")
         if assignment.topology_digest != previous.topology_digest:
             raise ValueError("successor assignment must preserve topology digest")
+        previous_slots = {node_id: slot for slot, node_id in previous.slot_to_node_id.items()}
+        if any(
+            node_id in previous_slots and previous_slots[node_id] != slot
+            for slot, node_id in assignment.slot_to_node_id.items()
+        ):
+            raise ValueError("successor assignment must preserve surviving node slots")
         snapshot_record = self._snapshot_record(
             lease,
             assignment,

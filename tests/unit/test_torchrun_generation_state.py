@@ -411,6 +411,10 @@ def test_generation_state_rejects_fabricated_current_generation():
             _assignment(1, topology_digest="topology-v2"),
             "topology digest",
         ),
+        (
+            _assignment(1, node_ids=("node-b", "node-a")),
+            "surviving node slots",
+        ),
     ],
 )
 def test_generation_state_rejects_incompatible_successors(assignment, message):

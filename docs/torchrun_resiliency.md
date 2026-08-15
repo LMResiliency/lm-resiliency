@@ -916,10 +916,11 @@ proves the run has no committed or deleted head history. It commits the mutable
 head and one create-only immutable snapshot in the same lease-guarded
 transaction. A successor must name the exact current head, advance by one
 generation, preserve active-node count, local world size, logical rank ranges,
-and topology digest, and link to the predecessor's canonical snapshot digest.
-Concurrent initializers or successor writers therefore produce one committed
-winner; stale leases, stale heads, expired store-time windows, partial target
-conflicts, and unexpected transaction results fail closed.
+topology digest, and the logical slot of every surviving node, and link to the
+predecessor's canonical snapshot digest. Concurrent initializers or successor
+writers therefore produce one committed winner; stale leases, stale heads,
+expired store-time windows, partial target conflicts, and unexpected
+transaction results fail closed.
 
 Coordinator ownership is stored under a schema-versioned, run-scoped lease key.
 The lease record binds the run, a unique coordinator-process incarnation, a
