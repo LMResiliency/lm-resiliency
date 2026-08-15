@@ -885,31 +885,32 @@ guard-mutation, and lease-identity chain back to generation zero. Lease
 identities cannot reappear after a different acquisition, and one acquisition
 cannot change coordinator identity, lease duration, or store-stamped guard-key
 lifetime. Every snapshot entry must retain store-stamped mutation sequence `1`,
-while the head mutation sequence must equal `generation + 1`; this rejects
-replacement, recreation, extra rewrites, and rollback. Every generation commit
-must fall within the stamped lease grant and duration. The head must remain in
-its first store-key lifetime, and a stable immediate successor snapshot beyond
-the head is contradictory state for every read API. Replacing a lease in place
-must not overlap the prior lease's stamped expiry, and one fencing token cannot
-identify multiple guard mutations. Fencing revisions are compared only for
-equality; ordering comes from the store-stamped guard mutation sequence. Each
-guard-key lifetime increase requires at least one delete and one create
-mutation, including before the first persisted generation. Because deletion
-advances mutation sequence without advancing value sequence, every entry and
-adjacent transition must also satisfy the corresponding value-sequence upper
-bound. When generations omit intervening renewals of one lease, the mutation
-distance bounds the latest grant time that a valid renewal chain could reach, so
-skipped valid renewals are accepted while resurrection after expiry is rejected.
-A same-key takeover with unobserved intervening mutations is ambiguous and
-rejected. An older generation commit cannot postdate the next guard mutation
-that fences it. Opaque fencing tokens cannot reappear after another guard
-mutation. One lease identity must retain one guard value sequence, so changing A
-to B and back to A cannot be misread as skipped renewals. The durable history of
-the generation-head key is the run initialization marker, so deleting both the
-head and generation zero cannot make an initialized run appear empty. Grant
-times, guard mutation/value sequences, and key-lifetime sequences cannot move
-backward. Missing or contradictory history is corruption, not an empty or
-partially usable assignment.
+lifetime. Every snapshot entry must retain store-stamped mutation, value, and
+lifetime sequence `1`, while the head mutation and value sequences must equal
+`generation + 1`; this rejects replacement, recreation, extra rewrites, and
+rollback. Every generation commit must fall within the stamped lease grant and
+duration. The head must remain in its first store-key lifetime, and a stable
+immediate successor snapshot beyond the head is contradictory state for every
+read API. Replacing a lease in place must not overlap the prior lease's stamped
+expiry, and one fencing token cannot identify multiple guard mutations. Fencing
+revisions are compared only for equality; ordering comes from the store-stamped
+guard mutation sequence. Each guard-key lifetime increase requires at least one
+delete and one create mutation, including before the first persisted generation.
+Because deletion advances mutation sequence without advancing value sequence,
+every entry and adjacent transition must also satisfy the corresponding
+value-sequence upper bound. When generations omit intervening renewals of one
+lease, the mutation distance bounds the latest grant time that a valid renewal
+chain could reach, so skipped valid renewals are accepted while resurrection
+after expiry is rejected. A same-key takeover with unobserved intervening
+mutations is ambiguous and rejected. An older generation commit cannot postdate
+the next guard mutation that fences it. Opaque fencing tokens cannot reappear
+after another guard mutation. One lease identity must retain one guard value
+sequence, so changing A to B and back to A cannot be misread as skipped
+renewals. The durable history of the generation-head key is the run
+initialization marker, so deleting both the head and generation zero cannot make
+an initialized run appear empty. Grant times, guard mutation/value sequences,
+and key-lifetime sequences cannot move backward. Missing or contradictory
+history is corruption, not an empty or partially usable assignment.
 
 Coordinator ownership is stored under a schema-versioned, run-scoped lease key.
 The lease record binds the run, a unique coordinator-process incarnation, a

@@ -198,8 +198,14 @@ class GenerationStateReader:
             raise GenerationStateCorrupt("generation snapshot belongs to another run")
         if assignment.generation != expected_generation:
             raise GenerationStateCorrupt("generation snapshot key and payload disagree")
-        if entry.mutation_sequence != 1:
-            raise GenerationStateCorrupt("immutable generation snapshot was replaced or recreated")
+        if (
+            entry.mutation_sequence != 1
+            or entry.value_sequence != 1
+            or entry.lifetime_sequence != 1
+        ):
+            raise GenerationStateCorrupt(
+                "immutable generation snapshot has noninitial store sequences"
+            )
         if entry.committed_at_unix_ms is None:
             raise GenerationStateCorrupt("generation snapshot has no authoritative commit time")
         (
@@ -231,6 +237,10 @@ class GenerationStateReader:
         if head_entry.mutation_sequence != head.generation + 1:
             raise GenerationStateCorrupt(
                 "generation head mutation sequence does not match its generation"
+            )
+        if head_entry.value_sequence != head.generation + 1:
+            raise GenerationStateCorrupt(
+                "generation head value sequence does not match its generation"
             )
         if head_entry.committed_at_unix_ms != snapshot.committed_at_unix_ms:
             raise GenerationStateCorrupt(
