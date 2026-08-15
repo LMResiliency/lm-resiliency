@@ -307,6 +307,9 @@ whether the scheduled cycle completed and whether any comparison group found
 SDC. An SDC in one group therefore rejects the candidate on every rank.</p>
 <h2 id="persistence-and-recovery">Persistence and Recovery<a class="headerlink" href="#persistence-and-recovery" title="Permanent link">&para;</a></h2>
 <p>GEMINI serializes only completed slots.
+Each shard is written to a same-directory temporary file, flushed, and atomically renamed before it becomes visible to recovery.
+Restart mirrors use the same publication rule.
+Temporary files left by a terminated writer are ignored and removed before the next write to that shard, while latest-mode recovery walks older generations until it finds the newest shard set that every rank can load and validate.
 At a dense accepted boundary, it persists the latest local CPU checkpoint and received peer replica as recovery-verified.
 At a dynamic recipe-cycle boundary, it persists them as the new candidate and records candidate and recovery-verified steps separately.
 Each rank owns its status sidecar; several workers on one node never update the same mutable trust record.
@@ -397,7 +400,7 @@ Framework integrations call the manager at safe optimizer boundaries and include
 <p>These values measure the synchronization-visible portion of asynchronous capture.
 They do not infer overhead from small differences between independent end-to-end step-time runs.
 Hardware, state layout, capture cadence, and available copy or network overlap can change the result.
-The reproducible <a href="https://github.com/LMResiliency/lm-resiliency/blob/d305aa0b122e859a5685bb1682d59cf6fd1e6141/benchmarks/README.md">healthy-path benchmark</a> records current-package baseline, GEMINI, SCOUT, and combined measurements and applies explicit scheduled-run thresholds.
+The reproducible <a href="https://github.com/LMResiliency/lm-resiliency/blob/e411f4c48c469e7bc1b8a49adcc96b4f0a2132e4/benchmarks/README.md">healthy-path benchmark</a> records current-package baseline, GEMINI, SCOUT, and combined measurements and applies explicit scheduled-run thresholds.
 The table above remains historical evidence for its stated A100 workload and is not a baseline for different benchmark shapes or hardware.</p>
 <h2 id="boundaries">Boundaries<a class="headerlink" href="#boundaries" title="Permanent link">&para;</a></h2>
 <ul>
