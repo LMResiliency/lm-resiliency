@@ -33,6 +33,14 @@ class ControlStoreConflict(ControlStoreError):
         )
 
 
+class ControlStoreHistoryConflict(ControlStoreError):
+    """Raised when a create-once mutation targets a previously used key."""
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+        super().__init__(f"control-store key {key!r} has prior committed history")
+
+
 class ControlStoreDeadlineExceeded(ControlStoreError):
     """Raised when a conditional mutation reaches its store-side deadline."""
 
@@ -176,6 +184,7 @@ class ControlStoreWrite:
 
     expected_revision: int | None
     value: bytes
+    require_never_created: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -184,6 +193,10 @@ class ControlStoreWrite:
             _expected_revision(self.expected_revision, allow_absent=True),
         )
         object.__setattr__(self, "value", _control_value(self.value))
+        if not isinstance(self.require_never_created, bool):
+            raise TypeError("require_never_created must be bool")
+        if self.require_never_created and self.expected_revision is not None:
+            raise ValueError("require_never_created is valid only for create-if-absent writes")
 
 
 class ControlStore(Protocol):
@@ -421,6 +434,8 @@ class InMemoryControlStore:
             guard_value_digest = hashlib.sha256(guard_entry.value).hexdigest()
             for key, write in normalized_writes.items():
                 self._require_revision(key, write.expected_revision)
+                if write.require_never_created and key in self._last_revisions:
+                    raise ControlStoreHistoryConflict(key)
             now_unix_ms = self._store_now_unix_ms()
             if now_unix_ms < normalized_not_before:
                 raise ControlStoreTooEarly(
@@ -573,6 +588,7 @@ __all__ = [
     "ControlStoreDeadlineExceeded",
     "ControlStoreEntry",
     "ControlStoreError",
+    "ControlStoreHistoryConflict",
     "ControlStoreTooEarly",
     "ControlStoreWrite",
     "InMemoryControlStore",
