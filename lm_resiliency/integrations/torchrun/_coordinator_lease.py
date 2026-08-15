@@ -7,7 +7,7 @@ import json
 import threading
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import ClassVar
 
 from lm_resiliency.integrations.torchrun._control_store import (
@@ -52,8 +52,7 @@ class CoordinatorLeaseRecord:
     run_id: str
     coordinator_id: str
     lease_id: str
-    acquired_at_unix_ms: int
-    expires_at_unix_ms: int
+    lease_duration_ms: int
 
     def __post_init__(self) -> None:
         _nonempty_string(self.run_id, "CoordinatorLeaseRecord.run_id")
@@ -63,15 +62,9 @@ class CoordinatorLeaseRecord:
         )
         _nonempty_string(self.lease_id, "CoordinatorLeaseRecord.lease_id")
         _positive_integer(
-            self.acquired_at_unix_ms,
-            "CoordinatorLeaseRecord.acquired_at_unix_ms",
+            self.lease_duration_ms,
+            "CoordinatorLeaseRecord.lease_duration_ms",
         )
-        _positive_integer(
-            self.expires_at_unix_ms,
-            "CoordinatorLeaseRecord.expires_at_unix_ms",
-        )
-        if self.expires_at_unix_ms <= self.acquired_at_unix_ms:
-            raise ValueError("CoordinatorLeaseRecord.expires_at_unix_ms must be after acquisition")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -79,8 +72,7 @@ class CoordinatorLeaseRecord:
             "run_id": self.run_id,
             "coordinator_id": self.coordinator_id,
             "lease_id": self.lease_id,
-            "acquired_at_unix_ms": self.acquired_at_unix_ms,
-            "expires_at_unix_ms": self.expires_at_unix_ms,
+            "lease_duration_ms": self.lease_duration_ms,
         }
 
     def to_json(self) -> bytes:
@@ -111,8 +103,7 @@ class CoordinatorLeaseRecord:
             "run_id",
             "coordinator_id",
             "lease_id",
-            "acquired_at_unix_ms",
-            "expires_at_unix_ms",
+            "lease_duration_ms",
         }
         missing = expected - set(value)
         unknown = set(value) - expected
@@ -142,13 +133,9 @@ class CoordinatorLeaseRecord:
                 value["lease_id"],
                 "CoordinatorLeaseRecord.lease_id",
             ),
-            acquired_at_unix_ms=_positive_integer(
-                value["acquired_at_unix_ms"],
-                "CoordinatorLeaseRecord.acquired_at_unix_ms",
-            ),
-            expires_at_unix_ms=_positive_integer(
-                value["expires_at_unix_ms"],
-                "CoordinatorLeaseRecord.expires_at_unix_ms",
+            lease_duration_ms=_positive_integer(
+                value["lease_duration_ms"],
+                "CoordinatorLeaseRecord.lease_duration_ms",
             ),
         )
 
@@ -159,6 +146,7 @@ class HeldCoordinatorLease:
 
     record: CoordinatorLeaseRecord
     fencing_token: int
+    granted_at_unix_ms: int
 
     def __post_init__(self) -> None:
         if not isinstance(self.record, CoordinatorLeaseRecord):
@@ -167,6 +155,14 @@ class HeldCoordinatorLease:
             self.fencing_token,
             "HeldCoordinatorLease.fencing_token",
         )
+        _positive_integer(
+            self.granted_at_unix_ms,
+            "HeldCoordinatorLease.granted_at_unix_ms",
+        )
+
+    @property
+    def expires_at_unix_ms(self) -> int:
+        return self.granted_at_unix_ms + self.record.lease_duration_ms
 
 
 class CoordinatorLeaseManager:
@@ -213,14 +209,14 @@ class CoordinatorLeaseManager:
         now_unix_ms = self._now_unix_ms()
         for _ in range(_MAX_CAS_ATTEMPTS):
             current = self.current()
-            if current is not None and current.record.expires_at_unix_ms > now_unix_ms:
+            if current is not None and current.expires_at_unix_ms > now_unix_ms:
                 if current.record.coordinator_id == self._coordinator_id:
                     try:
                         entry = self._store.compare_set_in_window(
                             self._lease_key,
                             expected_revision=current.fencing_token,
                             not_before_unix_ms=now_unix_ms,
-                            deadline_unix_ms=current.record.expires_at_unix_ms,
+                            deadline_unix_ms=current.expires_at_unix_ms,
                             value=current.record.to_json(),
                         )
                     except ControlStoreDeadlineExceeded as error:
@@ -238,46 +234,29 @@ class CoordinatorLeaseManager:
                         ) from error
                     except ControlStoreConflict:
                         continue
-                    return HeldCoordinatorLease(
-                        record=current.record,
-                        fencing_token=entry.revision,
-                    )
+                    return self._require_live_response(self._decode_entry(entry))
                 raise CoordinatorLeaseUnavailable(
                     "coordinator lease is held by "
                     f"{current.record.coordinator_id!r} until "
-                    f"{current.record.expires_at_unix_ms}"
+                    f"{current.expires_at_unix_ms}"
                 )
             record = CoordinatorLeaseRecord(
                 run_id=self._run_id,
                 coordinator_id=self._coordinator_id,
                 lease_id=uuid.uuid4().hex,
-                acquired_at_unix_ms=now_unix_ms,
-                expires_at_unix_ms=now_unix_ms + self._lease_duration_ms,
+                lease_duration_ms=self._lease_duration_ms,
             )
             try:
-                if current is None:
-                    entry = self._store.compare_set_in_window(
-                        self._lease_key,
-                        expected_revision=None,
-                        not_before_unix_ms=record.acquired_at_unix_ms,
-                        deadline_unix_ms=record.expires_at_unix_ms,
-                        value=record.to_json(),
-                    )
-                else:
-                    entry = self._store.compare_set_in_window(
-                        self._lease_key,
-                        expected_revision=current.fencing_token,
-                        not_before_unix_ms=max(
-                            current.record.expires_at_unix_ms,
-                            record.acquired_at_unix_ms,
-                        ),
-                        deadline_unix_ms=record.expires_at_unix_ms,
-                        value=record.to_json(),
-                    )
-            except ControlStoreDeadlineExceeded as error:
-                raise CoordinatorLeaseUnavailable(
-                    "candidate coordinator lease expired at the control store before acquisition"
-                ) from error
+                entry = self._store.compare_set_in_window(
+                    self._lease_key,
+                    expected_revision=None if current is None else current.fencing_token,
+                    not_before_unix_ms=max(
+                        now_unix_ms,
+                        0 if current is None else current.expires_at_unix_ms,
+                    ),
+                    deadline_unix_ms=None,
+                    value=record.to_json(),
+                )
             except ControlStoreTooEarly as error:
                 raise CoordinatorLeaseClockError(
                     "control-store time precedes the coordinator acquisition observation "
@@ -289,32 +268,21 @@ class CoordinatorLeaseManager:
                 ) from error
             except ControlStoreConflict:
                 continue
-            return HeldCoordinatorLease(
-                record=record,
-                fencing_token=entry.revision,
-            )
+            return self._require_live_response(self._decode_entry(entry))
         raise CoordinatorLeaseUnavailable("coordinator lease changed repeatedly during acquisition")
 
     def renew(self, lease: HeldCoordinatorLease) -> HeldCoordinatorLease:
         self._validate_owned_handle(lease)
         now_unix_ms = self._now_unix_ms()
-        if lease.record.expires_at_unix_ms <= now_unix_ms:
+        if lease.expires_at_unix_ms <= now_unix_ms:
             raise CoordinatorLeaseLost("coordinator lease expired before renewal")
-        requested_expiry = max(
-            lease.record.expires_at_unix_ms,
-            now_unix_ms + self._lease_duration_ms,
-        )
-        record = replace(
-            lease.record,
-            expires_at_unix_ms=requested_expiry,
-        )
         try:
             entry = self._store.compare_set_in_window(
                 self._lease_key,
                 expected_revision=lease.fencing_token,
                 not_before_unix_ms=now_unix_ms,
-                deadline_unix_ms=lease.record.expires_at_unix_ms,
-                value=record.to_json(),
+                deadline_unix_ms=lease.expires_at_unix_ms,
+                value=lease.record.to_json(),
             )
         except ControlStoreDeadlineExceeded as error:
             raise CoordinatorLeaseLost(
@@ -330,18 +298,37 @@ class CoordinatorLeaseManager:
             ) from error
         except ControlStoreConflict as error:
             raise CoordinatorLeaseLost("coordinator lease changed before renewal") from error
-        return HeldCoordinatorLease(
-            record=record,
-            fencing_token=entry.revision,
-        )
+        try:
+            return self._require_live_response(self._decode_entry(entry))
+        except CoordinatorLeaseUnavailable as error:
+            raise CoordinatorLeaseLost(
+                "renewed coordinator lease expired before the response arrived"
+            ) from error
 
     def release(self, lease: HeldCoordinatorLease) -> int:
         self._validate_owned_handle(lease)
+        now_unix_ms = self._now_unix_ms()
+        if lease.expires_at_unix_ms <= now_unix_ms:
+            raise CoordinatorLeaseLost("coordinator lease expired before release")
         try:
-            return self._store.compare_delete(
+            return self._store.compare_delete_in_window(
                 self._lease_key,
                 expected_revision=lease.fencing_token,
+                not_before_unix_ms=now_unix_ms,
+                deadline_unix_ms=lease.expires_at_unix_ms,
             )
+        except ControlStoreDeadlineExceeded as error:
+            raise CoordinatorLeaseLost(
+                "coordinator lease expired at the control store before release"
+            ) from error
+        except ControlStoreTooEarly as error:
+            raise CoordinatorLeaseClockError(
+                "control-store time precedes the coordinator release observation"
+            ) from error
+        except ControlStoreClockError as error:
+            raise CoordinatorLeaseClockError(
+                "authoritative control-store clock moved backward"
+            ) from error
         except ControlStoreConflict as error:
             raise CoordinatorLeaseLost("coordinator lease changed before release") from error
 
@@ -352,10 +339,27 @@ class CoordinatorLeaseManager:
             raise CoordinatorLeaseCorrupt("persisted coordinator lease is malformed") from error
         if record.run_id != self._run_id:
             raise CoordinatorLeaseCorrupt("persisted coordinator lease belongs to another run")
+        if entry.committed_at_unix_ms is None:
+            raise CoordinatorLeaseCorrupt(
+                "persisted coordinator lease has no authoritative commit time"
+            )
         return HeldCoordinatorLease(
             record=record,
             fencing_token=entry.revision,
+            granted_at_unix_ms=entry.committed_at_unix_ms,
         )
+
+    def _require_live_response(self, lease: HeldCoordinatorLease) -> HeldCoordinatorLease:
+        now_unix_ms = self._now_unix_ms()
+        if now_unix_ms < lease.granted_at_unix_ms:
+            raise CoordinatorLeaseClockError(
+                "coordinator clock precedes the authoritative lease commit time"
+            )
+        if lease.expires_at_unix_ms <= now_unix_ms:
+            raise CoordinatorLeaseUnavailable(
+                "coordinator lease expired before the store response arrived"
+            )
+        return lease
 
     def _validate_owned_handle(self, lease: HeldCoordinatorLease) -> None:
         if not isinstance(lease, HeldCoordinatorLease):

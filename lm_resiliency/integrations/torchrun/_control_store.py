@@ -67,10 +67,20 @@ class ControlStoreEntry:
 
     value: bytes
     revision: int
+    committed_at_unix_ms: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "value", _control_value(self.value))
         object.__setattr__(self, "revision", _required_revision(self.revision))
+        if self.committed_at_unix_ms is not None:
+            object.__setattr__(
+                self,
+                "committed_at_unix_ms",
+                _positive_integer(
+                    self.committed_at_unix_ms,
+                    "committed_at_unix_ms",
+                ),
+            )
 
 
 class ControlStore(Protocol):
@@ -97,27 +107,31 @@ class ControlStore(Protocol):
         """Delete ``key`` when its revision matches and return the tombstone revision."""
         ...
 
-    def compare_set_before(
-        self,
-        key: str,
-        *,
-        expected_revision: int | None,
-        deadline_unix_ms: int,
-        value: bytes,
-    ) -> ControlStoreEntry:
-        """Create or replace ``key`` when its revision matches before the deadline."""
-        ...
-
     def compare_set_in_window(
         self,
         key: str,
         *,
         expected_revision: int | None,
         not_before_unix_ms: int,
-        deadline_unix_ms: int,
+        deadline_unix_ms: int | None,
         value: bytes,
     ) -> ControlStoreEntry:
-        """Create or replace ``key`` within an inclusive-start, exclusive-end window."""
+        """Create or replace ``key`` in a store-time window.
+
+        The start is inclusive. ``deadline_unix_ms=None`` leaves the end
+        unbounded. The returned entry carries the authoritative commit time.
+        """
+        ...
+
+    def compare_delete_in_window(
+        self,
+        key: str,
+        *,
+        expected_revision: int,
+        not_before_unix_ms: int,
+        deadline_unix_ms: int,
+    ) -> int:
+        """Delete ``key`` within an inclusive-start, exclusive-end window."""
         ...
 
 
@@ -158,43 +172,60 @@ class InMemoryControlStore:
             del self._entries[normalized_key]
             return self._next_revision(normalized_key)
 
-    def compare_set_before(
-        self,
-        key: str,
-        *,
-        expected_revision: int | None,
-        deadline_unix_ms: int,
-        value: bytes,
-    ) -> ControlStoreEntry:
-        normalized_key = _control_key(key)
-        normalized_revision = _expected_revision(expected_revision, allow_absent=True)
-        normalized_deadline = _positive_integer(
-            deadline_unix_ms,
-            "deadline_unix_ms",
-        )
-        normalized_value = _control_value(value)
-        with self._lock:
-            self._require_revision(normalized_key, normalized_revision)
-            now_unix_ms = self._store_now_unix_ms()
-            if now_unix_ms >= normalized_deadline:
-                raise ControlStoreDeadlineExceeded(
-                    normalized_key,
-                    normalized_deadline,
-                    now_unix_ms,
-                )
-            return self._set_entry(normalized_key, normalized_value)
-
     def compare_set_in_window(
         self,
         key: str,
         *,
         expected_revision: int | None,
         not_before_unix_ms: int,
-        deadline_unix_ms: int,
+        deadline_unix_ms: int | None,
         value: bytes,
     ) -> ControlStoreEntry:
         normalized_key = _control_key(key)
         normalized_revision = _expected_revision(expected_revision, allow_absent=True)
+        normalized_not_before = _positive_integer(
+            not_before_unix_ms,
+            "not_before_unix_ms",
+        )
+        normalized_deadline = (
+            None
+            if deadline_unix_ms is None
+            else _positive_integer(deadline_unix_ms, "deadline_unix_ms")
+        )
+        if normalized_deadline is not None and normalized_not_before >= normalized_deadline:
+            raise ValueError("not_before_unix_ms must be before deadline_unix_ms")
+        normalized_value = _control_value(value)
+        with self._lock:
+            self._require_revision(normalized_key, normalized_revision)
+            now_unix_ms = self._store_now_unix_ms()
+            if now_unix_ms < normalized_not_before:
+                raise ControlStoreTooEarly(
+                    normalized_key,
+                    normalized_not_before,
+                    now_unix_ms,
+                )
+            if normalized_deadline is not None and now_unix_ms >= normalized_deadline:
+                raise ControlStoreDeadlineExceeded(
+                    normalized_key,
+                    normalized_deadline,
+                    now_unix_ms,
+                )
+            return self._set_entry(
+                normalized_key,
+                normalized_value,
+                committed_at_unix_ms=now_unix_ms,
+            )
+
+    def compare_delete_in_window(
+        self,
+        key: str,
+        *,
+        expected_revision: int,
+        not_before_unix_ms: int,
+        deadline_unix_ms: int,
+    ) -> int:
+        normalized_key = _control_key(key)
+        normalized_revision = _required_revision(expected_revision)
         normalized_not_before = _positive_integer(
             not_before_unix_ms,
             "not_before_unix_ms",
@@ -205,7 +236,6 @@ class InMemoryControlStore:
         )
         if normalized_not_before >= normalized_deadline:
             raise ValueError("not_before_unix_ms must be before deadline_unix_ms")
-        normalized_value = _control_value(value)
         with self._lock:
             self._require_revision(normalized_key, normalized_revision)
             now_unix_ms = self._store_now_unix_ms()
@@ -221,7 +251,8 @@ class InMemoryControlStore:
                     normalized_deadline,
                     now_unix_ms,
                 )
-            return self._set_entry(normalized_key, normalized_value)
+            del self._entries[normalized_key]
+            return self._next_revision(normalized_key)
 
     def _require_revision(self, key: str, expected_revision: int | None) -> None:
         entry = self._entries.get(key)
@@ -229,9 +260,19 @@ class InMemoryControlStore:
         if actual_revision != expected_revision:
             raise ControlStoreConflict(key, expected_revision, actual_revision)
 
-    def _set_entry(self, key: str, value: bytes) -> ControlStoreEntry:
+    def _set_entry(
+        self,
+        key: str,
+        value: bytes,
+        *,
+        committed_at_unix_ms: int | None = None,
+    ) -> ControlStoreEntry:
         revision = self._next_revision(key)
-        entry = ControlStoreEntry(value=value, revision=revision)
+        entry = ControlStoreEntry(
+            value=value,
+            revision=revision,
+            committed_at_unix_ms=committed_at_unix_ms,
+        )
         self._entries[key] = entry
         return entry
 
@@ -289,6 +330,6 @@ __all__ = [
     "ControlStoreDeadlineExceeded",
     "ControlStoreEntry",
     "ControlStoreError",
-    "InMemoryControlStore",
     "ControlStoreTooEarly",
+    "InMemoryControlStore",
 ]

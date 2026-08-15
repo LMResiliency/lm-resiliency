@@ -173,74 +173,6 @@ def test_control_store_rejects_mutable_values():
         )
 
 
-def test_control_store_deadline_guard_is_checked_atomically():
-    clock = ManualClock(100)
-    store = InMemoryControlStore(clock=clock)
-    created = store.compare_set_before(
-        "run/control",
-        expected_revision=None,
-        deadline_unix_ms=101,
-        value=b"one",
-    )
-
-    updated = store.compare_set_before(
-        "run/control",
-        expected_revision=created.revision,
-        deadline_unix_ms=101,
-        value=b"two",
-    )
-    clock.now_unix_ms = 101
-
-    with pytest.raises(ControlStoreDeadlineExceeded) as error:
-        store.compare_set_before(
-            "run/control",
-            expected_revision=updated.revision,
-            deadline_unix_ms=101,
-            value=b"expired",
-        )
-
-    assert error.value.observed_unix_ms == 101
-    assert store.get("run/control") == updated
-
-
-def test_control_store_deadline_guard_rejects_expired_create():
-    clock = ManualClock(100)
-    store = InMemoryControlStore(clock=clock)
-
-    with pytest.raises(ControlStoreDeadlineExceeded):
-        store.compare_set_before(
-            "run/control",
-            expected_revision=None,
-            deadline_unix_ms=100,
-            value=b"expired",
-        )
-
-    assert store.get("run/control") is None
-
-
-def test_control_store_deadline_guard_rejects_backward_clock():
-    clock = ManualClock(100)
-    store = InMemoryControlStore(clock=clock)
-    created = store.compare_set("run/control", expected_revision=None, value=b"one")
-    updated = store.compare_set_before(
-        "run/control",
-        expected_revision=created.revision,
-        deadline_unix_ms=200,
-        value=b"two",
-    )
-    clock.now_unix_ms = 99
-
-    with pytest.raises(ControlStoreClockError, match="backward"):
-        store.compare_set_before(
-            "run/control",
-            expected_revision=updated.revision,
-            deadline_unix_ms=200,
-            value=b"stale-clock",
-        )
-
-    assert store.get("run/control") == updated
-
-
 def test_control_store_time_window_uses_one_authoritative_sample():
     clock = ManualClock(100)
     store = InMemoryControlStore(clock=clock)
@@ -248,9 +180,10 @@ def test_control_store_time_window_uses_one_authoritative_sample():
         "run/control",
         expected_revision=None,
         not_before_unix_ms=100,
-        deadline_unix_ms=103,
+        deadline_unix_ms=None,
         value=b"one",
     )
+    assert created.committed_at_unix_ms == 100
 
     with pytest.raises(ControlStoreTooEarly) as early_error:
         store.compare_set_in_window(
@@ -271,6 +204,7 @@ def test_control_store_time_window_uses_one_authoritative_sample():
         deadline_unix_ms=103,
         value=b"two",
     )
+    assert updated.committed_at_unix_ms == 101
     clock.now_unix_ms = 103
 
     with pytest.raises(ControlStoreDeadlineExceeded):
@@ -285,13 +219,81 @@ def test_control_store_time_window_uses_one_authoritative_sample():
     assert store.get("run/control") == updated
 
 
+def test_control_store_time_window_rejects_backward_clock():
+    clock = ManualClock(100)
+    store = InMemoryControlStore(clock=clock)
+    created = store.compare_set_in_window(
+        "run/control",
+        expected_revision=None,
+        not_before_unix_ms=100,
+        deadline_unix_ms=None,
+        value=b"one",
+    )
+    clock.now_unix_ms = 99
+
+    with pytest.raises(ControlStoreClockError, match="backward"):
+        store.compare_set_in_window(
+            "run/control",
+            expected_revision=created.revision,
+            not_before_unix_ms=99,
+            deadline_unix_ms=None,
+            value=b"stale-clock",
+        )
+
+    assert store.get("run/control") == created
+
+
+def test_control_store_guarded_delete_uses_same_time_window():
+    clock = ManualClock(100)
+    store = InMemoryControlStore(clock=clock)
+    created = store.compare_set("run/control", expected_revision=None, value=b"one")
+
+    with pytest.raises(ControlStoreTooEarly):
+        store.compare_delete_in_window(
+            "run/control",
+            expected_revision=created.revision,
+            not_before_unix_ms=101,
+            deadline_unix_ms=103,
+        )
+    clock.now_unix_ms = 102
+    tombstone_revision = store.compare_delete_in_window(
+        "run/control",
+        expected_revision=created.revision,
+        not_before_unix_ms=101,
+        deadline_unix_ms=103,
+    )
+
+    recreated = store.compare_set("run/control", expected_revision=None, value=b"two")
+    clock.now_unix_ms = 103
+    with pytest.raises(ControlStoreDeadlineExceeded):
+        store.compare_delete_in_window(
+            "run/control",
+            expected_revision=recreated.revision,
+            not_before_unix_ms=101,
+            deadline_unix_ms=103,
+        )
+
+    assert tombstone_revision > created.revision
+    assert store.get("run/control") == recreated
+
+
 @pytest.mark.parametrize(
-    ("value", "revision", "error"),
+    ("value", "revision", "committed_at_unix_ms", "error"),
     [
-        (bytearray(b"value"), 1, TypeError),
-        (b"value", 0, ValueError),
+        (bytearray(b"value"), 1, None, TypeError),
+        (b"value", 0, None, ValueError),
+        (b"value", 1, 0, ValueError),
     ],
 )
-def test_control_store_entry_rejects_invalid_backend_values(value, revision, error):
+def test_control_store_entry_rejects_invalid_backend_values(
+    value,
+    revision,
+    committed_at_unix_ms,
+    error,
+):
     with pytest.raises(error):
-        ControlStoreEntry(value=value, revision=revision)
+        ControlStoreEntry(
+            value=value,
+            revision=revision,
+            committed_at_unix_ms=committed_at_unix_ms,
+        )

@@ -856,29 +856,33 @@ layers rather than weakening this storage primitive.
 
 Coordinator ownership is stored under a schema-versioned, run-scoped lease key.
 The lease record binds the run, a unique coordinator-process incarnation, a
-unique lease acquisition, and its acquisition and expiry times. The record's
-control-store revision is the fencing token; acquisition, renewal, expiry
-takeover, release, and reacquisition therefore always produce a newer token.
-Every later authoritative coordinator mutation must carry the currently held
-token and fail closed when it is stale.
+unique lease acquisition, and the lease duration. The control store attaches
+its authoritative commit time to every timed mutation. A held lease expires at
+that commit time plus the persisted duration, so network delay before the CAS
+cannot consume the granted lifetime. The record's control-store revision is the
+fencing token; acquisition, renewal, expiry takeover, release, and reacquisition
+therefore always produce a newer token. Every later authoritative coordinator
+mutation must carry the currently held token and fail closed when it is stale.
 
 Lease time comes from one authoritative, nondecreasing control-plane clock
 shared by all contenders. A clock that moves backward aborts lease operations.
 Every lease mutation atomically requires store time to be no earlier than the
 coordinator's observation, preventing a client-side timestamp from committing
-future-dated ownership after a backward clock step.
+future-dated ownership after a backward clock step. The client also rejects an
+acquisition or renewal response if the commit-time-derived lease expired while
+the response was in flight.
 Expiry is inclusive: at `expires_at_unix_ms` the old holder may no longer renew,
 and a contender may take over. Renewal uses a deadline-guarded compare-and-set
 whose time predicate is evaluated atomically by that authoritative store; a
 client-side precheck alone cannot resurrect a lease after network delay.
-Initial acquisition and expired-lease takeover use the same atomic guard
-against the candidate lease's new expiry, so store latency cannot commit and
-return an already-expired ownership record. Takeover uses a single store-time
-sample and is valid only in the half-open interval from the old lease's expiry
-through the candidate lease's expiry. Retrying acquisition with the same active
-`coordinator_id` revalidates the existing record at store time and preserves its
-lease ID, so the coordinator ID must uniquely identify one live process
-incarnation and must not be reused after process restart.
+Takeover uses one store-time sample and is permitted only after the old lease's
+derived expiry; the replacement then receives a full duration from that commit
+time. Release uses the same guarded store-time window and cannot delete an
+expired lease or mutate ownership after a clock regression. Retrying acquisition
+with the same active `coordinator_id` revalidates and renews the existing record
+at store time while preserving its lease ID, so the coordinator ID must uniquely
+identify one live process incarnation and must not be reused after process
+restart.
 
 ### Slot-aware rendezvous
 
