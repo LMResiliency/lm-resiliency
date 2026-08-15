@@ -861,6 +861,14 @@ values with the same commit timestamp or publishes none. This is the primitive
 used to create an immutable generation snapshot and advance the generation head
 without allowing a stale or expired coordinator to commit either half alone.
 
+Persisted generation state uses strict versioned records. A
+`GenerationSnapshotRecord` contains the immutable `RankAssignment`, the previous
+snapshot digest, and the coordinator lease identity and fencing token that
+committed it. Generation zero must not name a predecessor, while every later
+generation must carry a lowercase SHA-256 predecessor digest. A
+`GenerationHeadRecord` contains only the run, generation, and canonical snapshot
+digest. Both records reject missing, unknown, duplicate, or unsupported fields.
+
 Coordinator ownership is stored under a schema-versioned, run-scoped lease key.
 The lease record binds the run, a unique coordinator-process incarnation, a
 unique lease acquisition, and the lease duration. The control store attaches
