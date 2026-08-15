@@ -51,6 +51,9 @@ class StaticControlStore:
     def get(self, key: str) -> ControlStoreEntry | None:
         return self.entries.get(key)
 
+    def has_history(self, key: str) -> bool:
+        return key in self.entries
+
 
 def _assignment(generation: int) -> RankAssignment:
     return RankAssignment.from_assignments(
@@ -448,6 +451,42 @@ def test_generation_reader_rejects_snapshots_outside_committed_head():
         reader.get(0)
     with pytest.raises(GenerationStateCorrupt, match="newer than"):
         reader.get(1)
+
+
+def test_generation_reader_rejects_deleted_head_after_generation_zero_is_gone():
+    _, store, lease, reader = _state()
+    generation_zero = _commit(
+        store,
+        reader,
+        lease,
+        generation=0,
+        previous_snapshot_digest=None,
+        expected_head_revision=None,
+    )
+    snapshot_zero = GenerationSnapshotRecord.from_json(
+        generation_zero[reader.snapshot_key(0)].value
+    )
+    generation_one = _commit(
+        store,
+        reader,
+        lease,
+        generation=1,
+        previous_snapshot_digest=snapshot_zero.digest,
+        expected_head_revision=generation_zero[reader.head_key].revision,
+    )
+    store.compare_delete(
+        reader.head_key,
+        expected_revision=generation_one[reader.head_key].revision,
+    )
+    store.compare_delete(
+        reader.snapshot_key(0),
+        expected_revision=generation_zero[reader.snapshot_key(0)].revision,
+    )
+
+    with pytest.raises(GenerationStateCorrupt, match="head was deleted"):
+        reader.current()
+    with pytest.raises(GenerationStateCorrupt, match="head was deleted"):
+        reader.get(0)
 
 
 def test_generation_reader_rejects_missing_or_recreated_snapshot():
@@ -945,6 +984,22 @@ def test_generation_reader_rejects_one_guard_revision_with_two_grant_times():
     )
 
     with pytest.raises(GenerationStateCorrupt, match="one lease grant"):
+        reader.current()
+
+
+def test_generation_reader_rejects_reappearing_fencing_token():
+    records = _history(
+        ("coordinator-a", "lease-a", 100),
+        ("coordinator-a", "lease-a", 50),
+        ("coordinator-a", "lease-a", 100),
+    )
+    reader = _reader_from_history(
+        records,
+        guard_mutation_sequences=(1, 2, 3),
+        guard_grant_times_unix_ms=(1_000, 1_050, 1_100),
+    )
+
+    with pytest.raises(GenerationStateCorrupt, match="fencing token reappears"):
         reader.current()
 
 

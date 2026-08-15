@@ -177,6 +177,14 @@ class ControlStore(Protocol):
         """Return the current value, or ``None`` when the key is absent."""
         ...
 
+    def has_history(self, key: str) -> bool:
+        """Return whether ``key`` has ever held a committed value.
+
+        History remains true after deletion so callers can distinguish a
+        never-created key from a deleted authoritative record.
+        """
+        ...
+
     def compare_set(
         self,
         key: str,
@@ -255,6 +263,11 @@ class InMemoryControlStore:
         normalized_key = _control_key(key)
         with self._lock:
             return self._entries.get(normalized_key)
+
+    def has_history(self, key: str) -> bool:
+        normalized_key = _control_key(key)
+        with self._lock:
+            return normalized_key in self._last_revisions
 
     def compare_set(
         self,

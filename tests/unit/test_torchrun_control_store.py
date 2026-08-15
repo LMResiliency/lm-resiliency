@@ -27,6 +27,7 @@ class ManualClock:
 
 def test_control_store_create_update_delete_and_recreate():
     store = InMemoryControlStore()
+    assert not store.has_history("run/control")
 
     created = store.compare_set("run/control", expected_revision=None, value=b"one")
     updated = store.compare_set(
@@ -49,7 +50,18 @@ def test_control_store_create_update_delete_and_recreate():
     assert created.lifetime_sequence == 1
     assert updated.lifetime_sequence == 1
     assert recreated.lifetime_sequence == 2
+    assert store.has_history("run/control")
     assert created.revision < updated.revision < tombstone_revision < recreated.revision
+
+
+def test_control_store_retains_key_history_after_delete():
+    store = InMemoryControlStore()
+    created = store.compare_set("run/control", expected_revision=None, value=b"one")
+
+    store.compare_delete("run/control", expected_revision=created.revision)
+
+    assert store.get("run/control") is None
+    assert store.has_history("run/control")
 
 
 def test_control_store_rejects_stale_update_and_delete():

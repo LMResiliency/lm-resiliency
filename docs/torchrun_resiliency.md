@@ -852,7 +852,9 @@ and deletion require the exact current revision. Revisions never repeat for a
 key, including after deletion and recreation, so a delayed coordinator cannot
 mistake a recreated record for an older value with identical bytes. Higher
 coordinator records add lease fencing and run/schema namespaces in subsequent
-layers rather than weakening this storage primitive.
+layers rather than weakening this storage primitive. The store also retains a
+durable `has_history(key)` bit after deletion, allowing readers to distinguish a
+never-created authoritative key from one that was removed.
 
 Coordinator state that spans multiple keys uses one guarded store transaction.
 The transaction first checks the coordinator lease revision, then every target
@@ -896,7 +898,10 @@ omit intervening renewals of one lease, the mutation distance bounds the latest
 grant time that a valid renewal chain could reach, so skipped valid renewals are
 accepted while resurrection after expiry is rejected. A same-key takeover with
 unobserved intervening mutations is ambiguous and rejected. An older generation
-commit cannot postdate the next guard mutation that fences it. Grant times,
+commit cannot postdate the next guard mutation that fences it. Opaque fencing
+tokens cannot reappear after another guard mutation. The durable history of the
+generation-head key is the run initialization marker, so deleting both the head
+and generation zero cannot make an initialized run appear empty. Grant times,
 guard mutations, and key-lifetime sequences cannot move backward. Missing or
 contradictory history is corruption, not an empty or partially usable
 assignment.

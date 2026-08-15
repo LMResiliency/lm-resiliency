@@ -83,10 +83,16 @@ class GenerationStateReader:
                 if self._head_changed_while_checking_successor(current):
                     continue
                 return current
-            if self._store.get(generation_zero_key) is None:
-                return None
-            if self._store.get(self._head_key) is not None:
+            generation_zero = self._store.get(generation_zero_key)
+            observed_head = self._store.get(self._head_key)
+            if observed_head is not None:
                 continue
+            if self._store.has_history(self._head_key):
+                if self._store.get(self._head_key) is not None:
+                    continue
+                raise GenerationStateCorrupt("generation head was deleted after initialization")
+            if generation_zero is None:
+                return None
             raise GenerationStateCorrupt("generation snapshots exist without a generation head")
         raise GenerationStateError("generation head changed repeatedly during read")
 
@@ -98,10 +104,15 @@ class GenerationStateReader:
             if result is None:
                 generation_zero = self._store.get(self.snapshot_key(0))
                 requested_snapshot = self._store.get(snapshot_key)
+                observed_head = self._store.get(self._head_key)
+                if observed_head is not None:
+                    continue
+                if self._store.has_history(self._head_key):
+                    if self._store.get(self._head_key) is not None:
+                        continue
+                    raise GenerationStateCorrupt("generation head was deleted after initialization")
                 if generation_zero is None and requested_snapshot is None:
                     return None
-                if self._store.get(self._head_key) is not None:
-                    continue
                 raise GenerationStateCorrupt("generation snapshot exists without a generation head")
             current, history = result
             if self._head_changed_while_checking_successor(current):
@@ -247,6 +258,7 @@ class GenerationStateReader:
         successor = snapshot
         history = {successor.record.assignment.generation: successor}
         seen_lease_ids = {successor.record.lease_id}
+        seen_fencing_tokens = {successor.record.coordinator_fencing_token}
         while successor.record.assignment.generation > 0:
             predecessor_generation = successor.record.assignment.generation - 1
             predecessor_entry = self._store.get(self.snapshot_key(predecessor_generation))
@@ -364,6 +376,15 @@ class GenerationStateReader:
                         "generation snapshot lease identity reappears after replacement"
                     )
                 seen_lease_ids.add(predecessor.record.lease_id)
+            if (
+                predecessor.record.coordinator_fencing_token
+                != successor.record.coordinator_fencing_token
+            ):
+                if predecessor.record.coordinator_fencing_token in seen_fencing_tokens:
+                    raise GenerationStateCorrupt(
+                        "generation snapshot fencing token reappears after another mutation"
+                    )
+                seen_fencing_tokens.add(predecessor.record.coordinator_fencing_token)
             history[predecessor_generation] = predecessor
             successor = predecessor
         return history
