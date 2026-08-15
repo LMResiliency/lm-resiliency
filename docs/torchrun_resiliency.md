@@ -938,6 +938,16 @@ not self-authenticating: the acknowledgement persistence layer must still
 verify the registration and intent against authoritative control-store state
 before committing it.
 
+Each intent/node acknowledgement key is create-once. Its guarded transaction
+conditions on the exact immutable intent revision, the still-open current
+intent-head revision, and the authenticated agent-registration revision. A
+concurrent intent closure, agent renewal/replacement, or duplicate
+acknowledgement therefore prevents the receipt from being committed. A receipt
+must also be no earlier than the authoritative intent-opening commit, so
+pre-intent transport data cannot be replayed as preparation evidence. The
+coordinator-lease authority and commit-time window are added by a separate
+prepared-write layer before this transaction can execute.
+
 For a crashed or unreachable node, no preparation is assumed.
 
 ## API: lm-resiliency to the Framework
