@@ -928,6 +928,16 @@ not authentication. For latest recovery, the acknowledgement's canonical
 inventory digest must match the exact event used by the manifest; event-ID
 reuse cannot substitute different copies after preparation.
 
+The durable receipt envelope stores the worker acknowledgement together with
+the exact immutable restart-intent record, the authenticated agent-registration
+lifetime, its registration fencing token and authoritative grant time, and the
+coordinator-recorded receipt time. The envelope rejects a sender identity that
+does not match the acknowledgement, a receipt outside the authenticated
+registration lifetime, or a receipt after the intent deadline. The record is
+not self-authenticating: the acknowledgement persistence layer must still
+verify the registration and intent against authoritative control-store state
+before committing it.
+
 For a crashed or unreachable node, no preparation is assumed.
 
 ## API: lm-resiliency to the Framework
