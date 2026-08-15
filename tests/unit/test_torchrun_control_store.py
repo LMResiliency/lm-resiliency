@@ -27,6 +27,7 @@ class ManualClock:
 
 def test_control_store_create_update_delete_and_recreate():
     store = InMemoryControlStore()
+    assert not store.has_history("run/control")
 
     created = store.compare_set("run/control", expected_revision=None, value=b"one")
     updated = store.compare_set(
@@ -43,7 +44,48 @@ def test_control_store_create_update_delete_and_recreate():
     assert created.value == b"one"
     assert updated.value == b"two"
     assert store.get("run/control") == recreated
+    assert created.mutation_sequence == 1
+    assert updated.mutation_sequence == 2
+    assert recreated.mutation_sequence == 4
+    assert created.value_sequence == 1
+    assert updated.value_sequence == 2
+    assert recreated.value_sequence == 3
+    assert created.lifetime_sequence == 1
+    assert updated.lifetime_sequence == 1
+    assert recreated.lifetime_sequence == 2
+    assert store.has_history("run/control")
     assert created.revision < updated.revision < tombstone_revision < recreated.revision
+
+
+def test_control_store_retains_key_history_after_delete():
+    store = InMemoryControlStore()
+    created = store.compare_set("run/control", expected_revision=None, value=b"one")
+
+    store.compare_delete("run/control", expected_revision=created.revision)
+
+    assert store.get("run/control") is None
+    assert store.has_history("run/control")
+
+
+def test_control_store_value_sequence_changes_only_with_value_or_lifetime():
+    store = InMemoryControlStore()
+    created = store.compare_set("run/control", expected_revision=None, value=b"one")
+    repeated = store.compare_set(
+        "run/control",
+        expected_revision=created.revision,
+        value=b"one",
+    )
+    changed = store.compare_set(
+        "run/control",
+        expected_revision=repeated.revision,
+        value=b"two",
+    )
+    store.compare_delete("run/control", expected_revision=changed.revision)
+    recreated = store.compare_set("run/control", expected_revision=None, value=b"two")
+
+    assert created.value_sequence == repeated.value_sequence == 1
+    assert changed.value_sequence == 2
+    assert recreated.value_sequence == 3
 
 
 def test_control_store_rejects_stale_update_and_delete():
@@ -296,4 +338,95 @@ def test_control_store_entry_rejects_invalid_backend_values(
             value=value,
             revision=revision,
             committed_at_unix_ms=committed_at_unix_ms,
+        )
+
+
+@pytest.mark.parametrize(
+    ("guard_key", "guard_revision", "guard_value_digest"),
+    [
+        ("run/lease", None, None),
+        (None, 1, None),
+        (None, None, "a" * 64),
+        ("run/lease", 1, "invalid"),
+    ],
+)
+def test_control_store_entry_rejects_invalid_guard_provenance(
+    guard_key,
+    guard_revision,
+    guard_value_digest,
+):
+    with pytest.raises(ValueError):
+        ControlStoreEntry(
+            value=b"value",
+            revision=1,
+            guard_key=guard_key,
+            guard_revision=guard_revision,
+            guard_value_digest=guard_value_digest,
+        )
+
+    with pytest.raises(ValueError):
+        ControlStoreEntry(
+            value=b"value",
+            revision=1,
+            guard_key="run/lease",
+            guard_revision=1,
+            guard_value_digest="a" * 64,
+            guard_mutation_sequence=1,
+            guard_value_sequence=1,
+            guard_lifetime_sequence=1,
+            guard_committed_at_unix_ms=0,
+        )
+
+    with pytest.raises(ValueError):
+        ControlStoreEntry(
+            value=b"value",
+            revision=1,
+            mutation_sequence=0,
+        )
+
+    with pytest.raises(ValueError):
+        ControlStoreEntry(
+            value=b"value",
+            revision=1,
+            value_sequence=0,
+        )
+
+    with pytest.raises(ValueError):
+        ControlStoreEntry(
+            value=b"value",
+            revision=1,
+            lifetime_sequence=0,
+        )
+
+    with pytest.raises(ValueError):
+        ControlStoreEntry(
+            value=b"value",
+            revision=1,
+            guard_key="run/lease",
+            guard_revision=1,
+            guard_value_digest="a" * 64,
+            guard_mutation_sequence=0,
+            guard_value_sequence=1,
+            guard_lifetime_sequence=1,
+        )
+
+    with pytest.raises(ValueError):
+        ControlStoreEntry(
+            value=b"value",
+            revision=1,
+            guard_key="run/lease",
+            guard_revision=1,
+            guard_value_digest="a" * 64,
+            guard_mutation_sequence=1,
+            guard_value_sequence=0,
+            guard_lifetime_sequence=1,
+        )
+
+    with pytest.raises(ValueError):
+        ControlStoreEntry(
+            value=b"value",
+            revision=1,
+            guard_key="run/lease",
+            guard_revision=1,
+            guard_value_digest="a" * 64,
         )

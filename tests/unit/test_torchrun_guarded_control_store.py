@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import MappingProxyType
@@ -26,9 +27,11 @@ class ManualClock:
 
 
 def _guard(store: InMemoryControlStore):
-    return store.compare_set(
+    return store.compare_set_in_window(
         "run/coordinator-lease",
         expected_revision=None,
+        not_before_unix_ms=1,
+        deadline_unix_ms=None,
         value=b"lease-a",
     )
 
@@ -65,6 +68,21 @@ def test_guarded_transaction_commits_all_writes_at_one_store_time():
     assert isinstance(committed, MappingProxyType)
     assert set(committed) == {"run/generation-head", "run/generations/0"}
     assert {entry.committed_at_unix_ms for entry in committed.values()} == {1_000}
+    assert {entry.guard_key for entry in committed.values()} == {"run/coordinator-lease"}
+    assert {entry.guard_revision for entry in committed.values()} == {guard.revision}
+    assert {entry.guard_value_digest for entry in committed.values()} == {
+        hashlib.sha256(b"lease-a").hexdigest()
+    }
+    assert {entry.guard_mutation_sequence for entry in committed.values()} == {
+        guard.mutation_sequence
+    }
+    assert {entry.guard_value_sequence for entry in committed.values()} == {guard.value_sequence}
+    assert {entry.guard_lifetime_sequence for entry in committed.values()} == {
+        guard.lifetime_sequence
+    }
+    assert {entry.guard_committed_at_unix_ms for entry in committed.values()} == {
+        guard.committed_at_unix_ms
+    }
     assert store.get("run/generation-head") == committed["run/generation-head"]
     assert store.get("run/generations/0") == committed["run/generations/0"]
     with pytest.raises(TypeError):
@@ -105,6 +123,53 @@ def test_guarded_transaction_atomically_updates_head_and_creates_successor():
     assert store.get("run/generation-head") == successor["run/generation-head"]
     assert store.get("run/generations/1") == successor["run/generations/1"]
     assert {entry.committed_at_unix_ms for entry in successor.values()} == {1_001}
+
+
+def test_guarded_transaction_stamps_recreated_guard_lifetime():
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    original_guard = _guard(store)
+    initial = store.compare_set_many_guarded(
+        _generation_writes(),
+        guard_key="run/coordinator-lease",
+        expected_guard_revision=original_guard.revision,
+        not_before_unix_ms=1_000,
+        deadline_unix_ms=1_100,
+    )
+    store.compare_delete(
+        "run/coordinator-lease",
+        expected_revision=original_guard.revision,
+    )
+    recreated_guard = _guard(store)
+    clock.now_unix_ms = 1_001
+
+    successor = store.compare_set_many_guarded(
+        {
+            "run/generation-head": ControlStoreWrite(
+                expected_revision=initial["run/generation-head"].revision,
+                value=b"generation-1",
+            ),
+            "run/generations/1": ControlStoreWrite(
+                expected_revision=None,
+                value=b"snapshot-1",
+            ),
+        },
+        guard_key="run/coordinator-lease",
+        expected_guard_revision=recreated_guard.revision,
+        not_before_unix_ms=1_000,
+        deadline_unix_ms=1_100,
+    )
+
+    assert original_guard.lifetime_sequence == 1
+    assert recreated_guard.lifetime_sequence == 2
+    assert recreated_guard.mutation_sequence == original_guard.mutation_sequence + 2
+    assert recreated_guard.value_sequence == original_guard.value_sequence + 1
+    assert initial["run/generation-head"].guard_mutation_sequence == 1
+    assert successor["run/generation-head"].guard_mutation_sequence == 3
+    assert initial["run/generation-head"].guard_value_sequence == 1
+    assert successor["run/generation-head"].guard_value_sequence == 2
+    assert initial["run/generation-head"].guard_lifetime_sequence == 1
+    assert successor["run/generation-head"].guard_lifetime_sequence == 2
 
 
 def test_guarded_transaction_rejects_stale_guard_without_partial_writes():

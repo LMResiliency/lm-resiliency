@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -69,10 +70,35 @@ class ControlStoreEntry:
     value: bytes
     revision: int
     committed_at_unix_ms: int | None = None
+    mutation_sequence: int = 1
+    value_sequence: int = 1
+    lifetime_sequence: int = 1
+    guard_key: str | None = None
+    guard_revision: int | None = None
+    guard_value_digest: str | None = None
+    guard_mutation_sequence: int | None = None
+    guard_value_sequence: int | None = None
+    guard_lifetime_sequence: int | None = None
+    guard_committed_at_unix_ms: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "value", _control_value(self.value))
         object.__setattr__(self, "revision", _required_revision(self.revision))
+        object.__setattr__(
+            self,
+            "mutation_sequence",
+            _positive_integer(self.mutation_sequence, "mutation_sequence"),
+        )
+        object.__setattr__(
+            self,
+            "value_sequence",
+            _positive_integer(self.value_sequence, "value_sequence"),
+        )
+        object.__setattr__(
+            self,
+            "lifetime_sequence",
+            _positive_integer(self.lifetime_sequence, "lifetime_sequence"),
+        )
         if self.committed_at_unix_ms is not None:
             object.__setattr__(
                 self,
@@ -82,6 +108,66 @@ class ControlStoreEntry:
                     "committed_at_unix_ms",
                 ),
             )
+        guard_values = (
+            self.guard_key,
+            self.guard_revision,
+            self.guard_value_digest,
+            self.guard_mutation_sequence,
+            self.guard_value_sequence,
+            self.guard_lifetime_sequence,
+        )
+        if any(value is not None for value in guard_values):
+            if not all(value is not None for value in guard_values):
+                raise ValueError("control-store guard provenance must be complete")
+            object.__setattr__(self, "guard_key", _control_key(self.guard_key))
+            object.__setattr__(
+                self,
+                "guard_revision",
+                _required_revision(self.guard_revision),
+            )
+            object.__setattr__(
+                self,
+                "guard_value_digest",
+                _sha256_digest(
+                    self.guard_value_digest,
+                    "guard_value_digest",
+                ),
+            )
+            object.__setattr__(
+                self,
+                "guard_mutation_sequence",
+                _positive_integer(
+                    self.guard_mutation_sequence,
+                    "guard_mutation_sequence",
+                ),
+            )
+            object.__setattr__(
+                self,
+                "guard_value_sequence",
+                _positive_integer(
+                    self.guard_value_sequence,
+                    "guard_value_sequence",
+                ),
+            )
+            object.__setattr__(
+                self,
+                "guard_lifetime_sequence",
+                _positive_integer(
+                    self.guard_lifetime_sequence,
+                    "guard_lifetime_sequence",
+                ),
+            )
+            if self.guard_committed_at_unix_ms is not None:
+                object.__setattr__(
+                    self,
+                    "guard_committed_at_unix_ms",
+                    _positive_integer(
+                        self.guard_committed_at_unix_ms,
+                        "guard_committed_at_unix_ms",
+                    ),
+                )
+        elif self.guard_committed_at_unix_ms is not None:
+            raise ValueError("control-store guard grant time requires guard provenance")
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +191,14 @@ class ControlStore(Protocol):
 
     def get(self, key: str) -> ControlStoreEntry | None:
         """Return the current value, or ``None`` when the key is absent."""
+        ...
+
+    def has_history(self, key: str) -> bool:
+        """Return whether ``key`` has ever held a committed value.
+
+        History remains true after deletion so callers can distinguish a
+        never-created key from a deleted authoritative record.
+        """
         ...
 
     def compare_set(
@@ -160,7 +254,13 @@ class ControlStore(Protocol):
         not_before_unix_ms: int,
         deadline_unix_ms: int,
     ) -> Mapping[str, ControlStoreEntry]:
-        """Atomically publish writes while a guard revision is live in the time window."""
+        """Atomically publish writes while a guard revision is live.
+
+        Every returned target entry carries store-stamped guard key, revision,
+        value digest, ordered mutation and value sequences, key-lifetime
+        sequence, and authoritative guard commit time from the same
+        linearization point.
+        """
         ...
 
 
@@ -171,6 +271,9 @@ class InMemoryControlStore:
         self._lock = threading.RLock()
         self._entries: dict[str, ControlStoreEntry] = {}
         self._last_revisions: dict[str, int] = {}
+        self._mutation_sequences: dict[str, int] = {}
+        self._value_sequences: dict[str, int] = {}
+        self._lifetime_sequences: dict[str, int] = {}
         self._clock = clock or _system_unix_ms
         self._last_now_unix_ms = 0
 
@@ -178,6 +281,11 @@ class InMemoryControlStore:
         normalized_key = _control_key(key)
         with self._lock:
             return self._entries.get(normalized_key)
+
+    def has_history(self, key: str) -> bool:
+        normalized_key = _control_key(key)
+        with self._lock:
+            return normalized_key in self._last_revisions
 
     def compare_set(
         self,
@@ -309,6 +417,8 @@ class InMemoryControlStore:
             raise ValueError("not_before_unix_ms must be before deadline_unix_ms")
         with self._lock:
             self._require_revision(normalized_guard_key, normalized_guard_revision)
+            guard_entry = self._entries[normalized_guard_key]
+            guard_value_digest = hashlib.sha256(guard_entry.value).hexdigest()
             for key, write in normalized_writes.items():
                 self._require_revision(key, write.expected_revision)
             now_unix_ms = self._store_now_unix_ms()
@@ -329,6 +439,13 @@ class InMemoryControlStore:
                     key,
                     write.value,
                     committed_at_unix_ms=now_unix_ms,
+                    guard_key=normalized_guard_key,
+                    guard_revision=normalized_guard_revision,
+                    guard_value_digest=guard_value_digest,
+                    guard_mutation_sequence=guard_entry.mutation_sequence,
+                    guard_value_sequence=guard_entry.value_sequence,
+                    guard_lifetime_sequence=guard_entry.lifetime_sequence,
+                    guard_committed_at_unix_ms=guard_entry.committed_at_unix_ms,
                 )
                 for key, write in normalized_writes.items()
             }
@@ -346,12 +463,35 @@ class InMemoryControlStore:
         value: bytes,
         *,
         committed_at_unix_ms: int | None = None,
+        guard_key: str | None = None,
+        guard_revision: int | None = None,
+        guard_value_digest: str | None = None,
+        guard_mutation_sequence: int | None = None,
+        guard_value_sequence: int | None = None,
+        guard_lifetime_sequence: int | None = None,
+        guard_committed_at_unix_ms: int | None = None,
     ) -> ControlStoreEntry:
+        current_entry = self._entries.get(key)
+        if current_entry is None:
+            self._lifetime_sequences[key] = self._lifetime_sequences.get(key, 0) + 1
+            self._value_sequences[key] = self._value_sequences.get(key, 0) + 1
+        elif current_entry.value != value:
+            self._value_sequences[key] += 1
         revision = self._next_revision(key)
         entry = ControlStoreEntry(
             value=value,
             revision=revision,
             committed_at_unix_ms=committed_at_unix_ms,
+            mutation_sequence=self._mutation_sequences[key],
+            value_sequence=self._value_sequences[key],
+            lifetime_sequence=self._lifetime_sequences[key],
+            guard_key=guard_key,
+            guard_revision=guard_revision,
+            guard_value_digest=guard_value_digest,
+            guard_mutation_sequence=guard_mutation_sequence,
+            guard_value_sequence=guard_value_sequence,
+            guard_lifetime_sequence=guard_lifetime_sequence,
+            guard_committed_at_unix_ms=guard_committed_at_unix_ms,
         )
         self._entries[key] = entry
         return entry
@@ -359,6 +499,7 @@ class InMemoryControlStore:
     def _next_revision(self, key: str) -> int:
         revision = self._last_revisions.get(key, 0) + 1
         self._last_revisions[key] = revision
+        self._mutation_sequences[key] = self._mutation_sequences.get(key, 0) + 1
         return revision
 
     def _store_now_unix_ms(self) -> int:
@@ -379,6 +520,16 @@ def _control_value(value: object) -> bytes:
     if not isinstance(value, bytes):
         raise TypeError("control-store value must be bytes")
     return bytes(value)
+
+
+def _sha256_digest(value: object, path: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{path} must be a lowercase SHA-256 digest")
+    return value
 
 
 def _control_writes(value: object) -> dict[str, ControlStoreWrite]:
