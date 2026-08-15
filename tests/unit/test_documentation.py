@@ -60,7 +60,7 @@ def test_deployment_contracts_cover_every_destination():
     assert "pull_request:" not in online_links
     assert "--exclude-all-private" in online_links
     assert "--exclude '^https://doi\\.org/10\\.1145/3600006\\.3613145$'" in online_links
-    assert "--github-token \"$GH_TOKEN\"" in online_links
+    assert '--github-token "$GH_TOKEN"' in online_links
     assert "--max-retries 3" in online_links
     assert "--offline" not in online_links
 
