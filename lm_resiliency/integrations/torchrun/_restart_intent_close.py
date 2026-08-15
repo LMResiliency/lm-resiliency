@@ -10,6 +10,12 @@ from lm_resiliency.integrations.torchrun._coordinator_lease import HeldCoordinat
 from lm_resiliency.integrations.torchrun._restart_intent_close_records import (
     InitialRestartIntentClosureRecords,
 )
+from lm_resiliency.integrations.torchrun._restart_intent_open_execution import (
+    CommittedInitialRestartIntentOpen,
+)
+from lm_resiliency.integrations.torchrun._restart_intent_open_records import (
+    PreparedInitialRestartIntentOpen,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +30,11 @@ class PreparedInitialRestartIntentClosure:
     coordinator_lease_lifetime_sequence: int
     not_before_unix_ms: int
     deadline_unix_ms: int
+    predecessor_lease: HeldCoordinatorLease | None = None
+    predecessor_lease_transaction_sequence: int | None = None
+    predecessor_lease_mutation_sequence: int | None = None
+    predecessor_lease_value_sequence: int | None = None
+    predecessor_lease_lifetime_sequence: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.records, InitialRestartIntentClosureRecords):
@@ -88,7 +99,13 @@ class PreparedInitialRestartIntentClosure:
     def _validate_lease_lineage(self) -> None:
         opened = self.records.opened
         opening = opened.prepared
+        predecessor = self._predecessor_authority()
         if self.lease.fencing_token == opening.lease.fencing_token:
+            if predecessor is not None:
+                raise ValueError(
+                    "PreparedInitialRestartIntentClosure exact opening authority "
+                    "cannot have a predecessor"
+                )
             if (
                 self.lease != opening.lease
                 or self.coordinator_lease_transaction_sequence
@@ -148,6 +165,10 @@ class PreparedInitialRestartIntentClosure:
             raise ValueError("PreparedInitialRestartIntentClosure reuses an older fencing token")
         same_lease_id = self.lease.record.lease_id == opening.lease.record.lease_id
         if same_lease_id:
+            if predecessor is not None:
+                raise ValueError(
+                    "PreparedInitialRestartIntentClosure renewal cannot have a predecessor"
+                )
             if self.lease.record.coordinator_id != opening.lease.record.coordinator_id:
                 raise ValueError(
                     "PreparedInitialRestartIntentClosure changes one lease's coordinator"
@@ -170,13 +191,124 @@ class PreparedInitialRestartIntentClosure:
             raise ValueError(
                 "PreparedInitialRestartIntentClosure changes lease identity without a new value"
             )
-        if lifetime_delta == 0 and mutation_delta != 1:
+        if lifetime_delta == 0:
+            self._validate_in_place_replacement(opened, opening, predecessor)
+        elif predecessor is not None:
             raise ValueError(
-                "PreparedInitialRestartIntentClosure lease replacement has ambiguous mutations"
+                "PreparedInitialRestartIntentClosure recreated lease cannot have a predecessor"
             )
-        if lifetime_delta == 0 and self.lease.granted_at_unix_ms < (
-            opening.lease.granted_at_unix_ms + opening.lease.record.lease_duration_ms
+
+    def _predecessor_authority(
+        self,
+    ) -> tuple[HeldCoordinatorLease, int, int, int, int] | None:
+        values = (
+            self.predecessor_lease,
+            self.predecessor_lease_transaction_sequence,
+            self.predecessor_lease_mutation_sequence,
+            self.predecessor_lease_value_sequence,
+            self.predecessor_lease_lifetime_sequence,
+        )
+        if all(value is None for value in values):
+            return None
+        if any(value is None for value in values):
+            raise ValueError(
+                "PreparedInitialRestartIntentClosure predecessor authority must be complete"
+            )
+        predecessor_lease = self.predecessor_lease
+        if not isinstance(predecessor_lease, HeldCoordinatorLease):
+            raise TypeError(
+                "PreparedInitialRestartIntentClosure.predecessor_lease must be HeldCoordinatorLease"
+            )
+        transaction_sequence = _positive_integer(
+            self.predecessor_lease_transaction_sequence,
+            "PreparedInitialRestartIntentClosure.predecessor_lease_transaction_sequence",
+        )
+        mutation_sequence = _positive_integer(
+            self.predecessor_lease_mutation_sequence,
+            "PreparedInitialRestartIntentClosure.predecessor_lease_mutation_sequence",
+        )
+        value_sequence = _positive_integer(
+            self.predecessor_lease_value_sequence,
+            "PreparedInitialRestartIntentClosure.predecessor_lease_value_sequence",
+        )
+        lifetime_sequence = _positive_integer(
+            self.predecessor_lease_lifetime_sequence,
+            "PreparedInitialRestartIntentClosure.predecessor_lease_lifetime_sequence",
+        )
+        return (
+            predecessor_lease,
+            transaction_sequence,
+            mutation_sequence,
+            value_sequence,
+            lifetime_sequence,
+        )
+
+    def _validate_in_place_replacement(
+        self,
+        opened: CommittedInitialRestartIntentOpen,
+        opening: PreparedInitialRestartIntentOpen,
+        predecessor: tuple[HeldCoordinatorLease, int, int, int, int] | None,
+    ) -> None:
+        if predecessor is None:
+            raise ValueError(
+                "PreparedInitialRestartIntentClosure in-place replacement requires "
+                "its immediate predecessor"
+            )
+        (
+            predecessor_lease,
+            transaction_sequence,
+            mutation_sequence,
+            value_sequence,
+            lifetime_sequence,
+        ) = predecessor
+        if (
+            predecessor_lease.record != opening.lease.record
+            or value_sequence != opening.coordinator_lease_value_sequence
+            or lifetime_sequence != opening.coordinator_lease_lifetime_sequence
+            or mutation_sequence < opening.coordinator_lease_mutation_sequence
         ):
+            raise ValueError(
+                "PreparedInitialRestartIntentClosure predecessor is not an opening-lease renewal"
+            )
+        renewal_delta = mutation_sequence - opening.coordinator_lease_mutation_sequence
+        if renewal_delta == 0:
+            if (
+                predecessor_lease != opening.lease
+                or transaction_sequence != opening.coordinator_lease_transaction_sequence
+            ):
+                raise ValueError(
+                    "PreparedInitialRestartIntentClosure changes its opening predecessor"
+                )
+        else:
+            if (
+                transaction_sequence <= opened.transaction_sequence
+                or transaction_sequence - opened.transaction_sequence < renewal_delta
+                or predecessor_lease.fencing_token == opening.lease.fencing_token
+                or predecessor_lease.fencing_token in opening.generation_fencing_token_history
+                or predecessor_lease.granted_at_unix_ms < opened.committed_at_unix_ms
+            ):
+                raise ValueError(
+                    "PreparedInitialRestartIntentClosure predecessor renewal has invalid lineage"
+                )
+            latest_valid_grant = opening.lease.granted_at_unix_ms + renewal_delta * (
+                opening.lease.record.lease_duration_ms - 1
+            )
+            if predecessor_lease.granted_at_unix_ms > latest_valid_grant:
+                raise ValueError(
+                    "PreparedInitialRestartIntentClosure predecessor renews an expired "
+                    "coordinator lease"
+                )
+        if (
+            self.coordinator_lease_transaction_sequence <= transaction_sequence
+            or self.coordinator_lease_mutation_sequence != mutation_sequence + 1
+            or self.coordinator_lease_value_sequence != value_sequence + 1
+            or self.coordinator_lease_lifetime_sequence != lifetime_sequence
+        ):
+            raise ValueError(
+                "PreparedInitialRestartIntentClosure replacement does not immediately "
+                "follow its predecessor"
+            )
+        if self.lease.granted_at_unix_ms < predecessor_lease.expires_at_unix_ms:
             raise ValueError("PreparedInitialRestartIntentClosure coordinator leases overlap")
 
     @property

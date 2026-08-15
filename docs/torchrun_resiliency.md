@@ -603,9 +603,13 @@ held closing lease, its authoritative transaction, mutation, value, and
 lifetime sequences, and a bounded store-time commit window. It accepts exact
 opening authority, nonexpired same-lease renewal, and nonoverlapping
 replacement authority while rejecting lease identity or fencing-token reuse
-from the verified generation history. The value remains non-mutating; a later
-preparer authenticates the closing lease against the live store before
-constructing it. A frozen
+from the verified generation history. In-place replacement also carries the
+immediate predecessor lease and its store lineage, so intervening renewals are
+authenticated and replacement must be the next lease-key mutation at or after
+the predecessor expiry. The value remains non-mutating; a later preparer
+consumes a predecessor entry captured and authenticated before takeover, then
+authenticates the replacement lease against the live store before constructing
+it. A frozen
 `PreparedInitialRestartIntentOpen` descriptor binds the first intent record,
 current-intent head, exact generation revisions, coordinator fencing token,
 canonical run-scoped keys, and lease/intent commit window. It exposes immutable

@@ -154,7 +154,11 @@ def _prepared(
     opened: CommittedInitialRestartIntentOpen,
     lease: HeldCoordinatorLease,
     lease_entry: ControlStoreEntry,
+    *,
+    predecessor: tuple[HeldCoordinatorLease, ControlStoreEntry] | None = None,
 ) -> PreparedInitialRestartIntentClosure:
+    predecessor_lease = None if predecessor is None else predecessor[0]
+    predecessor_entry = None if predecessor is None else predecessor[1]
     return PreparedInitialRestartIntentClosure(
         records=_records(opened, lease),
         lease=lease,
@@ -167,6 +171,19 @@ def _prepared(
             lease.granted_at_unix_ms,
         ),
         deadline_unix_ms=lease.expires_at_unix_ms,
+        predecessor_lease=predecessor_lease,
+        predecessor_lease_transaction_sequence=(
+            None if predecessor_entry is None else predecessor_entry.transaction_sequence
+        ),
+        predecessor_lease_mutation_sequence=(
+            None if predecessor_entry is None else predecessor_entry.mutation_sequence
+        ),
+        predecessor_lease_value_sequence=(
+            None if predecessor_entry is None else predecessor_entry.value_sequence
+        ),
+        predecessor_lease_lifetime_sequence=(
+            None if predecessor_entry is None else predecessor_entry.lifetime_sequence
+        ),
     )
 
 
@@ -185,6 +202,11 @@ def _with_lease(
     mutation_sequence: int,
     value_sequence: int,
     lifetime_sequence: int,
+    predecessor_lease: HeldCoordinatorLease | None = None,
+    predecessor_transaction_sequence: int | None = None,
+    predecessor_mutation_sequence: int | None = None,
+    predecessor_value_sequence: int | None = None,
+    predecessor_lifetime_sequence: int | None = None,
 ) -> PreparedInitialRestartIntentClosure:
     return PreparedInitialRestartIntentClosure(
         records=_records(prepared.records.opened, lease),
@@ -198,7 +220,25 @@ def _with_lease(
             lease.granted_at_unix_ms,
         ),
         deadline_unix_ms=lease.expires_at_unix_ms,
+        predecessor_lease=predecessor_lease,
+        predecessor_lease_transaction_sequence=predecessor_transaction_sequence,
+        predecessor_lease_mutation_sequence=predecessor_mutation_sequence,
+        predecessor_lease_value_sequence=predecessor_value_sequence,
+        predecessor_lease_lifetime_sequence=predecessor_lifetime_sequence,
     )
+
+
+def _opening_predecessor(
+    prepared: PreparedInitialRestartIntentClosure,
+) -> dict[str, object]:
+    opening = prepared.records.opened.prepared
+    return {
+        "predecessor_lease": opening.lease,
+        "predecessor_transaction_sequence": (opening.coordinator_lease_transaction_sequence),
+        "predecessor_mutation_sequence": opening.coordinator_lease_mutation_sequence,
+        "predecessor_value_sequence": opening.coordinator_lease_value_sequence,
+        "predecessor_lifetime_sequence": opening.coordinator_lease_lifetime_sequence,
+    }
 
 
 def test_prepared_initial_closure_delegates_immutable_transaction_inputs():
@@ -292,6 +332,42 @@ def test_prepared_initial_closure_accepts_nonexpired_renewal():
     assert prepared.coordinator_lease_lifetime_sequence == 1
 
 
+def test_prepared_initial_closure_accepts_replacement_after_post_open_renewal():
+    clock, store, _, opened, lease = _state()
+    opening_manager = CoordinatorLeaseManager(
+        store,
+        run_id=RUN_ID,
+        coordinator_id="coordinator-a",
+        lease_duration_ms=100,
+        clock=clock,
+    )
+    clock.set(1_010)
+    renewed = opening_manager.renew(lease)
+    predecessor_entry = store.get(opened.prepared.coordinator_lease_key)
+    assert predecessor_entry is not None
+    replacement_manager = CoordinatorLeaseManager(
+        store,
+        run_id=RUN_ID,
+        coordinator_id="coordinator-b",
+        lease_duration_ms=100,
+        clock=clock,
+    )
+    clock.set(renewed.expires_at_unix_ms)
+    replacement = replacement_manager.acquire()
+    replacement_entry = store.get(opened.prepared.coordinator_lease_key)
+    assert replacement_entry is not None
+
+    prepared = _prepared(
+        opened,
+        replacement,
+        replacement_entry,
+        predecessor=(renewed, predecessor_entry),
+    )
+
+    assert prepared.lease == replacement
+    assert prepared.predecessor_lease == renewed
+
+
 def test_prepared_initial_closure_rejects_expired_renewal():
     prepared = _initial_prepared()
     expired_renewal = replace(
@@ -339,6 +415,7 @@ def test_prepared_initial_closure_rejects_overlapping_replacement():
             mutation_sequence=prepared.coordinator_lease_mutation_sequence + 1,
             value_sequence=prepared.coordinator_lease_value_sequence + 1,
             lifetime_sequence=prepared.coordinator_lease_lifetime_sequence,
+            **_opening_predecessor(prepared),
         )
 
 
@@ -356,6 +433,7 @@ def test_prepared_initial_closure_accepts_nonoverlapping_replacement():
         mutation_sequence=prepared.coordinator_lease_mutation_sequence + 1,
         value_sequence=prepared.coordinator_lease_value_sequence + 1,
         lifetime_sequence=prepared.coordinator_lease_lifetime_sequence,
+        **_opening_predecessor(prepared),
     )
 
     assert replaced.lease == replacement
@@ -376,5 +454,22 @@ def test_prepared_initial_closure_rejects_impossible_mutation_gap():
             transaction_sequence=prepared.records.opened.transaction_sequence + 1,
             mutation_sequence=prepared.coordinator_lease_mutation_sequence + 2,
             value_sequence=prepared.coordinator_lease_value_sequence,
+            lifetime_sequence=prepared.coordinator_lease_lifetime_sequence,
+        )
+
+
+def test_prepared_initial_closure_requires_in_place_replacement_predecessor():
+    prepared = _initial_prepared()
+
+    with pytest.raises(ValueError, match="requires its immediate predecessor"):
+        _with_lease(
+            prepared,
+            _replacement(
+                prepared,
+                granted_at_unix_ms=prepared.lease.expires_at_unix_ms,
+            ),
+            transaction_sequence=prepared.records.opened.transaction_sequence + 1,
+            mutation_sequence=prepared.coordinator_lease_mutation_sequence + 1,
+            value_sequence=prepared.coordinator_lease_value_sequence + 1,
             lifetime_sequence=prepared.coordinator_lease_lifetime_sequence,
         )
