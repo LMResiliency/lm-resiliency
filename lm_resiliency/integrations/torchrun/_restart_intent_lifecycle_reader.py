@@ -29,6 +29,7 @@ from lm_resiliency.integrations.torchrun._restart_intent_records import (
     RestartIntentClosedHeadRecord,
     RestartIntentHeadRecord,
     RestartIntentLifecycleHeadRecord,
+    RestartIntentRecord,
 )
 
 _CONTROL_PREFIX = "lm_resiliency/torchrun/v1"
@@ -108,10 +109,30 @@ class InitialRestartIntentLifecycleReader:
                     closure_observation,
                 ):
                     continue
-                self._validate_absent_lifecycle(
+                open_head = self._validate_absent_lifecycle(
                     head_observation,
                     lifecycle_observation,
                     closure_observation,
+                )
+                if open_head is None:
+                    return None
+                intent_key = self.intent_key(open_head.intent_id)
+                intent_observation = self._observe(intent_key)
+                if not self._stable(
+                    self._intent_head_key,
+                    head_observation,
+                    self._lifecycle_head_key,
+                    lifecycle_observation,
+                    self._initial_closure_key,
+                    closure_observation,
+                    intent_key,
+                    intent_observation,
+                ):
+                    continue
+                self._validate_open_intent(
+                    open_head,
+                    head_observation,
+                    intent_observation,
                 )
                 return None
             lifecycle_head = self._decode_lifecycle_head(lifecycle_observation)
@@ -167,7 +188,7 @@ class InitialRestartIntentLifecycleReader:
         head: _ObservedKey,
         lifecycle: _ObservedKey,
         closure: _ObservedKey,
-    ) -> None:
+    ) -> RestartIntentHeadRecord | None:
         if lifecycle.has_history or lifecycle.history:
             raise RestartIntentLifecycleReadCorrupt("restart-intent lifecycle head was deleted")
         if closure.entry is not None or closure.has_history or closure.history:
@@ -177,7 +198,7 @@ class InitialRestartIntentLifecycleReader:
         if head.entry is None:
             if head.has_history or head.history:
                 raise RestartIntentLifecycleReadCorrupt("current restart-intent head was deleted")
-            return
+            return None
         if not head.has_history or not head.history:
             raise RestartIntentLifecycleReadCorrupt(
                 "live restart-intent head has no durable history"
@@ -206,6 +227,46 @@ class InitialRestartIntentLifecycleReader:
         if open_head.run_id != self._run_id or head.entry.value != open_head.to_json():
             raise RestartIntentLifecycleReadCorrupt(
                 "current restart-intent head is noncanonical or belongs to another run"
+            )
+        return open_head
+
+    def _validate_open_intent(
+        self,
+        head: RestartIntentHeadRecord,
+        head_observation: _ObservedKey,
+        intent_observation: _ObservedKey,
+    ) -> None:
+        head_entry = _required_entry(head_observation, "current restart-intent head")
+        intent_entry = _immutable_entry(intent_observation, "immutable restart intent")
+        if (
+            intent_entry.mutation_sequence != 1
+            or intent_entry.value_sequence != 1
+            or intent_entry.lifetime_sequence != 1
+        ):
+            raise RestartIntentLifecycleReadCorrupt(
+                "immutable restart intent is not an initial creation"
+            )
+        try:
+            intent = RestartIntentRecord.from_json(intent_entry.value)
+        except (TypeError, ValueError) as error:
+            raise RestartIntentLifecycleReadCorrupt(
+                "immutable restart intent is malformed"
+            ) from error
+        if intent_entry.value != intent.to_json():
+            raise RestartIntentLifecycleReadCorrupt("immutable restart intent is noncanonical")
+        if (
+            intent.intent.run_id != self._run_id
+            or head.generation != intent.intent.generation
+            or head.intent_id != intent.intent.intent_id
+            or head.intent_digest != intent.digest
+        ):
+            raise RestartIntentLifecycleReadCorrupt(
+                "current restart-intent head does not identify its immutable record"
+            )
+        if _transaction_provenance(head_entry) != _transaction_provenance(intent_entry):
+            raise RestartIntentLifecycleReadCorrupt(
+                "current restart-intent head and immutable intent "
+                "do not share one guarded transaction"
             )
 
     def _authenticate_closure(
@@ -312,6 +373,20 @@ def _immutable_entry(observation: _ObservedKey, path: str) -> ControlStoreEntry:
     if observation.history != (entry,):
         raise RestartIntentLifecycleReadCorrupt(f"{path} is not an immutable retained value")
     return entry
+
+
+def _transaction_provenance(entry: ControlStoreEntry) -> tuple[object, ...]:
+    return (
+        entry.committed_at_unix_ms,
+        entry.transaction_sequence,
+        entry.guard_key,
+        entry.guard_revision,
+        entry.guard_value_digest,
+        entry.guard_committed_at_unix_ms,
+        entry.guard_mutation_sequence,
+        entry.guard_value_sequence,
+        entry.guard_lifetime_sequence,
+    )
 
 
 def _nonempty_string(value: object, path: str) -> str:

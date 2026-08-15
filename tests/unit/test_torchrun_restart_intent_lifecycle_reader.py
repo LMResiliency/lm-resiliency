@@ -255,6 +255,47 @@ def test_lifecycle_reader_rejects_orphaned_closure_without_lifecycle_head():
         reader.read()
 
 
+def test_lifecycle_reader_rejects_missing_open_intent_without_lifecycle():
+    _, store, _, _, _, opened, reader = _open_state()
+    intent_entry = store.get(opened.prepared.intent_key)
+    assert intent_entry is not None
+    store.compare_delete(
+        opened.prepared.intent_key,
+        expected_revision=intent_entry.revision,
+    )
+
+    with pytest.raises(RestartIntentLifecycleReadCorrupt, match="intent is missing"):
+        reader.read()
+
+
+def test_lifecycle_reader_rejects_rewritten_open_intent_without_lifecycle():
+    _, store, _, _, _, opened, reader = _open_state()
+    intent_entry = store.get(opened.prepared.intent_key)
+    assert intent_entry is not None
+    store.compare_set(
+        opened.prepared.intent_key,
+        expected_revision=intent_entry.revision,
+        value=opened.prepared.record.to_json(),
+    )
+
+    with pytest.raises(RestartIntentLifecycleReadCorrupt, match="immutable retained"):
+        reader.read()
+
+
+def test_lifecycle_reader_rejects_split_open_transaction_without_lifecycle():
+    _, store, _, _, _, opened, reader = _open_state()
+    intent_entry = store.get(opened.prepared.intent_key)
+    assert intent_entry is not None
+    _replace_entry(
+        store,
+        opened.prepared.intent_key,
+        transaction_sequence=intent_entry.transaction_sequence + 1,
+    )
+
+    with pytest.raises(RestartIntentLifecycleReadCorrupt, match="guarded transaction"):
+        reader.read()
+
+
 def test_lifecycle_reader_reconstructs_verified_closure():
     clock, store, _, _, lease, opened, reader = _open_state()
     records = _commit_closure(clock, store, opened, lease)
