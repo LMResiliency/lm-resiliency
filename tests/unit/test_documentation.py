@@ -33,6 +33,8 @@ def test_deployment_contracts_cover_every_destination():
     pages = (ROOT / ".github/workflows/pages.yml").read_text()
 
     assert "site_url:" not in mkdocs
+    assert "Torchrun Resiliency: torchrun_resiliency.md" in mkdocs
+    assert "[Torchrun Resiliency](torchrun_resiliency.md)" in (ROOT / "docs/index.md").read_text()
     assert "git rm -rf --ignore-unmatch ." in development
     assert "git rm -rf --ignore-unmatch ." in release
     assert "group: release-docs-${{ github.ref_name }}" in release

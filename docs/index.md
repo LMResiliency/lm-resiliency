@@ -8,6 +8,8 @@ LM Resiliency provides GEMINI checkpoint recovery and SCOUT failure localization
 - [Compatibility](compatibility.md) — supported and tested Python/framework versions.
 - [GEMINI](gemini.md) — checkpoint tiers, replication, persistence, and recovery semantics.
 - [SCOUT](scout.md) — failure coverage, replay, consensus, and localization contracts.
+- [Torchrun Resiliency](torchrun_resiliency.md) — fixed-size replacement architecture,
+  coordinator protocol, fencing, and restart context.
 - [Validation](validation.md) — qualification evidence, environments, and known boundaries.
 - [Release Process](release.md) — artifact validation and publication workflow.
 
