@@ -840,6 +840,11 @@ advancing the lifecycle head and creating the immutable closure record. The
 next intent replaces the marker instead of relying on deletion, so a restarted
 reader can prove closure from persisted state. Atomic opening and closure
 transactions are separate control-plane components. A frozen
+<code>InitialRestartIntentClosureRecords</code> value links the first committed intent to
+its immutable closure record, first lifecycle head, and durable closed marker.
+It exposes create-once closure/lifecycle writes, a revision-guarded
+current-head update, and an exact immutable-intent condition, but does not
+authenticate a closing lease or mutate the store. A frozen
 <code>PreparedInitialRestartIntentOpen</code> descriptor binds the first intent record,
 current-intent head, exact generation revisions, coordinator fencing token,
 canonical run-scoped keys, and lease/intent commit window. It exposes immutable
