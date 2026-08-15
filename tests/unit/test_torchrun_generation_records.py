@@ -93,7 +93,8 @@ def test_generation_records_reject_duplicate_fields_at_any_depth():
         '{"assignment":'
         + assignment
         + ',"coordinator_fencing_token":4,"coordinator_id":"coordinator-a",'
-        '"lease_id":"lease-a","previous_snapshot_digest":"' + "a" * 64 + '","schema_version":1}'
+        '"coordinator_lease_duration_ms":100,"lease_id":"lease-a",'
+        '"previous_snapshot_digest":"' + "a" * 64 + '","schema_version":2}'
     ).encode()
     with pytest.raises(ValueError, match="duplicate field 'generation'"):
         GenerationSnapshotRecord.from_json(encoded)
@@ -105,7 +106,7 @@ def test_generation_records_reject_duplicate_fields_at_any_depth():
         lambda value: value.pop("lease_id"),
         lambda value: value.pop("coordinator_lease_duration_ms"),
         lambda value: value.update({"unknown": "field"}),
-        lambda value: value.update({"schema_version": 2}),
+        lambda value: value.update({"schema_version": 3}),
         lambda value: value.update({"schema_version": True}),
         lambda value: value.update({"assignment": []}),
     ],
@@ -117,6 +118,17 @@ def test_generation_snapshot_rejects_invalid_wire_shapes(mutation):
     with pytest.raises(ValueError):
         GenerationSnapshotRecord.from_json(
             json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
+        )
+
+
+def test_generation_snapshot_rejects_legacy_schema_before_field_shape():
+    legacy = _snapshot().to_dict()
+    legacy["schema_version"] = 1
+    legacy.pop("coordinator_lease_duration_ms")
+
+    with pytest.raises(ValueError, match="schema_version: unsupported value 1"):
+        GenerationSnapshotRecord.from_json(
+            json.dumps(legacy, separators=(",", ":"), sort_keys=True).encode()
         )
 
 

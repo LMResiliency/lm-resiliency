@@ -335,6 +335,8 @@ def test_control_store_entry_rejects_invalid_guard_provenance(
             guard_key="run/lease",
             guard_revision=1,
             guard_value_digest="a" * 64,
+            guard_mutation_sequence=1,
+            guard_lifetime_sequence=1,
             guard_committed_at_unix_ms=0,
         )
 
@@ -350,6 +352,17 @@ def test_control_store_entry_rejects_invalid_guard_provenance(
             value=b"value",
             revision=1,
             lifetime_sequence=0,
+        )
+
+    with pytest.raises(ValueError):
+        ControlStoreEntry(
+            value=b"value",
+            revision=1,
+            guard_key="run/lease",
+            guard_revision=1,
+            guard_value_digest="a" * 64,
+            guard_mutation_sequence=0,
+            guard_lifetime_sequence=1,
         )
 
     with pytest.raises(ValueError):

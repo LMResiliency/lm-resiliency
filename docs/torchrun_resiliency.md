@@ -858,24 +858,27 @@ Coordinator state that spans multiple keys uses one guarded store transaction.
 The transaction first checks the coordinator lease revision, then every target
 revision, then one authoritative store-time window. It publishes all target
 values with the same commit timestamp and store-stamped guard key, guard
-revision, guard-value digest, and authoritative guard commit time, or publishes
-none. This is the primitive used to create an immutable generation snapshot and
-advance the generation head without allowing a stale or expired coordinator to
-commit either half alone.
+revision, guard-value digest, ordered guard mutation sequence, guard-key lifetime
+sequence, and authoritative guard commit time, or publishes none. This is the
+primitive used to create an immutable generation snapshot and advance the
+generation head without allowing a stale or expired coordinator to commit
+either half alone.
 
-Persisted generation state uses strict versioned records. A
-`GenerationSnapshotRecord` contains the immutable `RankAssignment`, the previous
-snapshot digest, and the complete coordinator lease identity, duration, and
-fencing token that committed it. Generation zero must not name a predecessor,
-while every later generation must carry a lowercase SHA-256 predecessor digest. A
-`GenerationHeadRecord` contains only the run, generation, and canonical snapshot
-digest. Both records reject missing, unknown, duplicate, or unsupported fields.
+Persisted generation state uses strict versioned records.
+`GenerationSnapshotRecord` schema version 2 contains the immutable
+`RankAssignment`, the previous snapshot digest, and the complete coordinator
+lease identity, duration, and opaque fencing token that committed it. Version 1
+is rejected explicitly rather than being interpreted as the expanded layout.
+Generation zero must not name a predecessor, while every later generation must
+carry a lowercase SHA-256 predecessor digest. A `GenerationHeadRecord` contains
+only the run, generation, and canonical snapshot digest. Both records reject
+missing, unknown, duplicate, or unsupported fields.
 
 The generation-state reader derives snapshot, head, and coordinator-lease keys
 from one run-scoped namespace. It requires the head and snapshot to agree on
 generation, digest, authoritative commit time, and store-stamped guard
 provenance, then verifies the complete predecessor digest, timestamp,
-fencing-token, and lease-identity chain back to generation zero. Lease
+guard-mutation, and lease-identity chain back to generation zero. Lease
 identities cannot reappear after a different acquisition, and one acquisition
 cannot change coordinator identity, lease duration, or store-stamped guard-key
 lifetime. Every snapshot entry must retain store-stamped mutation sequence `1`,
@@ -885,20 +888,26 @@ must fall within the stamped lease grant and duration. The head must remain in
 its first store-key lifetime, and a stable immediate successor snapshot beyond
 the head is contradictory state for every read API. Replacing a lease in place
 must not overlap the prior lease's stamped expiry, and one fencing token cannot
-identify multiple grant times or key lifetimes. Renewing the same lease identity
-must occur before its prior expiry, and grant times or key-lifetime sequences
-cannot move backward. Missing or contradictory history is corruption, not an
-empty or partially usable assignment.
+identify multiple guard mutations. Fencing revisions are compared only for
+equality; ordering comes from the store-stamped guard mutation sequence. Each
+guard-key lifetime increase requires at least one delete and one create
+mutation. When generations omit intervening renewals, the mutation distance
+bounds the latest grant time that a valid renewal chain could reach, so skipped
+valid renewals are accepted while resurrection after expiry is rejected. Grant
+times, guard mutations, and key-lifetime sequences cannot move backward.
+Missing or contradictory history is corruption, not an empty or partially
+usable assignment.
 
 Coordinator ownership is stored under a schema-versioned, run-scoped lease key.
 The lease record binds the run, a unique coordinator-process incarnation, a
 unique lease acquisition, and the lease duration. The control store attaches
 its authoritative commit time to every timed mutation. A held lease expires at
 that commit time plus the persisted duration, so network delay before the CAS
-cannot consume the granted lifetime. The record's control-store revision is the
-fencing token; acquisition, renewal, expiry takeover, release, and reacquisition
-therefore always produce a newer token. Every later authoritative coordinator
-mutation must carry the currently held token and fail closed when it is stale.
+cannot consume the granted lifetime. The record's opaque control-store revision
+is the fencing token; acquisition, renewal, expiry takeover, release, and
+reacquisition therefore produce distinct tokens, while the store's mutation
+sequence supplies ordering. Every later authoritative coordinator mutation must
+carry the currently held token and fail closed when it is stale.
 
 Lease time comes from one authoritative, nondecreasing control-plane clock
 shared by all contenders. A clock that moves backward aborts lease operations.

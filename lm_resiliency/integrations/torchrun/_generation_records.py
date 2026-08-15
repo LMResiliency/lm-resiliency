@@ -21,7 +21,7 @@ from lm_resiliency.integrations.torchrun._protocol import (
 class GenerationSnapshotRecord:
     """One immutable rank assignment and its coordinator fencing provenance."""
 
-    SCHEMA_VERSION: ClassVar[int] = 1
+    SCHEMA_VERSION: ClassVar[int] = 2
 
     assignment: RankAssignment
     previous_snapshot_digest: str | None
@@ -86,6 +86,13 @@ class GenerationSnapshotRecord:
     @classmethod
     def from_json(cls, encoded: bytes) -> GenerationSnapshotRecord:
         value = _json_object(encoded, cls.__name__)
+        if "schema_version" not in value:
+            raise ValueError(f"{cls.__name__}: missing fields ['schema_version']")
+        _schema_version(
+            value["schema_version"],
+            cls.__name__,
+            expected=cls.SCHEMA_VERSION,
+        )
         _fields(
             value,
             path=cls.__name__,
@@ -99,7 +106,6 @@ class GenerationSnapshotRecord:
                 "coordinator_fencing_token",
             },
         )
-        _schema_version(value["schema_version"], cls.__name__)
         assignment_value = value["assignment"]
         if not isinstance(assignment_value, Mapping):
             raise ValueError("GenerationSnapshotRecord.assignment must be an object")
@@ -174,7 +180,11 @@ class GenerationHeadRecord:
                 "snapshot_digest",
             },
         )
-        _schema_version(value["schema_version"], cls.__name__)
+        _schema_version(
+            value["schema_version"],
+            cls.__name__,
+            expected=cls.SCHEMA_VERSION,
+        )
         return cls(
             run_id=_nonempty_string(value["run_id"], "GenerationHeadRecord.run_id"),
             generation=_nonnegative_integer(
@@ -228,8 +238,8 @@ def _fields(
         raise ValueError(f"{path}: unknown fields {sorted(unknown)!r}")
 
 
-def _schema_version(value: object, path: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value != 1:
+def _schema_version(value: object, path: str, *, expected: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value != expected:
         raise ValueError(f"{path}.schema_version: unsupported value {value!r}")
     return value
 

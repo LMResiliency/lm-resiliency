@@ -33,6 +33,7 @@ class StoredGenerationSnapshot:
     record: GenerationSnapshotRecord
     revision: int
     committed_at_unix_ms: int
+    guard_mutation_sequence: int
     guard_lifetime_sequence: int
     guard_committed_at_unix_ms: int
 
@@ -189,13 +190,16 @@ class GenerationStateReader:
             raise GenerationStateCorrupt("immutable generation snapshot was replaced or recreated")
         if entry.committed_at_unix_ms is None:
             raise GenerationStateCorrupt("generation snapshot has no authoritative commit time")
-        guard_lifetime_sequence, guard_committed_at_unix_ms = self._validate_guard_provenance(
-            entry, record
-        )
+        (
+            guard_mutation_sequence,
+            guard_lifetime_sequence,
+            guard_committed_at_unix_ms,
+        ) = self._validate_guard_provenance(entry, record)
         return StoredGenerationSnapshot(
             record=record,
             revision=entry.revision,
             committed_at_unix_ms=entry.committed_at_unix_ms,
+            guard_mutation_sequence=guard_mutation_sequence,
             guard_lifetime_sequence=guard_lifetime_sequence,
             guard_committed_at_unix_ms=guard_committed_at_unix_ms,
         )
@@ -218,10 +222,15 @@ class GenerationStateReader:
             raise GenerationStateCorrupt(
                 "generation head and snapshot commit timestamps do not match"
             )
-        head_guard_lifetime, head_guard_committed_at = self._validate_guard_provenance(
-            head_entry,
-            snapshot.record,
-        )
+        (
+            head_guard_mutation,
+            head_guard_lifetime,
+            head_guard_committed_at,
+        ) = self._validate_guard_provenance(head_entry, snapshot.record)
+        if head_guard_mutation != snapshot.guard_mutation_sequence:
+            raise GenerationStateCorrupt(
+                "generation head and snapshot guard mutation sequences do not match"
+            )
         if head_guard_lifetime != snapshot.guard_lifetime_sequence:
             raise GenerationStateCorrupt(
                 "generation head and snapshot guard lifetimes do not match"
@@ -257,33 +266,46 @@ class GenerationStateReader:
                 raise GenerationStateCorrupt("generation snapshot lease grant times move backward")
             if predecessor.guard_lifetime_sequence > successor.guard_lifetime_sequence:
                 raise GenerationStateCorrupt("generation snapshot guard lifetimes move backward")
-            if (
-                predecessor.record.coordinator_fencing_token
-                > successor.record.coordinator_fencing_token
-            ):
-                raise GenerationStateCorrupt("generation snapshot fencing tokens move backward")
-            if (
-                predecessor.record.coordinator_fencing_token
-                == successor.record.coordinator_fencing_token
-                and (
-                    predecessor.record.coordinator_id != successor.record.coordinator_id
-                    or predecessor.record.lease_id != successor.record.lease_id
+            if predecessor.guard_mutation_sequence > successor.guard_mutation_sequence:
+                raise GenerationStateCorrupt("generation snapshot guard mutations move backward")
+            guard_mutation_delta = (
+                successor.guard_mutation_sequence - predecessor.guard_mutation_sequence
+            )
+            guard_lifetime_delta = (
+                successor.guard_lifetime_sequence - predecessor.guard_lifetime_sequence
+            )
+            if guard_mutation_delta < 2 * guard_lifetime_delta:
+                raise GenerationStateCorrupt(
+                    "generation snapshot guard lifetime lacks delete-and-recreate mutations"
                 )
+            if (
+                guard_mutation_delta == 0
+                and predecessor.record.coordinator_fencing_token
+                != successor.record.coordinator_fencing_token
+            ):
+                raise GenerationStateCorrupt(
+                    "one guard mutation identifies multiple fencing tokens"
+                )
+            if (
+                guard_mutation_delta > 0
+                and predecessor.record.coordinator_fencing_token
+                == successor.record.coordinator_fencing_token
+            ):
+                raise GenerationStateCorrupt(
+                    "one fencing token identifies multiple guard mutations"
+                )
+            if guard_mutation_delta == 0 and (
+                predecessor.record.coordinator_id != successor.record.coordinator_id
+                or predecessor.record.lease_id != successor.record.lease_id
             ):
                 raise GenerationStateCorrupt("generation snapshots disagree on one lease identity")
-            if (
-                predecessor.record.coordinator_fencing_token
-                == successor.record.coordinator_fencing_token
-                and (
-                    predecessor.guard_lifetime_sequence != successor.guard_lifetime_sequence
-                    or predecessor.guard_committed_at_unix_ms
-                    != successor.guard_committed_at_unix_ms
-                )
+            if guard_mutation_delta == 0 and (
+                predecessor.guard_lifetime_sequence != successor.guard_lifetime_sequence
+                or predecessor.guard_committed_at_unix_ms != successor.guard_committed_at_unix_ms
             ):
                 raise GenerationStateCorrupt("generation snapshots disagree on one lease grant")
-            if (
-                predecessor.record.lease_id == successor.record.lease_id
-                and predecessor.record.coordinator_id != successor.record.coordinator_id
+            if predecessor.record.lease_id == successor.record.lease_id and (
+                predecessor.record.coordinator_id != successor.record.coordinator_id
             ):
                 raise GenerationStateCorrupt("one generation lease changes coordinator identity")
             if (
@@ -301,12 +323,11 @@ class GenerationStateReader:
                 )
             if (
                 predecessor.record.lease_id == successor.record.lease_id
-                and predecessor.record.coordinator_fencing_token
-                != successor.record.coordinator_fencing_token
+                and guard_mutation_delta > 0
                 and successor.guard_committed_at_unix_ms
-                >= (
+                > (
                     predecessor.guard_committed_at_unix_ms
-                    + predecessor.record.coordinator_lease_duration_ms
+                    + guard_mutation_delta * (predecessor.record.coordinator_lease_duration_ms - 1)
                 )
             ):
                 raise GenerationStateCorrupt(
@@ -336,7 +357,7 @@ class GenerationStateReader:
         self,
         entry: ControlStoreEntry,
         snapshot: GenerationSnapshotRecord,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, int]:
         if entry.guard_key != self._coordinator_lease_key:
             raise GenerationStateCorrupt(
                 "generation state has no matching coordinator-lease guard key"
@@ -348,6 +369,11 @@ class GenerationStateReader:
         if entry.guard_value_digest != snapshot.coordinator_lease_digest:
             raise GenerationStateCorrupt(
                 "generation state guard digest does not match its lease identity"
+            )
+        guard_mutation_sequence = entry.guard_mutation_sequence
+        if guard_mutation_sequence is None:
+            raise GenerationStateCorrupt(
+                "generation state guard has no authoritative mutation sequence"
             )
         guard_lifetime_sequence = entry.guard_lifetime_sequence
         if guard_lifetime_sequence is None:
@@ -369,7 +395,11 @@ class GenerationStateReader:
             raise GenerationStateCorrupt(
                 "generation state was committed after its coordinator lease expired"
             )
-        return guard_lifetime_sequence, guard_committed_at_unix_ms
+        return (
+            guard_mutation_sequence,
+            guard_lifetime_sequence,
+            guard_committed_at_unix_ms,
+        )
 
 
 def _nonempty_string(value: object, path: str) -> str:

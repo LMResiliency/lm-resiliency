@@ -75,6 +75,7 @@ class ControlStoreEntry:
     guard_key: str | None = None
     guard_revision: int | None = None
     guard_value_digest: str | None = None
+    guard_mutation_sequence: int | None = None
     guard_lifetime_sequence: int | None = None
     guard_committed_at_unix_ms: int | None = None
 
@@ -104,6 +105,7 @@ class ControlStoreEntry:
             self.guard_key,
             self.guard_revision,
             self.guard_value_digest,
+            self.guard_mutation_sequence,
             self.guard_lifetime_sequence,
         )
         if any(value is not None for value in guard_values):
@@ -121,6 +123,14 @@ class ControlStoreEntry:
                 _sha256_digest(
                     self.guard_value_digest,
                     "guard_value_digest",
+                ),
+            )
+            object.__setattr__(
+                self,
+                "guard_mutation_sequence",
+                _positive_integer(
+                    self.guard_mutation_sequence,
+                    "guard_mutation_sequence",
                 ),
             )
             object.__setattr__(
@@ -223,8 +233,8 @@ class ControlStore(Protocol):
         """Atomically publish writes while a guard revision is live.
 
         Every returned target entry carries store-stamped guard key, revision,
-        value digest, key-lifetime sequence, and authoritative guard commit
-        time from the same linearization point.
+        value digest, ordered mutation sequence, key-lifetime sequence, and
+        authoritative guard commit time from the same linearization point.
         """
         ...
 
@@ -401,6 +411,7 @@ class InMemoryControlStore:
                     guard_key=normalized_guard_key,
                     guard_revision=normalized_guard_revision,
                     guard_value_digest=guard_value_digest,
+                    guard_mutation_sequence=guard_entry.mutation_sequence,
                     guard_lifetime_sequence=guard_entry.lifetime_sequence,
                     guard_committed_at_unix_ms=guard_entry.committed_at_unix_ms,
                 )
@@ -423,6 +434,7 @@ class InMemoryControlStore:
         guard_key: str | None = None,
         guard_revision: int | None = None,
         guard_value_digest: str | None = None,
+        guard_mutation_sequence: int | None = None,
         guard_lifetime_sequence: int | None = None,
         guard_committed_at_unix_ms: int | None = None,
     ) -> ControlStoreEntry:
@@ -438,6 +450,7 @@ class InMemoryControlStore:
             guard_key=guard_key,
             guard_revision=guard_revision,
             guard_value_digest=guard_value_digest,
+            guard_mutation_sequence=guard_mutation_sequence,
             guard_lifetime_sequence=guard_lifetime_sequence,
             guard_committed_at_unix_ms=guard_committed_at_unix_ms,
         )

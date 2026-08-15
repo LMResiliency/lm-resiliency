@@ -152,12 +152,28 @@ def _reader_from_history(
     records: tuple[GenerationSnapshotRecord, ...],
     *,
     head_committed_at_offset_ms: int = 0,
+    guard_mutation_sequences: tuple[int, ...] | None = None,
     guard_lifetime_sequences: tuple[int, ...] | None = None,
     guard_grant_times_unix_ms: tuple[int, ...] | None = None,
     snapshot_commit_times_unix_ms: tuple[int, ...] | None = None,
 ) -> GenerationStateReader:
     if guard_lifetime_sequences is None:
         guard_lifetime_sequences = (1,) * len(records)
+    if guard_mutation_sequences is None:
+        mutation_sequences = [1]
+        for predecessor, successor, predecessor_lifetime, successor_lifetime in zip(
+            records[:-1],
+            records[1:],
+            guard_lifetime_sequences[:-1],
+            guard_lifetime_sequences[1:],
+            strict=True,
+        ):
+            if successor.coordinator_fencing_token == predecessor.coordinator_fencing_token:
+                mutation_sequences.append(mutation_sequences[-1])
+            else:
+                lifetime_delta = successor_lifetime - predecessor_lifetime
+                mutation_sequences.append(mutation_sequences[-1] + max(1, 2 * lifetime_delta))
+        guard_mutation_sequences = tuple(mutation_sequences)
     if guard_grant_times_unix_ms is None:
         grant_times = [1_000]
         for predecessor, successor, predecessor_lifetime, successor_lifetime in zip(
@@ -181,8 +197,15 @@ def _reader_from_history(
         snapshot_commit_times_unix_ms = guard_grant_times_unix_ms
     store = StaticControlStore()
     reader = GenerationStateReader(store, run_id=RUN_ID)
-    for record, guard_lifetime_sequence, guard_grant_time, snapshot_commit_time in zip(
+    for (
+        record,
+        guard_mutation_sequence,
+        guard_lifetime_sequence,
+        guard_grant_time,
+        snapshot_commit_time,
+    ) in zip(
         records,
+        guard_mutation_sequences,
         guard_lifetime_sequences,
         guard_grant_times_unix_ms,
         snapshot_commit_times_unix_ms,
@@ -196,6 +219,7 @@ def _reader_from_history(
             guard_key=reader.coordinator_lease_key,
             guard_revision=record.coordinator_fencing_token,
             guard_value_digest=record.coordinator_lease_digest,
+            guard_mutation_sequence=guard_mutation_sequence,
             guard_lifetime_sequence=guard_lifetime_sequence,
             guard_committed_at_unix_ms=guard_grant_time,
         )
@@ -213,6 +237,7 @@ def _reader_from_history(
         guard_key=reader.coordinator_lease_key,
         guard_revision=latest.coordinator_fencing_token,
         guard_value_digest=latest.coordinator_lease_digest,
+        guard_mutation_sequence=guard_mutation_sequences[-1],
         guard_lifetime_sequence=guard_lifetime_sequences[-1],
         guard_committed_at_unix_ms=guard_grant_times_unix_ms[-1],
     )
@@ -774,6 +799,38 @@ def test_generation_reader_rejects_expired_same_lease_renewal():
         reader.current()
 
 
+def test_generation_reader_accepts_skipped_valid_renewals_and_opaque_revisions():
+    records = _history(
+        ("coordinator-a", "lease-a", 100),
+        ("coordinator-a", "lease-a", 50),
+    )
+    reader = _reader_from_history(
+        records,
+        guard_mutation_sequences=(1, 3),
+        guard_grant_times_unix_ms=(1_000, 1_100),
+    )
+
+    current = reader.current()
+
+    assert current is not None
+    assert current.snapshot.record == records[-1]
+
+
+def test_generation_reader_rejects_expired_renewal_after_skipped_mutations():
+    records = _history(
+        ("coordinator-a", "lease-a", 100),
+        ("coordinator-a", "lease-a", 50),
+    )
+    reader = _reader_from_history(
+        records,
+        guard_mutation_sequences=(1, 3),
+        guard_grant_times_unix_ms=(1_000, 1_199),
+    )
+
+    with pytest.raises(GenerationStateCorrupt, match="renews an expired"):
+        reader.current()
+
+
 def test_generation_reader_rejects_lease_grant_time_rollback():
     records = _history(
         ("coordinator-a", "lease-a", 1),
@@ -800,6 +857,36 @@ def test_generation_reader_rejects_guard_lifetime_rollback():
     )
 
     with pytest.raises(GenerationStateCorrupt, match="guard lifetimes move backward"):
+        reader.current()
+
+
+def test_generation_reader_rejects_guard_mutation_rollback():
+    records = _history(
+        ("coordinator-a", "lease-a", 100),
+        ("coordinator-a", "lease-a", 50),
+    )
+    reader = _reader_from_history(
+        records,
+        guard_mutation_sequences=(2, 1),
+    )
+
+    with pytest.raises(GenerationStateCorrupt, match="guard mutations move backward"):
+        reader.current()
+
+
+def test_generation_reader_rejects_guard_recreation_without_two_mutations():
+    records = _history(
+        ("coordinator-a", "lease-a", 100),
+        ("coordinator-b", "lease-b", 50),
+    )
+    reader = _reader_from_history(
+        records,
+        guard_mutation_sequences=(1, 2),
+        guard_lifetime_sequences=(1, 2),
+        guard_grant_times_unix_ms=(1_000, 1_100),
+    )
+
+    with pytest.raises(GenerationStateCorrupt, match="delete-and-recreate"):
         reader.current()
 
 
@@ -948,13 +1035,6 @@ def test_generation_reader_anchors_fencing_token_to_store_guard():
 @pytest.mark.parametrize(
     ("history", "message"),
     [
-        (
-            _history(
-                ("coordinator-a", "lease-a", 5),
-                ("coordinator-b", "lease-b", 4),
-            ),
-            "fencing tokens",
-        ),
         (
             _history(
                 ("coordinator-a", "lease-a", 4),

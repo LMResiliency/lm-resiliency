@@ -73,6 +73,9 @@ def test_guarded_transaction_commits_all_writes_at_one_store_time():
     assert {entry.guard_value_digest for entry in committed.values()} == {
         hashlib.sha256(b"lease-a").hexdigest()
     }
+    assert {entry.guard_mutation_sequence for entry in committed.values()} == {
+        guard.mutation_sequence
+    }
     assert {entry.guard_lifetime_sequence for entry in committed.values()} == {
         guard.lifetime_sequence
     }
@@ -158,6 +161,9 @@ def test_guarded_transaction_stamps_recreated_guard_lifetime():
 
     assert original_guard.lifetime_sequence == 1
     assert recreated_guard.lifetime_sequence == 2
+    assert recreated_guard.mutation_sequence == original_guard.mutation_sequence + 2
+    assert initial["run/generation-head"].guard_mutation_sequence == 1
+    assert successor["run/generation-head"].guard_mutation_sequence == 3
     assert initial["run/generation-head"].guard_lifetime_sequence == 1
     assert successor["run/generation-head"].guard_lifetime_sequence == 2
 
