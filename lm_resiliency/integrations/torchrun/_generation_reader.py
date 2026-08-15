@@ -33,6 +33,7 @@ class StoredGenerationSnapshot:
     record: GenerationSnapshotRecord
     revision: int
     committed_at_unix_ms: int
+    transaction_sequence: int
     guard_mutation_sequence: int
     guard_value_sequence: int
     guard_lifetime_sequence: int
@@ -218,6 +219,7 @@ class GenerationStateReader:
             record=record,
             revision=entry.revision,
             committed_at_unix_ms=entry.committed_at_unix_ms,
+            transaction_sequence=entry.transaction_sequence,
             guard_mutation_sequence=guard_mutation_sequence,
             guard_value_sequence=guard_value_sequence,
             guard_lifetime_sequence=guard_lifetime_sequence,
@@ -245,6 +247,10 @@ class GenerationStateReader:
         if head_entry.committed_at_unix_ms != snapshot.committed_at_unix_ms:
             raise GenerationStateCorrupt(
                 "generation head and snapshot commit timestamps do not match"
+            )
+        if head_entry.transaction_sequence != snapshot.transaction_sequence:
+            raise GenerationStateCorrupt(
+                "generation head and snapshot transaction sequences do not match"
             )
         (
             head_guard_mutation,
@@ -292,6 +298,10 @@ class GenerationStateReader:
                 )
             if predecessor.committed_at_unix_ms > successor.committed_at_unix_ms:
                 raise GenerationStateCorrupt("generation snapshot commit timestamps move backward")
+            if predecessor.transaction_sequence >= successor.transaction_sequence:
+                raise GenerationStateCorrupt(
+                    "generation snapshot transaction sequences do not advance"
+                )
             if predecessor.guard_committed_at_unix_ms > successor.guard_committed_at_unix_ms:
                 raise GenerationStateCorrupt("generation snapshot lease grant times move backward")
             if predecessor.guard_lifetime_sequence > successor.guard_lifetime_sequence:
