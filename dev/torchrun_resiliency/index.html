@@ -1049,7 +1049,12 @@ successor node. Each selected registration must be live at one observation time
 and must match the planned local worker count and the coordinator's expected
 <code>environment_digest</code>. Trusted hardware inventory, previously committed
 quarantine state, recovery evidence, and atomic publication remain separate
-admission boundaries.</p>
+admission boundaries.
+<code>RestartPlanCandidateState</code> composes one placement state with one recovery
+evidence state only when both describe the exact same lifecycle and generation
+records. The registration observation must also precede the plan's exclusive
+restart deadline. This value is still only a publication candidate: trusted
+prior quarantine and the atomic store transaction remain separate gates.</p>
 <p>Before commit, the coordinator validates:</p>
 <ul>
 <li>the plan is fenced to the same intent ID, run, generation, incidents, and
