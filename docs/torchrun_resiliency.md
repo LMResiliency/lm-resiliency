@@ -844,6 +844,12 @@ that pure authority value without mutating the store. Repeated lease changes
 remain retryable conflicts; missing, stale, expired, or contradictory authority
 fails closed. Lifecycle fencing, quarantine-resource authorization, execution,
 and committed-result verification remain separate publication layers.
+`RestartPlanPublicationLifecycleFence` derives immutable revision conditions
+for the exact closed intent, durable closed head, lifecycle record, and
+lifecycle head from one authenticated closure. It rejects any closure whose
+successor generation is already committed. Candidate identity, live-store
+observation, transaction execution, and committed-result verification remain
+separate layers.
 
 Before commit, the coordinator validates:
 

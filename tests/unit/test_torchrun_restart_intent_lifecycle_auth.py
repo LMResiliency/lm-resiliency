@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import threading
 from dataclasses import dataclass, replace
 from typing import Any, cast
@@ -46,6 +47,9 @@ from lm_resiliency.integrations.torchrun._restart_intent_records import (
     RestartIntentClosedHeadRecord,
     RestartIntentLifecycleHeadRecord,
     RestartIntentLifecycleRecord,
+)
+from lm_resiliency.integrations.torchrun._restart_plan_publication_lifecycle import (
+    RestartPlanPublicationLifecycleFence,
 )
 
 RUN_ID = "training-run"
@@ -234,6 +238,73 @@ def test_authenticated_closure_resolves_exact_authorities(closing_mode: str):
     assert authenticated.closing_authority == fixture.lease_history[-1]
     assert authenticated.closed_at_unix_ms == fixture.state.closed_at_unix_ms
     assert authenticated.transaction_sequence == fixture.state.closing_transaction_sequence
+
+
+@pytest.mark.parametrize("closing_mode", ["opening", "renewed", "replacement"])
+def test_restart_plan_publication_lifecycle_fence_preserves_exact_revisions(
+    closing_mode: str,
+):
+    fixture = _fixture(closing_mode=closing_mode)
+    closure = _authenticate(fixture)
+
+    fence = RestartPlanPublicationLifecycleFence(closure)
+
+    run_digest = hashlib.sha256(RUN_ID.encode("utf-8")).hexdigest()
+    intent_digest = hashlib.sha256(closure.intent.intent.intent_id.encode("utf-8")).hexdigest()
+    run_prefix = f"lm_resiliency/torchrun/v1/runs/{run_digest}"
+    assert fence.run_prefix == run_prefix
+    assert fence.intent_key == f"{run_prefix}/restart-intents/{intent_digest}"
+    assert fence.intent_head_key == f"{run_prefix}/restart-intent-head"
+    assert fence.closure_key == f"{run_prefix}/restart-intent-closures/1"
+    assert fence.lifecycle_head_key == f"{run_prefix}/restart-intent-lifecycle-head"
+    assert fence.conditions == {
+        fence.intent_key: fixture.state.intent_entry.revision,
+        fence.intent_head_key: fixture.state.closed_head_entry.revision,
+        fence.closure_key: fixture.state.lifecycle_entry.revision,
+        fence.lifecycle_head_key: fixture.state.lifecycle_head_entry.revision,
+    }
+    assert fence.closed_at_unix_ms == fixture.state.closed_at_unix_ms
+    assert fence.transaction_sequence == fixture.state.closing_transaction_sequence
+
+
+def test_restart_plan_publication_lifecycle_fence_is_immutable():
+    fence = RestartPlanPublicationLifecycleFence(_authenticate(_fixture()))
+
+    with pytest.raises(AttributeError):
+        fence.closure = fence.closure
+    with pytest.raises(TypeError):
+        fence.conditions[fence.intent_key] = 99
+
+
+def test_restart_plan_publication_lifecycle_fence_requires_authenticated_closure():
+    with pytest.raises(TypeError, match="must be AuthenticatedInitialRestartIntentClosure"):
+        RestartPlanPublicationLifecycleFence(_fixture().state)
+
+
+def test_restart_plan_publication_lifecycle_fence_rejects_existing_successor():
+    fixture = _fixture()
+    current = fixture.generation_manager.current()
+    assert current is not None
+    fixture.clock.set(1_020)
+    fixture.generation_manager.commit_successor(
+        fixture.opening_lease,
+        current,
+        _assignment(generation=1, node_id="node-c"),
+    )
+    successor = GenerationStateReader(fixture.store, run_id=RUN_ID).get(1)
+    assert successor is not None
+    closure = AuthenticatedInitialRestartIntentClosure(
+        state=fixture.state,
+        generation_snapshot=fixture.generation,
+        immediate_successor=successor,
+        lease_history=CoordinatorLeaseHistoryReader(
+            fixture.store,
+            run_id=RUN_ID,
+        ).read(),
+    )
+
+    with pytest.raises(ValueError, match="successor generation is already committed"):
+        RestartPlanPublicationLifecycleFence(closure)
 
 
 def test_authenticated_closure_accepts_immediate_generation_successor():
