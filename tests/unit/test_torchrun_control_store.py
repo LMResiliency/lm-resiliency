@@ -382,6 +382,19 @@ def test_control_store_time_window_rejects_backward_clock():
     assert store.get("run/control") == created
 
 
+def test_control_store_observes_time_without_consuming_a_mutation():
+    clock = ManualClock(100)
+    store = InMemoryControlStore(clock=clock)
+
+    assert store.observe_time_unix_ms() == 100
+    created = store.compare_set("run/control", expected_revision=None, value=b"one")
+    assert created.transaction_sequence == 1
+
+    clock.now_unix_ms = 99
+    with pytest.raises(ControlStoreClockError, match="backward"):
+        store.observe_time_unix_ms()
+
+
 def test_control_store_guarded_delete_uses_same_time_window():
     clock = ManualClock(100)
     store = InMemoryControlStore(clock=clock)

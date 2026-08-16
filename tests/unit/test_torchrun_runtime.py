@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import fcntl
+import json
 import os
 import queue
 import stat
@@ -10,6 +12,7 @@ import time
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, cast
 
 import pytest
@@ -38,6 +41,7 @@ from lm_resiliency.integrations.torchrun._protocol import (
     HardwareFaultReport,
     RankAssignment,
     RestartContext,
+    RestartPlan,
     SlotAssignment,
     WorkerIdentity,
     validate_event_reporter,
@@ -49,6 +53,7 @@ from lm_resiliency.integrations.torchrun._runtime import (
     TorchrunRendezvousPolicy,
     TorchrunRuntimeConfig,
     TorchrunRuntimeConfigError,
+    _RestartContextOwnership,
 )
 
 RUN_ID = "training-run"
@@ -56,7 +61,7 @@ POLICY = """\
 schema_version = 1
 control_endpoint = "control.example:443"
 replacement_only = true
-max_replacement_generations = 2
+max_replacement_generations = 1
 registration_lease_duration_ms = 30000
 poll_interval_ms = 1000
 join_timeout_ms = 300000
@@ -75,6 +80,24 @@ class ManualClock:
     def advance(self, duration_ms: int) -> None:
         with self._lock:
             self._now_unix_ms += duration_ms
+
+    def set(self, now_unix_ms: int) -> None:
+        with self._lock:
+            self._now_unix_ms = now_unix_ms
+
+
+class ManualMonotonicClock:
+    def __init__(self) -> None:
+        self._now = 0.0
+        self._lock = threading.Lock()
+
+    def __call__(self) -> float:
+        with self._lock:
+            return self._now
+
+    def advance(self, duration_seconds: float) -> None:
+        with self._lock:
+            self._now += duration_seconds
 
 
 def _write_policy(path: Path, content: str = POLICY) -> Path:
@@ -134,6 +157,53 @@ def _context(*, plan_id: str = "plan-1") -> RestartContext:
     )
 
 
+class StaticRecoveryStateReader:
+    def __init__(self, state: object) -> None:
+        self._state = state
+        self.calls = 0
+
+    def read_recovery_state(self) -> object:
+        self.calls += 1
+        return self._state
+
+
+def _static_recovery_state(
+    plan: RestartPlan,
+    *,
+    committed_at_unix_ms: int = 1_000,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        plan=plan,
+        publication=SimpleNamespace(committed_at_unix_ms=committed_at_unix_ms),
+    )
+
+
+def _replacement_plan(
+    *,
+    node_id: str = "node-b",
+    restart_deadline_unix_ms: int = 5_000,
+) -> RestartPlan:
+    return RestartPlan(
+        plan_id="plan-1",
+        intent_id="intent-1",
+        run_id=RUN_ID,
+        from_generation=0,
+        to_generation=1,
+        incident_ids=("incident-1",),
+        reason_code="attributed_sdc",
+        recovery_mode="latest",
+        checkpoint_source="gemini",
+        checkpoint_step=40,
+        checkpoint_id=None,
+        checkpoint_manifest_id="manifest-40",
+        slot_assignments=(SlotAssignment(0, node_id, 0, 2),),
+        quarantined_node_ids=("node-a",),
+        expected_world_size=2,
+        topology_digest="topology-v1",
+        restart_deadline_unix_ms=restart_deadline_unix_ms,
+    )
+
+
 def test_runtime_config_loads_shared_policy_and_node_inputs(tmp_path: Path):
     source = _write_policy(tmp_path / "rendezvous.toml")
     context_path = tmp_path / "private" / "restart-context.json"
@@ -144,7 +214,7 @@ def test_runtime_config_loads_shared_policy_and_node_inputs(tmp_path: Path):
     )
 
     assert config.policy.control_endpoint == "control.example:443"
-    assert config.policy.max_replacement_generations == 2
+    assert config.policy.max_replacement_generations == 1
     assert (
         config.policy.digest
         == TorchrunRendezvousPolicy(
@@ -170,7 +240,7 @@ def test_runtime_config_digest_ignores_toml_formatting_and_node_inputs(tmp_path:
 join_timeout_ms=300000
 poll_interval_ms=1000
 registration_lease_duration_ms=30000
-max_replacement_generations=2
+max_replacement_generations=1
 replacement_only=true
 control_endpoint="control.example:443"
 schema_version=1
@@ -401,7 +471,7 @@ def test_runtime_config_rendezvous_overrides_change_resolved_policy(tmp_path: Pa
         _parameters(
             source,
             control_endpoint="override.example:8443",
-            max_replacement_generations="4",
+            max_replacement_generations="1",
             registration_lease_duration_ms="45000",
             poll_interval_ms="500",
             join_timeout_ms="120000",
@@ -411,7 +481,7 @@ def test_runtime_config_rendezvous_overrides_change_resolved_policy(tmp_path: Pa
     )
 
     assert config.policy.control_endpoint == "override.example:8443"
-    assert config.policy.max_replacement_generations == 4
+    assert config.policy.max_replacement_generations == 1
     assert config.policy.registration_lease_duration_ms == 45_000
     assert config.policy.poll_interval_ms == 500
     assert config.policy.join_timeout_ms == 120_000
@@ -443,6 +513,10 @@ def test_runtime_config_rendezvous_overrides_change_resolved_policy(tmp_path: Pa
         (
             'schema_version = 1\ncontrol_endpoint = "control"\nmax_replacement_generations = 1.5\n',
             "max_replacement_generations",
+        ),
+        (
+            'schema_version = 1\ncontrol_endpoint = "control"\nmax_replacement_generations = 2\n',
+            "exactly one replacement generation",
         ),
     ],
 )
@@ -710,9 +784,11 @@ def test_restart_context_file_writes_reads_replaces_and_clears(tmp_path: Path):
     path = tmp_path / "private" / "restart-context.json"
     context_file = RestartContextFile(path)
 
-    context_file.write(_context())
+    cleanup_token = context_file.write(_context())
 
     assert context_file.read() == _context()
+    assert context_file.read_with_token() == (cleanup_token, _context())
+    assert json.loads(path.read_text(encoding="utf-8")) == _context().to_dict()
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
@@ -723,6 +799,130 @@ def test_restart_context_file_writes_reads_replaces_and_clears(tmp_path: Path):
     context_file.clear()
     assert not path.exists()
     context_file.clear()
+
+
+def test_restart_context_file_clears_only_the_matching_cleanup_token(
+    tmp_path: Path,
+):
+    path = tmp_path / "private" / "restart-context.json"
+    context_file = RestartContextFile(path)
+
+    first_token = context_file.write(_context())
+    second_token = context_file.write(_context())
+
+    assert first_token != second_token
+    assert context_file.clear_if_token(first_token) is False
+    assert context_file.read() == _context()
+    assert context_file.clear_if_token(second_token) is True
+    assert not path.exists()
+
+
+def test_restart_context_file_fences_registration_ownership(
+    tmp_path: Path,
+):
+    path = tmp_path / "private" / "restart-context.json"
+    context_file = RestartContextFile(path)
+    original = _RestartContextOwnership("registration-a", 1)
+    replacement = _RestartContextOwnership("registration-b", 2)
+
+    context_file.write(_context(plan_id="plan-a"), ownership=original)
+    replacement_token = context_file.write(
+        _context(plan_id="plan-b"),
+        ownership=replacement,
+    )
+
+    with pytest.raises(RestartContextFileError, match="stale registration"):
+        context_file.write(_context(plan_id="stale-plan"), ownership=original)
+
+    assert context_file.read_with_token() == (
+        replacement_token,
+        _context(plan_id="plan-b"),
+    )
+
+    renewed_token = context_file.write(
+        _context(plan_id="plan-b-renewed"),
+        ownership=_RestartContextOwnership("registration-b", 3),
+    )
+    assert context_file.read_with_token() == (
+        renewed_token,
+        _context(plan_id="plan-b-renewed"),
+    )
+
+
+def test_restart_context_file_invalidates_context_while_directory_lock_is_held(
+    tmp_path: Path,
+):
+    path = tmp_path / "private" / "restart-context.json"
+    monotonic_clock = ManualMonotonicClock()
+    context_file = RestartContextFile(path, monotonic_clock=monotonic_clock)
+    cleanup_token = context_file.write(_context())
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    fcntl.flock(directory, fcntl.LOCK_EX)
+    try:
+        context_file.invalidate(cleanup_token)
+        with pytest.raises(RestartContextFileError, match="timed out locking"):
+            context_file.clear_if_token(
+                cleanup_token,
+                deadline=monotonic_clock(),
+            )
+    finally:
+        fcntl.flock(directory, fcntl.LOCK_UN)
+        os.close(directory)
+
+    with pytest.raises(RestartContextFileError, match="invalidated"):
+        context_file.read()
+
+
+def test_restart_context_file_preserves_every_invalidated_token(
+    tmp_path: Path,
+):
+    path = tmp_path / "private" / "restart-context.json"
+    context_file = RestartContextFile(path)
+    old_token = context_file.write(_context(plan_id="plan-old"))
+    current_token = context_file.write(_context(plan_id="plan-current"))
+
+    context_file.invalidate(current_token)
+    context_file.invalidate(old_token)
+
+    with pytest.raises(RestartContextFileError, match="invalidated"):
+        context_file.read()
+
+    context_file.write(_context(plan_id="plan-new"))
+    assert context_file.read() == _context(plan_id="plan-new")
+
+
+def test_restart_context_file_rejects_resurrected_invalidated_context(
+    tmp_path: Path,
+):
+    path = tmp_path / "private" / "restart-context.json"
+    context_file = RestartContextFile(path)
+    cleanup_token = context_file.write(_context())
+    metadata_path = path.parent / context_file._metadata_name()
+    encoded_context = path.read_bytes()
+    encoded_metadata = metadata_path.read_bytes()
+
+    context_file.invalidate(cleanup_token)
+    assert context_file.clear_if_token(cleanup_token) is True
+    path.write_bytes(encoded_context)
+    metadata_path.write_bytes(encoded_metadata)
+    path.chmod(0o600)
+    metadata_path.chmod(0o600)
+
+    with pytest.raises(RestartContextFileError, match="invalidated"):
+        context_file.read()
+
+
+def test_restart_context_file_invalidates_long_valid_basename(
+    tmp_path: Path,
+):
+    path = tmp_path / "private" / ("c" * 180)
+    context_file = RestartContextFile(path)
+    cleanup_token = context_file.write(_context())
+
+    context_file.invalidate(cleanup_token)
+
+    with pytest.raises(RestartContextFileError, match="invalidated"):
+        context_file.read()
 
 
 def test_restart_context_file_preserves_previous_value_when_replace_fails(
@@ -747,6 +947,31 @@ def test_restart_context_file_preserves_previous_value_when_replace_fails(
 
     assert context_file.read() == _context()
     assert list(path.parent.glob(f".{path.name}.*.tmp")) == []
+
+
+def test_restart_context_file_removes_orphaned_metadata_durably(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    path = tmp_path / "private" / "restart-context.json"
+    context_file = RestartContextFile(path)
+    context_file.write(_context())
+    path.unlink()
+    metadata_path = path.parent / context_file._metadata_name()
+    assert metadata_path.exists()
+    sync_count = 0
+    original_fsync = RestartContextFile._fsync_directory
+
+    def record_fsync(descriptor: int) -> None:
+        nonlocal sync_count
+        sync_count += 1
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(RestartContextFile, "_fsync_directory", staticmethod(record_fsync))
+
+    assert context_file.clear_stale_for_run(RUN_ID) is True
+    assert not metadata_path.exists()
+    assert sync_count == 1
 
 
 def test_restart_context_file_rejects_oversized_value_before_replace(tmp_path: Path):
@@ -804,6 +1029,19 @@ def test_restart_context_file_rejects_duplicate_json_fields(tmp_path: Path):
     path.chmod(0o600)
 
     with pytest.raises(RestartContextFileError, match="duplicate field"):
+        context_file.read()
+
+
+def test_restart_context_file_rejects_context_changed_without_metadata(
+    tmp_path: Path,
+):
+    path = tmp_path / "private" / "restart-context.json"
+    context_file = RestartContextFile(path)
+    context_file.write(_context())
+    path.write_text(_context(plan_id="substituted").to_json() + "\n", encoding="utf-8")
+    path.chmod(0o600)
+
+    with pytest.raises(RestartContextFileError, match="metadata does not match"):
         context_file.read()
 
 
@@ -915,6 +1153,25 @@ def test_restart_context_file_clear_accepts_missing_parent(tmp_path: Path):
     RestartContextFile(path).clear()
 
     assert not path.parent.exists()
+
+
+def test_restart_context_file_lock_acquisition_is_bounded(tmp_path: Path):
+    path = tmp_path / "private" / "restart-context.json"
+    path.parent.mkdir(mode=0o700)
+    directory_descriptor = os.open(path.parent, os.O_RDONLY)
+    try:
+        fcntl.flock(directory_descriptor, fcntl.LOCK_EX)
+
+        with pytest.raises(RestartContextFileError, match="timed out locking"):
+            RestartContextFile(path).write(
+                _context(),
+                deadline=time.monotonic() + 0.03,
+            )
+    finally:
+        fcntl.flock(directory_descriptor, fcntl.LOCK_UN)
+        os.close(directory_descriptor)
+
+    assert not path.exists()
 
 
 @pytest.mark.parametrize("path", [Path("relative.json"), cast(Any, "not-a-path")])
@@ -1081,6 +1338,40 @@ def _seed_assigned_arrival(
     threading.Thread(target=complete_attempt, daemon=True).start()
 
 
+def _stub_replacement_return_evidence(
+    handler: SlotAwareRendezvousHandler,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    slot: int = 0,
+) -> tuple[object, object]:
+    with handler._registration_lock:
+        registration = handler._registration
+    assert registration is not None
+    completion = object()
+    admission = object()
+    consumption = SimpleNamespace(revision=101, transaction_sequence=202)
+    monkeypatch.setattr(
+        handler,
+        "_validate_replacement_admission_entry",
+        lambda *_args, **_kwargs: {
+            str(slot): {
+                "agent_id": registration.record.agent_identity.agent_id,
+                "consumption_revision": consumption.revision,
+                "consumption_transaction_sequence": consumption.transaction_sequence,
+                "node_id": registration.record.agent_identity.node_id,
+                "registration_id": registration.record.registration_id,
+                "registration_revision": registration.fencing_token,
+            }
+        },
+    )
+    monkeypatch.setattr(
+        handler,
+        "_read_arrival_consumption",
+        lambda *_args, **_kwargs: consumption,
+    )
+    return completion, admission
+
+
 def test_slot_aware_handler_refreshes_leader_registration_before_completion(
     tmp_path: Path,
 ):
@@ -1233,7 +1524,7 @@ def test_slot_aware_handler_admits_initial_assignment_with_stable_rank(
         max_nodes=3,
     )
     context_file = RestartContextFile(config.restart_context_path)
-    context_file.write(_context())
+    context_file.write(replace(_context(), run_id="previous-run"))
     handler = _handler(
         config,
         store=store,
@@ -2069,14 +2360,19 @@ def test_slot_aware_handler_does_not_publish_arrival_before_context_cleanup(
         clock=clock,
         agent_id="agent-a",
     )
-    original_clear = RestartContextFile.clear
+    original_clear = RestartContextFile.clear_stale_for_run
 
-    def fail_peer_clear(context_file: RestartContextFile) -> None:
+    def fail_peer_clear(
+        context_file: RestartContextFile,
+        run_id: str,
+        *,
+        deadline: float | None = None,
+    ) -> bool:
         if context_file.path == peer._config.restart_context_path:
             raise RestartContextFileError("injected context cleanup failure")
-        original_clear(context_file)
+        return original_clear(context_file, run_id, deadline=deadline)
 
-    monkeypatch.setattr(RestartContextFile, "clear", fail_peer_clear)
+    monkeypatch.setattr(RestartContextFile, "clear_stale_for_run", fail_peer_clear)
     peer_thread, peer_outcome = _start_rendezvous(peer)
 
     with pytest.raises(RendezvousTimeoutError):
@@ -2093,6 +2389,38 @@ def test_slot_aware_handler_does_not_publish_arrival_before_context_cleanup(
     assert store.get(leader._arrival_key(0, attempt, 1)) is None
     assert leader.shutdown() is True
     assert peer.shutdown() is True
+
+
+def test_slot_aware_handler_refuses_to_clear_current_run_context_for_initial_generation(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    _, _, current = _initialize_generation(store, clock, ("node-a",))
+    config = _handler_config(
+        tmp_path,
+        node_id="node-a",
+        min_nodes=1,
+        max_nodes=2,
+    )
+    context_file = RestartContextFile(config.restart_context_path)
+    context_file.write(_context())
+    handler = _handler(
+        config,
+        store=store,
+        clock=clock,
+        agent_id="agent-a",
+    )
+
+    with pytest.raises(RendezvousStateError, match="stale initial restart context"):
+        handler._prepare_restart_context(
+            current,
+            None,
+            time.monotonic() + 1,
+        )
+
+    assert context_file.read() == _context()
+    assert handler.shutdown() is True
 
 
 def test_slot_aware_handler_reads_registration_histories_linearly(
@@ -2558,7 +2886,12 @@ def test_slot_aware_handler_rejects_job_wide_environment_drift(tmp_path: Path):
     first._ensure_registered(time.monotonic() + 1)
     current = first._read_generation()
     assert current is not None
-    assert first._initial_slot(current) == 0
+    slot, recovery_state, _ = first._generation_admission(
+        current,
+        time.monotonic() + 1,
+    )
+    assert slot == 0
+    assert recovery_state is None
     with pytest.raises(RendezvousStateError, match="committed workload environment"):
         second.next_rendezvous()
 
@@ -2784,7 +3117,7 @@ def test_slot_aware_handler_cleans_up_registration_on_cancellation(
     assert handler.shutdown() is True
 
 
-def test_slot_aware_handler_rejects_generation_after_initial_assignment(
+def test_slot_aware_handler_rejects_successor_without_restart_plan_publication(
     tmp_path: Path,
 ):
     clock = ManualClock()
@@ -2809,8 +3142,1376 @@ def test_slot_aware_handler_rejects_generation_after_initial_assignment(
         agent_id="agent-b",
     )
 
-    with pytest.raises(RendezvousStateError, match="replacement generations"):
+    with pytest.raises(RendezvousStateError, match="restart-plan publication"):
         handler.next_rendezvous()
+
+    assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_admits_replacement_and_writes_restart_context(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    manager, lease, current = _initialize_generation(store, clock, ("node-a",))
+    plan = _replacement_plan()
+    successor = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    manager.commit_successor(lease, current, successor)
+    config = _handler_config(
+        tmp_path,
+        node_id="node-b",
+        min_nodes=1,
+        max_nodes=2,
+    )
+    handler = _handler(
+        config,
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+    )
+    state = _static_recovery_state(plan)
+    handler._publication_reader = cast(Any, StaticRecoveryStateReader(state))
+
+    rendezvous = handler.next_rendezvous()
+
+    assert rendezvous.rank == 0
+    assert rendezvous.world_size == 1
+    assert RestartContextFile(config.restart_context_path).read() == RestartContext.from_plan(
+        plan,
+        "node-b",
+    )
+    admission = store.get(handler._arrival_admission_key(1, 1))
+    assert admission is not None
+    assert handler.num_nodes_waiting() == 0
+    assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_waits_for_return_ack_before_advancing_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    manager, lease, current = _initialize_generation(store, clock, ("node-a",))
+    plan = _replacement_plan()
+    successor = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    manager.commit_successor(lease, current, successor)
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+    )
+    handler._publication_reader = cast(
+        Any,
+        StaticRecoveryStateReader(_static_recovery_state(plan)),
+    )
+    reached_return_ack = threading.Event()
+    release_return_ack = threading.Event()
+    original_publish = handler._publish_replacement_return_acknowledgement
+
+    def delay_return_ack(*args: Any, **kwargs: Any) -> Any:
+        reached_return_ack.set()
+        assert release_return_ack.wait(timeout=2)
+        return original_publish(*args, **kwargs)
+
+    monkeypatch.setattr(
+        handler,
+        "_publish_replacement_return_acknowledgement",
+        delay_return_ack,
+    )
+    first = handler.next_rendezvous()
+    assert first.rank == 0
+    assert store.get(handler._arrival_return_key(1, 1, 0)) is None
+    current_generation = handler._read_generation()
+    assert current_generation is not None
+    attempt_entry = store.get(handler._arrival_attempt_key(1))
+    completion = store.get(handler._arrival_completion_key(1, 1))
+    assert attempt_entry is not None
+    assert completion is not None
+    with handler._registration_lock:
+        registration = handler._registration
+    assert registration is not None
+    assert (
+        handler._advance_arrival_attempt(
+            successor,
+            attempt_entry,
+            1,
+            2,
+            handler._arrival_attempt_value(
+                generation=1,
+                attempt=2,
+                registration=registration,
+            ),
+            registration,
+            completion,
+        )
+        is None
+    )
+
+    thread, outcome = _start_rendezvous(handler)
+    assert reached_return_ack.wait(timeout=2)
+
+    assert (
+        handler._advance_arrival_attempt(
+            successor,
+            attempt_entry,
+            1,
+            2,
+            handler._arrival_attempt_value(
+                generation=1,
+                attempt=2,
+                registration=registration,
+            ),
+            registration,
+            completion,
+        )
+        is None
+    )
+    release_return_ack.set()
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert isinstance(outcome.get_nowait(), RendezvousInfo)
+    advanced = store.get(handler._arrival_attempt_key(1))
+    assert advanced is not None
+    attempt, _, _ = handler._validate_arrival_attempt_entry(
+        advanced,
+        generation=1,
+        expected_attempt=2,
+        leader_node_id="node-b",
+    )
+    assert attempt == 2
+    assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_retries_return_ack_after_heartbeat_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    manager, lease, current = _initialize_generation(store, clock, ("node-a",))
+    plan = _replacement_plan()
+    successor = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    manager.commit_successor(lease, current, successor)
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+    )
+    handler._publication_reader = cast(
+        Any,
+        StaticRecoveryStateReader(_static_recovery_state(plan)),
+    )
+    assert handler.next_rendezvous().rank == 0
+    original_compare = store.compare_set_many_guarded
+    refreshed = False
+    renewed_registration = None
+
+    def refresh_before_return_ack(*args: Any, **kwargs: Any) -> Any:
+        nonlocal refreshed, renewed_registration
+        writes = args[0]
+        if not refreshed and any("/returned/" in key for key in writes):
+            refreshed = True
+            with handler._registration_lock:
+                registration = handler._registration
+            assert registration is not None
+            renewed_registration = handler._registration_manager.renew(registration)
+            with handler._registration_lock:
+                handler._registration = renewed_registration
+        return original_compare(*args, **kwargs)
+
+    monkeypatch.setattr(
+        store,
+        "compare_set_many_guarded",
+        refresh_before_return_ack,
+    )
+
+    assert handler.next_rendezvous().rank == 0
+
+    assert refreshed
+    assert renewed_registration is not None
+    acknowledgement = store.get(handler._arrival_return_key(1, 1, 0))
+    assert acknowledgement is not None
+    assert acknowledgement.guard_revision == renewed_registration.fencing_token
+    assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_replacement_incarnation_starts_fresh_attempt(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    manager, lease, current = _initialize_generation(store, clock, ("node-a",))
+    plan = _replacement_plan()
+    successor = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    manager.commit_successor(lease, current, successor)
+    config = _handler_config(
+        tmp_path,
+        node_id="node-b",
+        min_nodes=1,
+        max_nodes=2,
+    )
+    recovery_state = _static_recovery_state(plan)
+    original = _handler(
+        config,
+        store=store,
+        clock=clock,
+        agent_id="agent-b-original",
+    )
+    original._publication_reader = cast(
+        Any,
+        StaticRecoveryStateReader(recovery_state),
+    )
+    assert original.next_rendezvous().rank == 0
+    assert original.shutdown() is True
+
+    replacement = _handler(
+        config,
+        store=store,
+        clock=clock,
+        agent_id="agent-b-replacement",
+    )
+    replacement._publication_reader = cast(
+        Any,
+        StaticRecoveryStateReader(recovery_state),
+    )
+
+    assert replacement.next_rendezvous().rank == 0
+
+    attempt_entry = store.get(replacement._arrival_attempt_key(1))
+    acknowledgement = store.get(replacement._arrival_return_key(1, 1, 0))
+    assert attempt_entry is not None
+    assert acknowledgement is not None
+    attempt, _, _ = replacement._validate_arrival_attempt_entry(
+        attempt_entry,
+        generation=1,
+        expected_attempt=2,
+        leader_node_id="node-b",
+    )
+    payload = json.loads(acknowledgement.value)
+    assert attempt == 2
+    assert payload["agent_id"] == "agent-b-replacement"
+    assert replacement.shutdown() is True
+
+
+def test_slot_aware_handler_never_partially_admits_replacement_after_deadline(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    manager, lease, current = _initialize_generation(
+        store,
+        clock,
+        ("node-a", "node-d"),
+    )
+    plan = replace(
+        _replacement_plan(restart_deadline_unix_ms=clock() + 50),
+        slot_assignments=(
+            SlotAssignment(0, "node-b", 0, 2),
+            SlotAssignment(1, "node-c", 2, 2),
+        ),
+        expected_world_size=4,
+    )
+    successor = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    manager.commit_successor(lease, current, successor)
+    handlers = tuple(
+        _handler(
+            _handler_config(
+                tmp_path,
+                node_id=node_id,
+                min_nodes=2,
+                max_nodes=4,
+            ),
+            store=store,
+            clock=clock,
+            agent_id=f"agent-{node_id}",
+        )
+        for node_id in ("node-b", "node-c")
+    )
+    recovery_state = cast(
+        Any,
+        _static_recovery_state(plan),
+    )
+    deadline = time.monotonic() + 1
+    for handler in handlers:
+        handler._publication_reader = cast(
+            Any,
+            StaticRecoveryStateReader(recovery_state),
+        )
+        handler._ensure_registered(deadline)
+        handler._prepare_restart_context(
+            cast(Any, handler._read_generation()),
+            recovery_state,
+            deadline,
+        )
+    generation = handlers[0]._read_generation()
+    assert generation is not None
+    with handlers[0]._registration_lock:
+        leader_registration = handlers[0]._registration
+    assert leader_registration is not None
+    attempt = handlers[0]._claim_shared_arrival_attempt(
+        assignment=successor,
+        slot=0,
+        registration=leader_registration,
+        deadline=deadline,
+    )
+    for slot, handler in enumerate(handlers):
+        with handler._registration_lock:
+            registration = handler._registration
+        assert registration is not None
+        store.compare_set(
+            handler._arrival_key(1, attempt, slot),
+            expected_revision=None,
+            value=handler._arrival_value(
+                generation=1,
+                attempt=attempt,
+                slot=slot,
+                registration=registration,
+            ),
+        )
+    handlers[0]._try_complete_arrival_attempt(
+        successor,
+        attempt,
+        leader_registration,
+    )
+    completion = store.get(handlers[0]._arrival_completion_key(1, attempt))
+    assert completion is not None
+    context_tokens = []
+    for handler in handlers:
+        context_tokens.append(handler._restart_context.read_with_token()[0])
+    for handler, context_token in zip(handlers, context_tokens, strict=True):
+        handler._validate_final_admission_state(
+            generation,
+            recovery_state,
+            deadline,
+            expected_context_token=context_token,
+        )
+    handlers[0]._publish_arrival_consumption(
+        generation,
+        successor,
+        attempt,
+        0,
+        completion,
+        deadline,
+        recovery_state,
+    )
+
+    clock.advance(50)
+    with pytest.raises(RendezvousTimeoutError):
+        handlers[1]._publish_arrival_consumption(
+            generation,
+            successor,
+            attempt,
+            1,
+            completion,
+            deadline,
+            recovery_state,
+        )
+    handlers[0]._try_commit_replacement_admission(
+        generation,
+        successor,
+        attempt,
+        completion,
+        recovery_state,
+        deadline,
+    )
+
+    assert store.get(handlers[0]._arrival_admission_key(1, attempt)) is None
+    for handler in handlers:
+        assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_gives_selected_standby_a_fresh_formation_deadline(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    monotonic_clock = ManualMonotonicClock()
+    store = InMemoryControlStore(clock=clock)
+    manager, lease, current = _initialize_generation(store, clock, ("node-a",))
+    plan = _replacement_plan()
+    config = _handler_config(
+        tmp_path,
+        node_id="node-b",
+        min_nodes=1,
+        max_nodes=2,
+        join_timeout_ms=50,
+    )
+    handler = _handler(
+        config,
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+        monotonic_clock=monotonic_clock,
+    )
+    handler._publication_reader = cast(
+        Any,
+        StaticRecoveryStateReader(_static_recovery_state(plan)),
+    )
+    thread, outcome = _start_rendezvous(handler)
+    _wait_until(
+        lambda: (
+            AgentRegistrationReader(
+                store,
+                run_id=RUN_ID,
+                clock=clock,
+            ).get("node-b")
+            is not None
+        )
+    )
+    monotonic_clock.advance(0.08)
+    successor = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    manager.commit_successor(lease, current, successor)
+
+    result = outcome.get(timeout=2)
+    thread.join(timeout=2)
+
+    assert isinstance(result, RendezvousInfo)
+    assert result.rank == 0
+    assert RestartContextFile(config.restart_context_path).read() == RestartContext.from_plan(
+        plan,
+        "node-b",
+    )
+    assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_keeps_unselected_standby_outside_plan_deadline(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    manager, lease, current = _initialize_generation(store, clock, ("node-a",))
+    plan = _replacement_plan(restart_deadline_unix_ms=clock())
+    successor = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    manager.commit_successor(lease, current, successor)
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-c",
+            min_nodes=1,
+            max_nodes=3,
+            join_timeout_ms=50,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-c",
+    )
+    recovery_reader = StaticRecoveryStateReader(_static_recovery_state(plan))
+    handler._publication_reader = cast(Any, recovery_reader)
+
+    thread, outcome = _start_rendezvous(handler)
+    _wait_until(
+        lambda: (
+            AgentRegistrationReader(
+                store,
+                run_id=RUN_ID,
+                clock=clock,
+            ).get("node-c")
+            is not None
+        )
+    )
+    time.sleep(0.08)
+
+    assert thread.is_alive()
+    assert recovery_reader.calls == 0
+    assert handler.shutdown() is True
+    thread.join(timeout=2)
+    assert isinstance(outcome.get_nowait(), RendezvousClosedError)
+
+
+def test_slot_aware_handler_rejects_expired_replacement_without_leaving_context(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    manager, lease, current = _initialize_generation(store, clock, ("node-a",))
+    plan = _replacement_plan(restart_deadline_unix_ms=clock())
+    successor = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    manager.commit_successor(lease, current, successor)
+    config = _handler_config(
+        tmp_path,
+        node_id="node-b",
+        min_nodes=1,
+        max_nodes=2,
+    )
+    handler = _handler(
+        config,
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+    )
+    handler._publication_reader = cast(
+        Any,
+        StaticRecoveryStateReader(_static_recovery_state(plan)),
+    )
+
+    with pytest.raises(RendezvousTimeoutError):
+        handler.next_rendezvous()
+
+    assert not config.restart_context_path.exists()
+    assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_clears_context_when_publication_fails_after_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    manager, lease, current = _initialize_generation(store, clock, ("node-a",))
+    plan = _replacement_plan()
+    successor = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    manager.commit_successor(lease, current, successor)
+    config = _handler_config(
+        tmp_path,
+        node_id="node-b",
+        min_nodes=1,
+        max_nodes=2,
+    )
+    handler = _handler(
+        config,
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+    )
+    handler._publication_reader = cast(
+        Any,
+        StaticRecoveryStateReader(_static_recovery_state(plan)),
+    )
+    original_write = RestartContextFile.write
+
+    def publish_then_fail(
+        context_file: RestartContextFile,
+        context: RestartContext,
+        *,
+        deadline: float | None = None,
+        ownership: _RestartContextOwnership | None = None,
+    ) -> None:
+        token = original_write(
+            context_file,
+            context,
+            deadline=deadline,
+            ownership=ownership,
+        )
+        raise RestartContextFileError(
+            "injected post-publication failure",
+            published_token=token,
+        )
+
+    monkeypatch.setattr(RestartContextFile, "write", publish_then_fail)
+
+    with pytest.raises(RendezvousStateError, match="publish the replacement restart context"):
+        handler.next_rendezvous()
+
+    assert not config.restart_context_path.exists()
+    assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_clears_replacement_context_after_admission_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    manager, lease, current = _initialize_generation(store, clock, ("node-a",))
+    plan = _replacement_plan()
+    successor = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    manager.commit_successor(lease, current, successor)
+    config = _handler_config(
+        tmp_path,
+        node_id="node-b",
+        min_nodes=1,
+        max_nodes=2,
+    )
+    handler = _handler(
+        config,
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+    )
+    handler._publication_reader = cast(
+        Any,
+        StaticRecoveryStateReader(_static_recovery_state(plan)),
+    )
+
+    def fail_after_context(*_args: object) -> object:
+        assert RestartContextFile(config.restart_context_path).read() == RestartContext.from_plan(
+            plan,
+            "node-b",
+        )
+        raise RendezvousConnectionError("injected arrival failure")
+
+    monkeypatch.setattr(handler, "_wait_for_assigned_arrivals", fail_after_context)
+
+    with pytest.raises(RendezvousConnectionError, match="injected arrival failure"):
+        handler.next_rendezvous()
+
+    assert not config.restart_context_path.exists()
+    assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_always_cleans_registration_when_context_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=InMemoryControlStore(clock=clock),
+        clock=clock,
+        agent_id="agent-b",
+    )
+    cleanup_token = "a" * 64
+    cleaned = False
+    current = SimpleNamespace()
+    monkeypatch.setattr(handler, "_is_closed_bounded", lambda _deadline: False)
+    monkeypatch.setattr(handler, "_ensure_registered", lambda _deadline: None)
+    monkeypatch.setattr(handler, "_read_generation", lambda: current)
+    monkeypatch.setattr(
+        handler,
+        "_generation_admission",
+        lambda *_args: (0, object(), time.monotonic() + 1),
+    )
+    monkeypatch.setattr(
+        handler,
+        "_prepare_restart_context",
+        lambda *_args: cleanup_token,
+    )
+    monkeypatch.setattr(
+        handler,
+        "_acknowledge_prior_replacement_return",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        handler,
+        "_wait_for_assigned_arrivals",
+        lambda *_args: (_ for _ in ()).throw(
+            RendezvousConnectionError("original admission failure")
+        ),
+    )
+    monkeypatch.setattr(
+        handler,
+        "_invalidate_and_clear_restart_context",
+        lambda _token: (_ for _ in ()).throw(RendezvousStateError("context cleanup failure")),
+    )
+
+    def cleanup() -> bool:
+        nonlocal cleaned
+        cleaned = True
+        return True
+
+    monkeypatch.setattr(handler, "_cleanup_local_resources", cleanup)
+
+    with pytest.raises(RendezvousConnectionError, match="original admission failure"):
+        handler.next_rendezvous()
+
+    assert cleaned is True
+
+
+def test_slot_aware_handler_invalidates_context_when_cleanup_cannot_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    manager, lease, current = _initialize_generation(store, clock, ("node-a",))
+    plan = _replacement_plan()
+    successor = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    manager.commit_successor(lease, current, successor)
+    config = _handler_config(
+        tmp_path,
+        node_id="node-b",
+        min_nodes=1,
+        max_nodes=2,
+    )
+    handler = _handler(
+        config,
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+    )
+    handler._publication_reader = cast(
+        Any,
+        StaticRecoveryStateReader(_static_recovery_state(plan)),
+    )
+
+    def fail_after_context(*_args: object) -> object:
+        assert RestartContextFile(config.restart_context_path).read() == RestartContext.from_plan(
+            plan,
+            "node-b",
+        )
+        raise RendezvousConnectionError("injected arrival failure")
+
+    def fail_cleanup(
+        _context_file: RestartContextFile,
+        _cleanup_token: str,
+        *,
+        deadline: float | None = None,
+    ) -> bool:
+        del deadline
+        raise RestartContextFileError("injected cleanup lock timeout")
+
+    monkeypatch.setattr(handler, "_wait_for_assigned_arrivals", fail_after_context)
+    monkeypatch.setattr(RestartContextFile, "clear_if_token", fail_cleanup)
+
+    with pytest.raises(RendezvousConnectionError, match="injected arrival failure"):
+        handler.next_rendezvous()
+
+    assert config.restart_context_path.exists()
+    with pytest.raises(RestartContextFileError, match="invalidated"):
+        RestartContextFile(config.restart_context_path).read()
+    handler.shutdown()
+
+
+def test_slot_aware_handler_rejects_replacement_clock_behind_publication(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=InMemoryControlStore(clock=clock),
+        clock=clock,
+        agent_id="agent-b",
+    )
+    recovery_state = _static_recovery_state(
+        _replacement_plan(),
+        committed_at_unix_ms=clock() + 1,
+    )
+
+    with pytest.raises(RendezvousConnectionError, match="clock regressed"):
+        handler._replacement_deadline(cast(Any, recovery_state), None)
+
+
+def test_slot_aware_handler_uses_authoritative_store_time_for_replacement_deadline(
+    tmp_path: Path,
+):
+    client_clock = ManualClock(1_000)
+    store_clock = ManualClock(1_100)
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=InMemoryControlStore(clock=store_clock),
+        clock=client_clock,
+        agent_id="agent-b",
+    )
+    recovery_state = _static_recovery_state(
+        _replacement_plan(restart_deadline_unix_ms=1_050),
+        committed_at_unix_ms=1_000,
+    )
+
+    with pytest.raises(RendezvousTimeoutError):
+        handler._replacement_deadline(cast(Any, recovery_state), None)
+
+
+def test_slot_aware_handler_rejects_clock_regression_and_retains_first_deadline(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    monotonic_clock = ManualMonotonicClock()
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=InMemoryControlStore(clock=clock),
+        clock=clock,
+        agent_id="agent-b",
+        monotonic_clock=monotonic_clock,
+    )
+    recovery_state = _static_recovery_state(_replacement_plan())
+    deadline = handler._replacement_deadline(cast(Any, recovery_state), None)
+
+    clock.set(clock() - 1)
+    with pytest.raises(
+        RendezvousConnectionError,
+        match="authoritative replacement rendezvous time",
+    ):
+        handler._validate_replacement_deadline(cast(Any, recovery_state), deadline)
+
+    clock.set(1_000)
+    monotonic_clock.advance(deadline)
+    with pytest.raises(RendezvousTimeoutError):
+        handler._validate_replacement_deadline(cast(Any, recovery_state), deadline)
+
+
+def test_slot_aware_handler_rechecks_deadline_before_returning_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    monotonic_clock = ManualMonotonicClock()
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+        monotonic_clock=monotonic_clock,
+    )
+    plan = _replacement_plan(restart_deadline_unix_ms=clock() + 50)
+    recovery_state = _static_recovery_state(plan)
+    assignment = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    deadline = monotonic_clock() + 0.05
+    handler._ensure_registered(time.monotonic() + 1)
+
+    def validate_after_blocking_work(*_args: object, **_kwargs: object) -> None:
+        clock.advance(50)
+        monotonic_clock.advance(0.05)
+
+    monkeypatch.setattr(
+        handler,
+        "_validate_final_admission_state",
+        validate_after_blocking_work,
+    )
+    monkeypatch.setattr(handler, "_validate_current_arrival_attempt", lambda *_args: None)
+    completion, admission = _stub_replacement_return_evidence(
+        handler,
+        monkeypatch,
+    )
+
+    with pytest.raises(RendezvousTimeoutError):
+        handler._validate_replacement_return(
+            cast(Any, object()),
+            assignment,
+            1,
+            0,
+            cast(Any, completion),
+            cast(Any, admission),
+            cast(Any, recovery_state),
+            deadline,
+            "a" * 64,
+        )
+    assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_binds_admission_to_returning_registration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=InMemoryControlStore(clock=clock),
+        clock=clock,
+        agent_id="agent-b",
+    )
+    handler._ensure_registered(time.monotonic() + 1)
+    with handler._registration_lock:
+        registration = handler._registration
+    assert registration is not None
+    plan = _replacement_plan()
+    assignment = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    monkeypatch.setattr(handler, "_validate_final_admission_state", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        handler,
+        "_validate_replacement_admission_entry",
+        lambda *_a, **_k: {
+            "0": {
+                "agent_id": "old-agent-b",
+                "consumption_revision": 10,
+                "consumption_transaction_sequence": 11,
+                "node_id": "node-b",
+                "registration_id": "old-registration",
+                "registration_revision": registration.fencing_token,
+            }
+        },
+    )
+
+    with pytest.raises(
+        RendezvousConnectionError,
+        match="does not include this agent registration",
+    ):
+        handler._validate_replacement_return(
+            cast(Any, object()),
+            assignment,
+            1,
+            0,
+            cast(Any, object()),
+            cast(Any, object()),
+            cast(Any, _static_recovery_state(plan)),
+            time.monotonic() + 1,
+            "a" * 64,
+        )
+
+    assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_accepts_heartbeat_renewal_before_return(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=InMemoryControlStore(clock=clock),
+        clock=clock,
+        agent_id="agent-b",
+    )
+    handler._ensure_registered(time.monotonic() + 1)
+    with handler._registration_lock:
+        original = handler._registration
+    assert original is not None
+    completion, admission = _stub_replacement_return_evidence(
+        handler,
+        monkeypatch,
+    )
+    renewed = handler._registration_manager.renew(original)
+    with handler._registration_lock:
+        handler._registration = renewed
+    plan = _replacement_plan()
+    assignment = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    monkeypatch.setattr(
+        handler,
+        "_validate_final_admission_state",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(handler, "_validate_current_arrival_attempt", lambda *_args: None)
+    monkeypatch.setattr(
+        handler,
+        "_publish_replacement_return_acknowledgement",
+        lambda *_args, **_kwargs: None,
+    )
+
+    handler._validate_replacement_return(
+        cast(Any, object()),
+        assignment,
+        1,
+        0,
+        cast(Any, completion),
+        cast(Any, admission),
+        cast(Any, _static_recovery_state(plan)),
+        time.monotonic() + 1,
+        "a" * 64,
+    )
+
+    assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_rejects_replaced_restart_context_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=InMemoryControlStore(clock=clock),
+        clock=clock,
+        agent_id="agent-b",
+    )
+    plan = _replacement_plan()
+    recovery_state = _static_recovery_state(plan)
+    current = object()
+    expected_context = handler._restart_context_for_plan(plan)
+    original_token = handler._restart_context.write(expected_context)
+    replacement_token = handler._restart_context.write(expected_context)
+    assert replacement_token != original_token
+    monkeypatch.setattr(handler, "_read_generation", lambda: current)
+    monkeypatch.setattr(handler, "_read_recovery_state", lambda: recovery_state)
+
+    with pytest.raises(RendezvousStateError, match="context changed"):
+        handler._validate_final_admission_state(
+            cast(Any, current),
+            cast(Any, recovery_state),
+            time.monotonic() + 1,
+            validate_deadline=False,
+            expected_context_token=original_token,
+        )
+
+    handler._restart_context.clear()
+
+
+def test_slot_aware_handler_treats_missing_peer_registration_as_not_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-a",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=InMemoryControlStore(clock=clock),
+        clock=clock,
+        agent_id="agent-a",
+    )
+    assignment = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=(SlotAssignment(0, "node-b", 0, 2),),
+        topology_digest="topology-v1",
+    )
+    monkeypatch.setattr(
+        handler,
+        "_try_current_assigned_registration",
+        lambda _node_id: None,
+    )
+
+    assert (
+        handler._arrival_consumption_state(
+            assignment,
+            1,
+            cast(Any, object()),
+        )
+        is None
+    )
+
+
+def test_slot_aware_handler_requires_live_registration_before_returning_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+    )
+    deadline = time.monotonic() + 1
+    handler._ensure_registered(deadline)
+    with handler._registration_lock:
+        registration = handler._registration
+    assert registration is not None
+    assert handler._stop_heartbeat() is True
+    handler._registration_manager.release(registration)
+    replacement_manager = AgentRegistrationManager(
+        store,
+        agent_identity=replace(
+            handler.agent_identity,
+            agent_id="replacement-agent-b",
+        ),
+        lease_duration_ms=handler._config.policy.registration_lease_duration_ms,
+        clock=clock,
+    )
+    replacement_manager.register()
+    monkeypatch.setattr(
+        handler,
+        "_validate_final_admission_state",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(handler, "_validate_current_arrival_attempt", lambda *_args: None)
+    plan = _replacement_plan()
+    assignment = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    completion, admission = _stub_replacement_return_evidence(
+        handler,
+        monkeypatch,
+    )
+
+    with pytest.raises(
+        RendezvousConnectionError,
+        match="registration changed before admission",
+    ):
+        handler._validate_replacement_return(
+            cast(Any, object()),
+            assignment,
+            1,
+            0,
+            cast(Any, completion),
+            cast(Any, admission),
+            cast(Any, _static_recovery_state(plan)),
+            deadline,
+            "a" * 64,
+        )
+
+
+def test_slot_aware_handler_cannot_borrow_replacement_registration_ownership(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    config = _handler_config(
+        tmp_path,
+        node_id="node-b",
+        min_nodes=1,
+        max_nodes=2,
+    )
+    stale_handler = _handler(
+        config,
+        store=store,
+        clock=clock,
+        agent_id="agent-b-stale",
+    )
+    deadline = time.monotonic() + 1
+    stale_handler._ensure_registered(deadline)
+    stale_ownership = stale_handler._current_restart_context_ownership()
+    with stale_handler._registration_lock:
+        stale_registration = stale_handler._registration
+    assert stale_registration is not None
+    assert stale_handler._stop_heartbeat() is True
+    stale_handler._registration_manager.release(stale_registration)
+
+    replacement_handler = _handler(
+        config,
+        store=store,
+        clock=clock,
+        agent_id="agent-b-replacement",
+    )
+    replacement_handler._ensure_registered(deadline)
+    replacement_ownership = replacement_handler._current_restart_context_ownership()
+    context_file = RestartContextFile(config.restart_context_path)
+    replacement_token = context_file.write(
+        _context(plan_id="replacement-plan"),
+        ownership=replacement_ownership,
+    )
+
+    with pytest.raises(
+        RendezvousConnectionError,
+        match="registration no longer belongs",
+    ):
+        stale_handler._current_restart_context_ownership()
+    with pytest.raises(RestartContextFileError, match="stale registration"):
+        context_file.write(
+            _context(plan_id="stale-plan"),
+            ownership=stale_ownership,
+        )
+    assert context_file.read_with_token() == (
+        replacement_token,
+        _context(plan_id="replacement-plan"),
+    )
+    assert replacement_handler.shutdown() is True
+
+
+def test_slot_aware_handler_uses_authoritative_time_for_final_registration_expiry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client_clock = ManualClock()
+    store_clock = ManualClock()
+    store = InMemoryControlStore(clock=store_clock)
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=store,
+        clock=client_clock,
+        agent_id="agent-b",
+    )
+    handler._ensure_registered(time.monotonic() + 1)
+    assert handler._stop_heartbeat() is True
+    plan = _replacement_plan(restart_deadline_unix_ms=100_000)
+    assignment = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    monkeypatch.setattr(handler, "_validate_final_admission_state", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(handler, "_validate_current_arrival_attempt", lambda *_args: None)
+    completion, admission = _stub_replacement_return_evidence(
+        handler,
+        monkeypatch,
+    )
+    store_clock.advance(handler._config.policy.registration_lease_duration_ms)
+
+    with pytest.raises(
+        RendezvousConnectionError,
+        match="registration has expired",
+    ):
+        handler._validate_replacement_return(
+            cast(Any, object()),
+            assignment,
+            1,
+            0,
+            cast(Any, completion),
+            cast(Any, admission),
+            cast(Any, _static_recovery_state(plan)),
+            time.monotonic() + 1,
+            "a" * 64,
+        )
+    handler.shutdown()
+
+
+def test_slot_aware_handler_rejects_advanced_attempt_before_returning_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+    )
+    handler._ensure_registered(time.monotonic() + 1)
+    with handler._registration_lock:
+        registration = handler._registration
+    assert registration is not None
+    plan = _replacement_plan()
+    assignment = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    store.compare_set(
+        handler._arrival_attempt_key(assignment.generation),
+        expected_revision=None,
+        value=handler._arrival_attempt_value(
+            generation=assignment.generation,
+            attempt=2,
+            registration=registration,
+        ),
+    )
+    monkeypatch.setattr(handler, "_validate_final_admission_state", lambda *_args, **_kwargs: None)
+    completion, admission = _stub_replacement_return_evidence(
+        handler,
+        monkeypatch,
+    )
+
+    with pytest.raises(
+        RendezvousStateError,
+        match="does not match its generation",
+    ):
+        handler._validate_replacement_return(
+            cast(Any, object()),
+            assignment,
+            1,
+            0,
+            cast(Any, completion),
+            cast(Any, admission),
+            cast(Any, _static_recovery_state(plan)),
+            time.monotonic() + 1,
+            "a" * 64,
+        )
 
     assert handler.shutdown() is True
 
