@@ -837,6 +837,13 @@ records. Its observation must follow the candidate's generation,
 manifest-source, placement, and lease inputs, and its exclusive deadline is
 additionally capped by coordinator-lease expiry. This pure value performs no
 store access and does not prove that the supplied authority is still live.
+`RestartPlanPublicationAuthorityPreparer` reads a stable durable coordinator
+lease history around one monotonic clock sample, requires the live history tail
+to match the plan's exact coordinator identity and fencing token, and returns
+that pure authority value without mutating the store. Repeated lease changes
+remain retryable conflicts; missing, stale, expired, or contradictory authority
+fails closed. Lifecycle fencing, quarantine-resource authorization, execution,
+and committed-result verification remain separate publication layers.
 
 Before commit, the coordinator validates:
 
