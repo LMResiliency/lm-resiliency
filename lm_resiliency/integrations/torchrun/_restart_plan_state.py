@@ -634,6 +634,42 @@ class RestartPlanCopyEligibilityState:
         return self.inventory_state.manifest
 
 
+@dataclass(frozen=True, slots=True)
+class RestartPlanRecoveryEvidenceState:
+    """One copy-eligible plan authorized by one exact recovery trust path."""
+
+    copy_state: RestartPlanCopyEligibilityState
+    trust_state: RestartPlanLatestEvidenceState | RestartPlanCertificationState
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.copy_state, RestartPlanCopyEligibilityState):
+            raise TypeError(
+                "RestartPlanRecoveryEvidenceState.copy_state "
+                "must be RestartPlanCopyEligibilityState"
+            )
+        if not isinstance(
+            self.trust_state,
+            (RestartPlanLatestEvidenceState, RestartPlanCertificationState),
+        ):
+            raise TypeError(
+                "RestartPlanRecoveryEvidenceState.trust_state must be "
+                "RestartPlanLatestEvidenceState or RestartPlanCertificationState"
+            )
+        if self.copy_state.inventory_state != self.trust_state.inventory_state:
+            raise ValueError(
+                "RestartPlanRecoveryEvidenceState copy and trust evidence "
+                "do not describe the same inventory state"
+            )
+
+    @property
+    def plan(self) -> RestartPlan:
+        return self.copy_state.plan
+
+    @property
+    def manifest(self) -> RecoveryManifest:
+        return self.copy_state.manifest
+
+
 __all__ = [
     "ResolvedRecoveryManifest",
     "RestartPlanCertificationState",
@@ -643,4 +679,5 @@ __all__ = [
     "RestartPlanLatestEvidenceState",
     "RestartPlanManifestState",
     "RestartPlanQuarantineState",
+    "RestartPlanRecoveryEvidenceState",
 ]

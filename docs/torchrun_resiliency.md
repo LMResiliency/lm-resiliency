@@ -801,6 +801,11 @@ and rejects every incomplete, wrong-source, wrong-role, process-memory, or
 unavailable node-local copy advertised by the immutable manifest. Shared and
 remote copies remain independent of holder-node admission. This value does not
 establish latest acknowledgement or recovery-verified certification evidence.
+`RestartPlanRecoveryEvidenceState` composes that copy eligibility with exactly
+one matching trust path: latest restart-acknowledgement evidence or
+recovery-verified checkpoint certification. Both values must describe the same
+immutable inventory state. Placement, quarantine admission, and atomic
+publication remain separate checks.
 
 Before commit, the coordinator validates:
 
