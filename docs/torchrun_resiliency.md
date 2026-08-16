@@ -1022,6 +1022,14 @@ receipt-or-absence snapshot without requiring a store-wide read transaction.
 Repeated changes are retryable conflicts; contradictory per-node state fails
 closed as corruption. The collector still makes no quorum or restart decision.
 
+A pure evidence value authorizes a `latest` checkpoint inventory event only
+when its reporter is valid for the committed rank assignment and the reporter's
+persisted acknowledgement succeeded for the same agent incarnation and flushed
+step while naming the event's exact canonical digest. Missing or failed
+acknowledgements, foreign topology or rank identity, candidate/verified events,
+and reused event IDs with different bytes are not latest-preparation evidence.
+This value does not select a manifest or recovery fallback.
+
 For a crashed or unreachable node, no preparation is assumed.
 
 ## API: lm-resiliency to the Framework
