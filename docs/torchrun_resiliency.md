@@ -1804,15 +1804,22 @@ Because PyTorch does not include `nproc_per_node` in
 `RendezvousParameters`, the agent also requires `local_world_size` and the
 deployment-generated workload `environment_digest` through `--rdzv-conf` or
 `LM_RESILIENCY_LOCAL_WORLD_SIZE` and
-`LM_RESILIENCY_ENVIRONMENT_DIGEST`. The registered runtime digest includes the
-local worker count. The immutable agent environment digest combines that
-runtime digest with the deployment workload digest, so either runtime or
-software/capability drift produces a different agent identity.
+`LM_RESILIENCY_ENVIRONMENT_DIGEST`. The scheduler or deployment integration
+must also provide the node's trusted GPU, NIC, HCA, and link identifiers as a
+semicolon-delimited `resource_ids` value or `LM_RESILIENCY_RESOURCE_IDS`; use
+`[]` for an explicitly empty inventory. These per-node IDs are stored in the
+immutable `AgentIdentity` used to authenticate SCOUT hardware reports, but are
+excluded from the shared compatibility digest because each node owns different
+resources. The registered runtime digest includes the local worker count. The
+immutable agent environment digest combines that runtime digest with the
+deployment workload digest, so either runtime or software/capability drift
+produces a different agent identity.
 
 ```bash
 export LM_RESILIENCY_NODE_ID="${SCHEDULER_NODE_ID}"
 export LM_RESILIENCY_LOCAL_WORLD_SIZE=8
 export LM_RESILIENCY_ENVIRONMENT_DIGEST="${WORKLOAD_ENVIRONMENT_DIGEST}"
+export LM_RESILIENCY_RESOURCE_IDS="${GPU_UUIDS_SEMICOLON_DELIMITED}"
 export LM_RESILIENCY_RESTART_CONTEXT="/run/lm-resiliency/${JOB_ID}/restart-context.json"
 
 torchrun \

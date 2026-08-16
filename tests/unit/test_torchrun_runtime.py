@@ -11,7 +11,14 @@ from typing import Any, cast
 import pytest
 from torch.distributed.elastic.rendezvous import RendezvousParameters
 
-from lm_resiliency.integrations.torchrun._protocol import RestartContext
+from lm_resiliency.integrations.torchrun._protocol import (
+    FaultEvent,
+    HardwareFaultReport,
+    RankAssignment,
+    RestartContext,
+    WorkerIdentity,
+    validate_event_reporter,
+)
 from lm_resiliency.integrations.torchrun._runtime import (
     RestartContextFile,
     RestartContextFileError,
@@ -47,6 +54,7 @@ def _parameters(
     runtime_config = {
         "local_world_size": "2",
         "environment_digest": "environment-v1",
+        "resource_ids": "gpu-node-a-0;gpu-node-a-1",
         **config,
     }
     return RendezvousParameters(
@@ -110,6 +118,7 @@ def test_runtime_config_loads_shared_policy_and_node_inputs(tmp_path: Path):
     assert config.min_nodes == 2
     assert config.max_nodes == 3
     assert config.node_id == "node-a"
+    assert config.resource_ids == ("gpu-node-a-0", "gpu-node-a-1")
     assert config.restart_context_path == context_path
     assert config.local_addr == "node-a.example"
     assert config.source_path == source
@@ -131,11 +140,21 @@ schema_version=1
     )
 
     first_config = TorchrunRuntimeConfig.from_parameters(
-        _parameters(first, node_id="node-a", restart_context_path="/run/a.json"),
+        _parameters(
+            first,
+            node_id="node-a",
+            resource_ids="gpu-node-a-0;gpu-node-a-1",
+            restart_context_path="/run/a.json",
+        ),
         environment={},
     )
     second_config = TorchrunRuntimeConfig.from_parameters(
-        _parameters(second, node_id="node-b", restart_context_path="/run/b.json"),
+        _parameters(
+            second,
+            node_id="node-b",
+            resource_ids="gpu-node-b-0;gpu-node-b-1",
+            restart_context_path="/run/b.json",
+        ),
         environment={},
     )
 
@@ -203,8 +222,83 @@ def test_runtime_config_builds_agent_identity(tmp_path: Path):
     assert identity.agent_id == "agent-a"
     assert identity.hostname == "host-a"
     assert identity.local_world_size == 2
-    assert identity.resource_ids == ()
+    assert identity.resource_ids == ("gpu-node-a-0", "gpu-node-a-1")
     assert identity.environment_digest == config.agent_environment_digest
+
+
+def test_runtime_config_agent_identity_authorizes_registered_hardware_report(
+    tmp_path: Path,
+):
+    source = _write_policy(tmp_path / "rendezvous.toml")
+    config = TorchrunRuntimeConfig.from_parameters(
+        _parameters(
+            source,
+            node_id="node-a",
+            restart_context_path="/run/context.json",
+        ),
+        environment={},
+    )
+    identity = config.build_agent_identity(
+        agent_id="agent-a",
+        hostname="host-a",
+    )
+    assignment = RankAssignment(
+        run_id=RUN_ID,
+        generation=0,
+        active_nodes=1,
+        local_world_size=2,
+        slot_to_node_id={0: "node-a"},
+        slot_to_rank_range={0: (0, 2)},
+        topology_digest="topology-v1",
+    )
+    reporter = WorkerIdentity(
+        run_id=RUN_ID,
+        generation=0,
+        node_id="node-a",
+        agent_id="agent-a",
+        logical_node_slot=0,
+        global_rank=0,
+        local_rank=0,
+        local_world_size=2,
+        hostname="host-a",
+        gpu_uuid="gpu-node-a-0",
+        topology_digest="topology-v1",
+    )
+    event = FaultEvent(
+        event_id="fault-gpu-a0",
+        incident_id="incident-a",
+        run_id=RUN_ID,
+        generation=0,
+        reporter=reporter,
+        optimizer_step=10,
+        report=HardwareFaultReport(
+            kind="hardware",
+            resource_kind="gpu",
+            resource_id="gpu-node-a-0",
+            metric="uncorrectable_ecc",
+            value=1.0,
+            severity="fatal",
+            message="fatal ECC",
+        ),
+    )
+
+    validate_event_reporter(
+        event,
+        assignment,
+        agent_identity=identity,
+        resource_to_node_id={
+            "gpu-node-a-0": "node-a",
+            "gpu-node-a-1": "node-a",
+        },
+        resource_to_kind={
+            "gpu-node-a-0": "gpu",
+            "gpu-node-a-1": "gpu",
+        },
+        resource_to_global_rank={
+            "gpu-node-a-0": 0,
+            "gpu-node-a-1": 1,
+        },
+    )
 
 
 def test_runtime_config_resolves_agent_identity_inputs_from_environment(
@@ -215,6 +309,7 @@ def test_runtime_config_resolves_agent_identity_inputs_from_environment(
         "LM_RESILIENCY_NODE_ID": "node-a",
         "LM_RESILIENCY_LOCAL_WORLD_SIZE": "4",
         "LM_RESILIENCY_ENVIRONMENT_DIGEST": "environment-v2",
+        "LM_RESILIENCY_RESOURCE_IDS": "gpu-node-a-1;gpu-node-a-0",
         "LM_RESILIENCY_RESTART_CONTEXT": "/run/context.json",
     }
 
@@ -223,6 +318,7 @@ def test_runtime_config_resolves_agent_identity_inputs_from_environment(
             source,
             local_world_size=None,
             environment_digest=None,
+            resource_ids=None,
         ),
         environment=environment,
     )
@@ -230,6 +326,7 @@ def test_runtime_config_resolves_agent_identity_inputs_from_environment(
     assert config.node_id == "node-a"
     assert config.local_world_size == 4
     assert config.environment_digest == "environment-v2"
+    assert config.resource_ids == ("gpu-node-a-0", "gpu-node-a-1")
     assert config.restart_context_path == Path("/run/context.json")
 
 
@@ -358,6 +455,12 @@ def test_runtime_config_rejects_fifo_policy_without_blocking(tmp_path: Path):
             "environment-v2",
         ),
         (
+            "resource_ids",
+            "LM_RESILIENCY_RESOURCE_IDS",
+            "gpu-node-a-0;gpu-node-a-1",
+            "gpu-node-a-0;hca-node-a",
+        ),
+        (
             "restart_context_path",
             "LM_RESILIENCY_RESTART_CONTEXT",
             "/run/a.json",
@@ -423,6 +526,11 @@ def test_runtime_config_requires_node_inputs(
             "LM_RESILIENCY_ENVIRONMENT_DIGEST",
         ),
         (
+            {"resource_ids": None},
+            {},
+            "LM_RESILIENCY_RESOURCE_IDS",
+        ),
+        (
             {"local_world_size": "0"},
             {},
             "local_world_size must be positive",
@@ -447,6 +555,50 @@ def test_runtime_config_requires_agent_identity_inputs(
             _parameters(source, **runtime_config),
             environment=environment,
         )
+
+
+@pytest.mark.parametrize(
+    ("resource_ids", "match"),
+    [
+        ("gpu-node-a-0;;gpu-node-a-1", r"resource_ids\[1\]"),
+        ("gpu-node-a-0;gpu-node-a-0", "must be unique"),
+        ('["gpu-node-a-0","gpu-node-a-1"]', "semicolon-delimited"),
+        ({"gpu-node-a-0": True}, "semicolon-delimited"),
+    ],
+)
+def test_runtime_config_rejects_invalid_resource_ids(
+    tmp_path: Path,
+    resource_ids: object,
+    match: str,
+):
+    source = _write_policy(tmp_path / "rendezvous.toml")
+
+    with pytest.raises(TorchrunRuntimeConfigError, match=match):
+        TorchrunRuntimeConfig.from_parameters(
+            _parameters(
+                source,
+                node_id="node-a",
+                resource_ids=resource_ids,
+                restart_context_path="/run/context.json",
+            ),
+            environment={},
+        )
+
+
+def test_runtime_config_accepts_explicit_empty_resource_inventory(tmp_path: Path):
+    source = _write_policy(tmp_path / "rendezvous.toml")
+
+    config = TorchrunRuntimeConfig.from_parameters(
+        _parameters(
+            source,
+            node_id="node-a",
+            resource_ids="[]",
+            restart_context_path="/run/context.json",
+        ),
+        environment={},
+    )
+
+    assert config.resource_ids == ()
 
 
 def test_runtime_config_respects_explicitly_empty_environment(
@@ -491,6 +643,7 @@ def test_runtime_config_requires_absolute_paths_and_standby_capacity(tmp_path: P
                 config=str(source),
                 local_world_size="2",
                 environment_digest="environment-v1",
+                resource_ids="[]",
             ),
             environment=_environment(tmp_path / "context.json"),
         )
