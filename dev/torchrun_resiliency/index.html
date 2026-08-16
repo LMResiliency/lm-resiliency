@@ -1007,7 +1007,11 @@ or for the later atomic publication transaction.
 <code>RestartPlanGenerationState</code> binds that envelope to the exact closed intent,
 current generation, successor generation, successor assignment, and shared
 coordinator publication authority. Manifest and quarantine resolution remain
-separate cross-record checks.</p>
+separate cross-record checks.
+<code>RestartPlanManifestState</code> then binds the exact resolved manifest record and
+checks plan/manifest metadata, source world size, exact current-generation
+assignment when applicable, and trust compatibility. It still does not prove
+per-rank copy completeness or inventory certification.</p>
 <p>Before commit, the coordinator validates:</p>
 <ul>
 <li>the plan is fenced to the same intent ID, run, generation, incidents, and
