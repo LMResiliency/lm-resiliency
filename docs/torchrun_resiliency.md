@@ -1458,6 +1458,9 @@ and exposes its own canonical digest for the later restart-plan envelope.
 Resolving the source snapshot and validating inventory, certification,
 acknowledgement, assignment, and copy eligibility remain separate admission
 steps; constructing the record alone does not make a manifest safe to commit.
+`ResolvedRecoveryManifest` binds the record to one verified immutable
+generation snapshot and requires exact run, source-generation, topology, and
+snapshot-digest agreement. It still does not establish completeness or trust.
 
 The manifest is usable only when every required rank has at least one copy and
 every included copy is eligible for the manifest's exact positive step and the
