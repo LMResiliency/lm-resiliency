@@ -33,6 +33,7 @@ from lm_resiliency.integrations.torchrun._restart_plan_records import (
 from lm_resiliency.integrations.torchrun._restart_plan_state import (
     ResolvedRecoveryManifest,
     RestartPlanGenerationState,
+    RestartPlanManifestState,
 )
 
 RUN_ID = "training-run"
@@ -495,3 +496,213 @@ def test_restart_plan_generation_state_rejects_different_publication_authority()
             state,
             record=replace(state.record, lease_id="other-lease"),
         )
+
+
+def _manifest_state(
+    *,
+    manifest: RecoveryManifest | None = None,
+    plan: RestartPlan | None = None,
+) -> RestartPlanManifestState:
+    selected_manifest = manifest or _manifest()
+    generation_state = _generation_state()
+    if plan is not None:
+        generation_state = replace(
+            generation_state,
+            record=replace(generation_state.record, plan=plan),
+        )
+    source_snapshot = _snapshot(
+        assignment=_assignment(
+            run_id=selected_manifest.run_id,
+            generation=selected_manifest.source_generation,
+            topology_digest=selected_manifest.topology_digest,
+        )
+    )
+    manifest_record = RecoveryManifestRecord(
+        manifest=selected_manifest,
+        source_generation_snapshot_digest=source_snapshot.record.digest,
+    )
+    generation_state = replace(
+        generation_state,
+        record=replace(
+            generation_state.record,
+            recovery_manifest_record_digest=manifest_record.digest,
+        ),
+    )
+    return RestartPlanManifestState(
+        generation_state=generation_state,
+        resolved_manifest=ResolvedRecoveryManifest(
+            record=manifest_record,
+            source_snapshot=source_snapshot,
+        ),
+    )
+
+
+def test_restart_plan_manifest_state_binds_exact_plan_and_manifest():
+    state = _manifest_state()
+
+    assert state.plan == state.generation_state.plan
+    assert state.manifest == state.resolved_manifest.manifest
+
+
+def test_restart_plan_manifest_state_requires_exact_types():
+    state = _manifest_state()
+
+    with pytest.raises(TypeError, match="generation_state must be"):
+        replace(state, generation_state=state.generation_state.record)
+
+    with pytest.raises(TypeError, match="resolved_manifest must be"):
+        replace(state, resolved_manifest=state.resolved_manifest.record)
+
+
+def test_restart_plan_manifest_state_rejects_wrong_manifest_digest():
+    state = _manifest_state()
+
+    with pytest.raises(ValueError, match="manifest record digest"):
+        replace(
+            state,
+            generation_state=replace(
+                state.generation_state,
+                record=replace(
+                    state.generation_state.record,
+                    recovery_manifest_record_digest="0" * 64,
+                ),
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        _manifest(run_id="other-run"),
+        _manifest(source_generation=5),
+        replace(_manifest(), manifest_id="other-manifest"),
+        _manifest(topology_digest="topology-v2"),
+    ],
+)
+def test_restart_plan_manifest_state_rejects_metadata_mismatch(manifest):
+    with pytest.raises(ValueError, match="manifest metadata"):
+        _manifest_state(manifest=manifest)
+
+
+def test_restart_plan_manifest_state_rejects_source_world_size_mismatch():
+    state = _manifest_state()
+    smaller_assignment = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=4,
+        assignments=(
+            SlotAssignment(
+                logical_node_slot=0,
+                node_id="node-a",
+                first_global_rank=0,
+                local_world_size=2,
+            ),
+        ),
+        topology_digest="topology-v1",
+    )
+    source_snapshot = _snapshot(assignment=smaller_assignment)
+    manifest_record = replace(
+        state.resolved_manifest.record,
+        source_generation_snapshot_digest=source_snapshot.record.digest,
+    )
+
+    with pytest.raises(ValueError, match="source world size"):
+        replace(
+            state,
+            generation_state=replace(
+                state.generation_state,
+                record=replace(
+                    state.generation_state.record,
+                    recovery_manifest_record_digest=manifest_record.digest,
+                ),
+            ),
+            resolved_manifest=ResolvedRecoveryManifest(
+                record=manifest_record,
+                source_snapshot=source_snapshot,
+            ),
+        )
+
+
+def test_restart_plan_manifest_state_rejects_conflicting_current_source_assignment():
+    state = _manifest_state()
+    conflicting_assignment = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=4,
+        assignments=(
+            SlotAssignment(
+                logical_node_slot=0,
+                node_id="node-b",
+                first_global_rank=0,
+                local_world_size=2,
+            ),
+            SlotAssignment(
+                logical_node_slot=1,
+                node_id="node-a",
+                first_global_rank=2,
+                local_world_size=2,
+            ),
+        ),
+        topology_digest="topology-v1",
+    )
+    source_snapshot = _snapshot(assignment=conflicting_assignment)
+    manifest_record = replace(
+        state.resolved_manifest.record,
+        source_generation_snapshot_digest=source_snapshot.record.digest,
+    )
+
+    with pytest.raises(ValueError, match="source assignment conflicts"):
+        replace(
+            state,
+            generation_state=replace(
+                state.generation_state,
+                record=replace(
+                    state.generation_state.record,
+                    recovery_manifest_record_digest=manifest_record.digest,
+                ),
+            ),
+            resolved_manifest=ResolvedRecoveryManifest(
+                record=manifest_record,
+                source_snapshot=source_snapshot,
+            ),
+        )
+
+
+def test_restart_plan_manifest_state_requires_verified_manifest_for_verified_mode():
+    plan = replace(_plan(), recovery_mode="recovery_verified")
+
+    with pytest.raises(ValueError, match="verified recovery"):
+        _manifest_state(plan=plan)
+
+
+def test_restart_plan_manifest_state_requires_verified_manifest_for_durable_source():
+    plan = replace(
+        _plan(),
+        checkpoint_source="durable",
+        checkpoint_id="durable-40",
+    )
+
+    with pytest.raises(ValueError, match="durable recovery"):
+        _manifest_state(plan=plan)
+
+
+def test_restart_plan_manifest_state_accepts_verified_manifest():
+    plan = replace(
+        _plan(),
+        recovery_mode="recovery_verified",
+        checkpoint_source="durable",
+        checkpoint_id="durable-40",
+    )
+
+    state = _manifest_state(
+        manifest=replace(_manifest(), trust="recovery_verified"),
+        plan=plan,
+    )
+
+    assert state.manifest.trust == "recovery_verified"
+
+
+def test_restart_plan_manifest_state_does_not_claim_copy_completeness():
+    incomplete = replace(_manifest(), rank_copies=_manifest().rank_copies[:-1])
+
+    state = _manifest_state(manifest=incomplete)
+
+    assert len(state.manifest.rank_copies) == 3

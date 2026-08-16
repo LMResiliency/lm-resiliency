@@ -774,6 +774,10 @@ or for the later atomic publication transaction.
 current generation, successor generation, successor assignment, and shared
 coordinator publication authority. Manifest and quarantine resolution remain
 separate cross-record checks.
+`RestartPlanManifestState` then binds the exact resolved manifest record and
+checks plan/manifest metadata, source world size, exact current-generation
+assignment when applicable, and trust compatibility. It still does not prove
+per-rank copy completeness or inventory certification.
 
 Before commit, the coordinator validates:
 

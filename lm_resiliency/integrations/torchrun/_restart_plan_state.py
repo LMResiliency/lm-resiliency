@@ -188,7 +188,69 @@ class RestartPlanGenerationState:
             )
 
 
+@dataclass(frozen=True, slots=True)
+class RestartPlanManifestState:
+    """One generation-bound plan linked to its resolved recovery manifest."""
+
+    generation_state: RestartPlanGenerationState
+    resolved_manifest: ResolvedRecoveryManifest
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.generation_state, RestartPlanGenerationState):
+            raise TypeError(
+                "RestartPlanManifestState.generation_state must be RestartPlanGenerationState"
+            )
+        if not isinstance(self.resolved_manifest, ResolvedRecoveryManifest):
+            raise TypeError(
+                "RestartPlanManifestState.resolved_manifest must be ResolvedRecoveryManifest"
+            )
+        plan_record = self.generation_state.record
+        plan = plan_record.plan
+        manifest_record = self.resolved_manifest.record
+        manifest = manifest_record.manifest
+        if plan_record.recovery_manifest_record_digest != manifest_record.digest:
+            raise ValueError(
+                "RestartPlanManifestState manifest record digest does not match its plan"
+            )
+        if (
+            manifest.manifest_id != plan.checkpoint_manifest_id
+            or manifest.run_id != plan.run_id
+            or manifest.source_generation > plan.from_generation
+            or manifest.step != plan.checkpoint_step
+            or manifest.topology_digest != plan.topology_digest
+        ):
+            raise ValueError("RestartPlanManifestState manifest metadata does not match its plan")
+        source_assignment = self.resolved_manifest.source_assignment
+        source_world_size = source_assignment.active_nodes * source_assignment.local_world_size
+        if source_world_size != plan.expected_world_size:
+            raise ValueError("RestartPlanManifestState source world size does not match its plan")
+        if (
+            source_assignment.generation == plan.from_generation
+            and source_assignment != self.generation_state.from_assignment
+        ):
+            raise ValueError(
+                "RestartPlanManifestState source assignment conflicts with its current generation"
+            )
+        if plan.recovery_mode == "recovery_verified" and manifest.trust != "recovery_verified":
+            raise ValueError(
+                "RestartPlanManifestState verified recovery requires a verified manifest"
+            )
+        if plan.checkpoint_source == "durable" and manifest.trust != "recovery_verified":
+            raise ValueError(
+                "RestartPlanManifestState durable recovery requires a verified manifest"
+            )
+
+    @property
+    def plan(self) -> RestartPlan:
+        return self.generation_state.plan
+
+    @property
+    def manifest(self) -> RecoveryManifest:
+        return self.resolved_manifest.manifest
+
+
 __all__ = [
     "ResolvedRecoveryManifest",
     "RestartPlanGenerationState",
+    "RestartPlanManifestState",
 ]
