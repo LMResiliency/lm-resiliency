@@ -912,8 +912,17 @@ persisted publication without reading or mutating the store. It resolves the
 exact manifest source generation, quarantine records, inventory events, copy
 eligibility, and exactly one trust path: persisted trusted certifications for
 `recovery_verified`, or supplied restart-acknowledgement evidence for `latest`.
-It still does not authenticate the closed lifecycle or make the publication
-visible to rendezvous.
+`RestartPlanPublicationReader.read_recovery_state()` double-collects that
+publication, the authenticated closed restart-intent lifecycle, and the exact
+manifest source snapshot. It requires the lifecycle's source snapshot and
+immediate successor, including authoritative store metadata, to equal the
+signed publication, and requires the publication transaction and commit time
+to follow lifecycle closure, before returning the reauthorized recovery state.
+Repeated lifecycle, generation, or lease-history movement remains a retryable
+conflict; missing, mixed, causally impossible, or unsafe recovery evidence
+fails closed. For `latest`, the caller must supply the exact stable
+restart-acknowledgement evidence until historical acknowledgement collection
+is exposed directly to readback.
 
 Before commit, the coordinator validates:
 

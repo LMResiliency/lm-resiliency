@@ -24,6 +24,17 @@ from lm_resiliency.integrations.torchrun._generation_reader import (
     StoredGenerationSnapshot,
 )
 from lm_resiliency.integrations.torchrun._quarantine_store import node_quarantine_key
+from lm_resiliency.integrations.torchrun._restart_ack_collection import (
+    RestartAckEvidence,
+)
+from lm_resiliency.integrations.torchrun._restart_intent_lifecycle_auth import (
+    AuthenticatedInitialRestartIntentClosure,
+)
+from lm_resiliency.integrations.torchrun._restart_intent_lifecycle_reader import (
+    InitialRestartIntentLifecycleReader,
+    RestartIntentLifecycleReadCorrupt,
+    RestartIntentLifecycleReadError,
+)
 from lm_resiliency.integrations.torchrun._restart_plan_publication_lifecycle import (
     RestartPlanPublicationLifecycleConflict,
     RestartPlanPublicationLifecycleCorrupt,
@@ -41,6 +52,8 @@ from lm_resiliency.integrations.torchrun._restart_plan_publication_records impor
 from lm_resiliency.integrations.torchrun._restart_plan_records import RestartPlanRecord
 from lm_resiliency.integrations.torchrun._restart_plan_state import (
     PersistedRestartPlanPublication,
+    RestartPlanGenerationState,
+    RestartPlanPersistedRecoveryState,
 )
 
 _MAX_READ_ATTEMPTS = 8
@@ -251,6 +264,10 @@ class RestartPlanPublicationReader:
             store,
             run_id=self._run_id,
         )
+        self._lifecycle_reader = InitialRestartIntentLifecycleReader(
+            store,
+            run_id=self._run_id,
+        )
 
     def read(self) -> PersistedRestartPlanPublication | None:
         """Return the stable publication for the current generation, if any."""
@@ -273,6 +290,40 @@ class RestartPlanPublicationReader:
             "restart-plan publication changed repeatedly during read"
         )
 
+    def read_recovery_state(
+        self,
+        *,
+        acknowledgement_evidence: RestartAckEvidence | None = None,
+    ) -> RestartPlanPersistedRecoveryState | None:
+        """Return one stable publication reauthorized for recovery."""
+
+        if acknowledgement_evidence is not None and not isinstance(
+            acknowledgement_evidence,
+            RestartAckEvidence,
+        ):
+            raise TypeError("acknowledgement_evidence must be RestartAckEvidence or None")
+        for _ in range(_MAX_READ_ATTEMPTS):
+            publication = self.read()
+            if publication is None:
+                return None
+            lifecycle = self._read_lifecycle()
+            manifest_source = self._read_manifest_source(publication)
+            if (
+                self.read() != publication
+                or self._read_lifecycle() != lifecycle
+                or self._read_manifest_source(publication) != manifest_source
+            ):
+                continue
+            return self._reauthorize(
+                publication,
+                lifecycle,
+                manifest_source,
+                acknowledgement_evidence,
+            )
+        raise RestartPlanPublicationReadConflict(
+            "restart-plan recovery state changed repeatedly during read"
+        )
+
     def _read_current(self) -> CurrentGeneration | None:
         try:
             return self._generation_reader.current()
@@ -283,6 +334,91 @@ class RestartPlanPublicationReader:
         except GenerationStateError as error:
             raise RestartPlanPublicationReadConflict(
                 "generation state changed repeatedly while reading restart-plan publication"
+            ) from error
+
+    def _read_lifecycle(self) -> AuthenticatedInitialRestartIntentClosure:
+        try:
+            lifecycle = self._lifecycle_reader.read()
+        except (
+            CoordinatorLeaseHistoryCorrupt,
+            GenerationStateCorrupt,
+            RestartIntentLifecycleReadCorrupt,
+        ) as error:
+            raise RestartPlanPublicationReadCorrupt(
+                "restart-intent lifecycle is corrupt while reauthorizing publication"
+            ) from error
+        except (
+            CoordinatorLeaseHistoryError,
+            GenerationStateError,
+            RestartIntentLifecycleReadError,
+        ) as error:
+            raise RestartPlanPublicationReadConflict(
+                "restart-intent lifecycle changed repeatedly while reauthorizing publication"
+            ) from error
+        if lifecycle is None:
+            raise RestartPlanPublicationReadCorrupt(
+                "restart-plan publication has no closed restart-intent lifecycle"
+            )
+        return lifecycle
+
+    def _read_manifest_source(
+        self,
+        publication: PersistedRestartPlanPublication,
+    ) -> StoredGenerationSnapshot:
+        generation = publication.manifest_record.manifest.source_generation
+        try:
+            snapshot = self._generation_reader.get(generation)
+        except GenerationStateCorrupt as error:
+            raise RestartPlanPublicationReadCorrupt(
+                "manifest source generation is corrupt while reauthorizing publication"
+            ) from error
+        except GenerationStateError as error:
+            raise RestartPlanPublicationReadConflict(
+                "manifest source generation changed repeatedly while reauthorizing publication"
+            ) from error
+        if snapshot is None:
+            raise RestartPlanPublicationReadCorrupt(
+                "restart-plan publication references a missing manifest source generation"
+            )
+        return snapshot
+
+    def _reauthorize(
+        self,
+        publication: PersistedRestartPlanPublication,
+        lifecycle: AuthenticatedInitialRestartIntentClosure,
+        manifest_source: StoredGenerationSnapshot,
+        acknowledgement_evidence: RestartAckEvidence | None,
+    ) -> RestartPlanPersistedRecoveryState:
+        successor = lifecycle.immediate_successor
+        expected_successor = self._stored_successor(publication)
+        if (
+            lifecycle.lifecycle.digest != publication.record.intent_lifecycle_record_digest
+            or lifecycle.generation_snapshot.record.digest
+            != publication.record.from_generation_snapshot_digest
+            or successor != expected_successor
+            or publication.transaction_sequence <= lifecycle.transaction_sequence
+            or publication.committed_at_unix_ms < lifecycle.closed_at_unix_ms
+        ):
+            raise RestartPlanPublicationReadCorrupt(
+                "restart-plan publication does not match its closed lifecycle"
+            )
+        try:
+            generation_state = RestartPlanGenerationState(
+                record=publication.record,
+                intent_record=lifecycle.intent,
+                lifecycle_record=lifecycle.lifecycle,
+                from_snapshot=lifecycle.generation_snapshot.record,
+                to_snapshot=publication.successor_snapshot,
+            )
+            return RestartPlanPersistedRecoveryState(
+                publication=publication,
+                generation_state=generation_state,
+                manifest_source_snapshot=manifest_source,
+                acknowledgement_evidence=acknowledgement_evidence,
+            )
+        except (TypeError, ValueError) as error:
+            raise RestartPlanPublicationReadCorrupt(
+                "restart-plan publication recovery evidence is not authoritative"
             ) from error
 
     def _read_entries(self, generation: int) -> _PublicationEntries:
@@ -361,6 +497,19 @@ class RestartPlanPublicationReader:
         publication: PersistedRestartPlanPublication,
         current: CurrentGeneration,
     ) -> None:
+        expected_snapshot = self._stored_successor(publication)
+        if (
+            current.snapshot != expected_snapshot
+            or current.head_revision != publication.generation_head_entry.revision
+        ):
+            raise RestartPlanPublicationReadCorrupt(
+                "latest restart-plan publication does not match the current generation"
+            )
+
+    def _stored_successor(
+        self,
+        publication: PersistedRestartPlanPublication,
+    ) -> StoredGenerationSnapshot:
         successor_entry = publication.successor_snapshot_entry
         if (
             successor_entry.committed_at_unix_ms is None
@@ -372,7 +521,7 @@ class RestartPlanPublicationReader:
             raise RestartPlanPublicationReadCorrupt(
                 "latest restart-plan successor lacks authoritative metadata"
             )
-        expected_snapshot = StoredGenerationSnapshot(
+        return StoredGenerationSnapshot(
             record=publication.successor_snapshot,
             revision=successor_entry.revision,
             committed_at_unix_ms=successor_entry.committed_at_unix_ms,
@@ -382,13 +531,6 @@ class RestartPlanPublicationReader:
             guard_lifetime_sequence=successor_entry.guard_lifetime_sequence,
             guard_committed_at_unix_ms=successor_entry.guard_committed_at_unix_ms,
         )
-        if (
-            current.snapshot != expected_snapshot
-            or current.head_revision != publication.generation_head_entry.revision
-        ):
-            raise RestartPlanPublicationReadCorrupt(
-                "latest restart-plan publication does not match the current generation"
-            )
 
 
 class RestartPlanPublicationPreparer:
