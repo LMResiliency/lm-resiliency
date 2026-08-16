@@ -1444,6 +1444,13 @@ class RecoveryManifest(TypedDict):
     rank_copies: list[RankCheckpointCopies]
 ```
 
+The persisted `RecoveryManifestRecord` contains the canonical manifest and the
+digest of its immutable source-generation snapshot. This record is create-once
+and exposes its own canonical digest for the later restart-plan envelope.
+Resolving the source snapshot and validating inventory, certification,
+acknowledgement, assignment, and copy eligibility remain separate admission
+steps; constructing the record alone does not make a manifest safe to commit.
+
 The manifest is usable only when every required rank has at least one copy and
 every included copy is eligible for the manifest's exact positive step and the
 plan's selected source. The coordinator must omit rejected alternatives before
