@@ -1081,6 +1081,145 @@ def _seed_assigned_arrival(
     threading.Thread(target=complete_attempt, daemon=True).start()
 
 
+def test_slot_aware_handler_refreshes_leader_registration_before_completion(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    _, _, current = _initialize_generation(store, clock, ("node-a", "node-b"))
+    leader = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-a",
+            min_nodes=2,
+            max_nodes=3,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-a",
+    )
+    peer = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=2,
+            max_nodes=3,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+    )
+    deadline = time.monotonic() + 1
+    leader._ensure_registered(deadline)
+    peer._ensure_registered(deadline)
+    with leader._registration_lock:
+        original_leader_registration = leader._registration
+    with peer._registration_lock:
+        peer_registration = peer._registration
+    assert original_leader_registration is not None
+    assert peer_registration is not None
+    attempt = leader._claim_shared_arrival_attempt(
+        generation=0,
+        slot=0,
+        registration=original_leader_registration,
+        deadline=deadline,
+    )
+    for slot, handler, registration in (
+        (0, leader, original_leader_registration),
+        (1, peer, peer_registration),
+    ):
+        store.compare_set(
+            leader._arrival_key(0, attempt, slot),
+            expected_revision=None,
+            value=handler._arrival_value(
+                generation=0,
+                attempt=attempt,
+                slot=slot,
+                registration=registration,
+            ),
+        )
+    renewed = leader._registration_manager.renew(original_leader_registration)
+    with leader._registration_lock:
+        leader._registration = renewed
+
+    leader._try_complete_arrival_attempt(
+        current.snapshot.record.assignment,
+        attempt,
+        original_leader_registration,
+    )
+
+    completion = store.get(leader._arrival_completion_key(0, attempt))
+    assert completion is not None
+    assert completion.guard_revision == renewed.fencing_token
+    assert leader.shutdown() is True
+    assert peer.shutdown() is True
+
+
+def test_slot_aware_handler_classifies_duplicate_completion_fields_as_corruption(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    _, _, current = _initialize_generation(store, clock, ("node-a",))
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-a",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-a",
+    )
+    deadline = time.monotonic() + 1
+    handler._ensure_registered(deadline)
+    with handler._registration_lock:
+        registration = handler._registration
+    assert registration is not None
+    attempt = handler._claim_shared_arrival_attempt(
+        generation=0,
+        slot=0,
+        registration=registration,
+        deadline=deadline,
+    )
+    store.compare_set(
+        handler._arrival_key(0, attempt, 0),
+        expected_revision=None,
+        value=handler._arrival_value(
+            generation=0,
+            attempt=attempt,
+            slot=0,
+            registration=registration,
+        ),
+    )
+    handler._try_complete_arrival_attempt(
+        current.snapshot.record.assignment,
+        attempt,
+        registration,
+    )
+    completion = store.get(handler._arrival_completion_key(0, attempt))
+    assert completion is not None
+    corrupted = replace(
+        completion,
+        value=completion.value.replace(
+            b'"attempt":1,',
+            b'"attempt":1,"attempt":1,',
+            1,
+        ),
+    )
+
+    with pytest.raises(RendezvousStateError, match="malformed"):
+        handler._validate_arrival_completion_entry(
+            corrupted,
+            assignment=current.snapshot.record.assignment,
+            attempt=attempt,
+            registration=registration,
+        )
+
+    assert handler.shutdown() is True
+
+
 def test_slot_aware_handler_admits_initial_assignment_with_stable_rank(
     tmp_path: Path,
 ):
@@ -2418,6 +2557,58 @@ def test_slot_aware_handler_rejects_deleted_closure_record(tmp_path: Path):
         second.is_closed()
 
     assert second.shutdown() is True
+
+
+def test_slot_aware_handler_bounds_closure_publication_before_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    _initialize_generation(store, clock, ("node-a",))
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-a",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-a",
+    )
+    handler._ensure_registered(time.monotonic() + 1)
+    original_read = handler._read_closure_entry
+    started = threading.Event()
+    unblock = threading.Event()
+
+    def delayed_read():
+        started.set()
+        unblock.wait(timeout=2)
+        return original_read()
+
+    monkeypatch.setattr(handler, "_read_closure_entry", delayed_read)
+
+    before = time.monotonic()
+    with pytest.raises(RendezvousConnectionError, match="timed out"):
+        handler.set_closed()
+    elapsed = time.monotonic() - before
+
+    assert started.is_set()
+    assert elapsed < 0.5
+    _wait_until(
+        lambda: (
+            AgentRegistrationReader(
+                store,
+                run_id=RUN_ID,
+                clock=clock,
+            ).get("node-a")
+            is None
+        )
+    )
+    unblock.set()
+    _wait_until(lambda: store.get(handler.closure_key) is not None)
+    assert handler.shutdown() is True
 
 
 def test_slot_aware_handler_retries_closure_created_during_read(

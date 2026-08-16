@@ -1521,16 +1521,21 @@ registration. Slot zero validates the complete registration set once and
 atomically publishes one immutable completion proof conditioned on the shared
 attempt head plus every arrival and registration revision. Other slots wait on
 that proof instead of rereading every registration history, keeping control
-store work linear in the active node count. An incomplete attempt remains
-usable when a handler incarnation is replaced; a completed attempt advances
-the shared head before the next worker launch. Missing or unprepared assigned
-nodes therefore fail at the formation deadline instead of launching a partial
-worker group. After bootstrap completes, every handler revalidates the
-generation head before returning its slot.
+store work linear in the active node count. Slot zero reloads its current
+renewed registration immediately before each guarded completion attempt, so
+heartbeat renewal cannot strand an otherwise complete barrier on a stale
+fencing token. An incomplete attempt remains usable when a handler incarnation
+is replaced; a completed attempt advances the shared head before the next
+worker launch. Missing or unprepared assigned nodes therefore fail at the
+formation deadline instead of launching a partial worker group. After
+bootstrap completes, every handler revalidates the generation head before
+returning its slot.
 
 Registration release is best effort and bounded during local shutdown. If the
 backend remains unavailable, cleanup returns without waiting indefinitely and
-the registration expires under its existing lease.
+the registration expires under its existing lease. Global closure publication
+also runs through a bounded daemon operation; local heartbeat and registration
+cleanup still proceeds when the control store is unavailable.
 Replacement generation admission, restart-context publication, and the positive
 `num_nodes_waiting()` restart edge are enabled only after authoritative
 restart-plan readback is integrated in the following slice.

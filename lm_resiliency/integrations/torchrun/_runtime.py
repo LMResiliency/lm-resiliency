@@ -108,6 +108,10 @@ class RestartContextFileError(RuntimeError):
     """Raised when the node-local restart-context file is unsafe or malformed."""
 
 
+class _DuplicateJsonFieldError(ValueError):
+    """Raised when strict JSON decoding observes a duplicate object field."""
+
+
 @dataclass(frozen=True, slots=True)
 class TorchrunRendezvousPolicy:
     """Shared replacement-only policy resolved identically by every agent."""
@@ -413,9 +417,12 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         self._stop_heartbeat_event = threading.Event()
         self._release_thread: threading.Thread | None = None
         self._release_error: Exception | None = None
+        self._closure_thread: threading.Thread | None = None
+        self._closure_error: Exception | None = None
         self._last_arrival_attempts: dict[int, int] = {}
         self._state_changed_event = threading.Event()
         self._closed_event = threading.Event()
+        self._closure_lock = threading.Lock()
         self._shutdown_lock = threading.Lock()
 
     @property
@@ -513,6 +520,40 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         return True
 
     def set_closed(self) -> None:
+        self._closed_event.set()
+        self._state_changed_event.set()
+        try:
+            self._publish_closure_bounded()
+        finally:
+            self._cleanup_local_resources()
+
+    def _publish_closure_bounded(self) -> None:
+        with self._closure_lock:
+            thread = self._closure_thread
+            if thread is None:
+                self._closure_error = None
+                thread = threading.Thread(
+                    target=self._publish_closure_worker,
+                    name=f"lm-resiliency-close-{self._config.node_id}",
+                    daemon=True,
+                )
+                self._closure_thread = thread
+                thread.start()
+        thread.join(timeout=self._bounded_cleanup_timeout_seconds())
+        if thread.is_alive():
+            raise RendezvousConnectionError("timed out while publishing rendezvous closure state")
+        with self._closure_lock:
+            error = self._closure_error
+            self._closure_thread = None
+            self._closure_error = None
+        if error is None:
+            return
+        if isinstance(error, RendezvousStateError):
+            raise error
+        raise RendezvousConnectionError("failed to publish rendezvous closure state") from error
+
+    def _publish_closure_worker(self) -> None:
+        error: Exception | None = None
         try:
             entry = self._read_closure_entry()
             if entry is None:
@@ -529,13 +570,11 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                             "rendezvous closure changed without a current record"
                         )
             self._validate_closure_entry(entry)
-        except RendezvousStateError:
-            raise
-        except Exception as error:
-            raise RendezvousConnectionError("failed to publish rendezvous closure state") from error
-        self._closed_event.set()
+        except Exception as closure_error:
+            error = closure_error
+        with self._closure_lock:
+            self._closure_error = error
         self._state_changed_event.set()
-        self._cleanup_local_resources()
 
     def num_nodes_waiting(self) -> int:
         """Hide passive standbys until a committed replacement plan exists."""
@@ -718,12 +757,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         thread = self._heartbeat_thread
         if thread is not None and thread is not threading.current_thread():
             try:
-                thread.join(
-                    timeout=max(
-                        self._config.policy.poll_interval_ms / 500,
-                        0.1,
-                    )
-                )
+                thread.join(timeout=self._bounded_cleanup_timeout_seconds())
             except RuntimeError:
                 return False
         return thread is None or not thread.is_alive()
@@ -745,12 +779,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                 self._release_thread = thread
                 thread.start()
         if thread is not threading.current_thread():
-            thread.join(
-                timeout=max(
-                    self._config.policy.poll_interval_ms / 500,
-                    0.1,
-                )
-            )
+            thread.join(timeout=self._bounded_cleanup_timeout_seconds())
         if thread.is_alive():
             return False
         with self._registration_lock:
@@ -776,6 +805,12 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                 "agent registration backend failed during release"
             ) from error
         return False
+
+    def _bounded_cleanup_timeout_seconds(self) -> float:
+        return max(
+            self._config.policy.poll_interval_ms / 500,
+            0.1,
+        )
 
     def _release_registration_worker(
         self,
@@ -1304,6 +1339,14 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         attempt: int,
         leader_registration: HeldAgentRegistration,
     ) -> None:
+        with self._registration_lock:
+            current_leader_registration = self._registration
+        if (
+            current_leader_registration is None
+            or current_leader_registration.record != leader_registration.record
+        ):
+            raise RendezvousConnectionError("arrival leader no longer owns its agent registration")
+        leader_registration = current_leader_registration
         completion_key = self._arrival_completion_key(
             assignment.generation,
             attempt,
@@ -1742,6 +1785,8 @@ class RestartContextFile:
             if not isinstance(value, Mapping):
                 raise RestartContextFileError("restart-context JSON must contain an object")
             return RestartContext.from_dict(value)
+        except _DuplicateJsonFieldError as error:
+            raise RestartContextFileError(str(error)) from error
         except RestartContextFileError:
             raise
         except (TypeError, ValueError, UnicodeDecodeError) as error:
@@ -2075,7 +2120,7 @@ def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     value: dict[str, Any] = {}
     for key, item in pairs:
         if key in value:
-            raise RestartContextFileError(f"restart-context JSON contains duplicate field {key!r}")
+            raise _DuplicateJsonFieldError(f"JSON contains duplicate field {key!r}")
         value[key] = item
     return value
 
