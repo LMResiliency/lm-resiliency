@@ -1512,7 +1512,9 @@ does not hold the handler's ownership lock, so local shutdown remains bounded
 while registration is stalled. A registration response arriving after local
 shutdown is not installed or heartbeated; a daemon performs an explicit
 best-effort release, with lease expiry as the conservative fallback. Initial
-registration itself is bounded by the formation deadline.
+registration and the initial closure-state observation are bounded by the
+formation deadline. A stalled closure backend cannot defeat that timeout, and
+local shutdown interrupts a handler waiting on the daemonized closure read.
 
 Before publishing readiness, each assigned handler clears its stale node-local
 restart context. Slot zero owns one durable, generation-scoped attempt head,
@@ -1524,17 +1526,22 @@ that proof instead of rereading every registration history, keeping control
 store work linear in the active node count. Slot zero reloads its current
 renewed registration immediately before each guarded completion attempt, so
 heartbeat renewal cannot strand an otherwise complete barrier on a stale
-fencing token. After bootstrap and final generation revalidation, every
-assigned handler publishes one immutable, registration-guarded consumption
-record for the completed attempt. An incomplete attempt remains usable when a
-handler incarnation is replaced. A completed attempt advances only after every
-slot has a durable consumption record, so a replacement for a handler that
-failed after completion but before returning joins the completed attempt
-instead of splitting the worker group. Guarded barrier transactions pin their
-registration revision in retained history. Missing or unprepared assigned
-nodes therefore fail at the formation deadline instead of launching a partial
-worker group. After bootstrap completes, every handler revalidates the
-generation head before returning its slot.
+fencing token. After bootstrap and generation revalidation, every assigned
+handler publishes one immutable, registration-incarnation-scoped consumption
+record for the completed attempt. The guarded publication reloads the current
+registration after heartbeat renewal and atomically conditions on the
+completion proof, generation head, immutable generation snapshot, and absence
+of terminal closure. An incomplete attempt remains usable when a handler
+incarnation is replaced. A stale consumption from an incarnation that failed
+before returning does not satisfy its replacement; the replacement publishes
+its own consumption for the same completed attempt. A completed attempt
+advances only after every slot's current registration has a durable consumption
+record, so a replacement joins the completed attempt instead of splitting the
+worker group. Guarded barrier transactions pin their registration revision in
+retained history. Missing or unprepared assigned nodes therefore fail at the
+formation deadline instead of launching a partial worker group. After
+consumption completes, every handler performs one final closure and generation
+check before returning its slot.
 
 Registration release is best effort and bounded during local shutdown. If the
 backend remains unavailable, cleanup returns without waiting indefinitely and

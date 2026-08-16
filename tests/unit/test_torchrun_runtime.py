@@ -1394,9 +1394,19 @@ def test_slot_aware_handler_reuses_generation_scoped_bootstrap_store(
         args=(second_outcome,),
     )
     second_thread.start()
+    second_thread.join(timeout=2)
+    replacement_first = second_outcome.get_nowait()
+    assert isinstance(replacement_first, RendezvousInfo)
+    assert replacement_first.rank == 1
+
+    second_outcome = queue.Queue()
+    second_thread = threading.Thread(
+        target=replacement_rendezvous_b,
+        args=(second_outcome,),
+    )
+    second_thread.start()
     time.sleep(0.02)
     assert second_thread.is_alive()
-
     second_a = handler_a.next_rendezvous()
     second_thread.join(timeout=2)
     assert not second_thread.is_alive()
@@ -1552,10 +1562,34 @@ def test_slot_aware_handler_replacement_consumes_completed_attempt_before_advanc
     )
     completion = store.get(original_leader._arrival_completion_key(0, attempt))
     assert completion is not None
+    original_leader._publish_arrival_consumption(
+        current,
+        assignment,
+        attempt,
+        0,
+        completion,
+        deadline,
+    )
+    original_consumption = store.get(
+        original_leader._arrival_consumption_key(
+            0,
+            attempt,
+            0,
+            original_registration.record.registration_id,
+        )
+    )
+    assert original_consumption is not None
     assert original_leader.shutdown() is True
 
     peer_info = peer.next_rendezvous()
-    peer_consumption = store.get(peer._arrival_consumption_key(0, attempt, 1))
+    peer_consumption = store.get(
+        peer._arrival_consumption_key(
+            0,
+            attempt,
+            1,
+            peer_registration.record.registration_id,
+        )
+    )
     assert peer_info.rank == 1
     assert peer_consumption is not None
 
@@ -1571,11 +1605,22 @@ def test_slot_aware_handler_replacement_consumes_completed_attempt_before_advanc
         agent_id="agent-a-replacement",
     )
     replacement_info = replacement.next_rendezvous()
-    replacement_consumption = store.get(replacement._arrival_consumption_key(0, attempt, 0))
+    with replacement._registration_lock:
+        replacement_registration = replacement._registration
+    assert replacement_registration is not None
+    replacement_consumption = store.get(
+        replacement._arrival_consumption_key(
+            0,
+            attempt,
+            0,
+            replacement_registration.record.registration_id,
+        )
+    )
     attempt_entry = store.get(replacement._arrival_attempt_key(0))
 
     assert replacement_info.rank == 0
     assert replacement_consumption is not None
+    assert replacement_consumption.value != original_consumption.value
     assert attempt_entry is not None
     current_attempt, _, _ = replacement._validate_arrival_attempt_entry(
         attempt_entry,
@@ -1584,6 +1629,172 @@ def test_slot_aware_handler_replacement_consumes_completed_attempt_before_advanc
     assert current_attempt == attempt
     assert peer.shutdown() is True
     assert replacement.shutdown() is True
+
+
+def test_slot_aware_handler_retries_consumption_after_heartbeat_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    _initialize_generation(store, clock, ("node-a",))
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-a",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-a",
+    )
+    original_compare = store.compare_set_many_guarded
+    refreshed = False
+
+    def refresh_before_consumption(*args: Any, **kwargs: Any) -> Any:
+        nonlocal refreshed
+        writes = args[0]
+        if not refreshed and any("/consumed/" in key for key in writes):
+            refreshed = True
+            with handler._registration_lock:
+                registration = handler._registration
+            assert registration is not None
+            renewed = handler._registration_manager.renew(registration)
+            with handler._registration_lock:
+                handler._registration = renewed
+        return original_compare(*args, **kwargs)
+
+    monkeypatch.setattr(store, "compare_set_many_guarded", refresh_before_consumption)
+
+    info = handler.next_rendezvous()
+
+    assert info.rank == 0
+    assert refreshed
+    assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_fences_closure_during_consumption(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    _initialize_generation(store, clock, ("node-a",))
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-a",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-a",
+    )
+    original_compare = store.compare_set_many_guarded
+    closed = False
+
+    def close_before_consumption(*args: Any, **kwargs: Any) -> Any:
+        nonlocal closed
+        writes = args[0]
+        if not closed and any("/consumed/" in key for key in writes):
+            closed = True
+            store.compare_set(
+                handler.closure_key,
+                expected_revision=None,
+                value=handler._closure_value,
+            )
+        return original_compare(*args, **kwargs)
+
+    monkeypatch.setattr(store, "compare_set_many_guarded", close_before_consumption)
+
+    with pytest.raises(RendezvousClosedError):
+        handler.next_rendezvous()
+
+    assert closed
+    assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_shutdown_interrupts_initial_closure_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-a",
+            min_nodes=1,
+            max_nodes=2,
+            join_timeout_ms=1_000,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-a",
+    )
+    started = threading.Event()
+    unblock = threading.Event()
+    original_read = handler._read_closure_entry
+
+    def blocked_read() -> Any:
+        started.set()
+        unblock.wait(timeout=2)
+        return original_read()
+
+    monkeypatch.setattr(handler, "_read_closure_entry", blocked_read)
+    thread, outcome = _start_rendezvous(handler)
+    assert started.wait(timeout=1)
+
+    before = time.monotonic()
+    assert handler.shutdown() is True
+    thread.join(timeout=1)
+    elapsed = time.monotonic() - before
+
+    assert not thread.is_alive()
+    assert elapsed < 0.5
+    assert isinstance(outcome.get_nowait(), RendezvousClosedError)
+    unblock.set()
+
+
+def test_slot_aware_handler_bounds_initial_closure_read_by_formation_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-a",
+            min_nodes=1,
+            max_nodes=2,
+            join_timeout_ms=60,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-a",
+    )
+    started = threading.Event()
+    unblock = threading.Event()
+
+    def blocked_read() -> Any:
+        started.set()
+        unblock.wait(timeout=2)
+        return None
+
+    monkeypatch.setattr(handler, "_read_closure_entry", blocked_read)
+
+    before = time.monotonic()
+    with pytest.raises(RendezvousTimeoutError):
+        handler.next_rendezvous()
+    elapsed = time.monotonic() - before
+
+    assert started.is_set()
+    assert elapsed < 0.5
+    unblock.set()
+    assert handler.shutdown() is True
 
 
 def test_slot_aware_handler_bounds_bootstrap_read_and_ignores_stale_unprefixed_keys(
