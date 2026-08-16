@@ -79,6 +79,20 @@ class ManualClock:
             self._now_unix_ms += duration_ms
 
 
+class ManualMonotonicClock:
+    def __init__(self) -> None:
+        self._now = 0.0
+        self._lock = threading.Lock()
+
+    def __call__(self) -> float:
+        with self._lock:
+            return self._now
+
+    def advance(self, duration_seconds: float) -> None:
+        with self._lock:
+            self._now += duration_seconds
+
+
 def _write_policy(path: Path, content: str = POLICY) -> Path:
     path.write_text(content, encoding="utf-8")
     return path
@@ -2901,6 +2915,7 @@ def test_slot_aware_handler_gives_selected_standby_a_fresh_formation_deadline(
     tmp_path: Path,
 ):
     clock = ManualClock()
+    monotonic_clock = ManualMonotonicClock()
     store = InMemoryControlStore(clock=clock)
     manager, lease, current = _initialize_generation(store, clock, ("node-a",))
     plan = _replacement_plan()
@@ -2916,6 +2931,7 @@ def test_slot_aware_handler_gives_selected_standby_a_fresh_formation_deadline(
         store=store,
         clock=clock,
         agent_id="agent-b",
+        monotonic_clock=monotonic_clock,
     )
     handler._publication_reader = cast(
         Any,
@@ -2932,7 +2948,7 @@ def test_slot_aware_handler_gives_selected_standby_a_fresh_formation_deadline(
             is not None
         )
     )
-    time.sleep(0.08)
+    monotonic_clock.advance(0.08)
     successor = RankAssignment.from_assignments(
         run_id=RUN_ID,
         generation=1,
