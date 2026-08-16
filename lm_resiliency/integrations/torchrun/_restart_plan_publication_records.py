@@ -67,16 +67,21 @@ class RestartPlanPublicationRecords:
 
     @property
     def run_prefix(self) -> str:
-        run_digest = hashlib.sha256(self.candidate.plan.run_id.encode("utf-8")).hexdigest()
-        return f"{_CONTROL_PREFIX}/runs/{run_digest}"
+        return _run_prefix(self.candidate.plan.run_id)
 
     @property
     def plan_key(self) -> str:
-        return f"{self.run_prefix}/restart-plans/{self.candidate.plan.to_generation}"
+        return restart_plan_key(
+            self.candidate.plan.run_id,
+            self.candidate.plan.to_generation,
+        )
 
     @property
     def recovery_manifest_key(self) -> str:
-        return f"{self.plan_key}/recovery-manifest"
+        return recovery_manifest_key(
+            self.candidate.plan.run_id,
+            self.candidate.plan.to_generation,
+        )
 
     @property
     def generation_head_key(self) -> str:
@@ -378,8 +383,30 @@ def _positive_integer(value: object, path: str) -> int:
     return value
 
 
+def _run_prefix(run_id: str) -> str:
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise ValueError("run_id must be a non-empty string")
+    run_digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()
+    return f"{_CONTROL_PREFIX}/runs/{run_digest}"
+
+
+def restart_plan_key(run_id: str, to_generation: int) -> str:
+    """Return the canonical immutable restart-plan key."""
+
+    generation = _positive_integer(to_generation, "to_generation")
+    return f"{_run_prefix(run_id)}/restart-plans/{generation}"
+
+
+def recovery_manifest_key(run_id: str, to_generation: int) -> str:
+    """Return the canonical manifest key beneath one restart plan."""
+
+    return f"{restart_plan_key(run_id, to_generation)}/recovery-manifest"
+
+
 __all__ = [
     "PreparedRestartPlanPublication",
     "RestartPlanPublicationAuthority",
     "RestartPlanPublicationRecords",
+    "recovery_manifest_key",
+    "restart_plan_key",
 ]

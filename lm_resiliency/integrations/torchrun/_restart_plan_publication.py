@@ -4,14 +4,26 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 
-from lm_resiliency.integrations.torchrun._control_store import ControlStore
+from lm_resiliency.integrations.torchrun._control_store import (
+    ControlStore,
+    ControlStoreEntry,
+)
 from lm_resiliency.integrations.torchrun._coordinator_lease_history import (
     CoordinatorLeaseAuthority,
     CoordinatorLeaseHistoryCorrupt,
     CoordinatorLeaseHistoryError,
     CoordinatorLeaseHistoryReader,
 )
+from lm_resiliency.integrations.torchrun._generation_reader import (
+    CurrentGeneration,
+    GenerationStateCorrupt,
+    GenerationStateError,
+    GenerationStateReader,
+    StoredGenerationSnapshot,
+)
+from lm_resiliency.integrations.torchrun._quarantine_store import node_quarantine_key
 from lm_resiliency.integrations.torchrun._restart_plan_publication_lifecycle import (
     RestartPlanPublicationLifecycleConflict,
     RestartPlanPublicationLifecycleCorrupt,
@@ -22,6 +34,12 @@ from lm_resiliency.integrations.torchrun._restart_plan_publication_records impor
     PreparedRestartPlanPublication,
     RestartPlanPublicationAuthority,
     RestartPlanPublicationRecords,
+    recovery_manifest_key,
+    restart_plan_key,
+)
+from lm_resiliency.integrations.torchrun._restart_plan_records import RestartPlanRecord
+from lm_resiliency.integrations.torchrun._restart_plan_state import (
+    PersistedRestartPlanPublication,
 )
 
 _MAX_READ_ATTEMPTS = 8
@@ -195,6 +213,177 @@ class RestartPlanPublicationCorrupt(RestartPlanPublicationError):
     """Raised when durable publication dependencies are contradictory."""
 
 
+class RestartPlanPublicationReadError(RuntimeError):
+    """Base error for reading the latest committed restart plan."""
+
+
+class RestartPlanPublicationReadConflict(RestartPlanPublicationReadError):
+    """Raised when generation or publication state changes repeatedly."""
+
+
+class RestartPlanPublicationReadCorrupt(RestartPlanPublicationReadError):
+    """Raised when the latest publication is incomplete or contradictory."""
+
+
+@dataclass(frozen=True, slots=True)
+class _PublicationEntries:
+    plan: ControlStoreEntry
+    manifest: ControlStoreEntry
+    successor_snapshot: ControlStoreEntry
+    generation_head: ControlStoreEntry
+    quarantines: tuple[tuple[str, ControlStoreEntry], ...]
+
+
+class RestartPlanPublicationReader:
+    """Read one stable latest restart-plan publication without mutation."""
+
+    def __init__(
+        self,
+        store: ControlStore,
+        *,
+        run_id: str,
+    ) -> None:
+        self._store = store
+        self._run_id = _nonempty_string(run_id, "run_id")
+        self._generation_reader = GenerationStateReader(
+            store,
+            run_id=self._run_id,
+        )
+
+    def read(self) -> PersistedRestartPlanPublication | None:
+        """Return the stable publication for the current generation, if any."""
+
+        for _ in range(_MAX_READ_ATTEMPTS):
+            current = self._read_current()
+            if current is None or current.snapshot.record.assignment.generation == 0:
+                return None
+            generation = current.snapshot.record.assignment.generation
+            first = self._read_entries(generation)
+            if self._read_current() != current:
+                continue
+            second = self._read_entries(generation)
+            if second != first or self._read_current() != current:
+                continue
+            publication = self._decode(first, generation)
+            self._validate_current(publication, current)
+            return publication
+        raise RestartPlanPublicationReadConflict(
+            "restart-plan publication changed repeatedly during read"
+        )
+
+    def _read_current(self) -> CurrentGeneration | None:
+        try:
+            return self._generation_reader.current()
+        except GenerationStateCorrupt as error:
+            raise RestartPlanPublicationReadCorrupt(
+                "generation state is corrupt while reading restart-plan publication"
+            ) from error
+        except GenerationStateError as error:
+            raise RestartPlanPublicationReadConflict(
+                "generation state changed repeatedly while reading restart-plan publication"
+            ) from error
+
+    def _read_entries(self, generation: int) -> _PublicationEntries:
+        plan = self._require_entry(
+            restart_plan_key(self._run_id, generation),
+            "restart plan",
+        )
+        try:
+            plan_record = RestartPlanRecord.from_json(plan.value)
+        except (TypeError, ValueError) as error:
+            raise RestartPlanPublicationReadCorrupt(
+                "restart-plan publication contains a malformed plan record"
+            ) from error
+        quarantines = tuple(
+            (
+                node_id,
+                self._require_entry(
+                    node_quarantine_key(self._run_id, node_id),
+                    f"quarantine record for {node_id!r}",
+                ),
+            )
+            for node_id in sorted(plan_record.plan.quarantined_node_ids)
+        )
+        return _PublicationEntries(
+            plan=plan,
+            manifest=self._require_entry(
+                recovery_manifest_key(self._run_id, generation),
+                "recovery manifest",
+            ),
+            successor_snapshot=self._require_entry(
+                self._generation_reader.snapshot_key(generation),
+                "successor generation snapshot",
+            ),
+            generation_head=self._require_entry(
+                self._generation_reader.head_key,
+                "generation head",
+            ),
+            quarantines=quarantines,
+        )
+
+    def _require_entry(self, key: str, path: str) -> ControlStoreEntry:
+        entry = self._store.get(key)
+        if entry is None:
+            raise RestartPlanPublicationReadCorrupt(
+                f"latest restart-plan publication is missing its {path}"
+            )
+        return entry
+
+    def _decode(
+        self,
+        entries: _PublicationEntries,
+        generation: int,
+    ) -> PersistedRestartPlanPublication:
+        try:
+            return PersistedRestartPlanPublication.from_entries(
+                run_id=self._run_id,
+                to_generation=generation,
+                plan_entry=entries.plan,
+                manifest_entry=entries.manifest,
+                successor_snapshot_entry=entries.successor_snapshot,
+                generation_head_entry=entries.generation_head,
+                quarantine_entries=dict(entries.quarantines),
+            )
+        except (TypeError, ValueError) as error:
+            raise RestartPlanPublicationReadCorrupt(
+                "latest restart-plan publication is corrupt"
+            ) from error
+
+    def _validate_current(
+        self,
+        publication: PersistedRestartPlanPublication,
+        current: CurrentGeneration,
+    ) -> None:
+        successor_entry = publication.successor_snapshot_entry
+        if (
+            successor_entry.committed_at_unix_ms is None
+            or successor_entry.guard_mutation_sequence is None
+            or successor_entry.guard_value_sequence is None
+            or successor_entry.guard_lifetime_sequence is None
+            or successor_entry.guard_committed_at_unix_ms is None
+        ):
+            raise RestartPlanPublicationReadCorrupt(
+                "latest restart-plan successor lacks authoritative metadata"
+            )
+        expected_snapshot = StoredGenerationSnapshot(
+            record=publication.successor_snapshot,
+            revision=successor_entry.revision,
+            committed_at_unix_ms=successor_entry.committed_at_unix_ms,
+            transaction_sequence=successor_entry.transaction_sequence,
+            guard_mutation_sequence=successor_entry.guard_mutation_sequence,
+            guard_value_sequence=successor_entry.guard_value_sequence,
+            guard_lifetime_sequence=successor_entry.guard_lifetime_sequence,
+            guard_committed_at_unix_ms=successor_entry.guard_committed_at_unix_ms,
+        )
+        if (
+            current.snapshot != expected_snapshot
+            or current.head_revision != publication.generation_head_entry.revision
+        ):
+            raise RestartPlanPublicationReadCorrupt(
+                "latest restart-plan publication does not match the current generation"
+            )
+
+
 class RestartPlanPublicationPreparer:
     """Compose authenticated authority and lifecycle state without mutation."""
 
@@ -286,4 +475,8 @@ __all__ = [
     "RestartPlanPublicationPreparationError",
     "RestartPlanPublicationPreparationLeaseLost",
     "RestartPlanPublicationPreparer",
+    "RestartPlanPublicationReadConflict",
+    "RestartPlanPublicationReadCorrupt",
+    "RestartPlanPublicationReadError",
+    "RestartPlanPublicationReader",
 ]
