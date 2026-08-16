@@ -58,7 +58,7 @@ POLICY = """\
 schema_version = 1
 control_endpoint = "control.example:443"
 replacement_only = true
-max_replacement_generations = 2
+max_replacement_generations = 1
 registration_lease_duration_ms = 30000
 poll_interval_ms = 1000
 join_timeout_ms = 300000
@@ -77,6 +77,10 @@ class ManualClock:
     def advance(self, duration_ms: int) -> None:
         with self._lock:
             self._now_unix_ms += duration_ms
+
+    def set(self, now_unix_ms: int) -> None:
+        with self._lock:
+            self._now_unix_ms = now_unix_ms
 
 
 class ManualMonotonicClock:
@@ -153,9 +157,22 @@ def _context(*, plan_id: str = "plan-1") -> RestartContext:
 class StaticRecoveryStateReader:
     def __init__(self, state: object) -> None:
         self._state = state
+        self.calls = 0
 
     def read_recovery_state(self) -> object:
+        self.calls += 1
         return self._state
+
+
+def _static_recovery_state(
+    plan: RestartPlan,
+    *,
+    committed_at_unix_ms: int = 1_000,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        plan=plan,
+        publication=SimpleNamespace(committed_at_unix_ms=committed_at_unix_ms),
+    )
 
 
 def _replacement_plan(
@@ -194,7 +211,7 @@ def test_runtime_config_loads_shared_policy_and_node_inputs(tmp_path: Path):
     )
 
     assert config.policy.control_endpoint == "control.example:443"
-    assert config.policy.max_replacement_generations == 2
+    assert config.policy.max_replacement_generations == 1
     assert (
         config.policy.digest
         == TorchrunRendezvousPolicy(
@@ -220,7 +237,7 @@ def test_runtime_config_digest_ignores_toml_formatting_and_node_inputs(tmp_path:
 join_timeout_ms=300000
 poll_interval_ms=1000
 registration_lease_duration_ms=30000
-max_replacement_generations=2
+max_replacement_generations=1
 replacement_only=true
 control_endpoint="control.example:443"
 schema_version=1
@@ -451,7 +468,7 @@ def test_runtime_config_rendezvous_overrides_change_resolved_policy(tmp_path: Pa
         _parameters(
             source,
             control_endpoint="override.example:8443",
-            max_replacement_generations="4",
+            max_replacement_generations="1",
             registration_lease_duration_ms="45000",
             poll_interval_ms="500",
             join_timeout_ms="120000",
@@ -461,7 +478,7 @@ def test_runtime_config_rendezvous_overrides_change_resolved_policy(tmp_path: Pa
     )
 
     assert config.policy.control_endpoint == "override.example:8443"
-    assert config.policy.max_replacement_generations == 4
+    assert config.policy.max_replacement_generations == 1
     assert config.policy.registration_lease_duration_ms == 45_000
     assert config.policy.poll_interval_ms == 500
     assert config.policy.join_timeout_ms == 120_000
@@ -493,6 +510,10 @@ def test_runtime_config_rendezvous_overrides_change_resolved_policy(tmp_path: Pa
         (
             'schema_version = 1\ncontrol_endpoint = "control"\nmax_replacement_generations = 1.5\n',
             "max_replacement_generations",
+        ),
+        (
+            'schema_version = 1\ncontrol_endpoint = "control"\nmax_replacement_generations = 2\n',
+            "exactly one replacement generation",
         ),
     ],
 )
@@ -2896,7 +2917,7 @@ def test_slot_aware_handler_admits_replacement_and_writes_restart_context(
         clock=clock,
         agent_id="agent-b",
     )
-    state = SimpleNamespace(plan=plan)
+    state = _static_recovery_state(plan)
     handler._publication_reader = cast(Any, StaticRecoveryStateReader(state))
 
     rendezvous = handler.next_rendezvous()
@@ -2935,7 +2956,7 @@ def test_slot_aware_handler_gives_selected_standby_a_fresh_formation_deadline(
     )
     handler._publication_reader = cast(
         Any,
-        StaticRecoveryStateReader(SimpleNamespace(plan=plan)),
+        StaticRecoveryStateReader(_static_recovery_state(plan)),
     )
     thread, outcome = _start_rendezvous(handler)
     _wait_until(
@@ -2969,6 +2990,55 @@ def test_slot_aware_handler_gives_selected_standby_a_fresh_formation_deadline(
     assert handler.shutdown() is True
 
 
+def test_slot_aware_handler_keeps_unselected_standby_outside_plan_deadline(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    manager, lease, current = _initialize_generation(store, clock, ("node-a",))
+    plan = _replacement_plan(restart_deadline_unix_ms=clock())
+    successor = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    manager.commit_successor(lease, current, successor)
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-c",
+            min_nodes=1,
+            max_nodes=3,
+            join_timeout_ms=50,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-c",
+    )
+    recovery_reader = StaticRecoveryStateReader(_static_recovery_state(plan))
+    handler._publication_reader = cast(Any, recovery_reader)
+
+    thread, outcome = _start_rendezvous(handler)
+    _wait_until(
+        lambda: (
+            AgentRegistrationReader(
+                store,
+                run_id=RUN_ID,
+                clock=clock,
+            ).get("node-c")
+            is not None
+        )
+    )
+    time.sleep(0.08)
+
+    assert thread.is_alive()
+    assert recovery_reader.calls == 0
+    assert handler.shutdown() is True
+    thread.join(timeout=2)
+    assert isinstance(outcome.get_nowait(), RendezvousClosedError)
+
+
 def test_slot_aware_handler_rejects_expired_replacement_without_leaving_context(
     tmp_path: Path,
 ):
@@ -2997,10 +3067,56 @@ def test_slot_aware_handler_rejects_expired_replacement_without_leaving_context(
     )
     handler._publication_reader = cast(
         Any,
-        StaticRecoveryStateReader(SimpleNamespace(plan=plan)),
+        StaticRecoveryStateReader(_static_recovery_state(plan)),
     )
 
     with pytest.raises(RendezvousTimeoutError):
+        handler.next_rendezvous()
+
+    assert not config.restart_context_path.exists()
+    assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_clears_context_when_publication_fails_after_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    manager, lease, current = _initialize_generation(store, clock, ("node-a",))
+    plan = _replacement_plan()
+    successor = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    manager.commit_successor(lease, current, successor)
+    config = _handler_config(
+        tmp_path,
+        node_id="node-b",
+        min_nodes=1,
+        max_nodes=2,
+    )
+    handler = _handler(
+        config,
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+    )
+    handler._publication_reader = cast(
+        Any,
+        StaticRecoveryStateReader(_static_recovery_state(plan)),
+    )
+    original_write = RestartContextFile.write
+
+    def publish_then_fail(context_file: RestartContextFile, context: RestartContext) -> None:
+        original_write(context_file, context)
+        raise RestartContextFileError("injected post-publication failure")
+
+    monkeypatch.setattr(RestartContextFile, "write", publish_then_fail)
+
+    with pytest.raises(RendezvousStateError, match="publish the replacement restart context"):
         handler.next_rendezvous()
 
     assert not config.restart_context_path.exists()
@@ -3036,7 +3152,7 @@ def test_slot_aware_handler_clears_replacement_context_after_admission_failure(
     )
     handler._publication_reader = cast(
         Any,
-        StaticRecoveryStateReader(SimpleNamespace(plan=plan)),
+        StaticRecoveryStateReader(_static_recovery_state(plan)),
     )
 
     def fail_after_context(*_args: object) -> object:
@@ -3053,6 +3169,60 @@ def test_slot_aware_handler_clears_replacement_context_after_admission_failure(
 
     assert not config.restart_context_path.exists()
     assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_rejects_replacement_clock_behind_publication(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=InMemoryControlStore(clock=clock),
+        clock=clock,
+        agent_id="agent-b",
+    )
+    recovery_state = _static_recovery_state(
+        _replacement_plan(),
+        committed_at_unix_ms=clock() + 1,
+    )
+
+    with pytest.raises(RendezvousConnectionError, match="clock regressed"):
+        handler._replacement_deadline(cast(Any, recovery_state), None)
+
+
+def test_slot_aware_handler_rejects_clock_regression_and_retains_first_deadline(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    monotonic_clock = ManualMonotonicClock()
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=InMemoryControlStore(clock=clock),
+        clock=clock,
+        agent_id="agent-b",
+        monotonic_clock=monotonic_clock,
+    )
+    recovery_state = _static_recovery_state(_replacement_plan())
+    deadline = handler._replacement_deadline(cast(Any, recovery_state), None)
+
+    clock.set(clock() - 1)
+    with pytest.raises(RendezvousConnectionError, match="clock regressed"):
+        handler._validate_replacement_deadline(cast(Any, recovery_state), deadline)
+
+    clock.set(1_000)
+    monotonic_clock.advance(deadline)
+    with pytest.raises(RendezvousTimeoutError):
+        handler._validate_replacement_deadline(cast(Any, recovery_state), deadline)
 
 
 def test_slot_aware_handler_rejects_assignment_size_mismatch(tmp_path: Path):

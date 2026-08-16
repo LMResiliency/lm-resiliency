@@ -164,7 +164,11 @@ reference integration does not require that experimental surface.
 The integration must also avoid depending on `--max-restarts` as its only
 replacement budget. Failure retries and membership changes have had different
 accounting behavior across torchrun versions. The coordinator should own an
-explicit `max_replacement_generations` policy.
+explicit `max_replacement_generations` policy. The current runtime admits
+exactly one replacement generation because authoritative lifecycle readback
+currently proves only the first closed intent and successor. Configuration
+values greater than one fail closed until repeated lifecycle readback is
+implemented.
 
 ## Three-Layer Architecture
 
@@ -1876,7 +1880,7 @@ changing torchrun's default behavior:
 schema_version = 1
 control_endpoint = "control.internal:443"
 replacement_only = true
-max_replacement_generations = 2
+max_replacement_generations = 1
 registration_lease_duration_ms = 30000
 poll_interval_ms = 1000
 join_timeout_ms = 300000

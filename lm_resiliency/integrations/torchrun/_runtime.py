@@ -93,6 +93,7 @@ _ARRIVAL_SCHEMA_VERSION = 1
 _ARRIVAL_ATTEMPT_SCHEMA_VERSION = 1
 _ARRIVAL_COMPLETION_SCHEMA_VERSION = 1
 _ARRIVAL_CONSUMPTION_SCHEMA_VERSION = 1
+_SUPPORTED_REPLACEMENT_GENERATIONS = 1
 _SHARED_FIELDS = {
     "control_endpoint",
     "replacement_only",
@@ -131,7 +132,7 @@ class TorchrunRendezvousPolicy:
 
     control_endpoint: str
     replacement_only: bool = True
-    max_replacement_generations: int = 2
+    max_replacement_generations: int = _SUPPORTED_REPLACEMENT_GENERATIONS
     registration_lease_duration_ms: int = 30_000
     poll_interval_ms: int = 1_000
     join_timeout_ms: int = 300_000
@@ -199,6 +200,10 @@ class TorchrunRuntimeConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.policy, TorchrunRendezvousPolicy):
             raise TypeError("policy must be TorchrunRendezvousPolicy")
+        if self.policy.max_replacement_generations > _SUPPORTED_REPLACEMENT_GENERATIONS:
+            raise TorchrunRuntimeConfigError(
+                "the torchrun runtime currently supports exactly one replacement generation"
+            )
         _nonempty_string(self.run_id, "run_id")
         _nonempty_string(self.endpoint, "endpoint")
         _positive_integer(self.min_nodes, "min_nodes")
@@ -441,6 +446,8 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         self._closed_event = threading.Event()
         self._closure_lock = threading.Lock()
         self._closure_read_lock = threading.Lock()
+        self._replacement_clock_lock = threading.Lock()
+        self._last_replacement_now_unix_ms: int | None = None
         self._shutdown_lock = threading.Lock()
 
     @property
@@ -494,9 +501,13 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                 self._raise_heartbeat_error()
                 if current is not None:
                     if slot is not None:
-                        context_written = self._prepare_restart_context(
-                            current,
-                            recovery_state,
+                        context_written = current.snapshot.record.assignment.generation > 0
+                        context_written = (
+                            self._prepare_restart_context(
+                                current,
+                                recovery_state,
+                            )
+                            or context_written
                         )
                         attempt, completion = self._wait_for_assigned_arrivals(
                             current,
@@ -527,6 +538,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                         self._validate_final_admission_state(
                             current,
                             recovery_state,
+                            admission_deadline,
                         )
                         return RendezvousInfo(
                             bootstrap_store,
@@ -1566,6 +1578,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         self,
         current: CurrentGeneration,
         recovery_state: RestartPlanPersistedRecoveryState | None = None,
+        admission_deadline: float | None = None,
     ) -> None:
         if self._is_closed_bounded(None):
             raise RendezvousClosedError
@@ -1578,7 +1591,11 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             raise RendezvousConnectionError(
                 "restart-plan recovery state changed before rendezvous admission"
             )
-        self._replacement_deadline(refreshed.plan, None)
+        if admission_deadline is None:
+            raise RendezvousStateError(
+                "replacement rendezvous lacks its original admission deadline"
+            )
+        self._validate_replacement_deadline(refreshed, admission_deadline)
         expected_context = self._restart_context_for_plan(refreshed.plan)
         try:
             persisted_context = self._restart_context.read()
@@ -2176,6 +2193,16 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             raise RendezvousStateError(
                 "generation assignment local world size does not match runtime configuration"
             )
+        slot = next(
+            (
+                slot
+                for slot, node_id in assignment.slot_to_node_id.items()
+                if node_id == self._config.node_id
+            ),
+            None,
+        )
+        if slot is None:
+            return None, None, formation_deadline
         recovery_state: RestartPlanPersistedRecoveryState | None = None
         admission_deadline = formation_deadline
         if assignment.generation > 0:
@@ -2206,15 +2233,12 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                     "replacement plan does not match the committed generation assignment"
                 )
             admission_deadline = self._replacement_deadline(
-                plan,
+                recovery_state,
                 formation_deadline,
             )
-        for slot, node_id in assignment.slot_to_node_id.items():
-            if node_id == self._config.node_id:
-                self._ensure_job_compatibility()
-                self._validate_assigned_registration_history()
-                return slot, recovery_state, admission_deadline
-        return None, recovery_state, admission_deadline
+        self._ensure_job_compatibility()
+        self._validate_assigned_registration_history()
+        return slot, recovery_state, admission_deadline
 
     def _read_recovery_state(self) -> RestartPlanPersistedRecoveryState | None:
         try:
@@ -2234,17 +2258,47 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
 
     def _replacement_deadline(
         self,
-        plan: RestartPlan,
+        recovery_state: RestartPlanPersistedRecoveryState,
         formation_deadline: float | None,
     ) -> float:
-        now_unix_ms = self._clock()
-        if isinstance(now_unix_ms, bool) or not isinstance(now_unix_ms, int) or now_unix_ms < 1:
-            raise RendezvousConnectionError("replacement rendezvous clock returned an invalid time")
+        now_unix_ms = self._replacement_now_unix_ms(recovery_state)
+        plan = recovery_state.plan
         remaining_seconds = (plan.restart_deadline_unix_ms - now_unix_ms) / 1_000
         if remaining_seconds <= 0:
             raise RendezvousTimeoutError
         deadline = self._monotonic_clock() + remaining_seconds
         return deadline if formation_deadline is None else min(deadline, formation_deadline)
+
+    def _replacement_now_unix_ms(
+        self,
+        recovery_state: RestartPlanPersistedRecoveryState,
+    ) -> int:
+        now_unix_ms = self._clock()
+        if isinstance(now_unix_ms, bool) or not isinstance(now_unix_ms, int) or now_unix_ms < 1:
+            raise RendezvousConnectionError("replacement rendezvous clock returned an invalid time")
+        publication_time = recovery_state.publication.committed_at_unix_ms
+        with self._replacement_clock_lock:
+            if now_unix_ms < publication_time or (
+                self._last_replacement_now_unix_ms is not None
+                and now_unix_ms < self._last_replacement_now_unix_ms
+            ):
+                raise RendezvousConnectionError(
+                    "replacement rendezvous clock regressed behind trusted state"
+                )
+            self._last_replacement_now_unix_ms = now_unix_ms
+        return now_unix_ms
+
+    def _validate_replacement_deadline(
+        self,
+        recovery_state: RestartPlanPersistedRecoveryState,
+        admission_deadline: float,
+    ) -> None:
+        now_unix_ms = self._replacement_now_unix_ms(recovery_state)
+        if (
+            self._monotonic_clock() >= admission_deadline
+            or now_unix_ms >= recovery_state.plan.restart_deadline_unix_ms
+        ):
+            raise RendezvousTimeoutError
 
     def _prepare_restart_context(
         self,
@@ -2650,7 +2704,10 @@ def _policy_from_values(values: Mapping[str, object]) -> TorchrunRendezvousPolic
                 "replacement_only",
             ),
             max_replacement_generations=_integer(
-                values.get("max_replacement_generations", 2),
+                values.get(
+                    "max_replacement_generations",
+                    _SUPPORTED_REPLACEMENT_GENERATIONS,
+                ),
                 "max_replacement_generations",
             ),
             registration_lease_duration_ms=_integer(
