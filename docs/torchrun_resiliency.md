@@ -875,6 +875,15 @@ immutable-record lineage, common transaction identity, coordinator-lease
 provenance, input ordering, and commit window before the publication is
 accepted. Lifecycle, generation, or registration churn remains a classified
 conflict; substituted store responses fail closed as corruption.
+`PersistedRestartPlanPublication` reconstructs the publication transaction
+from canonical plan, manifest, quarantine, successor-snapshot, and
+generation-head entries. It requires exact envelope digests, immutable record
+lineage, one transaction and commit time, canonical coordinator-lease guard
+provenance, and a commit inside both the lease and restart-deadline windows.
+This transaction decoder does not by itself resolve the source generation,
+closed lifecycle, lease history, inventory evidence, or currently committed
+generation; the stable publication reader performs those checks before
+rendezvous may expose the plan.
 
 Before commit, the coordinator validates:
 

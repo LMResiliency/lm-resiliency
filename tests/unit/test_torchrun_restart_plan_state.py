@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any, cast
 
@@ -23,6 +24,7 @@ from lm_resiliency.integrations.torchrun._agent_registration_records import (
     HeldAgentRegistration,
 )
 from lm_resiliency.integrations.torchrun._control_store import (
+    ControlStoreEntry,
     ControlStoreWrite,
     InMemoryControlStore,
 )
@@ -82,6 +84,7 @@ from lm_resiliency.integrations.torchrun._restart_plan_records import (
     RestartPlanRecord,
 )
 from lm_resiliency.integrations.torchrun._restart_plan_state import (
+    PersistedRestartPlanPublication,
     ResolvedRecoveryManifest,
     RestartPlanCandidateState,
     RestartPlanCertificationState,
@@ -2042,6 +2045,209 @@ def _publication_records() -> RestartPlanPublicationRecords:
             head_revision=18,
         ),
     )
+
+
+def _persisted_publication() -> PersistedRestartPlanPublication:
+    publication = _publication_records()
+    generation_state = publication.candidate.placement_state.generation_state
+    quarantine_state = (
+        publication.candidate.recovery_state.copy_state.inventory_state.quarantine_state
+    )
+    manifest_record = quarantine_state.manifest_state.resolved_manifest.record
+    plan_record = generation_state.record
+    run_digest = hashlib.sha256(RUN_ID.encode()).hexdigest()
+    guard_key = f"lm_resiliency/torchrun/v1/runs/{run_digest}/coordinator-lease"
+
+    def immutable_entry(value: bytes, revision: int) -> ControlStoreEntry:
+        return ControlStoreEntry(
+            value=value,
+            revision=revision,
+            committed_at_unix_ms=1_200,
+            transaction_sequence=30,
+            guard_key=guard_key,
+            guard_revision=plan_record.coordinator_fencing_token,
+            guard_value_digest=plan_record.coordinator_lease_digest,
+            guard_mutation_sequence=9,
+            guard_value_sequence=5,
+            guard_lifetime_sequence=1,
+            guard_committed_at_unix_ms=900,
+        )
+
+    quarantine_entries = {
+        node_id: immutable_entry(record.to_json(), 24 + index)
+        for index, (node_id, record) in enumerate(quarantine_state.quarantine_records.items())
+    }
+    return PersistedRestartPlanPublication.from_entries(
+        plan_entry=immutable_entry(plan_record.to_json(), 21),
+        manifest_entry=immutable_entry(manifest_record.to_json(), 22),
+        successor_snapshot_entry=immutable_entry(
+            generation_state.to_snapshot.to_json(),
+            23,
+        ),
+        generation_head_entry=replace(
+            immutable_entry(publication.generation_head.to_json(), 29),
+            mutation_sequence=publication.candidate.plan.to_generation + 1,
+            value_sequence=publication.candidate.plan.to_generation + 1,
+        ),
+        quarantine_entries=quarantine_entries,
+    )
+
+
+def test_persisted_restart_plan_publication_decodes_atomic_records():
+    state = _persisted_publication()
+
+    assert state.record.plan == state.plan
+    assert state.generation_head.snapshot_digest == state.successor_snapshot.digest
+    assert state.committed_at_unix_ms == 1_200
+    assert state.transaction_sequence == 30
+    assert set(state.quarantine_records) == set(state.plan.quarantined_node_ids)
+    with pytest.raises(TypeError):
+        state.quarantine_entries["other"] = state.plan_entry
+
+
+def test_persisted_restart_plan_publication_rejects_malformed_records():
+    state = _persisted_publication()
+
+    with pytest.raises(ValueError, match="malformed records"):
+        PersistedRestartPlanPublication.from_entries(
+            plan_entry=replace(state.plan_entry, value=b"{}"),
+            manifest_entry=state.manifest_entry,
+            successor_snapshot_entry=state.successor_snapshot_entry,
+            generation_head_entry=state.generation_head_entry,
+            quarantine_entries=state.quarantine_entries,
+        )
+
+
+def test_persisted_restart_plan_publication_rejects_digest_substitution():
+    state = _persisted_publication()
+
+    with pytest.raises(ValueError, match="manifest digest"):
+        replace(
+            state,
+            manifest_record=replace(
+                state.manifest_record,
+                source_generation_snapshot_digest="f" * 64,
+            ),
+        )
+    with pytest.raises(ValueError, match="successor digest"):
+        replace(
+            state,
+            successor_snapshot=replace(
+                state.successor_snapshot,
+                coordinator_fencing_token=10,
+            ),
+        )
+    with pytest.raises(ValueError, match="quarantine records"):
+        replace(state, quarantine_records={})
+
+
+@pytest.mark.parametrize(
+    ("entry_name", "change", "message"),
+    [
+        (
+            "plan_entry",
+            lambda entry: replace(entry, transaction_sequence=31),
+            "share one transaction",
+        ),
+        (
+            "manifest_entry",
+            lambda entry: replace(entry, committed_at_unix_ms=1_201),
+            "share one commit time",
+        ),
+        (
+            "successor_snapshot_entry",
+            lambda entry: replace(entry, guard_value_digest="0" * 64),
+            "share guard provenance",
+        ),
+        (
+            "plan_entry",
+            lambda entry: replace(
+                entry,
+                mutation_sequence=2,
+                value_sequence=2,
+            ),
+            "is not immutable",
+        ),
+        (
+            "generation_head_entry",
+            lambda entry: replace(
+                entry,
+                mutation_sequence=7,
+                value_sequence=7,
+            ),
+            "generation head has invalid lineage",
+        ),
+    ],
+)
+def test_persisted_restart_plan_publication_rejects_entry_substitution(
+    entry_name: str,
+    change: Callable[[ControlStoreEntry], ControlStoreEntry],
+    message: str,
+) -> None:
+    state = _persisted_publication()
+
+    with pytest.raises(ValueError, match=message):
+        replace(
+            state,
+            **cast(Any, {entry_name: change(getattr(state, entry_name))}),
+        )
+
+
+def test_persisted_restart_plan_publication_rejects_guard_or_time_substitution():
+    state = _persisted_publication()
+    changed_guard = {
+        node_id: replace(entry, guard_revision=10)
+        for node_id, entry in state.quarantine_entries.items()
+    }
+
+    with pytest.raises(ValueError, match="share guard provenance"):
+        replace(state, quarantine_entries=changed_guard)
+    wrong_guard_key = "lm_resiliency/torchrun/v1/runs/other/coordinator-lease"
+    with pytest.raises(ValueError, match="invalid coordinator guard provenance"):
+        replace(
+            state,
+            plan_entry=replace(state.plan_entry, guard_key=wrong_guard_key),
+            manifest_entry=replace(state.manifest_entry, guard_key=wrong_guard_key),
+            successor_snapshot_entry=replace(
+                state.successor_snapshot_entry,
+                guard_key=wrong_guard_key,
+            ),
+            generation_head_entry=replace(
+                state.generation_head_entry,
+                guard_key=wrong_guard_key,
+            ),
+            quarantine_entries={
+                node_id: replace(entry, guard_key=wrong_guard_key)
+                for node_id, entry in state.quarantine_entries.items()
+            },
+        )
+    with pytest.raises(ValueError, match="authority window"):
+        replace(
+            state,
+            plan_entry=replace(state.plan_entry, committed_at_unix_ms=1_400),
+            manifest_entry=replace(state.manifest_entry, committed_at_unix_ms=1_400),
+            successor_snapshot_entry=replace(
+                state.successor_snapshot_entry,
+                committed_at_unix_ms=1_400,
+            ),
+            generation_head_entry=replace(
+                state.generation_head_entry,
+                committed_at_unix_ms=1_400,
+            ),
+            quarantine_entries={
+                node_id: replace(entry, committed_at_unix_ms=1_400)
+                for node_id, entry in state.quarantine_entries.items()
+            },
+        )
+
+
+def test_persisted_restart_plan_publication_requires_exact_types():
+    state = _persisted_publication()
+
+    with pytest.raises(TypeError, match="record must be"):
+        replace(state, record=state.record.plan)
+    with pytest.raises(TypeError, match="quarantine_entries must be a mapping"):
+        replace(state, quarantine_entries=())
 
 
 def test_restart_plan_publication_records_build_canonical_atomic_inputs():
