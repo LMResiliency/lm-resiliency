@@ -747,9 +747,14 @@ class RestartPlanPlacementState:
                 "RestartPlanPlacementState surviving nodes changed logical slots: "
                 f"{moved_survivors!r}"
             )
-        if planned_nodes == current_nodes:
+        if not planned_nodes - current_nodes:
             raise ValueError(
                 "RestartPlanPlacementState version 1 requires at least one replacement node"
+            )
+        if len(plan.slot_assignments) != self.generation_state.from_assignment.active_nodes:
+            raise ValueError(
+                "RestartPlanPlacementState successor active node count "
+                "does not match the source generation"
             )
         removed_nodes = current_nodes - planned_nodes
         quarantined_nodes = set(plan.quarantined_node_ids)

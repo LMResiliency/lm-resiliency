@@ -809,12 +809,13 @@ publication remain separate checks.
 `RestartPlanPlacementState` performs the registration-backed part of placement
 admission without reading or mutating the control store. It requires the
 closed intent's suspected nodes to be removed, surviving nodes to retain their
-logical slots, at least one replacement node, and exact current registration
-histories for every successor node. Each selected registration must be live at
-one observation time and must match the planned local worker count and the
-coordinator's expected `environment_digest`. Trusted hardware inventory,
-previously committed quarantine state, recovery evidence, and atomic
-publication remain separate admission boundaries.
+logical slots, the active node count to remain fixed, at least one genuinely
+new replacement node, and exact current registration histories for every
+successor node. Each selected registration must be live at one observation time
+and must match the planned local worker count and the coordinator's expected
+`environment_digest`. Trusted hardware inventory, previously committed
+quarantine state, recovery evidence, and atomic publication remain separate
+admission boundaries.
 
 Before commit, the coordinator validates:
 

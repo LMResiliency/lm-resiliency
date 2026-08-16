@@ -600,6 +600,58 @@ def test_restart_plan_placement_state_requires_replacement():
         )
 
 
+def test_restart_plan_placement_state_rejects_shrink_without_replacement():
+    state = _generation_state()
+    changed = _replace_generation_plan(
+        state,
+        replace(
+            state.plan,
+            slot_assignments=(
+                SlotAssignment(
+                    logical_node_slot=0,
+                    node_id="node-a",
+                    first_global_rank=0,
+                    local_world_size=4,
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="requires at least one replacement"):
+        _placement_state(
+            generation_state=changed,
+            registration_histories={
+                "node-a": _registration_history("node-a", local_world_size=4),
+            },
+        )
+
+
+def test_restart_plan_placement_state_preserves_active_node_count():
+    state = _generation_state()
+    changed = _replace_generation_plan(
+        state,
+        replace(
+            state.plan,
+            slot_assignments=(
+                SlotAssignment(
+                    logical_node_slot=0,
+                    node_id="node-c",
+                    first_global_rank=0,
+                    local_world_size=4,
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="active node count"):
+        _placement_state(
+            generation_state=changed,
+            registration_histories={
+                "node-c": _registration_history("node-c", local_world_size=4),
+            },
+        )
+
+
 def test_restart_plan_placement_state_rejects_quarantine_outside_intent_scope():
     state = _generation_state()
     changed = _replace_generation_plan(
