@@ -983,6 +983,15 @@ intent window, preserves the exact registration authority used by the atomic
 registration-revision condition, and chooses the earliest exclusive deadline
 for the guarded receipt transaction.
 
+The guarded acknowledgement executor publishes the create-once receipt while
+the intent, current-intent head, agent registration, and coordinator lease
+remain unchanged. Its committed result must match the exact receipt bytes,
+carry the prepared coordinator-lease provenance, remain inside the prepared
+time window, and follow the durable intent opening, registration authority, and
+coordinator authority in store transaction order. Conflicts distinguish
+changed intent state, lost registration, lost coordinator ownership, elapsed
+intent time, and contradictory store time.
+
 For a crashed or unreachable node, no preparation is assumed.
 
 ## API: lm-resiliency to the Framework
