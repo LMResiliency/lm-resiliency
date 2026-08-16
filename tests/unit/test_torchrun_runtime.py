@@ -2928,8 +2928,137 @@ def test_slot_aware_handler_admits_replacement_and_writes_restart_context(
         plan,
         "node-b",
     )
+    admission = store.get(handler._arrival_admission_key(1, 1))
+    assert admission is not None
     assert handler.num_nodes_waiting() == 0
     assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_never_partially_admits_replacement_after_deadline(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    manager, lease, current = _initialize_generation(
+        store,
+        clock,
+        ("node-a", "node-d"),
+    )
+    plan = replace(
+        _replacement_plan(restart_deadline_unix_ms=clock() + 50),
+        slot_assignments=(
+            SlotAssignment(0, "node-b", 0, 2),
+            SlotAssignment(1, "node-c", 2, 2),
+        ),
+        expected_world_size=4,
+    )
+    successor = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    manager.commit_successor(lease, current, successor)
+    handlers = tuple(
+        _handler(
+            _handler_config(
+                tmp_path,
+                node_id=node_id,
+                min_nodes=2,
+                max_nodes=4,
+            ),
+            store=store,
+            clock=clock,
+            agent_id=f"agent-{node_id}",
+        )
+        for node_id in ("node-b", "node-c")
+    )
+    recovery_state = cast(
+        Any,
+        _static_recovery_state(plan),
+    )
+    deadline = time.monotonic() + 1
+    for handler in handlers:
+        handler._publication_reader = cast(
+            Any,
+            StaticRecoveryStateReader(recovery_state),
+        )
+        handler._ensure_registered(deadline)
+        handler._prepare_restart_context(
+            cast(Any, handler._read_generation()),
+            recovery_state,
+        )
+    generation = handlers[0]._read_generation()
+    assert generation is not None
+    with handlers[0]._registration_lock:
+        leader_registration = handlers[0]._registration
+    assert leader_registration is not None
+    attempt = handlers[0]._claim_shared_arrival_attempt(
+        assignment=successor,
+        slot=0,
+        registration=leader_registration,
+        deadline=deadline,
+    )
+    for slot, handler in enumerate(handlers):
+        with handler._registration_lock:
+            registration = handler._registration
+        assert registration is not None
+        store.compare_set(
+            handler._arrival_key(1, attempt, slot),
+            expected_revision=None,
+            value=handler._arrival_value(
+                generation=1,
+                attempt=attempt,
+                slot=slot,
+                registration=registration,
+            ),
+        )
+    handlers[0]._try_complete_arrival_attempt(
+        successor,
+        attempt,
+        leader_registration,
+    )
+    completion = store.get(handlers[0]._arrival_completion_key(1, attempt))
+    assert completion is not None
+    for handler in handlers:
+        handler._validate_final_admission_state(
+            generation,
+            recovery_state,
+            deadline,
+        )
+    handlers[0]._publish_arrival_consumption(
+        generation,
+        successor,
+        attempt,
+        0,
+        completion,
+        deadline,
+        recovery_state,
+    )
+
+    clock.advance(50)
+    with pytest.raises(RendezvousTimeoutError):
+        handlers[1]._publish_arrival_consumption(
+            generation,
+            successor,
+            attempt,
+            1,
+            completion,
+            deadline,
+            recovery_state,
+        )
+    handlers[0]._try_commit_replacement_admission(
+        generation,
+        successor,
+        attempt,
+        completion,
+        recovery_state,
+        deadline,
+    )
+
+    assert store.get(handlers[0]._arrival_admission_key(1, attempt)) is None
+    for handler in handlers:
+        assert handler.shutdown() is True
 
 
 def test_slot_aware_handler_gives_selected_standby_a_fresh_formation_deadline(

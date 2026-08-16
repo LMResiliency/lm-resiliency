@@ -1538,14 +1538,20 @@ completion proof, generation head, immutable generation snapshot, and absence
 of terminal closure. An incomplete attempt remains usable when a handler
 incarnation is replaced. A stale consumption from an incarnation that failed
 before returning does not satisfy its replacement; the replacement publishes
-its own consumption for the same completed attempt. A completed attempt
-advances only after every slot's current registration has a durable consumption
-record, so a replacement joins the completed attempt instead of splitting the
-worker group. Guarded barrier transactions pin their registration revision in
-retained history. Missing or unprepared assigned nodes therefore fail at the
-formation deadline instead of launching a partial worker group. After
-consumption completes, every handler performs one final closure and generation
-check before returning its slot.
+its own consumption for the same completed attempt. For a replacement
+generation, a consumption record is a locally validated readiness claim rather
+than permission to return. Slot zero atomically commits one immutable
+group-admission proof only after every assigned slot has published readiness.
+That guarded transaction conditions on every readiness and live registration
+revision, the attempt and completion records, the generation head and immutable
+snapshot, and absence of terminal closure, and it must commit before the plan's
+exclusive restart deadline. Every replacement handler observes and validates
+the same admission proof before returning. A completed replacement attempt
+advances only after this proof exists; initial attempts retain the
+consumption-only advancement rule. Guarded barrier transactions pin their
+registration revision in retained history. Missing, unprepared, or late
+assigned nodes therefore fail at the shared deadline instead of allowing an
+early node to launch a partial worker group.
 
 Registration release is best effort and bounded during local shutdown. If the
 backend remains unavailable, cleanup returns without waiting indefinitely and
@@ -1558,11 +1564,12 @@ persisted restart-plan publication before admitting any assigned node. It
 requires the plan assignment to equal the committed generation, enforces the
 replacement budget and exclusive restart deadline, and writes the exact
 node-local `RestartContext` before the assigned node participates in the shared
-arrival barrier. The plan, generation, deadline, and persisted context are
-revalidated immediately before `next_rendezvous()` returns. A failed admission
-clears any context written by that attempt. Passive standbys and removed nodes
-remain parked. The positive `num_nodes_waiting()` restart edge remains disabled
-until the following signaling slice.
+arrival barrier. Each assigned node revalidates the plan, generation, deadline,
+and persisted context before publishing readiness; the immutable group-admission
+proof is the final shared decision observed before `next_rendezvous()` returns.
+A failed admission clears any context written by that attempt. Passive standbys
+and removed nodes remain parked. The positive `num_nodes_waiting()` restart edge
+remains disabled until the following signaling slice.
 
 All handler incarnations use one immutable generation-scoped `PrefixStore` for
 PyTorch's worker bootstrap keys. Slot zero publishes one address/port pair and

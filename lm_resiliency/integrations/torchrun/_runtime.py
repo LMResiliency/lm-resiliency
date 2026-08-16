@@ -54,6 +54,7 @@ from lm_resiliency.integrations.torchrun._agent_registration_records import (
 from lm_resiliency.integrations.torchrun._control_store import (
     ControlStore,
     ControlStoreConflict,
+    ControlStoreDeadlineExceeded,
     ControlStoreEntry,
     ControlStoreWrite,
 )
@@ -93,6 +94,7 @@ _ARRIVAL_SCHEMA_VERSION = 1
 _ARRIVAL_ATTEMPT_SCHEMA_VERSION = 1
 _ARRIVAL_COMPLETION_SCHEMA_VERSION = 1
 _ARRIVAL_CONSUMPTION_SCHEMA_VERSION = 1
+_ARRIVAL_ADMISSION_SCHEMA_VERSION = 1
 _SUPPORTED_REPLACEMENT_GENERATIONS = 1
 _SHARED_FIELDS = {
     "control_endpoint",
@@ -527,6 +529,11 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                         self._raise_heartbeat_error()
                         if self._read_generation() != current:
                             raise RendezvousConnectionError("generation changed during rendezvous")
+                        self._validate_final_admission_state(
+                            current,
+                            recovery_state,
+                            admission_deadline,
+                        )
                         self._publish_arrival_consumption(
                             current,
                             current.snapshot.record.assignment,
@@ -534,12 +541,18 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                             slot,
                             completion,
                             admission_deadline,
-                        )
-                        self._validate_final_admission_state(
-                            current,
                             recovery_state,
-                            admission_deadline,
                         )
+                        if recovery_state is not None:
+                            self._wait_for_replacement_admission(
+                                current,
+                                current.snapshot.record.assignment,
+                                attempt,
+                                slot,
+                                completion,
+                                recovery_state,
+                                admission_deadline,
+                            )
                         return RendezvousInfo(
                             bootstrap_store,
                             slot,
@@ -1300,6 +1313,21 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         )
         if conditions is None:
             return None
+        if assignment.generation > 0:
+            admission = self._read_replacement_admission(
+                assignment,
+                current_attempt,
+                completion,
+                None,
+            )
+            if admission is None:
+                return None
+            conditions[
+                self._arrival_admission_key(
+                    assignment.generation,
+                    current_attempt,
+                )
+            ] = admission.revision
         completion_key = self._arrival_completion_key(
             assignment.generation,
             current_attempt,
@@ -1580,7 +1608,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         recovery_state: RestartPlanPersistedRecoveryState | None = None,
         admission_deadline: float | None = None,
     ) -> None:
-        if self._is_closed_bounded(None):
+        if self._is_closed_bounded(admission_deadline):
             raise RendezvousClosedError
         if self._read_generation() != current:
             raise RendezvousConnectionError("generation changed before rendezvous admission")
@@ -1884,6 +1912,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         slot: int,
         completion: ControlStoreEntry,
         deadline: float,
+        recovery_state: RestartPlanPersistedRecoveryState | None = None,
     ) -> None:
         completion_key = self._arrival_completion_key(assignment.generation, attempt)
         generation_snapshot_key = self._generation_reader.snapshot_key(assignment.generation)
@@ -1922,15 +1951,22 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                 )
                 return
             now_unix_ms = self._clock()
+            store_deadline_unix_ms = registration.expires_at_unix_ms
+            if recovery_state is not None:
+                store_deadline_unix_ms = min(
+                    store_deadline_unix_ms,
+                    recovery_state.plan.restart_deadline_unix_ms,
+                )
             if (
                 isinstance(now_unix_ms, bool)
                 or not isinstance(now_unix_ms, int)
                 or now_unix_ms < registration.granted_at_unix_ms
-                or now_unix_ms >= registration.expires_at_unix_ms
+                or now_unix_ms >= store_deadline_unix_ms
+                or self._monotonic_clock() >= deadline
             ):
-                raise RendezvousConnectionError(
-                    "rendezvous consumption is outside the registration window"
-                )
+                if recovery_state is not None:
+                    raise RendezvousTimeoutError
+                raise RendezvousConnectionError("rendezvous consumption is outside its window")
             try:
                 result = self._control_store.compare_set_many_guarded(
                     {
@@ -1943,7 +1979,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                     guard_key=self._registration_manager.registration_key,
                     expected_guard_revision=registration.fencing_token,
                     not_before_unix_ms=now_unix_ms,
-                    deadline_unix_ms=registration.expires_at_unix_ms,
+                    deadline_unix_ms=store_deadline_unix_ms,
                     conditions={
                         completion_key: completion.revision,
                         self._generation_reader.head_key: current.head_revision,
@@ -1951,6 +1987,12 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                         self._closure_key: None,
                     },
                 )
+            except ControlStoreDeadlineExceeded as error:
+                if recovery_state is not None:
+                    raise RendezvousTimeoutError from error
+                raise RendezvousConnectionError(
+                    "rendezvous consumption missed its registration window"
+                ) from error
             except ControlStoreConflict:
                 try:
                     existing = self._control_store.get(key)
@@ -1998,7 +2040,21 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         attempt: int,
         completion: ControlStoreEntry,
     ) -> dict[str, int] | None:
+        state = self._arrival_consumption_state(
+            assignment,
+            attempt,
+            completion,
+        )
+        return None if state is None else state[0]
+
+    def _arrival_consumption_state(
+        self,
+        assignment: RankAssignment,
+        attempt: int,
+        completion: ControlStoreEntry,
+    ) -> tuple[dict[str, int], dict[str, dict[str, Any]]] | None:
         conditions: dict[str, int] = {}
+        consumptions: dict[str, dict[str, Any]] = {}
         for slot, node_id in assignment.slot_to_node_id.items():
             registration = self._current_assigned_registration(node_id)
             entry = self._read_arrival_consumption(
@@ -2010,6 +2066,14 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             )
             if entry is None:
                 return None
+            payload = self._validate_arrival_consumption_entry(
+                entry,
+                assignment=assignment,
+                attempt=attempt,
+                slot=slot,
+                completion=completion,
+                registration=registration,
+            )
             conditions[
                 self._arrival_consumption_key(
                     assignment.generation,
@@ -2021,7 +2085,15 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             registration_key = agent_registration_key(self._config.run_id, node_id)
             if registration_key != self._registration_manager.registration_key:
                 conditions[registration_key] = registration.fencing_token
-        return conditions
+            consumptions[str(slot)] = {
+                "agent_id": payload["agent_id"],
+                "consumption_revision": entry.revision,
+                "consumption_transaction_sequence": entry.transaction_sequence,
+                "node_id": node_id,
+                "registration_id": payload["registration_id"],
+                "registration_revision": registration.fencing_token,
+            }
+        return conditions, consumptions
 
     def _read_arrival_consumption(
         self,
@@ -2103,7 +2175,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         slot: int,
         completion: ControlStoreEntry,
         registration: HeldAgentRegistration | None,
-    ) -> None:
+    ) -> Mapping[str, Any]:
         try:
             payload = json.loads(
                 entry.value.decode("utf-8"),
@@ -2178,6 +2250,365 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             or entry.guard_revision != payload["registration_revision"]
         ):
             raise RendezvousStateError("rendezvous consumption has invalid store provenance")
+        return payload
+
+    def _wait_for_replacement_admission(
+        self,
+        current: CurrentGeneration,
+        assignment: RankAssignment,
+        attempt: int,
+        slot: int,
+        completion: ControlStoreEntry,
+        recovery_state: RestartPlanPersistedRecoveryState,
+        deadline: float,
+    ) -> ControlStoreEntry:
+        while True:
+            admission = self._read_replacement_admission(
+                assignment,
+                attempt,
+                completion,
+                recovery_state,
+            )
+            if admission is not None:
+                return admission
+            if slot == 0:
+                self._try_commit_replacement_admission(
+                    current,
+                    assignment,
+                    attempt,
+                    completion,
+                    recovery_state,
+                    deadline,
+                )
+                admission = self._read_replacement_admission(
+                    assignment,
+                    attempt,
+                    completion,
+                    recovery_state,
+                )
+                if admission is not None:
+                    return admission
+            if not self._wait_for_change(deadline):
+                admission = self._read_replacement_admission(
+                    assignment,
+                    attempt,
+                    completion,
+                    recovery_state,
+                )
+                if admission is not None:
+                    return admission
+                raise RendezvousTimeoutError
+
+    def _try_commit_replacement_admission(
+        self,
+        current: CurrentGeneration,
+        assignment: RankAssignment,
+        attempt: int,
+        completion: ControlStoreEntry,
+        recovery_state: RestartPlanPersistedRecoveryState,
+        deadline: float,
+    ) -> None:
+        admission_key = self._arrival_admission_key(
+            assignment.generation,
+            attempt,
+        )
+        if self._control_store.get(admission_key) is not None:
+            return
+        state = self._arrival_consumption_state(
+            assignment,
+            attempt,
+            completion,
+        )
+        if state is None:
+            return
+        readiness_conditions, consumptions = state
+        conditions: dict[str, int | None] = dict(readiness_conditions)
+        with self._registration_lock:
+            leader_registration = self._registration
+        if leader_registration is None:
+            raise RendezvousConnectionError(
+                "replacement leader lost its registration before group admission"
+            )
+        slot_zero = consumptions["0"]
+        if (
+            slot_zero["registration_id"] != leader_registration.record.registration_id
+            or slot_zero["agent_id"] != leader_registration.record.agent_identity.agent_id
+        ):
+            raise RendezvousConnectionError(
+                "replacement leader registration changed before group admission"
+            )
+        completion_key = self._arrival_completion_key(
+            assignment.generation,
+            attempt,
+        )
+        attempt_key = self._arrival_attempt_key(assignment.generation)
+        snapshot_key = self._generation_reader.snapshot_key(assignment.generation)
+        attempt_entry = self._control_store.get(attempt_key)
+        if attempt_entry is None:
+            raise RendezvousStateError(
+                "replacement rendezvous attempt disappeared before group admission"
+            )
+        self._validate_arrival_attempt_entry(
+            attempt_entry,
+            generation=assignment.generation,
+            expected_attempt=attempt,
+            leader_node_id=assignment.slot_to_node_id[0],
+        )
+        conditions.update(
+            {
+                attempt_key: attempt_entry.revision,
+                completion_key: completion.revision,
+                self._generation_reader.head_key: current.head_revision,
+                snapshot_key: current.snapshot.revision,
+                self._closure_key: None,
+            }
+        )
+        now_unix_ms = self._replacement_now_unix_ms(recovery_state)
+        store_deadline_unix_ms = recovery_state.plan.restart_deadline_unix_ms
+        for metadata in consumptions.values():
+            registration = self._current_assigned_registration(metadata["node_id"])
+            if (
+                registration.record.registration_id != metadata["registration_id"]
+                or registration.record.agent_identity.agent_id != metadata["agent_id"]
+            ):
+                return
+            metadata["registration_revision"] = registration.fencing_token
+            store_deadline_unix_ms = min(
+                store_deadline_unix_ms,
+                registration.expires_at_unix_ms,
+            )
+            registration_key = agent_registration_key(
+                self._config.run_id,
+                metadata["node_id"],
+            )
+            if registration_key != self._registration_manager.registration_key:
+                conditions[registration_key] = registration.fencing_token
+        if self._monotonic_clock() >= deadline or now_unix_ms >= store_deadline_unix_ms:
+            raise RendezvousTimeoutError
+        value = self._arrival_admission_value(
+            generation=assignment.generation,
+            attempt=attempt,
+            recovery_state=recovery_state,
+            completion=completion,
+            consumptions=consumptions,
+        )
+        try:
+            result = self._control_store.compare_set_many_guarded(
+                {
+                    admission_key: ControlStoreWrite(
+                        expected_revision=None,
+                        value=value,
+                        require_never_created=True,
+                    )
+                },
+                guard_key=self._registration_manager.registration_key,
+                expected_guard_revision=leader_registration.fencing_token,
+                not_before_unix_ms=now_unix_ms,
+                deadline_unix_ms=store_deadline_unix_ms,
+                conditions=conditions,
+            )
+        except ControlStoreDeadlineExceeded as error:
+            raise RendezvousTimeoutError from error
+        except ControlStoreConflict:
+            return
+        except Exception as error:
+            raise RendezvousConnectionError(
+                "failed to commit replacement group admission"
+            ) from error
+        self._validate_replacement_admission_entry(
+            result[admission_key],
+            assignment=assignment,
+            attempt=attempt,
+            completion=completion,
+            recovery_state=recovery_state,
+        )
+        self._state_changed_event.set()
+
+    def _read_replacement_admission(
+        self,
+        assignment: RankAssignment,
+        attempt: int,
+        completion: ControlStoreEntry,
+        recovery_state: RestartPlanPersistedRecoveryState | None,
+    ) -> ControlStoreEntry | None:
+        key = self._arrival_admission_key(
+            assignment.generation,
+            attempt,
+        )
+        try:
+            entry = self._control_store.get(key)
+        except Exception as error:
+            raise RendezvousConnectionError("failed to read replacement group admission") from error
+        if entry is None:
+            return None
+        self._validate_replacement_admission_entry(
+            entry,
+            assignment=assignment,
+            attempt=attempt,
+            completion=completion,
+            recovery_state=recovery_state,
+        )
+        return entry
+
+    def _arrival_admission_key(self, generation: int, attempt: int) -> str:
+        return (
+            f"{_CONTROL_PREFIX}/runs/{self._run_digest}/rendezvous/"
+            f"generation-{generation}/attempt-{attempt}/admitted"
+        )
+
+    def _arrival_admission_value(
+        self,
+        *,
+        generation: int,
+        attempt: int,
+        recovery_state: RestartPlanPersistedRecoveryState,
+        completion: ControlStoreEntry,
+        consumptions: Mapping[str, Mapping[str, Any]],
+    ) -> bytes:
+        return json.dumps(
+            {
+                "attempt": attempt,
+                "completion_digest": hashlib.sha256(completion.value).hexdigest(),
+                "consumptions": consumptions,
+                "generation": generation,
+                "plan_id": recovery_state.plan.plan_id,
+                "restart_deadline_unix_ms": (recovery_state.plan.restart_deadline_unix_ms),
+                "run_id": self._config.run_id,
+                "schema_version": _ARRIVAL_ADMISSION_SCHEMA_VERSION,
+            },
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+
+    def _validate_replacement_admission_entry(
+        self,
+        entry: ControlStoreEntry,
+        *,
+        assignment: RankAssignment,
+        attempt: int,
+        completion: ControlStoreEntry,
+        recovery_state: RestartPlanPersistedRecoveryState | None,
+    ) -> Mapping[str, Mapping[str, Any]]:
+        try:
+            payload = json.loads(
+                entry.value.decode("utf-8"),
+                object_pairs_hook=_strict_object,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            raise RendezvousStateError("replacement group admission is malformed") from error
+        expected_fields = {
+            "attempt",
+            "completion_digest",
+            "consumptions",
+            "generation",
+            "plan_id",
+            "restart_deadline_unix_ms",
+            "run_id",
+            "schema_version",
+        }
+        integer_fields = (
+            "attempt",
+            "generation",
+            "restart_deadline_unix_ms",
+            "schema_version",
+        )
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != expected_fields
+            or payload["run_id"] != self._config.run_id
+            or payload["generation"] != assignment.generation
+            or payload["attempt"] != attempt
+            or payload["schema_version"] != _ARRIVAL_ADMISSION_SCHEMA_VERSION
+            or any(
+                isinstance(payload[field], bool) or not isinstance(payload[field], int)
+                for field in integer_fields
+            )
+            or payload["restart_deadline_unix_ms"] < 1
+            or payload["completion_digest"] != hashlib.sha256(completion.value).hexdigest()
+            or not isinstance(payload["plan_id"], str)
+            or not payload["plan_id"]
+        ):
+            raise RendezvousStateError(
+                "replacement group admission does not match its rendezvous attempt"
+            )
+        if recovery_state is not None and (
+            payload["plan_id"] != recovery_state.plan.plan_id
+            or payload["restart_deadline_unix_ms"] != recovery_state.plan.restart_deadline_unix_ms
+        ):
+            raise RendezvousStateError(
+                "replacement group admission does not match its restart plan"
+            )
+        if entry.value != json.dumps(
+            payload,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8"):
+            raise RendezvousStateError("replacement group admission contains noncanonical bytes")
+        consumptions = payload["consumptions"]
+        expected_slots = {
+            str(slot): node_id for slot, node_id in assignment.slot_to_node_id.items()
+        }
+        if not isinstance(consumptions, dict) or set(consumptions) != set(expected_slots):
+            raise RendezvousStateError("replacement group admission has invalid slot coverage")
+        for slot, node_id in expected_slots.items():
+            metadata = consumptions[slot]
+            fields = {
+                "agent_id",
+                "consumption_revision",
+                "consumption_transaction_sequence",
+                "node_id",
+                "registration_id",
+                "registration_revision",
+            }
+            if (
+                not isinstance(metadata, dict)
+                or set(metadata) != fields
+                or metadata["node_id"] != node_id
+            ):
+                raise RendezvousStateError(
+                    "replacement group admission has invalid readiness metadata"
+                )
+            for field in ("agent_id", "registration_id"):
+                if not isinstance(metadata[field], str) or not metadata[field]:
+                    raise RendezvousStateError(f"replacement group admission has invalid {field}")
+            for field in (
+                "consumption_revision",
+                "consumption_transaction_sequence",
+                "registration_revision",
+            ):
+                if (
+                    isinstance(metadata[field], bool)
+                    or not isinstance(metadata[field], int)
+                    or metadata[field] < 1
+                ):
+                    raise RendezvousStateError(f"replacement group admission has invalid {field}")
+        slot_zero = consumptions["0"]
+        if (
+            entry.mutation_sequence != 1
+            or entry.value_sequence != 1
+            or entry.lifetime_sequence != 1
+            or entry.guard_key
+            != agent_registration_key(
+                self._config.run_id,
+                expected_slots["0"],
+            )
+            or entry.guard_revision != slot_zero["registration_revision"]
+            or entry.committed_at_unix_ms is None
+            or entry.committed_at_unix_ms >= payload["restart_deadline_unix_ms"]
+            or entry.transaction_sequence <= completion.transaction_sequence
+            or any(
+                entry.transaction_sequence <= metadata["consumption_transaction_sequence"]
+                for metadata in consumptions.values()
+            )
+        ):
+            raise RendezvousStateError("replacement group admission has invalid store provenance")
+        if recovery_state is not None and (
+            entry.committed_at_unix_ms < recovery_state.publication.committed_at_unix_ms
+        ):
+            raise RendezvousStateError("replacement group admission predates its restart plan")
+        return consumptions
 
     def _generation_admission(
         self,
