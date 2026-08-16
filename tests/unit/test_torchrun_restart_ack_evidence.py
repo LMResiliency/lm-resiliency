@@ -51,9 +51,21 @@ from lm_resiliency.integrations.torchrun._restart_ack_execution import (
 from lm_resiliency.integrations.torchrun._restart_ack_preparation import (
     RestartAckPreparer,
 )
-from lm_resiliency.integrations.torchrun._restart_ack_reader import RestartAckReader
+from lm_resiliency.integrations.torchrun._restart_ack_reader import (
+    RestartAckCollector,
+    RestartAckReader,
+)
 from lm_resiliency.integrations.torchrun._restart_ack_records import (
     RestartAckReceiptRecord,
+)
+from lm_resiliency.integrations.torchrun._restart_intent_close_execution import (
+    RestartIntentClosureExecutor,
+)
+from lm_resiliency.integrations.torchrun._restart_intent_close_preparation import (
+    RestartIntentClosurePreparer,
+)
+from lm_resiliency.integrations.torchrun._restart_intent_lifecycle_reader import (
+    InitialRestartIntentLifecycleReader,
 )
 from lm_resiliency.integrations.torchrun._restart_intent_open import (
     RestartIntentOpenPreparer,
@@ -139,6 +151,7 @@ def _evidence(
     event: CheckpointInventoryEvent | None = None,
     intent_id: str = "intent-a",
     generation: int = 0,
+    close_intent: bool = False,
 ) -> tuple[RestartAckEvidence, CheckpointInventoryEvent]:
     clock = ManualClock()
     store = InMemoryControlStore(clock=clock)
@@ -228,13 +241,30 @@ def _evidence(
             node_id="node-a",
         ).read()
         assert persisted is not None
-    collection = RestartAckCollection(
-        opened=opened,
-        receipts_by_node_id={
-            "node-a": persisted,
-            "node-b": None,
-        },
-    )
+    if close_intent:
+        prepared_closure = RestartIntentClosurePreparer(
+            store,
+            run_id=RUN_ID,
+            clock=clock,
+        ).prepare_initial_closure(lease)
+        RestartIntentClosureExecutor(
+            store,
+            run_id=RUN_ID,
+        ).execute_initial_closure(prepared_closure)
+        closure = InitialRestartIntentLifecycleReader(store, run_id=RUN_ID).read()
+        assert closure is not None
+        collection = RestartAckCollector(
+            store,
+            run_id=RUN_ID,
+        ).collect_for_closure(closure)
+    else:
+        collection = RestartAckCollection(
+            opened=opened,
+            receipts_by_node_id={
+                "node-a": persisted,
+                "node-b": None,
+            },
+        )
     return RestartAckEvidence(collection), event
 
 
@@ -262,9 +292,9 @@ def _latest_inventory_state(
     event: CheckpointInventoryEvent,
 ) -> RestartPlanInventoryState:
     opened = evidence.collection.opened
-    intent_record = opened.prepared.record
+    intent_record = opened.record
     intent = intent_record.intent
-    from_snapshot = opened.prepared.current.snapshot.record
+    from_snapshot = opened.generation_snapshot.record
     lifecycle = RestartIntentLifecycleRecord(
         closed_intent=RestartIntentHeadRecord(
             run_id=intent.run_id,
@@ -357,7 +387,7 @@ def _latest_inventory_state(
         generation_state=generation_state,
         resolved_manifest=ResolvedRecoveryManifest(
             record=manifest_record,
-            source_snapshot=opened.prepared.current.snapshot,
+            source_snapshot=opened.generation_snapshot,
         ),
     )
     return RestartPlanInventoryState(
@@ -659,6 +689,19 @@ def test_restart_plan_latest_evidence_state_binds_exact_acknowledgements():
 
     assert state.plan == inventory_state.plan
     assert state.manifest == inventory_state.manifest
+    assert state.acknowledgement_evidence.authorizes_latest_inventory(event)
+
+
+def test_restart_plan_latest_evidence_state_accepts_historical_acknowledgements():
+    event = _latest_event()
+    evidence, _ = _evidence(event=event, close_intent=True)
+    inventory_state = _latest_inventory_state(evidence, event)
+
+    state = RestartPlanLatestEvidenceState(
+        inventory_state=inventory_state,
+        acknowledgement_evidence=evidence,
+    )
+
     assert state.acknowledgement_evidence.authorizes_latest_inventory(event)
 
 

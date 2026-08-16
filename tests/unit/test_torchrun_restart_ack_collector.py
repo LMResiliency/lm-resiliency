@@ -42,10 +42,20 @@ from lm_resiliency.integrations.torchrun._restart_ack_reader import (
 from lm_resiliency.integrations.torchrun._restart_ack_records import (
     RestartAckReceiptRecord,
 )
+from lm_resiliency.integrations.torchrun._restart_intent_close_execution import (
+    RestartIntentClosureExecutor,
+)
+from lm_resiliency.integrations.torchrun._restart_intent_close_preparation import (
+    RestartIntentClosurePreparer,
+)
+from lm_resiliency.integrations.torchrun._restart_intent_lifecycle_reader import (
+    InitialRestartIntentLifecycleReader,
+)
 from lm_resiliency.integrations.torchrun._restart_intent_open import (
     RestartIntentOpenPreparer,
 )
 from lm_resiliency.integrations.torchrun._restart_intent_open_execution import (
+    PersistedInitialRestartIntentOpen,
     RestartIntentOpenExecutor,
 )
 from lm_resiliency.integrations.torchrun._restart_intent_open_reader import (
@@ -71,6 +81,14 @@ def _state(
     *,
     committed_node_ids: tuple[str, ...],
 ) -> tuple[InMemoryControlStore, dict[str, PersistedRestartAck]]:
+    store, persisted, _, _ = _state_details(committed_node_ids=committed_node_ids)
+    return store, persisted
+
+
+def _state_details(
+    *,
+    committed_node_ids: tuple[str, ...],
+):
     clock = ManualClock()
     store = InMemoryControlStore(clock=clock)
     lease = CoordinatorLeaseManager(
@@ -163,7 +181,7 @@ def _state(
         ).read()
         assert persisted_receipt is not None
         persisted[node_id] = persisted_receipt
-    return store, persisted
+    return store, persisted, clock, lease
 
 
 def test_restart_ack_reader_returns_stable_complete_snapshot():
@@ -185,6 +203,60 @@ def test_restart_ack_reader_preserves_stable_absence():
     assert collection.missing_node_ids == ("node-b",)
 
 
+def test_restart_ack_collector_reconstructs_historical_receipts_after_closure():
+    store, _, clock, lease = _state_details(
+        committed_node_ids=("node-a", "node-b"),
+    )
+    prepared = RestartIntentClosurePreparer(
+        store,
+        run_id=RUN_ID,
+        clock=clock,
+    ).prepare_initial_closure(lease)
+    RestartIntentClosureExecutor(
+        store,
+        run_id=RUN_ID,
+    ).execute_initial_closure(prepared)
+    closure = InitialRestartIntentLifecycleReader(store, run_id=RUN_ID).read()
+    assert closure is not None
+
+    with pytest.raises(RestartAckCollectionReadConflict, match="closed"):
+        RestartAckCollector(store, run_id=RUN_ID).collect()
+
+    collection = RestartAckCollector(store, run_id=RUN_ID).collect_for_closure(closure)
+
+    assert collection.opened.record == closure.intent
+    assert collection.opened.head == closure.open_head
+    assert collection.opened.intent_entry == closure.state.intent_entry
+    assert collection.opened.head_entry == closure.state.open_head_entry
+    assert collection.received_node_ids == ("node-a", "node-b")
+
+
+def test_restart_ack_collector_rejects_deleted_closed_opening():
+    store, _, clock, lease = _state_details(
+        committed_node_ids=("node-a", "node-b"),
+    )
+    prepared = RestartIntentClosurePreparer(
+        store,
+        run_id=RUN_ID,
+        clock=clock,
+    ).prepare_initial_closure(lease)
+    RestartIntentClosureExecutor(
+        store,
+        run_id=RUN_ID,
+    ).execute_initial_closure(prepared)
+    lifecycle_reader = InitialRestartIntentLifecycleReader(store, run_id=RUN_ID)
+    closure = lifecycle_reader.read()
+    assert closure is not None
+    intent_entry = closure.state.intent_entry
+    store.compare_delete(
+        lifecycle_reader.intent_key(closure.intent.intent.intent_id),
+        expected_revision=intent_entry.revision,
+    )
+
+    with pytest.raises(RestartAckCollectionReadCorrupt, match="lifecycle"):
+        RestartAckCollector(store, run_id=RUN_ID).collect_for_closure(closure)
+
+
 class SequencedCollector(RestartAckCollector):
     def __init__(
         self,
@@ -199,7 +271,10 @@ class SequencedCollector(RestartAckCollector):
     def _read_receipts(
         self,
         node_ids: tuple[str, ...],
+        *,
+        opened: PersistedInitialRestartIntentOpen | None = None,
     ) -> dict[str, PersistedRestartAck | None]:
+        assert opened is None
         self.read_count += 1
         node_b = None if self.read_count == 1 else self.received["node-b"]
         return {
