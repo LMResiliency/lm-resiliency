@@ -782,6 +782,10 @@ per-rank copy completeness or inventory certification.
 requires their digests, plan metadata, and coordinator authority to match the
 manifest-bound plan. It does not validate resource evidence or prove atomic
 publication.
+`RestartPlanInventoryState` then binds every manifest copy to its exact
+inventory event, source-generation reporter identity, local holder, and
+compatible trust state. It does not prove copy completeness, holder
+availability, acknowledgement authorization, or trusted certification.
 
 Before commit, the coordinator validates:
 

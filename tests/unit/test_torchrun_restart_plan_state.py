@@ -14,12 +14,14 @@ from lm_resiliency.integrations.torchrun._generation_records import (
 )
 from lm_resiliency.integrations.torchrun._protocol import (
     CheckpointCopy,
+    CheckpointInventoryEvent,
     RankAssignment,
     RankCheckpointCopies,
     RecoveryManifest,
     RestartIntent,
     RestartPlan,
     SlotAssignment,
+    WorkerIdentity,
 )
 from lm_resiliency.integrations.torchrun._quarantine_records import (
     NodeQuarantineRecord,
@@ -36,6 +38,7 @@ from lm_resiliency.integrations.torchrun._restart_plan_records import (
 from lm_resiliency.integrations.torchrun._restart_plan_state import (
     ResolvedRecoveryManifest,
     RestartPlanGenerationState,
+    RestartPlanInventoryState,
     RestartPlanManifestState,
     RestartPlanQuarantineState,
 )
@@ -712,8 +715,11 @@ def test_restart_plan_manifest_state_does_not_claim_copy_completeness():
     assert len(state.manifest.rank_copies) == 3
 
 
-def _quarantine_state() -> RestartPlanQuarantineState:
-    manifest_state = _manifest_state()
+def _quarantine_state(
+    *,
+    manifest_state: RestartPlanManifestState | None = None,
+) -> RestartPlanQuarantineState:
+    manifest_state = manifest_state or _manifest_state()
     plan = replace(
         manifest_state.plan,
         quarantined_node_ids=("node-b",),
@@ -910,3 +916,308 @@ def test_restart_plan_quarantine_state_rejects_publication_authority_mismatch(re
             ),
             quarantine_records={"node-b": record},
         )
+
+
+def _inventory_event(
+    state: RestartPlanQuarantineState,
+    rank: int,
+    *,
+    trust: str | None = None,
+) -> CheckpointInventoryEvent:
+    manifest = state.manifest_state.manifest
+    rank_copies = next(entry for entry in manifest.rank_copies if entry.owner_global_rank == rank)
+    copy = rank_copies.copies[0]
+    logical_node_slot = rank // 2
+    node_id = "node-a" if logical_node_slot == 0 else "node-b"
+    return CheckpointInventoryEvent(
+        event_id=copy.inventory_event_id,
+        run_id=manifest.run_id,
+        generation=manifest.source_generation,
+        reporter=WorkerIdentity(
+            run_id=manifest.run_id,
+            generation=manifest.source_generation,
+            node_id=node_id,
+            agent_id=f"agent-{node_id}",
+            logical_node_slot=logical_node_slot,
+            global_rank=rank,
+            local_rank=rank % 2,
+            local_world_size=2,
+            hostname=f"host-{node_id}",
+            gpu_uuid=f"gpu-{node_id}-{rank % 2}",
+            topology_digest=manifest.topology_digest,
+        ),
+        step=manifest.step,
+        trust=trust or manifest.trust,
+        topology_digest=manifest.topology_digest,
+        copies=(copy,),
+    )
+
+
+def _inventory_state(
+    *,
+    quarantine_state: RestartPlanQuarantineState | None = None,
+    inventory_events: dict[str, CheckpointInventoryEvent] | None = None,
+) -> RestartPlanInventoryState:
+    selected_state = quarantine_state or _quarantine_state()
+    events = inventory_events or {
+        event.event_id: event
+        for event in (
+            _inventory_event(selected_state, rank)
+            for rank in range(selected_state.plan.expected_world_size)
+        )
+    }
+    return RestartPlanInventoryState(
+        quarantine_state=selected_state,
+        inventory_events=events,
+    )
+
+
+def test_restart_plan_inventory_state_binds_exact_events():
+    state = _inventory_state()
+
+    assert state.plan == state.quarantine_state.plan
+    assert state.manifest == state.quarantine_state.manifest_state.manifest
+    assert tuple(state.inventory_events) == (
+        "inventory-0",
+        "inventory-1",
+        "inventory-2",
+        "inventory-3",
+    )
+
+    with pytest.raises(TypeError):
+        state.inventory_events["other"] = state.inventory_events["inventory-0"]
+
+
+def test_restart_plan_inventory_state_requires_exact_types():
+    state = _inventory_state()
+
+    with pytest.raises(TypeError, match="quarantine_state must be"):
+        replace(state, quarantine_state=state.quarantine_state.manifest_state)
+
+    with pytest.raises(TypeError, match="must be a mapping"):
+        replace(state, inventory_events=())
+
+    with pytest.raises(TypeError, match="must be CheckpointInventoryEvent"):
+        replace(
+            state,
+            inventory_events={
+                event_id: event.to_dict() for event_id, event in state.inventory_events.items()
+            },
+        )
+
+
+def test_restart_plan_inventory_state_requires_exact_event_coverage():
+    state = _inventory_state()
+    missing = dict(state.inventory_events)
+    missing.pop("inventory-3")
+
+    with pytest.raises(ValueError, match="exactly cover"):
+        replace(state, inventory_events=missing)
+
+    with pytest.raises(ValueError, match="exactly cover"):
+        replace(
+            state,
+            inventory_events={
+                **state.inventory_events,
+                "inventory-extra": replace(
+                    state.inventory_events["inventory-0"],
+                    event_id="inventory-extra",
+                    copies=(),
+                ),
+            },
+        )
+
+
+def test_restart_plan_inventory_state_rejects_event_key_mismatch():
+    state = _inventory_state()
+
+    with pytest.raises(ValueError, match="event ID does not match"):
+        replace(
+            state,
+            inventory_events={
+                **state.inventory_events,
+                "inventory-0": replace(
+                    state.inventory_events["inventory-0"],
+                    event_id="inventory-other",
+                    copies=(),
+                ),
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        replace(
+            _inventory_state().inventory_events["inventory-0"],
+            run_id="other-run",
+            reporter=replace(
+                _inventory_state().inventory_events["inventory-0"].reporter,
+                run_id="other-run",
+            ),
+        ),
+        replace(
+            _inventory_state().inventory_events["inventory-0"],
+            generation=3,
+            reporter=replace(
+                _inventory_state().inventory_events["inventory-0"].reporter,
+                generation=3,
+            ),
+        ),
+        replace(
+            _inventory_state().inventory_events["inventory-0"],
+            topology_digest="topology-v2",
+            reporter=replace(
+                _inventory_state().inventory_events["inventory-0"].reporter,
+                topology_digest="topology-v2",
+            ),
+        ),
+        replace(
+            _inventory_state().inventory_events["inventory-0"],
+            step=39,
+            copies=(
+                replace(
+                    _inventory_state().inventory_events["inventory-0"].copies[0],
+                    checkpoint_step=39,
+                ),
+            ),
+        ),
+    ],
+)
+def test_restart_plan_inventory_state_rejects_manifest_metadata_mismatch(event):
+    state = _inventory_state()
+
+    with pytest.raises(ValueError, match="does not match its manifest"):
+        replace(
+            state,
+            inventory_events={
+                **state.inventory_events,
+                "inventory-0": event,
+            },
+        )
+
+
+def test_restart_plan_inventory_state_rejects_reporter_outside_source_assignment():
+    state = _inventory_state()
+    event = state.inventory_events["inventory-0"]
+    conflicting_reporter = replace(
+        event.reporter,
+        node_id="node-b",
+        agent_id="agent-node-b",
+        hostname="host-node-b",
+        gpu_uuid="gpu-node-b-0",
+    )
+
+    with pytest.raises(ValueError, match="reporter does not match"):
+        replace(
+            state,
+            inventory_events={
+                **state.inventory_events,
+                "inventory-0": replace(event, reporter=conflicting_reporter),
+            },
+        )
+
+
+def test_restart_plan_inventory_state_rejects_copy_missing_from_event():
+    state = _inventory_state()
+
+    with pytest.raises(ValueError, match="copy does not match"):
+        replace(
+            state,
+            inventory_events={
+                **state.inventory_events,
+                "inventory-0": replace(
+                    state.inventory_events["inventory-0"],
+                    copies=(),
+                ),
+            },
+        )
+
+
+def test_restart_plan_inventory_state_rejects_local_copy_reported_by_another_node():
+    state = _inventory_state()
+    event = state.inventory_events["inventory-0"]
+    reporter = state.inventory_events["inventory-2"].reporter
+
+    with pytest.raises(ValueError, match="not reported by its holder"):
+        replace(
+            state,
+            inventory_events={
+                **state.inventory_events,
+                "inventory-0": replace(
+                    event,
+                    reporter=reporter,
+                ),
+            },
+        )
+
+
+def test_restart_plan_inventory_state_rejects_candidate_inventory():
+    state = _inventory_state()
+
+    with pytest.raises(ValueError, match="trust is incompatible"):
+        replace(
+            state,
+            inventory_events={
+                **state.inventory_events,
+                "inventory-0": replace(
+                    state.inventory_events["inventory-0"],
+                    trust="candidate",
+                ),
+            },
+        )
+
+
+def test_restart_plan_inventory_state_requires_verified_events_for_verified_manifest():
+    verified_manifest = replace(_manifest(), trust="recovery_verified")
+    verified_plan = replace(
+        _plan(),
+        recovery_mode="recovery_verified",
+        checkpoint_source="durable",
+        checkpoint_id="durable-40",
+    )
+    quarantine_state = _quarantine_state(
+        manifest_state=_manifest_state(
+            manifest=verified_manifest,
+            plan=verified_plan,
+        )
+    )
+    events = {
+        event.event_id: event
+        for event in (
+            _inventory_event(quarantine_state, rank, trust="latest")
+            for rank in range(quarantine_state.plan.expected_world_size)
+        )
+    }
+
+    with pytest.raises(ValueError, match="trust is incompatible"):
+        _inventory_state(
+            quarantine_state=quarantine_state,
+            inventory_events=events,
+        )
+
+
+def test_restart_plan_inventory_state_does_not_claim_copy_eligibility():
+    manifest = _manifest()
+    incomplete_manifest = replace(
+        manifest,
+        rank_copies=(
+            replace(
+                manifest.rank_copies[0],
+                copies=(
+                    replace(
+                        manifest.rank_copies[0].copies[0],
+                        complete=False,
+                    ),
+                ),
+            ),
+            *manifest.rank_copies[1:],
+        ),
+    )
+    quarantine_state = _quarantine_state(
+        manifest_state=_manifest_state(manifest=incomplete_manifest)
+    )
+
+    state = _inventory_state(quarantine_state=quarantine_state)
+
+    assert not state.manifest.rank_copies[0].copies[0].complete
