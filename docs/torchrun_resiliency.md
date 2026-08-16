@@ -881,7 +881,9 @@ generation-head entries for one requested run. It requires exact envelope
 digests, an exact plan-derived successor assignment and predecessor digest,
 immutable record lineage, one transaction and commit time, canonical
 coordinator-lease guard provenance, and a commit inside both the lease and
-restart-deadline windows.
+restart-deadline windows. Decoding also rejects manifest metadata or trust
+that conflicts with the plan and quarantine records that conflict with the
+plan lifecycle or publication authority.
 This transaction decoder does not by itself resolve the source generation,
 closed lifecycle, lease history, inventory evidence, or currently committed
 generation; the stable publication reader performs those checks before

@@ -169,6 +169,11 @@ class PersistedRestartPlanPublication:
             raise ValueError(
                 "PersistedRestartPlanPublication manifest digest does not match its plan"
             )
+        _validate_manifest_record_matches_plan(
+            self.record,
+            self.manifest_record,
+            path="PersistedRestartPlanPublication",
+        )
         if self.record.to_generation_snapshot_digest != self.successor_snapshot.digest:
             raise ValueError(
                 "PersistedRestartPlanPublication successor digest does not match its plan"
@@ -205,6 +210,11 @@ class PersistedRestartPlanPublication:
                 raise ValueError(
                     "PersistedRestartPlanPublication quarantine record does not match its plan"
                 )
+            _validate_quarantine_record_matches_plan(
+                self.record,
+                record,
+                path="PersistedRestartPlanPublication",
+            )
         if set(self.quarantine_entries) != set(self.quarantine_records):
             raise ValueError(
                 "PersistedRestartPlanPublication quarantine entries do not match its records"
@@ -363,6 +373,55 @@ def _node_entry_mapping(
             raise TypeError(f"{path} values must be ControlStoreEntry")
         result[node_id] = entry
     return dict(sorted(result.items()))
+
+
+def _validate_manifest_record_matches_plan(
+    plan_record: RestartPlanRecord,
+    manifest_record: RecoveryManifestRecord,
+    *,
+    path: str,
+) -> None:
+    plan = plan_record.plan
+    manifest = manifest_record.manifest
+    if (
+        manifest.manifest_id != plan.checkpoint_manifest_id
+        or manifest.run_id != plan.run_id
+        or manifest.source_generation > plan.from_generation
+        or manifest.step != plan.checkpoint_step
+        or manifest.topology_digest != plan.topology_digest
+    ):
+        raise ValueError(f"{path} manifest metadata does not match its plan")
+    if plan.recovery_mode == "recovery_verified" and manifest.trust != "recovery_verified":
+        raise ValueError(f"{path} verified recovery requires a verified manifest")
+    if plan.checkpoint_source == "durable" and manifest.trust != "recovery_verified":
+        raise ValueError(f"{path} durable recovery requires a verified manifest")
+
+
+def _validate_quarantine_record_matches_plan(
+    plan_record: RestartPlanRecord,
+    quarantine_record: NodeQuarantineRecord,
+    *,
+    path: str,
+) -> None:
+    plan = plan_record.plan
+    if (
+        quarantine_record.run_id != plan.run_id
+        or quarantine_record.plan_id != plan.plan_id
+        or quarantine_record.intent_id != plan.intent_id
+        or quarantine_record.from_generation != plan.from_generation
+        or quarantine_record.effective_generation != plan.to_generation
+        or quarantine_record.incident_ids != plan.incident_ids
+        or quarantine_record.reason_code != plan.reason_code
+    ):
+        raise ValueError(f"{path} quarantine record does not match its plan")
+    if (
+        quarantine_record.coordinator_id != plan_record.coordinator_id
+        or quarantine_record.lease_id != plan_record.lease_id
+        or quarantine_record.coordinator_lease_duration_ms
+        != plan_record.coordinator_lease_duration_ms
+        or quarantine_record.coordinator_fencing_token != plan_record.coordinator_fencing_token
+    ):
+        raise ValueError(f"{path} quarantine record uses different publication authority")
 
 
 @dataclass(frozen=True, slots=True)
@@ -547,19 +606,15 @@ class RestartPlanManifestState:
         plan_record = self.generation_state.record
         plan = plan_record.plan
         manifest_record = self.resolved_manifest.record
-        manifest = manifest_record.manifest
         if plan_record.recovery_manifest_record_digest != manifest_record.digest:
             raise ValueError(
                 "RestartPlanManifestState manifest record digest does not match its plan"
             )
-        if (
-            manifest.manifest_id != plan.checkpoint_manifest_id
-            or manifest.run_id != plan.run_id
-            or manifest.source_generation > plan.from_generation
-            or manifest.step != plan.checkpoint_step
-            or manifest.topology_digest != plan.topology_digest
-        ):
-            raise ValueError("RestartPlanManifestState manifest metadata does not match its plan")
+        _validate_manifest_record_matches_plan(
+            plan_record,
+            manifest_record,
+            path="RestartPlanManifestState",
+        )
         source_assignment = self.resolved_manifest.source_assignment
         source_world_size = source_assignment.active_nodes * source_assignment.local_world_size
         if source_world_size != plan.expected_world_size:
@@ -570,14 +625,6 @@ class RestartPlanManifestState:
         ):
             raise ValueError(
                 "RestartPlanManifestState source assignment conflicts with its current generation"
-            )
-        if plan.recovery_mode == "recovery_verified" and manifest.trust != "recovery_verified":
-            raise ValueError(
-                "RestartPlanManifestState verified recovery requires a verified manifest"
-            )
-        if plan.checkpoint_source == "durable" and manifest.trust != "recovery_verified":
-            raise ValueError(
-                "RestartPlanManifestState durable recovery requires a verified manifest"
             )
 
     @property
@@ -626,34 +673,16 @@ class RestartPlanQuarantineState:
             raise ValueError(
                 "RestartPlanQuarantineState records must exactly cover the plan's quarantined nodes"
             )
-        plan = plan_record.plan
         for node_id, record in records.items():
             if record.digest != expected_digests[node_id]:
                 raise ValueError(
                     "RestartPlanQuarantineState quarantine record digest does not match its plan"
                 )
-            if (
-                record.run_id != plan.run_id
-                or record.plan_id != plan.plan_id
-                or record.intent_id != plan.intent_id
-                or record.from_generation != plan.from_generation
-                or record.effective_generation != plan.to_generation
-                or record.incident_ids != plan.incident_ids
-                or record.reason_code != plan.reason_code
-            ):
-                raise ValueError(
-                    "RestartPlanQuarantineState quarantine record does not match its plan"
-                )
-            if (
-                record.coordinator_id != plan_record.coordinator_id
-                or record.lease_id != plan_record.lease_id
-                or record.coordinator_lease_duration_ms != plan_record.coordinator_lease_duration_ms
-                or record.coordinator_fencing_token != plan_record.coordinator_fencing_token
-            ):
-                raise ValueError(
-                    "RestartPlanQuarantineState quarantine record uses different "
-                    "publication authority"
-                )
+            _validate_quarantine_record_matches_plan(
+                plan_record,
+                record,
+                path="RestartPlanQuarantineState",
+            )
         object.__setattr__(
             self,
             "quarantine_records",

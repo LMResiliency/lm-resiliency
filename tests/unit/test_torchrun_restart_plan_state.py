@@ -2166,6 +2166,95 @@ def test_persisted_restart_plan_publication_rejects_digest_substitution():
         replace(state, quarantine_records={})
 
 
+def test_persisted_restart_plan_publication_rejects_manifest_metadata_substitution():
+    state = _persisted_publication()
+    manifest_record = replace(
+        state.manifest_record,
+        manifest=replace(
+            state.manifest_record.manifest,
+            manifest_id="other-manifest",
+        ),
+    )
+    plan_record = replace(
+        state.record,
+        recovery_manifest_record_digest=manifest_record.digest,
+    )
+
+    with pytest.raises(ValueError, match="manifest metadata"):
+        replace(
+            state,
+            record=plan_record,
+            manifest_record=manifest_record,
+            plan_entry=replace(state.plan_entry, value=plan_record.to_json()),
+            manifest_entry=replace(
+                state.manifest_entry,
+                value=manifest_record.to_json(),
+            ),
+        )
+
+
+def test_persisted_restart_plan_publication_rejects_weaker_manifest_trust():
+    state = _persisted_publication()
+    manifest_record = replace(
+        state.manifest_record,
+        manifest=replace(state.manifest_record.manifest, trust="latest"),
+    )
+    plan_record = replace(
+        state.record,
+        plan=replace(state.plan, recovery_mode="recovery_verified"),
+        recovery_manifest_record_digest=manifest_record.digest,
+    )
+
+    with pytest.raises(ValueError, match="verified recovery"):
+        replace(
+            state,
+            record=plan_record,
+            manifest_record=manifest_record,
+            plan_entry=replace(state.plan_entry, value=plan_record.to_json()),
+            manifest_entry=replace(
+                state.manifest_entry,
+                value=manifest_record.to_json(),
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (lambda record: replace(record, plan_id="other-plan"), "does not match its plan"),
+        (
+            lambda record: replace(record, lease_id="other-lease"),
+            "publication authority",
+        ),
+    ],
+)
+def test_persisted_restart_plan_publication_rejects_quarantine_substitution(
+    change: Callable[[NodeQuarantineRecord], NodeQuarantineRecord],
+    message: str,
+) -> None:
+    state = _persisted_publication()
+    node_id, quarantine_record = next(iter(state.quarantine_records.items()))
+    changed_record = change(quarantine_record)
+    plan_record = replace(
+        state.record,
+        quarantine_record_digests={node_id: changed_record.digest},
+    )
+
+    with pytest.raises(ValueError, match=message):
+        replace(
+            state,
+            record=plan_record,
+            quarantine_records={node_id: changed_record},
+            plan_entry=replace(state.plan_entry, value=plan_record.to_json()),
+            quarantine_entries={
+                node_id: replace(
+                    state.quarantine_entries[node_id],
+                    value=changed_record.to_json(),
+                )
+            },
+        )
+
+
 def test_persisted_restart_plan_publication_requires_the_planned_successor():
     state = _persisted_publication()
     slot_assignments = state.plan.slot_assignments
