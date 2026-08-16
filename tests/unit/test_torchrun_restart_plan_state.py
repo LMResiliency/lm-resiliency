@@ -1992,6 +1992,7 @@ def test_restart_plan_publication_records_build_canonical_atomic_inputs():
         records.registration_keys["node-a"]: 11,
         records.registration_keys["node-c"]: 11,
     }
+    assert records.deadline_unix_ms == 1_600
 
 
 def test_restart_plan_publication_records_derive_run_scoped_keys():
@@ -2062,6 +2063,28 @@ def test_restart_plan_publication_records_require_matching_shared_source_revisio
                 snapshot=replace(records.current.snapshot, revision=9),
             ),
         )
+
+
+def test_restart_plan_publication_records_use_earliest_registration_expiry():
+    records = _publication_records()
+    generation_state = records.candidate.placement_state.generation_state
+    placement = _placement_state(
+        generation_state=generation_state,
+        registration_histories={
+            "node-a": _registration_history(
+                "node-a",
+                lease_duration_ms=200,
+            ),
+            "node-c": _registration_history("node-c"),
+        },
+    )
+
+    updated = replace(
+        records,
+        candidate=replace(records.candidate, placement_state=placement),
+    )
+
+    assert updated.deadline_unix_ms == 1_300
 
 
 @pytest.mark.parametrize(

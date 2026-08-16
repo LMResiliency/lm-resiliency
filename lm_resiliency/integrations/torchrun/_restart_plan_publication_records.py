@@ -118,6 +118,19 @@ class RestartPlanPublicationRecords:
         )
 
     @property
+    def deadline_unix_ms(self) -> int:
+        registration_expiries = []
+        for history in self.candidate.placement_state.registration_histories.values():
+            registration = history.current
+            if registration is None:
+                raise AssertionError("validated placement lost its current registration")
+            registration_expiries.append(registration.expires_at_unix_ms)
+        return min(
+            self.candidate.plan.restart_deadline_unix_ms,
+            *registration_expiries,
+        )
+
+    @property
     def writes(self) -> Mapping[str, ControlStoreWrite]:
         generation_state = self.candidate.placement_state.generation_state
         manifest_state = (
