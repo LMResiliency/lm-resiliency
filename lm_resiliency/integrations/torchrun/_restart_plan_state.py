@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 
 from lm_resiliency.integrations.torchrun._agent_registration_history_reader import (
@@ -1073,6 +1073,115 @@ class RestartPlanRecoveryEvidenceState:
 
 
 @dataclass(frozen=True, slots=True)
+class RestartPlanPersistedRecoveryState:
+    """Reauthorize one persisted publication's exact recovery evidence."""
+
+    publication: PersistedRestartPlanPublication
+    generation_state: RestartPlanGenerationState
+    manifest_source_snapshot: StoredGenerationSnapshot
+    acknowledgement_evidence: RestartAckEvidence | None = None
+    resolved_manifest: ResolvedRecoveryManifest = field(init=False)
+    manifest_state: RestartPlanManifestState = field(init=False)
+    quarantine_state: RestartPlanQuarantineState = field(init=False)
+    inventory_state: RestartPlanInventoryState = field(init=False)
+    recovery_state: RestartPlanRecoveryEvidenceState = field(init=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.publication, PersistedRestartPlanPublication):
+            raise TypeError(
+                "RestartPlanPersistedRecoveryState.publication must be "
+                "PersistedRestartPlanPublication"
+            )
+        if not isinstance(self.generation_state, RestartPlanGenerationState):
+            raise TypeError(
+                "RestartPlanPersistedRecoveryState.generation_state must be "
+                "RestartPlanGenerationState"
+            )
+        if not isinstance(self.manifest_source_snapshot, StoredGenerationSnapshot):
+            raise TypeError(
+                "RestartPlanPersistedRecoveryState.manifest_source_snapshot must be "
+                "StoredGenerationSnapshot"
+            )
+        if self.acknowledgement_evidence is not None and not isinstance(
+            self.acknowledgement_evidence,
+            RestartAckEvidence,
+        ):
+            raise TypeError(
+                "RestartPlanPersistedRecoveryState.acknowledgement_evidence must be "
+                "RestartAckEvidence or None"
+            )
+        if (
+            self.publication.record != self.generation_state.record
+            or self.publication.successor_snapshot != self.generation_state.to_snapshot
+        ):
+            raise ValueError(
+                "RestartPlanPersistedRecoveryState publication and generation state differ"
+            )
+
+        resolved_manifest = ResolvedRecoveryManifest(
+            record=self.publication.manifest_record,
+            source_snapshot=self.manifest_source_snapshot,
+        )
+        manifest_state = RestartPlanManifestState(
+            generation_state=self.generation_state,
+            resolved_manifest=resolved_manifest,
+        )
+        quarantine_state = RestartPlanQuarantineState(
+            manifest_state=manifest_state,
+            quarantine_records=self.publication.quarantine_records,
+        )
+        inventory_state = RestartPlanInventoryState(
+            quarantine_state=quarantine_state,
+            inventory_events=self.publication.evidence_record.inventory_events,
+        )
+        copy_state = RestartPlanCopyEligibilityState(inventory_state)
+        if inventory_state.manifest.trust == "recovery_verified":
+            if self.acknowledgement_evidence is not None:
+                raise ValueError(
+                    "RestartPlanPersistedRecoveryState verified recovery cannot use "
+                    "latest acknowledgement evidence"
+                )
+            trust_state: RestartPlanLatestEvidenceState | RestartPlanCertificationState = (
+                RestartPlanCertificationState(
+                    inventory_state=inventory_state,
+                    certifications=self.publication.evidence_record.certifications,
+                )
+            )
+        else:
+            if self.publication.evidence_record.certifications:
+                raise ValueError(
+                    "RestartPlanPersistedRecoveryState latest recovery cannot use "
+                    "trusted certifications"
+                )
+            if self.acknowledgement_evidence is None:
+                raise ValueError(
+                    "RestartPlanPersistedRecoveryState latest recovery requires "
+                    "acknowledgement evidence"
+                )
+            trust_state = RestartPlanLatestEvidenceState(
+                inventory_state=inventory_state,
+                acknowledgement_evidence=self.acknowledgement_evidence,
+            )
+        recovery_state = RestartPlanRecoveryEvidenceState(
+            copy_state=copy_state,
+            trust_state=trust_state,
+        )
+        object.__setattr__(self, "resolved_manifest", resolved_manifest)
+        object.__setattr__(self, "manifest_state", manifest_state)
+        object.__setattr__(self, "quarantine_state", quarantine_state)
+        object.__setattr__(self, "inventory_state", inventory_state)
+        object.__setattr__(self, "recovery_state", recovery_state)
+
+    @property
+    def plan(self) -> RestartPlan:
+        return self.recovery_state.plan
+
+    @property
+    def manifest(self) -> RecoveryManifest:
+        return self.recovery_state.manifest
+
+
+@dataclass(frozen=True, slots=True)
 class RestartPlanPlacementState:
     """One successor placement backed by exact live agent registrations."""
 
@@ -1268,6 +1377,7 @@ __all__ = [
     "RestartPlanInventoryState",
     "RestartPlanLatestEvidenceState",
     "RestartPlanManifestState",
+    "RestartPlanPersistedRecoveryState",
     "RestartPlanPlacementState",
     "RestartPlanQuarantineState",
     "RestartPlanRecoveryEvidenceState",

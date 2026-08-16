@@ -907,6 +907,13 @@ generation-head revisions plus store metadata to equal the authoritative
 current generation. Missing, malformed, mixed, or substituted state fails
 closed; repeated head movement remains a retryable read conflict. This first
 readback boundary still does not reauthorize lifecycle or checkpoint evidence.
+`RestartPlanPersistedRecoveryState` reauthorizes the checkpoint side of one
+persisted publication without reading or mutating the store. It resolves the
+exact manifest source generation, quarantine records, inventory events, copy
+eligibility, and exactly one trust path: persisted trusted certifications for
+`recovery_verified`, or supplied restart-acknowledgement evidence for `latest`.
+It still does not authenticate the closed lifecycle or make the publication
+visible to rendezvous.
 
 Before commit, the coordinator validates:
 

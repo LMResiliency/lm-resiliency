@@ -102,6 +102,7 @@ from lm_resiliency.integrations.torchrun._restart_plan_state import (
     RestartPlanGenerationState,
     RestartPlanInventoryState,
     RestartPlanManifestState,
+    RestartPlanPersistedRecoveryState,
     RestartPlanPlacementState,
     RestartPlanQuarantineState,
     RestartPlanRecoveryEvidenceState,
@@ -1964,6 +1965,67 @@ def test_restart_plan_recovery_evidence_state_rejects_cross_inventory_evidence()
             copy_state=_copy_eligibility_state(),
             trust_state=_certification_state(),
         )
+
+
+def _persisted_recovery_state() -> RestartPlanPersistedRecoveryState:
+    publication = _persisted_publication()
+    records = _publication_records()
+    inventory_state = records.candidate.recovery_state.copy_state.inventory_state
+    manifest_state = inventory_state.quarantine_state.manifest_state
+    return RestartPlanPersistedRecoveryState(
+        publication=publication,
+        generation_state=manifest_state.generation_state,
+        manifest_source_snapshot=manifest_state.resolved_manifest.source_snapshot,
+    )
+
+
+def test_restart_plan_persisted_recovery_state_reauthorizes_verified_evidence():
+    state = _persisted_recovery_state()
+
+    assert state.plan == state.publication.plan
+    assert state.manifest == state.publication.manifest_record.manifest
+    assert (
+        state.inventory_state.inventory_events == state.publication.evidence_record.inventory_events
+    )
+    assert isinstance(state.recovery_state.trust_state, RestartPlanCertificationState)
+    assert (
+        state.recovery_state.trust_state.certifications
+        == state.publication.evidence_record.certifications
+    )
+
+
+def test_restart_plan_persisted_recovery_state_requires_exact_types():
+    state = _persisted_recovery_state()
+
+    with pytest.raises(TypeError, match="publication must be"):
+        replace(state, publication=state.publication.record)
+    with pytest.raises(TypeError, match="generation_state must be"):
+        replace(state, generation_state=state.generation_state.record)
+    with pytest.raises(TypeError, match="manifest_source_snapshot must be"):
+        replace(state, manifest_source_snapshot=state.manifest_source_snapshot.record)
+    with pytest.raises(TypeError, match="acknowledgement_evidence must be"):
+        replace(state, acknowledgement_evidence=object())
+
+
+def test_restart_plan_persisted_recovery_state_rejects_another_generation_state():
+    state = _persisted_recovery_state()
+
+    with pytest.raises(ValueError, match="publication and generation state differ"):
+        replace(state, generation_state=_generation_state())
+
+
+def test_restart_plan_persisted_recovery_state_rejects_another_manifest_source():
+    state = _persisted_recovery_state()
+    source_snapshot = replace(
+        state.manifest_source_snapshot,
+        record=replace(
+            state.manifest_source_snapshot.record,
+            coordinator_id="coordinator-other",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="source snapshot digest"):
+        replace(state, manifest_source_snapshot=source_snapshot)
 
 
 def _candidate_state() -> RestartPlanCandidateState:

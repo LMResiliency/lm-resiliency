@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import threading
 from dataclasses import replace
 from typing import Any, cast
@@ -11,11 +12,18 @@ import pytest
 from lm_resiliency.integrations.torchrun._agent_registration import (
     AgentRegistrationManager,
 )
-from lm_resiliency.integrations.torchrun._control_store import InMemoryControlStore
+from lm_resiliency.integrations.torchrun._control_store import (
+    ControlStoreEntry,
+    InMemoryControlStore,
+)
 from lm_resiliency.integrations.torchrun._coordinator_lease import (
     CoordinatorLeaseManager,
 )
+from lm_resiliency.integrations.torchrun._generation_reader import (
+    StoredGenerationSnapshot,
+)
 from lm_resiliency.integrations.torchrun._generation_records import (
+    GenerationHeadRecord,
     GenerationSnapshotRecord,
 )
 from lm_resiliency.integrations.torchrun._generation_state import GenerationStateManager
@@ -59,15 +67,18 @@ from lm_resiliency.integrations.torchrun._restart_intent_records import (
 )
 from lm_resiliency.integrations.torchrun._restart_plan_records import (
     RecoveryManifestRecord,
+    RestartPlanEvidenceRecord,
     RestartPlanRecord,
 )
 from lm_resiliency.integrations.torchrun._restart_plan_state import (
+    PersistedRestartPlanPublication,
     ResolvedRecoveryManifest,
     RestartPlanCopyEligibilityState,
     RestartPlanGenerationState,
     RestartPlanInventoryState,
     RestartPlanLatestEvidenceState,
     RestartPlanManifestState,
+    RestartPlanPersistedRecoveryState,
     RestartPlanQuarantineState,
     RestartPlanRecoveryEvidenceState,
 )
@@ -356,6 +367,176 @@ def _latest_inventory_state(
         ),
         inventory_events={event.event_id: event},
     )
+
+
+def _persisted_latest_recovery_inputs(
+    evidence: RestartAckEvidence,
+    event: CheckpointInventoryEvent,
+) -> tuple[
+    PersistedRestartPlanPublication,
+    RestartPlanGenerationState,
+    StoredGenerationSnapshot,
+]:
+    inventory_state = _latest_inventory_state(evidence, event)
+    manifest_state = inventory_state.quarantine_state.manifest_state
+    evidence_record = RestartPlanEvidenceRecord(
+        plan_id=manifest_state.plan.plan_id,
+        run_id=manifest_state.plan.run_id,
+        manifest_id=manifest_state.manifest.manifest_id,
+        inventory_events=inventory_state.inventory_events,
+        certifications=(),
+    )
+    generation_state = replace(
+        manifest_state.generation_state,
+        record=replace(
+            manifest_state.generation_state.record,
+            recovery_evidence_record_digest=evidence_record.digest,
+        ),
+    )
+    plan_record = generation_state.record
+    manifest_record = manifest_state.resolved_manifest.record
+    generation_head = GenerationHeadRecord(
+        run_id=RUN_ID,
+        generation=generation_state.plan.to_generation,
+        snapshot_digest=generation_state.to_snapshot.digest,
+    )
+    guard_key = (
+        "lm_resiliency/torchrun/v1/runs/"
+        f"{hashlib.sha256(RUN_ID.encode('utf-8')).hexdigest()}/coordinator-lease"
+    )
+
+    def immutable_entry(value: bytes, revision: int) -> ControlStoreEntry:
+        return ControlStoreEntry(
+            value=value,
+            revision=revision,
+            committed_at_unix_ms=1_200,
+            transaction_sequence=30,
+            guard_key=guard_key,
+            guard_revision=plan_record.coordinator_fencing_token,
+            guard_value_digest=plan_record.coordinator_lease_digest,
+            guard_mutation_sequence=9,
+            guard_value_sequence=5,
+            guard_lifetime_sequence=1,
+            guard_committed_at_unix_ms=900,
+        )
+
+    publication = PersistedRestartPlanPublication.from_entries(
+        run_id=RUN_ID,
+        to_generation=generation_state.plan.to_generation,
+        plan_entry=immutable_entry(plan_record.to_json(), 21),
+        manifest_entry=immutable_entry(manifest_record.to_json(), 22),
+        evidence_entry=immutable_entry(evidence_record.to_json(), 23),
+        successor_snapshot_entry=immutable_entry(
+            generation_state.to_snapshot.to_json(),
+            24,
+        ),
+        generation_head_entry=replace(
+            immutable_entry(generation_head.to_json(), 25),
+            mutation_sequence=generation_state.plan.to_generation + 1,
+            value_sequence=generation_state.plan.to_generation + 1,
+        ),
+        quarantine_entries={},
+    )
+    return (
+        publication,
+        generation_state,
+        manifest_state.resolved_manifest.source_snapshot,
+    )
+
+
+def test_persisted_latest_recovery_accepts_matching_acknowledgements():
+    event = _latest_event()
+    evidence, _ = _evidence(event=event)
+    publication, generation_state, source_snapshot = _persisted_latest_recovery_inputs(
+        evidence,
+        event,
+    )
+
+    state = RestartPlanPersistedRecoveryState(
+        publication=publication,
+        generation_state=generation_state,
+        manifest_source_snapshot=source_snapshot,
+        acknowledgement_evidence=evidence,
+    )
+
+    assert isinstance(state.recovery_state.trust_state, RestartPlanLatestEvidenceState)
+    assert state.recovery_state.trust_state.acknowledgement_evidence == evidence
+
+
+@pytest.mark.parametrize("acknowledgement_success", [None, False])
+def test_persisted_latest_recovery_rejects_missing_or_failed_acknowledgements(
+    acknowledgement_success,
+):
+    event = _latest_event()
+    evidence, _ = _evidence(event=event)
+    publication, generation_state, source_snapshot = _persisted_latest_recovery_inputs(
+        evidence,
+        event,
+    )
+    persisted = evidence.collection.receipts_by_node_id["node-a"]
+    assert persisted is not None
+    if acknowledgement_success is None:
+        unavailable_receipt = None
+    else:
+        failed_acknowledgement = replace(
+            persisted.receipt.acknowledgement,
+            flushed_step=-1,
+            inventory_event_digests={},
+            transferred_owner_ranks=(),
+            transferred_peer_ranks=(),
+            success=False,
+            reason="preparation failed",
+        )
+        failed_receipt = replace(
+            persisted.receipt,
+            acknowledgement=failed_acknowledgement,
+        )
+        unavailable_receipt = replace(
+            persisted,
+            receipt=failed_receipt,
+            receipt_entry=replace(
+                persisted.receipt_entry,
+                value=failed_receipt.to_json(),
+            ),
+        )
+    unavailable_evidence = RestartAckEvidence(
+        RestartAckCollection(
+            opened=evidence.collection.opened,
+            receipts_by_node_id={
+                "node-a": unavailable_receipt,
+                "node-b": None,
+            },
+        )
+    )
+
+    with pytest.raises(ValueError, match="not authorized"):
+        RestartPlanPersistedRecoveryState(
+            publication=publication,
+            generation_state=generation_state,
+            manifest_source_snapshot=source_snapshot,
+            acknowledgement_evidence=unavailable_evidence,
+        )
+
+
+def test_persisted_latest_recovery_rejects_acknowledgements_for_another_intent():
+    event = _latest_event()
+    evidence, _ = _evidence(event=event)
+    publication, generation_state, source_snapshot = _persisted_latest_recovery_inputs(
+        evidence,
+        event,
+    )
+    other_evidence, _ = _evidence(
+        event=event,
+        intent_id="intent-other",
+    )
+
+    with pytest.raises(ValueError, match="another restart intent"):
+        RestartPlanPersistedRecoveryState(
+            publication=publication,
+            generation_state=generation_state,
+            manifest_source_snapshot=source_snapshot,
+            acknowledgement_evidence=other_evidence,
+        )
 
 
 def test_restart_ack_collection_authorizes_exact_latest_inventory():
