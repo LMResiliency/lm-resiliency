@@ -28,7 +28,7 @@ from lm_resiliency.integrations.torchrun._protocol import (
 from lm_resiliency.integrations.torchrun._quarantine_records import (
     NodeQuarantineRecord,
 )
-from lm_resiliency.integrations.torchrun._restart_ack_evidence import (
+from lm_resiliency.integrations.torchrun._restart_ack_collection import (
     RestartAckEvidence,
 )
 from lm_resiliency.integrations.torchrun._restart_intent_records import (

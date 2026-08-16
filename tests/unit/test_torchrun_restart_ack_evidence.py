@@ -35,8 +35,6 @@ from lm_resiliency.integrations.torchrun._protocol import (
 )
 from lm_resiliency.integrations.torchrun._restart_ack_collection import (
     RestartAckCollection,
-)
-from lm_resiliency.integrations.torchrun._restart_ack_evidence import (
     RestartAckEvidence,
 )
 from lm_resiliency.integrations.torchrun._restart_ack_execution import (
@@ -359,7 +357,7 @@ def _latest_inventory_state(
     )
 
 
-def test_restart_ack_evidence_authorizes_exact_latest_inventory():
+def test_restart_ack_collection_authorizes_exact_latest_inventory():
     evidence, event = _evidence()
 
     assert evidence.authorizes_latest_inventory(event)
@@ -376,13 +374,13 @@ def test_restart_ack_evidence_authorizes_exact_latest_inventory():
         _event(trust="recovery_verified"),
     ],
 )
-def test_restart_ack_evidence_rejects_mismatched_or_nonlatest_inventory(event):
+def test_restart_ack_collection_rejects_mismatched_or_nonlatest_inventory(event):
     evidence, _ = _evidence()
 
     assert not evidence.authorizes_latest_inventory(event)
 
 
-def test_restart_ack_evidence_rejects_reused_event_id_with_different_bytes():
+def test_restart_ack_collection_rejects_reused_event_id_with_different_bytes():
     evidence, event = _evidence()
     changed = replace(event, reporter=replace(event.reporter, hostname="host-changed"))
 
@@ -391,7 +389,7 @@ def test_restart_ack_evidence_rejects_reused_event_id_with_different_bytes():
 
 
 @pytest.mark.parametrize("acknowledgement_success", [None, False])
-def test_restart_ack_evidence_rejects_missing_or_failed_preparation(
+def test_restart_ack_collection_rejects_missing_or_failed_preparation(
     acknowledgement_success,
 ):
     evidence, event = _evidence(
@@ -401,7 +399,7 @@ def test_restart_ack_evidence_rejects_missing_or_failed_preparation(
     assert not evidence.authorizes_latest_inventory(event)
 
 
-def test_restart_ack_evidence_rejects_event_from_missing_node():
+def test_restart_ack_collection_rejects_event_from_missing_node():
     evidence, _ = _evidence()
     event = _event(
         node_id="node-b",
@@ -413,7 +411,7 @@ def test_restart_ack_evidence_rejects_event_from_missing_node():
     assert not evidence.authorizes_latest_inventory(event)
 
 
-def test_restart_ack_evidence_validates_types():
+def test_restart_ack_collection_validates_types():
     evidence, _ = _evidence()
 
     with pytest.raises(TypeError, match="CheckpointInventoryEvent"):
