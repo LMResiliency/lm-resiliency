@@ -23,9 +23,6 @@ from lm_resiliency.integrations.torchrun._coordinator_lease import (
 from lm_resiliency.integrations.torchrun._coordinator_lease_history import (
     CoordinatorLeaseAuthority,
 )
-from lm_resiliency.integrations.torchrun._restart_plan_publication_authority import (
-    RestartPlanPublicationAuthority,
-)
 from lm_resiliency.integrations.torchrun._restart_plan_publication_execution import (
     RestartPlanPublicationExecutionClockError,
     RestartPlanPublicationExecutionConflict,
@@ -38,8 +35,9 @@ from lm_resiliency.integrations.torchrun._restart_plan_publication_execution imp
 from lm_resiliency.integrations.torchrun._restart_plan_publication_lifecycle import (
     RestartPlanPublicationLifecycleFence,
 )
-from lm_resiliency.integrations.torchrun._restart_plan_publication_state import (
+from lm_resiliency.integrations.torchrun._restart_plan_publication_records import (
     PreparedRestartPlanPublication,
+    RestartPlanPublicationAuthority,
 )
 
 RUN_ID = "training-run"

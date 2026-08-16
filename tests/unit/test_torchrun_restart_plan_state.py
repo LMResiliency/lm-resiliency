@@ -66,10 +66,7 @@ from lm_resiliency.integrations.torchrun._restart_intent_records import (
     RestartIntentLifecycleRecord,
     RestartIntentRecord,
 )
-from lm_resiliency.integrations.torchrun._restart_plan_publication_authority import (
-    RestartPlanPublicationAuthority,
-)
-from lm_resiliency.integrations.torchrun._restart_plan_publication_preparation import (
+from lm_resiliency.integrations.torchrun._restart_plan_publication import (
     RestartPlanPublicationAuthorityPreparer,
     RestartPlanPublicationPreparationClockError,
     RestartPlanPublicationPreparationConflict,
@@ -77,6 +74,7 @@ from lm_resiliency.integrations.torchrun._restart_plan_publication_preparation i
     RestartPlanPublicationPreparationLeaseLost,
 )
 from lm_resiliency.integrations.torchrun._restart_plan_publication_records import (
+    RestartPlanPublicationAuthority,
     RestartPlanPublicationRecords,
 )
 from lm_resiliency.integrations.torchrun._restart_plan_records import (
@@ -2223,21 +2221,21 @@ def _publication_authority() -> RestartPlanPublicationAuthority:
     )
 
 
-def test_restart_plan_publication_authority_binds_exact_lease_window():
+def test_restart_plan_publication_records_binds_exact_lease_window():
     authority = _publication_authority()
 
     assert authority.not_before_unix_ms == 1_200
     assert authority.deadline_unix_ms == 1_400
 
 
-def test_restart_plan_publication_authority_is_immutable():
+def test_restart_plan_publication_records_is_immutable():
     authority = _publication_authority()
 
     with pytest.raises(AttributeError):
         authority.observed_at_unix_ms = 1_201
 
 
-def test_restart_plan_publication_authority_requires_exact_types():
+def test_restart_plan_publication_records_requires_exact_types():
     authority = _publication_authority()
 
     with pytest.raises(TypeError, match="records must be"):
@@ -2250,7 +2248,7 @@ def test_restart_plan_publication_authority_requires_exact_types():
 
 
 @pytest.mark.parametrize("observed_at_unix_ms", [0, True])
-def test_restart_plan_publication_authority_requires_positive_observation(
+def test_restart_plan_publication_records_requires_positive_observation(
     observed_at_unix_ms,
 ):
     authority = _publication_authority()
@@ -2296,7 +2294,7 @@ def test_restart_plan_publication_authority_requires_positive_observation(
         ),
     ],
 )
-def test_restart_plan_publication_authority_rejects_wrong_lease(lease):
+def test_restart_plan_publication_records_rejects_wrong_lease(lease):
     authority = _publication_authority()
 
     with pytest.raises(ValueError, match="does not authorize"):
@@ -2310,7 +2308,7 @@ def test_restart_plan_publication_authority_rejects_wrong_lease(lease):
 
 
 @pytest.mark.parametrize("observed_at_unix_ms", [899, 999, 1_199])
-def test_restart_plan_publication_authority_rejects_early_observation(
+def test_restart_plan_publication_records_rejects_early_observation(
     observed_at_unix_ms,
 ):
     authority = _publication_authority()
@@ -2319,7 +2317,7 @@ def test_restart_plan_publication_authority_rejects_early_observation(
         replace(authority, observed_at_unix_ms=observed_at_unix_ms)
 
 
-def test_restart_plan_publication_authority_rejects_elapsed_window():
+def test_restart_plan_publication_records_rejects_elapsed_window():
     authority = _publication_authority()
 
     with pytest.raises(ValueError, match="window has elapsed"):
