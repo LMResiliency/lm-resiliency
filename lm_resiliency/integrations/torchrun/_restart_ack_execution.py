@@ -14,7 +14,7 @@ from lm_resiliency.integrations.torchrun._control_store import (
     ControlStoreHistoryConflict,
     ControlStoreTooEarly,
 )
-from lm_resiliency.integrations.torchrun._restart_ack import PreparedRestartAckWrite
+from lm_resiliency.integrations.torchrun._restart_ack_records import PreparedRestartAckWrite
 
 
 class RestartAckExecutionError(RuntimeError):
