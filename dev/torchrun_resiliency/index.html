@@ -1077,7 +1077,13 @@ to match the plan's exact coordinator identity and fencing token, and returns
 that pure authority value without mutating the store. Repeated lease changes
 remain retryable conflicts; missing, stale, expired, or contradictory authority
 fails closed. Lifecycle fencing, quarantine-resource authorization, execution,
-and committed-result verification remain separate publication layers.</p>
+and committed-result verification remain separate publication layers.
+<code>RestartPlanPublicationLifecycleFence</code> derives immutable revision conditions
+for the exact closed intent, durable closed head, lifecycle record, and
+lifecycle head from one authenticated closure. It rejects any closure whose
+successor generation is already committed. Candidate identity, live-store
+observation, transaction execution, and committed-result verification remain
+separate layers.</p>
 <p>Before commit, the coordinator validates:</p>
 <ul>
 <li>the plan is fenced to the same intent ID, run, generation, incidents, and
