@@ -960,6 +960,13 @@ authoritative intent-opening commit. This value performs no store reads or
 writes. A following read-only layer constructs it from stable durable state
 before the preparation layer selects a bounded commit window.
 
+Each retained agent-registration value is first decoded as one immutable
+authority. The strict decoder binds canonical registration bytes to the
+expected run and node, requires an authoritative commit time, rejects guarded
+registration writes, and preserves the store transaction, mutation, value, and
+lifetime sequences. It also rejects impossible per-entry sequence lineage. A
+following reader validates the complete registration history and current tail.
+
 For a crashed or unreachable node, no preparation is assumed.
 
 ## API: lm-resiliency to the Framework
