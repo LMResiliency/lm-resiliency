@@ -1101,7 +1101,14 @@ preparer before the stable lifecycle reader and returns that composed value
 without mutating the store. It exposes one error boundary for retryable
 authority/lifecycle contention, lost coordinator authority, unsafe clocks, and
 durable corruption. A closure committed after the authority observation or
-other cross-read mismatch remains retryable contention.</p>
+other cross-read mismatch remains retryable contention.
+<code>RestartPlanPublicationExecutor</code> then submits those exact writes, guard,
+revision conditions, and store-time window in one atomic transaction. Its
+committed result verifies the exact key/value set, generation-head and
+immutable-record lineage, common transaction identity, coordinator-lease
+provenance, input ordering, and commit window before the publication is
+accepted. Lifecycle, generation, or registration churn remains a classified
+conflict; substituted store responses fail closed as corruption.</p>
 <p>Before commit, the coordinator validates:</p>
 <ul>
 <li>the plan is fenced to the same intent ID, run, generation, incidents, and
