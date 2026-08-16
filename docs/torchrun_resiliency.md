@@ -821,6 +821,13 @@ evidence state only when both describe the exact same lifecycle and generation
 records. The registration observation must also precede the plan's exclusive
 restart deadline. This value is still only a publication candidate: trusted
 prior quarantine and the atomic store transaction remain separate gates.
+`RestartPlanPublicationRecords` derives the canonical immutable plan, manifest,
+quarantine, successor-generation, and generation-head writes from one admitted
+candidate. It CAS-updates the generation head and conditions on the exact
+current and manifest-source snapshot revisions, but performs no store access
+and does not authenticate the live coordinator lease, lifecycle revision,
+quarantine resource evidence, deadline, transaction result, or prior committed
+quarantine state.
 
 Before commit, the coordinator validates:
 

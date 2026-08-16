@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 
 import pytest
@@ -16,10 +17,13 @@ from lm_resiliency.integrations.torchrun._agent_registration_records import (
     AgentRegistrationRecord,
     HeldAgentRegistration,
 )
+from lm_resiliency.integrations.torchrun._control_store import ControlStoreWrite
 from lm_resiliency.integrations.torchrun._generation_reader import (
+    CurrentGeneration,
     StoredGenerationSnapshot,
 )
 from lm_resiliency.integrations.torchrun._generation_records import (
+    GenerationHeadRecord,
     GenerationSnapshotRecord,
 )
 from lm_resiliency.integrations.torchrun._protocol import (
@@ -43,6 +47,9 @@ from lm_resiliency.integrations.torchrun._restart_intent_records import (
     RestartIntentHeadRecord,
     RestartIntentLifecycleRecord,
     RestartIntentRecord,
+)
+from lm_resiliency.integrations.torchrun._restart_plan_publication_records import (
+    RestartPlanPublicationRecords,
 )
 from lm_resiliency.integrations.torchrun._restart_plan_records import (
     RecoveryManifestRecord,
@@ -1918,6 +1925,149 @@ def test_restart_plan_candidate_state_rejects_elapsed_restart_deadline():
 
     with pytest.raises(ValueError, match="deadline has elapsed"):
         replace(state, placement_state=placement)
+
+
+def _publication_records() -> RestartPlanPublicationRecords:
+    candidate = _candidate_state()
+    source_record = candidate.placement_state.generation_state.from_snapshot
+    return RestartPlanPublicationRecords(
+        candidate=candidate,
+        current=CurrentGeneration(
+            snapshot=StoredGenerationSnapshot(
+                record=source_record,
+                revision=8,
+                committed_at_unix_ms=1_000,
+                transaction_sequence=17,
+                guard_mutation_sequence=9,
+                guard_value_sequence=5,
+                guard_lifetime_sequence=1,
+                guard_committed_at_unix_ms=900,
+            ),
+            head_revision=18,
+        ),
+    )
+
+
+def test_restart_plan_publication_records_build_canonical_atomic_inputs():
+    records = _publication_records()
+    generation_state = records.candidate.placement_state.generation_state
+    quarantine_state = records.candidate.recovery_state.copy_state.inventory_state.quarantine_state
+    manifest_record = quarantine_state.manifest_state.resolved_manifest.record
+
+    assert records.generation_head == GenerationHeadRecord(
+        run_id=RUN_ID,
+        generation=records.candidate.plan.to_generation,
+        snapshot_digest=generation_state.to_snapshot.digest,
+    )
+    assert records.writes[records.generation_head_key] == ControlStoreWrite(
+        expected_revision=18,
+        value=records.generation_head.to_json(),
+    )
+    assert records.writes[records.successor_generation_snapshot_key] == ControlStoreWrite(
+        expected_revision=None,
+        value=generation_state.to_snapshot.to_json(),
+        require_never_created=True,
+    )
+    assert records.writes[records.recovery_manifest_key] == ControlStoreWrite(
+        expected_revision=None,
+        value=manifest_record.to_json(),
+        require_never_created=True,
+    )
+    assert records.writes[records.plan_key] == ControlStoreWrite(
+        expected_revision=None,
+        value=generation_state.record.to_json(),
+        require_never_created=True,
+    )
+    quarantine_record = quarantine_state.quarantine_records["node-b"]
+    assert records.writes[records.quarantine_keys["node-b"]] == ControlStoreWrite(
+        expected_revision=None,
+        value=quarantine_record.to_json(),
+        require_never_created=True,
+    )
+    assert records.conditions == {
+        records.source_generation_snapshot_key: 8,
+    }
+
+
+def test_restart_plan_publication_records_derive_run_scoped_keys():
+    records = _publication_records()
+    expected_run_digest = hashlib.sha256(RUN_ID.encode()).hexdigest()
+
+    assert records.run_prefix == f"lm_resiliency/torchrun/v1/runs/{expected_run_digest}"
+    assert records.plan_key.endswith("/restart-plans/5")
+    assert records.recovery_manifest_key.endswith("/restart-plans/5/recovery-manifest")
+    assert records.generation_head_key.endswith("/generation-head")
+    assert records.source_generation_snapshot_key.endswith("/generations/4")
+    assert records.manifest_source_generation_snapshot_key.endswith("/generations/4")
+    assert records.successor_generation_snapshot_key.endswith("/generations/5")
+    assert RUN_ID not in records.plan_key
+
+
+def test_restart_plan_publication_records_freeze_mappings():
+    records = _publication_records()
+
+    with pytest.raises(TypeError):
+        records.writes["other"] = next(iter(records.writes.values()))
+    with pytest.raises(TypeError):
+        records.conditions["other"] = 1
+    with pytest.raises(TypeError):
+        records.quarantine_keys["node-b"] = "other"
+
+
+def test_restart_plan_publication_records_require_exact_types():
+    records = _publication_records()
+
+    with pytest.raises(TypeError, match="candidate must be"):
+        replace(records, candidate=records.candidate.recovery_state)
+    with pytest.raises(TypeError, match="current must be"):
+        replace(records, current=records.current.snapshot)
+
+
+def test_restart_plan_publication_records_require_exact_current_generation():
+    records = _publication_records()
+    changed_snapshot = replace(
+        records.current.snapshot,
+        record=replace(
+            records.current.snapshot.record,
+            coordinator_fencing_token=10,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="current generation does not match"):
+        replace(
+            records,
+            current=replace(records.current, snapshot=changed_snapshot),
+        )
+
+
+def test_restart_plan_publication_records_require_matching_shared_source_revision():
+    records = _publication_records()
+
+    with pytest.raises(ValueError, match="source revisions disagree"):
+        replace(
+            records,
+            current=replace(
+                records.current,
+                snapshot=replace(records.current.snapshot, revision=9),
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "current",
+    [
+        lambda records: replace(records.current, head_revision=0),
+        lambda records: replace(
+            records.current,
+            snapshot=replace(records.current.snapshot, revision=0),
+        ),
+    ],
+)
+def test_restart_plan_publication_records_require_positive_revisions(current):
+    records = _publication_records()
+
+    with pytest.raises(ValueError, match="positive integer"):
+        replace(records, current=current(records))
 
 
 def _verified_inventory_state(
