@@ -13,6 +13,8 @@ from lm_resiliency.integrations.torchrun._coordinator_lease import (
     CoordinatorLeaseRecord,
 )
 from lm_resiliency.integrations.torchrun._protocol import (
+    CheckpointCertification,
+    CheckpointInventoryEvent,
     ProtocolValidationError,
     RecoveryManifest,
     RestartPlan,
@@ -90,13 +92,182 @@ class RecoveryManifestRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class RestartPlanRecord:
-    """One immutable plan envelope for atomic restart publication."""
+class RestartPlanEvidenceRecord:
+    """Immutable checkpoint evidence retained with one restart plan."""
 
     SCHEMA_VERSION: ClassVar[int] = 1
 
+    plan_id: str
+    run_id: str
+    manifest_id: str
+    inventory_events: Mapping[str, CheckpointInventoryEvent]
+    certifications: tuple[CheckpointCertification, ...]
+
+    def __post_init__(self) -> None:
+        _nonempty_string(self.plan_id, "RestartPlanEvidenceRecord.plan_id")
+        _nonempty_string(self.run_id, "RestartPlanEvidenceRecord.run_id")
+        _nonempty_string(self.manifest_id, "RestartPlanEvidenceRecord.manifest_id")
+        if not isinstance(self.inventory_events, Mapping):
+            raise TypeError("RestartPlanEvidenceRecord.inventory_events must be a mapping")
+        events: dict[str, CheckpointInventoryEvent] = {}
+        for event_id, event in self.inventory_events.items():
+            normalized_event_id = _nonempty_string(
+                event_id,
+                "RestartPlanEvidenceRecord.inventory_events key",
+            )
+            if not isinstance(event, CheckpointInventoryEvent):
+                raise TypeError(
+                    "RestartPlanEvidenceRecord.inventory_events values "
+                    "must be CheckpointInventoryEvent"
+                )
+            if event.event_id != normalized_event_id or event.run_id != self.run_id:
+                raise ValueError(
+                    "RestartPlanEvidenceRecord inventory event identity does not match its key/run"
+                )
+            events[normalized_event_id] = event
+        if not events:
+            raise ValueError("RestartPlanEvidenceRecord requires at least one inventory event")
+        if not isinstance(self.certifications, tuple):
+            raise TypeError("RestartPlanEvidenceRecord.certifications must be a tuple")
+        certification_ids: set[str] = set()
+        certifications: list[CheckpointCertification] = []
+        for certification in self.certifications:
+            if not isinstance(certification, CheckpointCertification):
+                raise TypeError(
+                    "RestartPlanEvidenceRecord.certifications values "
+                    "must be CheckpointCertification"
+                )
+            if certification.run_id != self.run_id:
+                raise ValueError("RestartPlanEvidenceRecord certification belongs to another run")
+            if certification.certification_id in certification_ids:
+                raise ValueError("RestartPlanEvidenceRecord certification IDs must be unique")
+            certification_ids.add(certification.certification_id)
+            certifications.append(certification)
+        object.__setattr__(
+            self,
+            "inventory_events",
+            MappingProxyType(dict(sorted(events.items()))),
+        )
+        object.__setattr__(
+            self,
+            "certifications",
+            tuple(sorted(certifications, key=lambda value: value.certification_id)),
+        )
+
+    @property
+    def digest(self) -> str:
+        return hashlib.sha256(self.to_json()).hexdigest()
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.SCHEMA_VERSION,
+            "plan_id": self.plan_id,
+            "run_id": self.run_id,
+            "manifest_id": self.manifest_id,
+            "inventory_events": {
+                event_id: event.to_dict() for event_id, event in self.inventory_events.items()
+            },
+            "certifications": [certification.to_dict() for certification in self.certifications],
+        }
+
+    def to_json(self) -> bytes:
+        return _canonical_json(self.to_dict())
+
+    @classmethod
+    def from_json(cls, encoded: bytes) -> RestartPlanEvidenceRecord:
+        value = _json_object(encoded, cls.__name__)
+        _fields(
+            value,
+            path=cls.__name__,
+            required={
+                "schema_version",
+                "plan_id",
+                "run_id",
+                "manifest_id",
+                "inventory_events",
+                "certifications",
+            },
+        )
+        _schema_version(
+            value["schema_version"],
+            cls.__name__,
+            expected=cls.SCHEMA_VERSION,
+        )
+        inventory_values = _mapping(
+            value["inventory_events"],
+            "RestartPlanEvidenceRecord.inventory_events",
+        )
+        inventory_events: dict[str, CheckpointInventoryEvent] = {}
+        for event_id, event_value in inventory_values.items():
+            normalized_event_id = _nonempty_string(
+                event_id,
+                "RestartPlanEvidenceRecord.inventory_events key",
+            )
+            event_mapping = _mapping(
+                event_value,
+                f"RestartPlanEvidenceRecord.inventory_events[{normalized_event_id!r}]",
+            )
+            _schema_version(
+                event_mapping.get("schema_version"),
+                f"RestartPlanEvidenceRecord.inventory_events[{normalized_event_id!r}]",
+                expected=CheckpointInventoryEvent.SCHEMA_VERSION,
+            )
+            try:
+                inventory_events[normalized_event_id] = CheckpointInventoryEvent.from_dict(
+                    event_mapping
+                )
+            except ProtocolValidationError as error:
+                raise ValueError(
+                    "RestartPlanEvidenceRecord contains an invalid inventory event"
+                ) from error
+        certification_values = _array(
+            value["certifications"],
+            "RestartPlanEvidenceRecord.certifications",
+        )
+        certifications: list[CheckpointCertification] = []
+        for index, certification_value in enumerate(certification_values):
+            certification_mapping = _mapping(
+                certification_value,
+                f"RestartPlanEvidenceRecord.certifications[{index}]",
+            )
+            _schema_version(
+                certification_mapping.get("schema_version"),
+                f"RestartPlanEvidenceRecord.certifications[{index}]",
+                expected=CheckpointCertification.SCHEMA_VERSION,
+            )
+            try:
+                certifications.append(CheckpointCertification.from_dict(certification_mapping))
+            except ProtocolValidationError as error:
+                raise ValueError(
+                    "RestartPlanEvidenceRecord contains an invalid certification"
+                ) from error
+        return cls(
+            plan_id=_nonempty_string(
+                value["plan_id"],
+                "RestartPlanEvidenceRecord.plan_id",
+            ),
+            run_id=_nonempty_string(
+                value["run_id"],
+                "RestartPlanEvidenceRecord.run_id",
+            ),
+            manifest_id=_nonempty_string(
+                value["manifest_id"],
+                "RestartPlanEvidenceRecord.manifest_id",
+            ),
+            inventory_events=inventory_events,
+            certifications=tuple(certifications),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RestartPlanRecord:
+    """One immutable plan envelope for atomic restart publication."""
+
+    SCHEMA_VERSION: ClassVar[int] = 2
+
     plan: RestartPlan
     recovery_manifest_record_digest: str
+    recovery_evidence_record_digest: str
     intent_lifecycle_record_digest: str
     from_generation_snapshot_digest: str
     to_generation_snapshot_digest: str
@@ -113,6 +284,10 @@ class RestartPlanRecord:
             (
                 self.recovery_manifest_record_digest,
                 "RestartPlanRecord.recovery_manifest_record_digest",
+            ),
+            (
+                self.recovery_evidence_record_digest,
+                "RestartPlanRecord.recovery_evidence_record_digest",
             ),
             (
                 self.intent_lifecycle_record_digest,
@@ -173,6 +348,7 @@ class RestartPlanRecord:
             "schema_version": self.SCHEMA_VERSION,
             "plan": self.plan.to_dict(),
             "recovery_manifest_record_digest": self.recovery_manifest_record_digest,
+            "recovery_evidence_record_digest": self.recovery_evidence_record_digest,
             "intent_lifecycle_record_digest": self.intent_lifecycle_record_digest,
             "from_generation_snapshot_digest": self.from_generation_snapshot_digest,
             "to_generation_snapshot_digest": self.to_generation_snapshot_digest,
@@ -196,6 +372,7 @@ class RestartPlanRecord:
                 "schema_version",
                 "plan",
                 "recovery_manifest_record_digest",
+                "recovery_evidence_record_digest",
                 "intent_lifecycle_record_digest",
                 "from_generation_snapshot_digest",
                 "to_generation_snapshot_digest",
@@ -226,6 +403,10 @@ class RestartPlanRecord:
             recovery_manifest_record_digest=_digest(
                 value["recovery_manifest_record_digest"],
                 "RestartPlanRecord.recovery_manifest_record_digest",
+            ),
+            recovery_evidence_record_digest=_digest(
+                value["recovery_evidence_record_digest"],
+                "RestartPlanRecord.recovery_evidence_record_digest",
             ),
             intent_lifecycle_record_digest=_digest(
                 value["intent_lifecycle_record_digest"],
@@ -289,6 +470,12 @@ def _json_object(encoded: bytes, path: str) -> Mapping[str, object]:
 def _mapping(value: object, path: str) -> Mapping[str, object]:
     if not isinstance(value, Mapping) or not all(isinstance(key, str) for key in value):
         raise ValueError(f"{path}: expected a JSON object")
+    return value
+
+
+def _array(value: object, path: str) -> list[object]:
+    if not isinstance(value, list):
+        raise ValueError(f"{path}: expected a JSON array")
     return value
 
 
@@ -360,5 +547,6 @@ def _reject_duplicate_object_fields(
 
 __all__ = [
     "RecoveryManifestRecord",
+    "RestartPlanEvidenceRecord",
     "RestartPlanRecord",
 ]

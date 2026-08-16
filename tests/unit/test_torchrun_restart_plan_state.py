@@ -457,6 +457,7 @@ def _generation_state() -> RestartPlanGenerationState:
     record = RestartPlanRecord(
         plan=_plan(),
         recovery_manifest_record_digest="b" * 64,
+        recovery_evidence_record_digest="a" * 64,
         intent_lifecycle_record_digest=lifecycle.digest,
         from_generation_snapshot_digest=from_snapshot.digest,
         to_generation_snapshot_digest=to_snapshot.digest,
