@@ -45,7 +45,7 @@ class RestartAckCollection:
         for node_id, receipt in normalized.items():
             if receipt is None:
                 continue
-            if receipt.opened != self.opened:
+            if not _same_committed_opening(receipt.opened, self.opened):
                 raise ValueError(
                     "RestartAckCollection receipt belongs to another restart intent opening"
                 )
@@ -101,6 +101,18 @@ def _nonempty_string(value: object, path: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{path} must be a non-empty string")
     return value
+
+
+def _same_committed_opening(
+    left: CommittedInitialRestartIntentOpen,
+    right: CommittedInitialRestartIntentOpen,
+) -> bool:
+    return (
+        left.prepared.intent_key == right.prepared.intent_key
+        and left.intent_entry == right.intent_entry
+        and left.prepared.intent_head_key == right.prepared.intent_head_key
+        and left.head_entry == right.head_entry
+    )
 
 
 __all__ = ["RestartAckCollection"]

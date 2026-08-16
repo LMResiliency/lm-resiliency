@@ -59,6 +59,10 @@ class ManualClock:
         with self._lock:
             return self.now_unix_ms
 
+    def set(self, now_unix_ms: int) -> None:
+        with self._lock:
+            self.now_unix_ms = now_unix_ms
+
 
 def _state() -> tuple[
     CommittedInitialRestartIntentOpen,
@@ -96,13 +100,13 @@ def _state() -> tuple[
         suspected_node_ids=("node-b",),
         prepare_deadline_unix_ms=1_500,
     )
-    opened = RestartIntentOpenExecutor(store, run_id=RUN_ID).execute_initial_open(
-        RestartIntentOpenPreparer(
-            store,
-            run_id=RUN_ID,
-            clock=clock,
-        ).prepare_initial_open(lease, current, intent)
-    )
+    prepared_open = RestartIntentOpenPreparer(
+        store,
+        run_id=RUN_ID,
+        clock=clock,
+    ).prepare_initial_open(lease, current, intent)
+    clock.set(1_010)
+    opened = RestartIntentOpenExecutor(store, run_id=RUN_ID).execute_initial_open(prepared_open)
     for node_id, success in (("node-a", True), ("node-b", False)):
         agent_id = f"agent-{node_id}"
         registration = AgentRegistrationManager(
@@ -155,6 +159,9 @@ def _state() -> tuple[
 
 def test_restart_ack_collection_classifies_exact_active_node_receipts():
     opened, receipts = _state()
+    assert receipts["node-a"].opened != opened
+    assert receipts["node-a"].opened.intent_entry == opened.intent_entry
+    assert receipts["node-a"].opened.head_entry == opened.head_entry
 
     collection = RestartAckCollection(
         opened=opened,
