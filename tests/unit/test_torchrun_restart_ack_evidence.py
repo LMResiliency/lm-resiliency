@@ -325,6 +325,7 @@ def _latest_inventory_state(
     plan_record = RestartPlanRecord(
         plan=plan,
         recovery_manifest_record_digest=manifest_record.digest,
+        recovery_evidence_record_digest="a" * 64,
         intent_lifecycle_record_digest=lifecycle.digest,
         from_generation_snapshot_digest=from_snapshot.digest,
         to_generation_snapshot_digest=to_snapshot.digest,

@@ -764,12 +764,19 @@ class RestartPlan(TypedDict):
 ```
 
 The persisted `RestartPlanRecord` contains the canonical plan; digests for the
-selected recovery-manifest record, closed-intent lifecycle record, source
-generation, and successor generation; the exact node-to-quarantine-record
-digest map; and the coordinator lease identity that authorized publication.
-Its quarantine keys must exactly match `quarantined_node_ids`. The envelope is
-strict and immutable, but it is not a substitute for `validate_restart_plan()`
-or for the later atomic publication transaction.
+selected recovery-manifest record, checkpoint-evidence record, closed-intent
+lifecycle record, source generation, and successor generation; the exact
+node-to-quarantine-record digest map; and the coordinator lease identity that
+authorized publication. Its quarantine keys must exactly match
+`quarantined_node_ids`. The envelope is strict and immutable, but it is not a
+substitute for `validate_restart_plan()` or for the later atomic publication
+transaction.
+`RestartPlanEvidenceRecord` preserves the canonical inventory events and
+trusted certification records used to admit that plan. The record is bound to
+one run, plan ID, and manifest ID and exposes its own digest for the plan
+envelope. Construction proves only canonical durable evidence identity; later
+state validation must still match the events and certifications to the plan,
+manifest, acknowledgements, source generation, and copy eligibility.
 `RestartPlanGenerationState` binds that envelope to the exact closed intent,
 current generation, successor generation, successor assignment, and shared
 coordinator publication authority. Manifest and quarantine resolution remain
