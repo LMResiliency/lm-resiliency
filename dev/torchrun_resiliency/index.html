@@ -1064,7 +1064,13 @@ share one generation key, their immutable records and revisions must both
 match. Its exclusive deadline is the earliest selected registration expiry or
 plan restart deadline. It performs no store access and does not authenticate
 the live coordinator lease, lifecycle revision, quarantine resource evidence,
-transaction result, or prior committed quarantine state.</p>
+transaction result, or prior committed quarantine state.
+<code>RestartPlanPublicationAuthority</code> binds that bundle to the exact coordinator
+lease identity already embedded in its plan, successor, and quarantine
+records. Its observation must follow the candidate's generation,
+manifest-source, placement, and lease inputs, and its exclusive deadline is
+additionally capped by coordinator-lease expiry. This pure value performs no
+store access and does not prove that the supplied authority is still live.</p>
 <p>Before commit, the coordinator validates:</p>
 <ul>
 <li>the plan is fenced to the same intent ID, run, generation, incidents, and
