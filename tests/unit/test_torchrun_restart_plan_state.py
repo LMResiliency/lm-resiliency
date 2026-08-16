@@ -50,6 +50,7 @@ from lm_resiliency.integrations.torchrun._restart_plan_records import (
 )
 from lm_resiliency.integrations.torchrun._restart_plan_state import (
     ResolvedRecoveryManifest,
+    RestartPlanCandidateState,
     RestartPlanCertificationState,
     RestartPlanCopyEligibilityState,
     RestartPlanGenerationState,
@@ -1861,6 +1862,62 @@ def test_restart_plan_recovery_evidence_state_rejects_cross_inventory_evidence()
             copy_state=_copy_eligibility_state(),
             trust_state=_certification_state(),
         )
+
+
+def _candidate_state() -> RestartPlanCandidateState:
+    inventory_state = _verified_inventory_state(
+        manifest=replace(_shared_manifest(), trust="recovery_verified")
+    )
+    recovery_state = RestartPlanRecoveryEvidenceState(
+        copy_state=RestartPlanCopyEligibilityState(inventory_state),
+        trust_state=RestartPlanCertificationState(
+            inventory_state=inventory_state,
+            certifications=(_certification(inventory_state),),
+        ),
+    )
+    generation_state = inventory_state.quarantine_state.manifest_state.generation_state
+    return RestartPlanCandidateState(
+        recovery_state=recovery_state,
+        placement_state=_placement_state(generation_state=generation_state),
+    )
+
+
+def test_restart_plan_candidate_state_composes_matching_evidence_and_placement():
+    state = _candidate_state()
+
+    assert state.plan == state.recovery_state.plan
+    assert state.manifest == state.recovery_state.manifest
+
+
+def test_restart_plan_candidate_state_requires_exact_types():
+    state = _candidate_state()
+
+    with pytest.raises(TypeError, match="recovery_state must be"):
+        replace(state, recovery_state=state.recovery_state.copy_state)
+    with pytest.raises(TypeError, match="placement_state must be"):
+        replace(state, placement_state=state.placement_state.generation_state)
+
+
+def test_restart_plan_candidate_state_rejects_cross_plan_composition():
+    state = _candidate_state()
+
+    with pytest.raises(ValueError, match="same plan generation"):
+        replace(state, placement_state=_placement_state())
+
+
+def test_restart_plan_candidate_state_rejects_elapsed_restart_deadline():
+    state = _candidate_state()
+    placement = _placement_state(
+        generation_state=state.placement_state.generation_state,
+        registration_histories={
+            "node-a": _registration_history("node-a", lease_duration_ms=2_000),
+            "node-c": _registration_history("node-c", lease_duration_ms=2_000),
+        },
+        observed_at_unix_ms=state.plan.restart_deadline_unix_ms,
+    )
+
+    with pytest.raises(ValueError, match="deadline has elapsed"):
+        replace(state, placement_state=placement)
 
 
 def _verified_inventory_state(
