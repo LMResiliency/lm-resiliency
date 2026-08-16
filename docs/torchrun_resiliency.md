@@ -868,6 +868,13 @@ without mutating the store. It exposes one error boundary for retryable
 authority/lifecycle contention, lost coordinator authority, unsafe clocks, and
 durable corruption. A closure committed after the authority observation or
 other cross-read mismatch remains retryable contention.
+`RestartPlanPublicationExecutor` then submits those exact writes, guard,
+revision conditions, and store-time window in one atomic transaction. Its
+committed result verifies the exact key/value set, generation-head and
+immutable-record lineage, common transaction identity, coordinator-lease
+provenance, input ordering, and commit window before the publication is
+accepted. Lifecycle, generation, or registration churn remains a classified
+conflict; substituted store responses fail closed as corruption.
 
 Before commit, the coordinator validates:
 
