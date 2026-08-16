@@ -17,13 +17,22 @@ from lm_resiliency.integrations.torchrun._protocol import (
     RankAssignment,
     RankCheckpointCopies,
     RecoveryManifest,
+    RestartIntent,
+    RestartPlan,
     SlotAssignment,
+)
+from lm_resiliency.integrations.torchrun._restart_intent_records import (
+    RestartIntentHeadRecord,
+    RestartIntentLifecycleRecord,
+    RestartIntentRecord,
 )
 from lm_resiliency.integrations.torchrun._restart_plan_records import (
     RecoveryManifestRecord,
+    RestartPlanRecord,
 )
 from lm_resiliency.integrations.torchrun._restart_plan_state import (
     ResolvedRecoveryManifest,
+    RestartPlanGenerationState,
 )
 
 RUN_ID = "training-run"
@@ -213,3 +222,276 @@ def test_resolved_recovery_manifest_does_not_claim_completeness():
     )
 
     assert len(resolved.manifest.rank_copies) == 3
+
+
+def _intent_record() -> RestartIntentRecord:
+    return RestartIntentRecord(
+        intent=RestartIntent(
+            intent_id="intent-4",
+            run_id=RUN_ID,
+            generation=4,
+            incident_ids=("incident-1",),
+            reason_code="confirmed_straggler",
+            minimum_recovery_mode="latest",
+            suspected_node_ids=("node-b",),
+            prepare_deadline_unix_ms=1_500,
+        ),
+        generation_snapshot_digest=_generation_record(4).digest,
+        coordinator_id="coordinator-a",
+        lease_id="lease-open",
+        coordinator_lease_duration_ms=500,
+        coordinator_fencing_token=4,
+    )
+
+
+def _lifecycle_record() -> RestartIntentLifecycleRecord:
+    intent_record = _intent_record()
+    return RestartIntentLifecycleRecord(
+        closed_intent=RestartIntentHeadRecord(
+            run_id=RUN_ID,
+            generation=4,
+            intent_id="intent-4",
+            intent_digest=intent_record.digest,
+        ),
+        coordinator_id="coordinator-a",
+        lease_id="lease-close",
+        coordinator_lease_duration_ms=500,
+        coordinator_fencing_token=6,
+    )
+
+
+def _generation_record(
+    generation: int,
+    *,
+    assignment: RankAssignment | None = None,
+    previous_snapshot_digest: str | None = None,
+) -> GenerationSnapshotRecord:
+    if assignment is None:
+        assignment = _assignment(generation=generation)
+    return GenerationSnapshotRecord(
+        assignment=assignment,
+        previous_snapshot_digest=(
+            previous_snapshot_digest if previous_snapshot_digest is not None else "a" * 64
+        ),
+        coordinator_id="coordinator-plan",
+        lease_id="lease-plan",
+        coordinator_lease_duration_ms=500,
+        coordinator_fencing_token=9,
+    )
+
+
+def _plan() -> RestartPlan:
+    return RestartPlan(
+        plan_id="plan-5",
+        intent_id="intent-4",
+        run_id=RUN_ID,
+        from_generation=4,
+        to_generation=5,
+        incident_ids=("incident-1",),
+        reason_code="confirmed_straggler",
+        recovery_mode="latest",
+        checkpoint_source="gemini",
+        checkpoint_step=40,
+        checkpoint_id=None,
+        checkpoint_manifest_id="manifest-40",
+        slot_assignments=(
+            SlotAssignment(
+                logical_node_slot=0,
+                node_id="node-a",
+                first_global_rank=0,
+                local_world_size=2,
+            ),
+            SlotAssignment(
+                logical_node_slot=1,
+                node_id="node-c",
+                first_global_rank=2,
+                local_world_size=2,
+            ),
+        ),
+        quarantined_node_ids=(),
+        expected_world_size=4,
+        topology_digest="topology-v1",
+        restart_deadline_unix_ms=2_000,
+    )
+
+
+def _generation_state() -> RestartPlanGenerationState:
+    from_snapshot = _generation_record(4)
+    to_assignment = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=5,
+        assignments=_plan().slot_assignments,
+        topology_digest="topology-v1",
+    )
+    to_snapshot = _generation_record(
+        5,
+        assignment=to_assignment,
+        previous_snapshot_digest=from_snapshot.digest,
+    )
+    lifecycle = _lifecycle_record()
+    record = RestartPlanRecord(
+        plan=_plan(),
+        recovery_manifest_record_digest="b" * 64,
+        intent_lifecycle_record_digest=lifecycle.digest,
+        from_generation_snapshot_digest=from_snapshot.digest,
+        to_generation_snapshot_digest=to_snapshot.digest,
+        quarantine_record_digests={},
+        coordinator_id=to_snapshot.coordinator_id,
+        lease_id=to_snapshot.lease_id,
+        coordinator_lease_duration_ms=to_snapshot.coordinator_lease_duration_ms,
+        coordinator_fencing_token=to_snapshot.coordinator_fencing_token,
+    )
+    return RestartPlanGenerationState(
+        record=record,
+        intent_record=_intent_record(),
+        lifecycle_record=lifecycle,
+        from_snapshot=from_snapshot,
+        to_snapshot=to_snapshot,
+    )
+
+
+def test_restart_plan_generation_state_binds_exact_records():
+    state = _generation_state()
+
+    assert state.plan == state.record.plan
+    assert state.from_assignment == state.from_snapshot.assignment
+    assert state.to_assignment == state.to_snapshot.assignment
+
+
+def test_restart_plan_generation_state_is_immutable():
+    state = _generation_state()
+
+    with pytest.raises(AttributeError):
+        state.record = state.record
+
+
+def test_restart_plan_generation_state_requires_exact_types():
+    state = _generation_state()
+
+    with pytest.raises(TypeError, match="record must be RestartPlanRecord"):
+        replace(state, record=state.record.to_dict())
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("intent_lifecycle_record_digest", "0" * 64),
+        ("from_generation_snapshot_digest", "1" * 64),
+        ("to_generation_snapshot_digest", "2" * 64),
+    ],
+)
+def test_restart_plan_generation_state_rejects_envelope_digest_mismatch(
+    field,
+    value,
+):
+    state = _generation_state()
+
+    with pytest.raises(ValueError, match="envelope digests"):
+        replace(state, record=replace(state.record, **{field: value}))
+
+
+def test_restart_plan_generation_state_rejects_wrong_closed_intent():
+    state = _generation_state()
+    wrong_lifecycle = replace(
+        state.lifecycle_record,
+        closed_intent=replace(
+            state.lifecycle_record.closed_intent,
+            intent_digest="0" * 64,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="does not close"):
+        replace(
+            state,
+            record=replace(
+                state.record,
+                intent_lifecycle_record_digest=wrong_lifecycle.digest,
+            ),
+            lifecycle_record=wrong_lifecycle,
+        )
+
+
+def test_restart_plan_generation_state_rejects_plan_intent_mismatch():
+    state = _generation_state()
+
+    with pytest.raises(ValueError, match="does not match its restart intent"):
+        replace(
+            state,
+            record=replace(
+                state.record,
+                plan=replace(state.plan, reason_code="other"),
+            ),
+        )
+
+
+def test_restart_plan_generation_state_rejects_weaker_recovery_mode():
+    state = _generation_state()
+    verified_intent = replace(
+        state.intent_record.intent,
+        minimum_recovery_mode="recovery_verified",
+    )
+    intent_record = replace(state.intent_record, intent=verified_intent)
+    lifecycle = replace(
+        state.lifecycle_record,
+        closed_intent=replace(
+            state.lifecycle_record.closed_intent,
+            intent_digest=intent_record.digest,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="recovery mode is weaker"):
+        replace(
+            state,
+            intent_record=intent_record,
+            lifecycle_record=lifecycle,
+            record=replace(
+                state.record,
+                intent_lifecycle_record_digest=lifecycle.digest,
+            ),
+        )
+
+
+def test_restart_plan_generation_state_rejects_wrong_successor_link():
+    state = _generation_state()
+
+    with pytest.raises(ValueError, match="does not reference"):
+        replace(
+            state,
+            to_snapshot=replace(
+                state.to_snapshot,
+                previous_snapshot_digest="0" * 64,
+            ),
+            record=replace(
+                state.record,
+                to_generation_snapshot_digest=replace(
+                    state.to_snapshot,
+                    previous_snapshot_digest="0" * 64,
+                ).digest,
+            ),
+        )
+
+
+def test_restart_plan_generation_state_rejects_wrong_successor_assignment():
+    state = _generation_state()
+    wrong_assignment = _assignment(generation=5)
+    wrong_snapshot = replace(state.to_snapshot, assignment=wrong_assignment)
+
+    with pytest.raises(ValueError, match="successor assignment"):
+        replace(
+            state,
+            to_snapshot=wrong_snapshot,
+            record=replace(
+                state.record,
+                to_generation_snapshot_digest=wrong_snapshot.digest,
+            ),
+        )
+
+
+def test_restart_plan_generation_state_rejects_different_publication_authority():
+    state = _generation_state()
+
+    with pytest.raises(ValueError, match="different publication authority"):
+        replace(
+            state,
+            record=replace(state.record, lease_id="other-lease"),
+        )
