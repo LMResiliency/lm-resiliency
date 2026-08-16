@@ -1778,7 +1778,31 @@ framework durable checkpoint.
 The custom rendezvous backend makes replacement-only semantics explicit without
 changing torchrun's default behavior:
 
+```toml
+# /shared/lm-resiliency/torchrun.toml
+schema_version = 1
+control_endpoint = "control.internal:443"
+replacement_only = true
+max_replacement_generations = 2
+registration_lease_duration_ms = 30000
+poll_interval_ms = 1000
+join_timeout_ms = 300000
+```
+
+The shared policy file contains no node identity or credentials. Every agent
+loads the file, applies any explicitly supplied shared `--rdzv-conf`
+overrides, and registers the canonical runtime digest over the resolved policy,
+run ID, rendezvous endpoint, and `min_nodes`/`max_nodes` range. Drift in
+whitespace or node-local settings does not matter, while drift in effective
+shared settings or fleet-size semantics fails closed.
+Node-specific `node_id` and `restart_context_path` values come from
+`--rdzv-conf` or `LM_RESILIENCY_NODE_ID` and
+`LM_RESILIENCY_RESTART_CONTEXT`; conflicting sources are rejected. Credentials
+and other secrets remain in deployment-provided environment or credential
+providers and are not included in the policy file or digest.
+
 ```bash
+export LM_RESILIENCY_NODE_ID="${SCHEDULER_NODE_ID}"
 export LM_RESILIENCY_RESTART_CONTEXT="/run/lm-resiliency/${JOB_ID}/restart-context.json"
 
 torchrun \
@@ -1787,7 +1811,7 @@ torchrun \
   --rdzv-backend=lm_resiliency \
   --rdzv-endpoint="${RDZV_ENDPOINT}" \
   --rdzv-id="${JOB_ID}" \
-  --rdzv-conf="control_endpoint=${CONTROL_ENDPOINT},replacement_only=true,max_replacement_generations=2" \
+  --rdzv-conf="config=/shared/lm-resiliency/torchrun.toml" \
   --module torchtitan.train ...
 ```
 
