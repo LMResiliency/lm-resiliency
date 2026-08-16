@@ -103,6 +103,7 @@ _ARRIVAL_ATTEMPT_SCHEMA_VERSION = 1
 _ARRIVAL_COMPLETION_SCHEMA_VERSION = 1
 _ARRIVAL_CONSUMPTION_SCHEMA_VERSION = 1
 _ARRIVAL_ADMISSION_SCHEMA_VERSION = 1
+_ARRIVAL_RETURN_SCHEMA_VERSION = 1
 _SUPPORTED_REPLACEMENT_GENERATIONS = 1
 _SHARED_FIELDS = {
     "control_endpoint",
@@ -1353,6 +1354,15 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                     current_attempt,
                 )
             ] = admission.revision
+            return_conditions = self._arrival_return_conditions(
+                assignment,
+                current_attempt,
+                completion,
+                admission,
+            )
+            if return_conditions is None:
+                return None
+            conditions.update(return_conditions)
         completion_key = self._arrival_completion_key(
             assignment.generation,
             current_attempt,
@@ -2499,6 +2509,331 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             deadline,
             now_unix_ms=now_unix_ms,
         )
+        self._publish_replacement_return_acknowledgement(
+            current,
+            assignment,
+            attempt,
+            slot,
+            admission,
+            consumption,
+            current_registration,
+            recovery_state,
+            now_unix_ms=now_unix_ms,
+        )
+
+    def _publish_replacement_return_acknowledgement(
+        self,
+        current: CurrentGeneration,
+        assignment: RankAssignment,
+        attempt: int,
+        slot: int,
+        admission: ControlStoreEntry,
+        consumption: ControlStoreEntry,
+        registration: HeldAgentRegistration,
+        recovery_state: RestartPlanPersistedRecoveryState,
+        *,
+        now_unix_ms: int,
+    ) -> ControlStoreEntry:
+        key = self._arrival_return_key(
+            assignment.generation,
+            attempt,
+            slot,
+            registration.record.registration_id,
+        )
+        value = self._arrival_return_value(
+            generation=assignment.generation,
+            attempt=attempt,
+            slot=slot,
+            admission=admission,
+            consumption=consumption,
+            registration=registration,
+        )
+        existing = self._control_store.get(key)
+        if existing is not None:
+            self._validate_arrival_return_entry(
+                existing,
+                assignment=assignment,
+                attempt=attempt,
+                slot=slot,
+                admission=admission,
+                consumption=consumption,
+                registration=registration,
+            )
+            return existing
+        deadline_unix_ms = min(
+            registration.expires_at_unix_ms,
+            recovery_state.plan.restart_deadline_unix_ms,
+        )
+        try:
+            result = self._control_store.compare_set_many_guarded(
+                {
+                    key: ControlStoreWrite(
+                        expected_revision=None,
+                        value=value,
+                        require_never_created=True,
+                    )
+                },
+                guard_key=self._registration_manager.registration_key,
+                expected_guard_revision=registration.fencing_token,
+                not_before_unix_ms=now_unix_ms,
+                deadline_unix_ms=deadline_unix_ms,
+                conditions={
+                    self._arrival_admission_key(
+                        assignment.generation,
+                        attempt,
+                    ): admission.revision,
+                    self._arrival_consumption_key(
+                        assignment.generation,
+                        attempt,
+                        slot,
+                        registration.record.registration_id,
+                    ): consumption.revision,
+                    self._generation_reader.head_key: current.head_revision,
+                    self._generation_reader.snapshot_key(
+                        assignment.generation,
+                    ): current.snapshot.revision,
+                    self._closure_key: None,
+                },
+            )
+        except ControlStoreDeadlineExceeded as error:
+            raise RendezvousTimeoutError from error
+        except ControlStoreConflict:
+            existing = self._control_store.get(key)
+            if existing is None:
+                raise RendezvousConnectionError(
+                    "replacement return acknowledgement lost its admission fence"
+                ) from None
+            self._validate_arrival_return_entry(
+                existing,
+                assignment=assignment,
+                attempt=attempt,
+                slot=slot,
+                admission=admission,
+                consumption=consumption,
+                registration=registration,
+            )
+            return existing
+        except Exception as error:
+            raise RendezvousConnectionError(
+                "failed to publish replacement return acknowledgement"
+            ) from error
+        entry = result[key]
+        self._validate_arrival_return_entry(
+            entry,
+            assignment=assignment,
+            attempt=attempt,
+            slot=slot,
+            admission=admission,
+            consumption=consumption,
+            registration=registration,
+        )
+        self._state_changed_event.set()
+        return entry
+
+    def _arrival_return_conditions(
+        self,
+        assignment: RankAssignment,
+        attempt: int,
+        completion: ControlStoreEntry,
+        admission: ControlStoreEntry,
+    ) -> dict[str, int] | None:
+        consumptions = self._validate_replacement_admission_entry(
+            admission,
+            assignment=assignment,
+            attempt=attempt,
+            completion=completion,
+            recovery_state=None,
+        )
+        conditions: dict[str, int] = {}
+        for slot, node_id in assignment.slot_to_node_id.items():
+            metadata = consumptions[str(slot)]
+            key = self._arrival_return_key(
+                assignment.generation,
+                attempt,
+                slot,
+                metadata["registration_id"],
+            )
+            try:
+                entry = self._control_store.get(key)
+            except Exception as error:
+                raise RendezvousConnectionError(
+                    "failed to read replacement return acknowledgement"
+                ) from error
+            if entry is None:
+                return None
+            payload = self._validate_arrival_return_entry(
+                entry,
+                assignment=assignment,
+                attempt=attempt,
+                slot=slot,
+                admission=admission,
+                consumption=None,
+                registration=None,
+            )
+            if (
+                payload["agent_id"] != metadata["agent_id"]
+                or payload["registration_id"] != metadata["registration_id"]
+                or payload["registration_revision"] != metadata["registration_revision"]
+                or payload["consumption_revision"] != metadata["consumption_revision"]
+            ):
+                raise RendezvousStateError(
+                    "replacement return acknowledgement does not match its admission metadata"
+                )
+            if entry.guard_key != agent_registration_key(
+                self._config.run_id,
+                node_id,
+            ):
+                raise RendezvousStateError(
+                    "replacement return acknowledgement has invalid registration provenance"
+                )
+            conditions[key] = entry.revision
+        return conditions
+
+    def _arrival_return_key(
+        self,
+        generation: int,
+        attempt: int,
+        slot: int,
+        registration_id: str,
+    ) -> str:
+        registration_digest = hashlib.sha256(registration_id.encode("utf-8")).hexdigest()
+        return (
+            f"{_CONTROL_PREFIX}/runs/{self._run_digest}/rendezvous/"
+            f"generation-{generation}/attempt-{attempt}/returned/"
+            f"slot-{slot}/registration-{registration_digest}"
+        )
+
+    def _arrival_return_value(
+        self,
+        *,
+        generation: int,
+        attempt: int,
+        slot: int,
+        admission: ControlStoreEntry,
+        consumption: ControlStoreEntry,
+        registration: HeldAgentRegistration,
+    ) -> bytes:
+        return json.dumps(
+            {
+                "admission_digest": hashlib.sha256(admission.value).hexdigest(),
+                "agent_id": registration.record.agent_identity.agent_id,
+                "attempt": attempt,
+                "consumption_revision": consumption.revision,
+                "generation": generation,
+                "logical_node_slot": slot,
+                "node_id": registration.record.agent_identity.node_id,
+                "registration_id": registration.record.registration_id,
+                "registration_revision": registration.fencing_token,
+                "run_id": self._config.run_id,
+                "schema_version": _ARRIVAL_RETURN_SCHEMA_VERSION,
+            },
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+
+    def _validate_arrival_return_entry(
+        self,
+        entry: ControlStoreEntry,
+        *,
+        assignment: RankAssignment,
+        attempt: int,
+        slot: int,
+        admission: ControlStoreEntry,
+        consumption: ControlStoreEntry | None,
+        registration: HeldAgentRegistration | None,
+    ) -> Mapping[str, Any]:
+        try:
+            payload = json.loads(
+                entry.value.decode("utf-8"),
+                object_pairs_hook=_strict_object,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            raise RendezvousStateError("replacement return acknowledgement is malformed") from error
+        expected_fields = {
+            "admission_digest",
+            "agent_id",
+            "attempt",
+            "consumption_revision",
+            "generation",
+            "logical_node_slot",
+            "node_id",
+            "registration_id",
+            "registration_revision",
+            "run_id",
+            "schema_version",
+        }
+        expected_node_id = assignment.slot_to_node_id.get(slot)
+        integer_fields = (
+            "attempt",
+            "consumption_revision",
+            "generation",
+            "registration_revision",
+            "schema_version",
+        )
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != expected_fields
+            or payload["run_id"] != self._config.run_id
+            or payload["generation"] != assignment.generation
+            or payload["attempt"] != attempt
+            or payload["logical_node_slot"] != slot
+            or payload["node_id"] != expected_node_id
+            or payload["admission_digest"] != hashlib.sha256(admission.value).hexdigest()
+            or payload["schema_version"] != _ARRIVAL_RETURN_SCHEMA_VERSION
+            or isinstance(payload["logical_node_slot"], bool)
+            or not isinstance(payload["logical_node_slot"], int)
+            or payload["logical_node_slot"] < 0
+            or any(
+                isinstance(payload[field], bool)
+                or not isinstance(payload[field], int)
+                or payload[field] < 1
+                for field in integer_fields
+            )
+        ):
+            raise RendezvousStateError(
+                "replacement return acknowledgement does not match its admission"
+            )
+        for field in ("agent_id", "registration_id"):
+            if not isinstance(payload[field], str) or not payload[field]:
+                raise RendezvousStateError(
+                    f"replacement return acknowledgement has invalid {field}"
+                )
+        if consumption is not None and payload["consumption_revision"] != consumption.revision:
+            raise RendezvousStateError(
+                "replacement return acknowledgement does not match its consumption"
+            )
+        if registration is not None and (
+            payload["registration_id"] != registration.record.registration_id
+            or payload["agent_id"] != registration.record.agent_identity.agent_id
+            or payload["registration_revision"] != registration.fencing_token
+        ):
+            raise RendezvousConnectionError(
+                "replacement return acknowledgement belongs to another registration"
+            )
+        if (
+            entry.value
+            != json.dumps(
+                payload,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            or entry.mutation_sequence != 1
+            or entry.value_sequence != 1
+            or entry.lifetime_sequence != 1
+            or entry.guard_key
+            != agent_registration_key(
+                self._config.run_id,
+                expected_node_id,
+            )
+            or entry.guard_revision != payload["registration_revision"]
+            or entry.transaction_sequence <= admission.transaction_sequence
+        ):
+            raise RendezvousStateError(
+                "replacement return acknowledgement has invalid store provenance"
+            )
+        return payload
 
     def _try_commit_replacement_admission(
         self,
@@ -3620,7 +3955,9 @@ class RestartContextFile:
 
     def _invalidation_name(self, cleanup_token: _RestartContextCleanupToken) -> str:
         self._validate_cleanup_token(cleanup_token)
-        return f".{self.path.name}.invalidated-{cleanup_token}"
+        identity = f"{self.path.name}\0{cleanup_token}".encode("utf-8")
+        digest = hashlib.sha256(identity).hexdigest()
+        return f".restart-context-invalidated-{digest}"
 
     @staticmethod
     def _validate_owned_private_file(metadata: os.stat_result) -> None:

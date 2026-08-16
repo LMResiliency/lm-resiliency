@@ -1558,7 +1558,10 @@ registration-history, and attempt-head reads complete, the handler samples
 authoritative control-store time once and uses that observation to recheck both
 the exclusive restart deadline and the exact registration's lease window. The
 shared attempt head must still name the admitted attempt. A completed
-replacement attempt advances only after this proof exists; initial attempts
+replacement attempt advances only after every admitted handler has completed
+its final return validation and durably acknowledged the exact admission,
+registration, and consumption it observed. A descheduled peer therefore keeps
+the shared attempt head fixed until its return check completes; initial attempts
 retain the consumption-only advancement rule. Guarded barrier transactions pin
 their registration revision in retained history. Missing, unprepared, late, or
 superseded assigned nodes therefore fail instead of allowing an early or stale
@@ -1581,9 +1584,11 @@ proof is the final shared decision observed before `next_rendezvous()` returns.
 A failed admission first durably invalidates the exact cryptographic cleanup
 token published by that handler incarnation, then attempts bounded physical
 removal. If the directory lock is unavailable, the stale file remains
-unreadable; every outstanding token has its own durable invalidation marker, so
-delayed cleanup from an older handler cannot revalidate a newer failed context,
-and a later replacement context with a different token remains valid. Context
+unreadable; every outstanding token has its own fixed-length, digest-named
+durable invalidation marker, so delayed cleanup from an older handler cannot
+revalidate a newer failed context, long valid context basenames cannot overflow
+the filesystem component limit, and a later replacement context with a
+different token remains valid. Context
 publication and cleanup acquire the parent
 directory lock nonblocking under the admission or bounded-cleanup deadline, so
 a stale process cannot strand replacement admission. The replacement deadline

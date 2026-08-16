@@ -855,6 +855,19 @@ def test_restart_context_file_preserves_every_invalidated_token(
     assert context_file.read() == _context(plan_id="plan-new")
 
 
+def test_restart_context_file_invalidates_long_valid_basename(
+    tmp_path: Path,
+):
+    path = tmp_path / "private" / ("c" * 180)
+    context_file = RestartContextFile(path)
+    cleanup_token = context_file.write(_context())
+
+    context_file.invalidate(cleanup_token)
+
+    with pytest.raises(RestartContextFileError, match="invalidated"):
+        context_file.read()
+
+
 def test_restart_context_file_preserves_previous_value_when_replace_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3080,6 +3093,108 @@ def test_slot_aware_handler_admits_replacement_and_writes_restart_context(
     admission = store.get(handler._arrival_admission_key(1, 1))
     assert admission is not None
     assert handler.num_nodes_waiting() == 0
+    assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_waits_for_return_ack_before_advancing_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    manager, lease, current = _initialize_generation(store, clock, ("node-a",))
+    plan = _replacement_plan()
+    successor = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    manager.commit_successor(lease, current, successor)
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+    )
+    handler._publication_reader = cast(
+        Any,
+        StaticRecoveryStateReader(_static_recovery_state(plan)),
+    )
+    reached_return_ack = threading.Event()
+    release_return_ack = threading.Event()
+    original_publish = handler._publish_replacement_return_acknowledgement
+
+    def delay_return_ack(*args: Any, **kwargs: Any) -> Any:
+        reached_return_ack.set()
+        assert release_return_ack.wait(timeout=2)
+        return original_publish(*args, **kwargs)
+
+    monkeypatch.setattr(
+        handler,
+        "_publish_replacement_return_acknowledgement",
+        delay_return_ack,
+    )
+    thread, outcome = _start_rendezvous(handler)
+    assert reached_return_ack.wait(timeout=2)
+    current_generation = handler._read_generation()
+    assert current_generation is not None
+    attempt_entry = store.get(handler._arrival_attempt_key(1))
+    completion = store.get(handler._arrival_completion_key(1, 1))
+    assert attempt_entry is not None
+    assert completion is not None
+    with handler._registration_lock:
+        registration = handler._registration
+    assert registration is not None
+
+    assert (
+        handler._advance_arrival_attempt(
+            successor,
+            attempt_entry,
+            1,
+            2,
+            handler._arrival_attempt_value(
+                generation=1,
+                attempt=2,
+                registration=registration,
+            ),
+            registration,
+            completion,
+        )
+        is None
+    )
+    release_return_ack.set()
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert isinstance(outcome.get_nowait(), RendezvousInfo)
+
+    advanced = handler._advance_arrival_attempt(
+        successor,
+        attempt_entry,
+        1,
+        2,
+        handler._arrival_attempt_value(
+            generation=1,
+            attempt=2,
+            registration=registration,
+        ),
+        registration,
+        completion,
+    )
+
+    assert advanced is not None
+    attempt, _, _ = handler._validate_arrival_attempt_entry(
+        advanced,
+        generation=1,
+        expected_attempt=2,
+        leader_node_id="node-b",
+    )
+    assert attempt == 2
     assert handler.shutdown() is True
 
 
