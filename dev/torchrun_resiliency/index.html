@@ -1015,7 +1015,11 @@ per-rank copy completeness or inventory certification.
 <code>RestartPlanQuarantineState</code> binds the exact node quarantine records and
 requires their digests, plan metadata, and coordinator authority to match the
 manifest-bound plan. It does not validate resource evidence or prove atomic
-publication.</p>
+publication.
+<code>RestartPlanInventoryState</code> then binds every manifest copy to its exact
+inventory event, source-generation reporter identity, local holder, and
+compatible trust state. It does not prove copy completeness, holder
+availability, acknowledgement authorization, or trusted certification.</p>
 <p>Before commit, the coordinator validates:</p>
 <ul>
 <li>the plan is fenced to the same intent ID, run, generation, incidents, and
