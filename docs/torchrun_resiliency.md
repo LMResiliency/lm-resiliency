@@ -972,6 +972,12 @@ registration identities or fencing tokens, and a current value that is not the
 retained tail. A released registration remains visible in the immutable history
 while the current value is absent.
 
+The restart-acknowledgement state reader double-collects the current open
+intent, verified agent-registration history, and durable coordinator-lease
+history. It binds a receipt to the exact current registration and live
+coordinator authority without sampling a clock or mutating the store. Durable
+contradictions fail closed, while repeated-read contention remains retryable.
+
 For a crashed or unreachable node, no preparation is assumed.
 
 ## API: lm-resiliency to the Framework
