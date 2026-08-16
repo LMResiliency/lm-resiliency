@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import threading
 from dataclasses import replace
+from typing import Any, cast
 
 import pytest
 
@@ -20,13 +22,19 @@ from lm_resiliency.integrations.torchrun._agent_registration_records import (
     AgentRegistrationRecord,
     HeldAgentRegistration,
 )
-from lm_resiliency.integrations.torchrun._control_store import ControlStoreWrite
+from lm_resiliency.integrations.torchrun._control_store import (
+    ControlStoreWrite,
+    InMemoryControlStore,
+)
 from lm_resiliency.integrations.torchrun._coordinator_lease import (
     CoordinatorLeaseRecord,
     HeldCoordinatorLease,
 )
 from lm_resiliency.integrations.torchrun._coordinator_lease_history import (
     CoordinatorLeaseAuthority,
+    CoordinatorLeaseHistoryCorrupt,
+    CoordinatorLeaseHistoryError,
+    CoordinatorLeaseHistoryReader,
 )
 from lm_resiliency.integrations.torchrun._generation_reader import (
     CurrentGeneration,
@@ -61,6 +69,13 @@ from lm_resiliency.integrations.torchrun._restart_intent_records import (
 from lm_resiliency.integrations.torchrun._restart_plan_publication_authority import (
     RestartPlanPublicationAuthority,
 )
+from lm_resiliency.integrations.torchrun._restart_plan_publication_preparation import (
+    RestartPlanPublicationAuthorityPreparer,
+    RestartPlanPublicationPreparationClockError,
+    RestartPlanPublicationPreparationConflict,
+    RestartPlanPublicationPreparationCorrupt,
+    RestartPlanPublicationPreparationLeaseLost,
+)
 from lm_resiliency.integrations.torchrun._restart_plan_publication_records import (
     RestartPlanPublicationRecords,
 )
@@ -82,6 +97,28 @@ from lm_resiliency.integrations.torchrun._restart_plan_state import (
 )
 
 RUN_ID = "training-run"
+
+
+class ManualClock:
+    def __init__(self, now_unix_ms: int) -> None:
+        self.now_unix_ms = now_unix_ms
+        self._lock = threading.Lock()
+
+    def __call__(self) -> int:
+        with self._lock:
+            return self.now_unix_ms
+
+    def set(self, now_unix_ms: int) -> None:
+        with self._lock:
+            self.now_unix_ms = now_unix_ms
+
+
+class FailingLeaseHistoryReader:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def read(self):
+        raise self._error
 
 
 def _assignment(
@@ -2287,6 +2324,149 @@ def test_restart_plan_publication_authority_rejects_elapsed_window():
 
     with pytest.raises(ValueError, match="window has elapsed"):
         replace(authority, observed_at_unix_ms=authority.deadline_unix_ms)
+
+
+def _publication_preparation_state(
+    *,
+    lease_writes: int = 9,
+) -> tuple[
+    ManualClock,
+    InMemoryControlStore,
+    RestartPlanPublicationRecords,
+]:
+    records = _publication_records()
+    plan_record = records.candidate.placement_state.generation_state.record
+    clock = ManualClock(900)
+    store = InMemoryControlStore(clock=clock)
+    lease_key = CoordinatorLeaseHistoryReader(store, run_id=RUN_ID).lease_key
+    lease_record = CoordinatorLeaseRecord(
+        run_id=RUN_ID,
+        coordinator_id=plan_record.coordinator_id,
+        lease_id=plan_record.lease_id,
+        lease_duration_ms=plan_record.coordinator_lease_duration_ms,
+    )
+    expected_revision = None
+    for _ in range(lease_writes):
+        entry = store.compare_set_in_window(
+            lease_key,
+            expected_revision=expected_revision,
+            not_before_unix_ms=900,
+            deadline_unix_ms=1_400,
+            value=lease_record.to_json(),
+        )
+        expected_revision = entry.revision
+    clock.set(1_200)
+    return clock, store, records
+
+
+def test_restart_plan_publication_preparer_authenticates_without_mutation():
+    clock, store, records = _publication_preparation_state()
+    lease_key = CoordinatorLeaseHistoryReader(store, run_id=RUN_ID).lease_key
+    history_before = store.get_history(lease_key)
+
+    authority = RestartPlanPublicationAuthorityPreparer(
+        store,
+        run_id=RUN_ID,
+        clock=clock,
+    ).prepare(records)
+
+    assert authority.records == records
+    assert authority.coordinator_authority.lease.fencing_token == 9
+    assert authority.observed_at_unix_ms == 1_200
+    assert authority.deadline_unix_ms == 1_400
+    assert store.get_history(lease_key) == history_before
+
+
+def test_restart_plan_publication_preparer_rejects_missing_or_stale_lease():
+    clock = ManualClock(1_200)
+    store = InMemoryControlStore(clock=clock)
+    records = _publication_records()
+
+    with pytest.raises(RestartPlanPublicationPreparationLeaseLost, match="no live"):
+        RestartPlanPublicationAuthorityPreparer(
+            store,
+            run_id=RUN_ID,
+            clock=clock,
+        ).prepare(records)
+
+    clock, store, records = _publication_preparation_state(lease_writes=8)
+    with pytest.raises(RestartPlanPublicationPreparationLeaseLost, match="not authorized"):
+        RestartPlanPublicationAuthorityPreparer(
+            store,
+            run_id=RUN_ID,
+            clock=clock,
+        ).prepare(records)
+
+
+def test_restart_plan_publication_preparer_rejects_elapsed_or_unsafe_clock():
+    clock, store, records = _publication_preparation_state()
+    clock.set(1_400)
+    with pytest.raises(RestartPlanPublicationPreparationLeaseLost, match="window elapsed"):
+        RestartPlanPublicationAuthorityPreparer(
+            store,
+            run_id=RUN_ID,
+            clock=clock,
+        ).prepare(records)
+
+    clock, store, records = _publication_preparation_state()
+    preparation_clock = ManualClock(1_199)
+    preparer = RestartPlanPublicationAuthorityPreparer(
+        store,
+        run_id=RUN_ID,
+        clock=preparation_clock,
+    )
+    with pytest.raises(RestartPlanPublicationPreparationClockError, match="precedes"):
+        preparer.prepare(records)
+
+    preparation_clock.set(1_200)
+    preparer.prepare(records)
+    preparation_clock.set(1_199)
+    with pytest.raises(RestartPlanPublicationPreparationClockError, match="moved backward"):
+        preparer.prepare(records)
+
+
+def test_restart_plan_publication_preparer_translates_history_failures():
+    clock, store, records = _publication_preparation_state()
+    preparer = RestartPlanPublicationAuthorityPreparer(
+        store,
+        run_id=RUN_ID,
+        clock=clock,
+    )
+    cast(Any, preparer)._lease_history_reader = FailingLeaseHistoryReader(
+        CoordinatorLeaseHistoryError("changed repeatedly")
+    )
+    with pytest.raises(RestartPlanPublicationPreparationConflict, match="changed repeatedly"):
+        preparer.prepare(records)
+
+    cast(Any, preparer)._lease_history_reader = FailingLeaseHistoryReader(
+        CoordinatorLeaseHistoryCorrupt("malformed")
+    )
+    with pytest.raises(RestartPlanPublicationPreparationCorrupt, match="history is corrupt"):
+        preparer.prepare(records)
+
+
+def test_restart_plan_publication_preparer_requires_exact_inputs():
+    clock, store, records = _publication_preparation_state()
+    preparer = RestartPlanPublicationAuthorityPreparer(
+        store,
+        run_id=RUN_ID,
+        clock=clock,
+    )
+
+    with pytest.raises(TypeError, match="records must be"):
+        preparer.prepare(records.candidate)
+    with pytest.raises(ValueError, match="another run"):
+        RestartPlanPublicationAuthorityPreparer(
+            store,
+            run_id="other-run",
+            clock=clock,
+        ).prepare(records)
+    with pytest.raises(TypeError, match="clock must be callable"):
+        RestartPlanPublicationAuthorityPreparer(
+            store,
+            run_id=RUN_ID,
+            clock=cast(Any, None),
+        )
 
 
 @pytest.mark.parametrize(
