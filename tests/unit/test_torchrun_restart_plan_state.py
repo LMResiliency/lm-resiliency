@@ -1932,12 +1932,60 @@ def test_restart_plan_candidate_state_rejects_elapsed_restart_deadline():
 
 def _publication_records() -> RestartPlanPublicationRecords:
     candidate = _candidate_state()
-    source_record = candidate.placement_state.generation_state.from_snapshot
+    inventory_state = candidate.recovery_state.copy_state.inventory_state
+    quarantine_state = inventory_state.quarantine_state
+    manifest_state = quarantine_state.manifest_state
+    source_snapshot = replace(
+        manifest_state.resolved_manifest.source_snapshot,
+        record=manifest_state.generation_state.from_snapshot,
+    )
+    manifest_record = replace(
+        manifest_state.resolved_manifest.record,
+        source_generation_snapshot_digest=source_snapshot.record.digest,
+    )
+    generation_state = replace(
+        manifest_state.generation_state,
+        record=replace(
+            manifest_state.generation_state.record,
+            recovery_manifest_record_digest=manifest_record.digest,
+        ),
+    )
+    manifest_state = RestartPlanManifestState(
+        generation_state=generation_state,
+        resolved_manifest=ResolvedRecoveryManifest(
+            record=manifest_record,
+            source_snapshot=source_snapshot,
+        ),
+    )
+    quarantine_state = RestartPlanQuarantineState(
+        manifest_state=manifest_state,
+        quarantine_records=quarantine_state.quarantine_records,
+    )
+    inventory_state = RestartPlanInventoryState(
+        quarantine_state=quarantine_state,
+        inventory_events=inventory_state.inventory_events,
+    )
+    copy_state = RestartPlanCopyEligibilityState(inventory_state)
+    trust_state = candidate.recovery_state.trust_state
+    assert isinstance(trust_state, RestartPlanCertificationState)
+    candidate = RestartPlanCandidateState(
+        recovery_state=RestartPlanRecoveryEvidenceState(
+            copy_state=copy_state,
+            trust_state=RestartPlanCertificationState(
+                inventory_state=inventory_state,
+                certifications=trust_state.certifications,
+            ),
+        ),
+        placement_state=replace(
+            candidate.placement_state,
+            generation_state=generation_state,
+        ),
+    )
     return RestartPlanPublicationRecords(
         candidate=candidate,
         current=CurrentGeneration(
             snapshot=StoredGenerationSnapshot(
-                record=source_record,
+                record=generation_state.from_snapshot,
                 revision=8,
                 committed_at_unix_ms=1_000,
                 transaction_sequence=17,
@@ -2055,12 +2103,28 @@ def test_restart_plan_publication_records_require_exact_current_generation():
 def test_restart_plan_publication_records_require_matching_shared_source_revision():
     records = _publication_records()
 
-    with pytest.raises(ValueError, match="source revisions disagree"):
+    with pytest.raises(ValueError, match="source snapshots disagree"):
         replace(
             records,
             current=replace(
                 records.current,
                 snapshot=replace(records.current.snapshot, revision=9),
+            ),
+        )
+
+
+def test_restart_plan_publication_records_reject_divergent_shared_source_record():
+    candidate = _candidate_state()
+
+    with pytest.raises(ValueError, match="source snapshots disagree"):
+        RestartPlanPublicationRecords(
+            candidate=candidate,
+            current=CurrentGeneration(
+                snapshot=replace(
+                    _publication_records().current.snapshot,
+                    record=candidate.placement_state.generation_state.from_snapshot,
+                ),
+                head_revision=18,
             ),
         )
 

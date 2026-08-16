@@ -825,11 +825,12 @@ prior quarantine and the atomic store transaction remain separate gates.
 quarantine, successor-generation, and generation-head writes from one admitted
 candidate. It CAS-updates the generation head and conditions on the exact
 current and manifest-source snapshot revisions plus every exact successor
-registration fencing revision. Its exclusive deadline is the earliest selected
-registration expiry or plan restart deadline. It performs no store access and
-does not authenticate the live coordinator lease, lifecycle revision,
-quarantine resource evidence, transaction result, or prior committed
-quarantine state.
+registration fencing revision. When the current and manifest-source snapshots
+share one generation key, their immutable records and revisions must both
+match. Its exclusive deadline is the earliest selected registration expiry or
+plan restart deadline. It performs no store access and does not authenticate
+the live coordinator lease, lifecycle revision, quarantine resource evidence,
+transaction result, or prior committed quarantine state.
 
 Before commit, the coordinator validates:
 

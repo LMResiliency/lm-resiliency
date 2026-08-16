@@ -51,12 +51,12 @@ class RestartPlanPublicationRecords:
             manifest_source.revision,
             "RestartPlanPublicationRecords manifest source revision",
         )
-        if (
-            self.manifest_source_generation_snapshot_key == self.source_generation_snapshot_key
-            and manifest_source.revision != self.current.snapshot.revision
+        if self.manifest_source_generation_snapshot_key == self.source_generation_snapshot_key and (
+            manifest_source.revision != self.current.snapshot.revision
+            or manifest_source.record != self.current.snapshot.record
         ):
             raise ValueError(
-                "RestartPlanPublicationRecords current and manifest source revisions disagree"
+                "RestartPlanPublicationRecords current and manifest source snapshots disagree"
             )
 
     @property
