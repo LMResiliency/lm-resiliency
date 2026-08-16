@@ -559,9 +559,85 @@ class RestartPlanLatestEvidenceState:
         return self.inventory_state.manifest
 
 
+@dataclass(frozen=True, slots=True)
+class RestartPlanCopyEligibilityState:
+    """One inventory-bound plan whose advertised copies are all usable."""
+
+    inventory_state: RestartPlanInventoryState
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.inventory_state, RestartPlanInventoryState):
+            raise TypeError(
+                "RestartPlanCopyEligibilityState.inventory_state must be RestartPlanInventoryState"
+            )
+        plan = self.inventory_state.plan
+        manifest = self.inventory_state.manifest
+        entries = {entry.owner_global_rank: entry for entry in manifest.rank_copies}
+        required_ranks = set(range(plan.expected_world_size))
+        if set(entries) != required_ranks:
+            missing = sorted(required_ranks - set(entries))
+            extra = sorted(set(entries) - required_ranks)
+            raise ValueError(
+                "RestartPlanCopyEligibilityState rank coverage mismatch; "
+                f"missing={missing!r}, extra={extra!r}"
+            )
+        source_assignment = (
+            self.inventory_state.quarantine_state.manifest_state.resolved_manifest.source_assignment
+        )
+        source_owner_by_rank = {
+            rank: source_assignment.slot_to_node_id[slot]
+            for slot, (first_rank, last_rank) in source_assignment.slot_to_rank_range.items()
+            for rank in range(first_rank, last_rank)
+        }
+        assigned_nodes = {assignment.node_id for assignment in plan.slot_assignments}
+        compatible_holder_kinds = (
+            {"durable"} if plan.checkpoint_source == "durable" else {"owner", "peer"}
+        )
+        for rank, entry in entries.items():
+            if not entry.copies:
+                raise ValueError(
+                    f"RestartPlanCopyEligibilityState rank {rank} has no eligible copy"
+                )
+            for copy in entry.copies:
+                if not (
+                    copy.complete
+                    and copy.checkpoint_step == manifest.step
+                    and copy.holder_kind in compatible_holder_kinds
+                    and copy.storage_kind in {"node_local", "shared", "remote"}
+                    and copy.checkpoint_id == plan.checkpoint_id
+                    and (
+                        copy.holder_kind == "durable"
+                        or (
+                            copy.holder_kind == "owner"
+                            and copy.holder_node_id == source_owner_by_rank[rank]
+                        )
+                        or (
+                            copy.holder_kind == "peer"
+                            and copy.holder_node_id != source_owner_by_rank[rank]
+                        )
+                    )
+                    and (
+                        copy.storage_kind in {"shared", "remote"}
+                        or copy.holder_node_id in assigned_nodes
+                    )
+                ):
+                    raise ValueError(
+                        f"RestartPlanCopyEligibilityState rank {rank} contains an ineligible copy"
+                    )
+
+    @property
+    def plan(self) -> RestartPlan:
+        return self.inventory_state.plan
+
+    @property
+    def manifest(self) -> RecoveryManifest:
+        return self.inventory_state.manifest
+
+
 __all__ = [
     "ResolvedRecoveryManifest",
     "RestartPlanCertificationState",
+    "RestartPlanCopyEligibilityState",
     "RestartPlanGenerationState",
     "RestartPlanInventoryState",
     "RestartPlanLatestEvidenceState",

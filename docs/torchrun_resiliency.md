@@ -796,6 +796,11 @@ current generation, and every referenced inventory event must be authorized by
 the reporting agent's successful acknowledgement, flushed step, and canonical
 event digest. It still does not prove per-rank copy completeness, holder
 availability, or fallback eligibility.
+`RestartPlanCopyEligibilityState` independently requires exact rank coverage
+and rejects every incomplete, wrong-source, wrong-role, process-memory, or
+unavailable node-local copy advertised by the immutable manifest. Shared and
+remote copies remain independent of holder-node admission. This value does not
+establish latest acknowledgement or recovery-verified certification evidence.
 
 Before commit, the coordinator validates:
 
