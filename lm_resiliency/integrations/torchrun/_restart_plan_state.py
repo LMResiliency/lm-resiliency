@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -9,10 +10,12 @@ from types import MappingProxyType
 from lm_resiliency.integrations.torchrun._agent_registration_history_reader import (
     AgentRegistrationHistory,
 )
+from lm_resiliency.integrations.torchrun._control_store import ControlStoreEntry
 from lm_resiliency.integrations.torchrun._generation_reader import (
     StoredGenerationSnapshot,
 )
 from lm_resiliency.integrations.torchrun._generation_records import (
+    GenerationHeadRecord,
     GenerationSnapshotRecord,
 )
 from lm_resiliency.integrations.torchrun._protocol import (
@@ -39,6 +42,407 @@ from lm_resiliency.integrations.torchrun._restart_plan_records import (
     RecoveryManifestRecord,
     RestartPlanRecord,
 )
+
+_CONTROL_PREFIX = "lm_resiliency/torchrun/v1"
+
+
+@dataclass(frozen=True, slots=True)
+class PersistedRestartPlanPublication:
+    """One canonical restart-plan publication reconstructed from store entries."""
+
+    record: RestartPlanRecord
+    manifest_record: RecoveryManifestRecord
+    successor_snapshot: GenerationSnapshotRecord
+    generation_head: GenerationHeadRecord
+    quarantine_records: Mapping[str, NodeQuarantineRecord]
+    plan_entry: ControlStoreEntry
+    manifest_entry: ControlStoreEntry
+    successor_snapshot_entry: ControlStoreEntry
+    generation_head_entry: ControlStoreEntry
+    quarantine_entries: Mapping[str, ControlStoreEntry]
+
+    def __post_init__(self) -> None:
+        expected_types = (
+            ("record", self.record, RestartPlanRecord),
+            ("manifest_record", self.manifest_record, RecoveryManifestRecord),
+            ("successor_snapshot", self.successor_snapshot, GenerationSnapshotRecord),
+            ("generation_head", self.generation_head, GenerationHeadRecord),
+            ("plan_entry", self.plan_entry, ControlStoreEntry),
+            ("manifest_entry", self.manifest_entry, ControlStoreEntry),
+            (
+                "successor_snapshot_entry",
+                self.successor_snapshot_entry,
+                ControlStoreEntry,
+            ),
+            ("generation_head_entry", self.generation_head_entry, ControlStoreEntry),
+        )
+        for path, value, expected_type in expected_types:
+            if not isinstance(value, expected_type):
+                raise TypeError(
+                    f"PersistedRestartPlanPublication.{path} must be {expected_type.__name__}"
+                )
+        records = _node_record_mapping(
+            self.quarantine_records,
+            path="PersistedRestartPlanPublication.quarantine_records",
+        )
+        entries = _node_entry_mapping(
+            self.quarantine_entries,
+            path="PersistedRestartPlanPublication.quarantine_entries",
+        )
+        object.__setattr__(self, "quarantine_records", MappingProxyType(records))
+        object.__setattr__(self, "quarantine_entries", MappingProxyType(entries))
+        self._validate_records()
+        self._validate_entries()
+
+    @classmethod
+    def from_entries(
+        cls,
+        *,
+        run_id: str,
+        to_generation: int,
+        plan_entry: ControlStoreEntry,
+        manifest_entry: ControlStoreEntry,
+        successor_snapshot_entry: ControlStoreEntry,
+        generation_head_entry: ControlStoreEntry,
+        quarantine_entries: Mapping[str, ControlStoreEntry],
+    ) -> PersistedRestartPlanPublication:
+        """Decode and validate one atomic restart-plan publication."""
+
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise ValueError("run_id must be a non-empty string")
+        if (
+            isinstance(to_generation, bool)
+            or not isinstance(to_generation, int)
+            or to_generation < 1
+        ):
+            raise ValueError("to_generation must be a positive integer")
+        entries = (
+            ("plan_entry", plan_entry),
+            ("manifest_entry", manifest_entry),
+            ("successor_snapshot_entry", successor_snapshot_entry),
+            ("generation_head_entry", generation_head_entry),
+        )
+        for path, entry in entries:
+            if not isinstance(entry, ControlStoreEntry):
+                raise TypeError(f"{path} must be ControlStoreEntry")
+        normalized_quarantine_entries = _node_entry_mapping(
+            quarantine_entries,
+            path="quarantine_entries",
+        )
+        try:
+            record = RestartPlanRecord.from_json(plan_entry.value)
+            manifest_record = RecoveryManifestRecord.from_json(manifest_entry.value)
+            successor_snapshot = GenerationSnapshotRecord.from_json(successor_snapshot_entry.value)
+            generation_head = GenerationHeadRecord.from_json(generation_head_entry.value)
+            quarantine_records = {
+                node_id: NodeQuarantineRecord.from_json(entry.value)
+                for node_id, entry in normalized_quarantine_entries.items()
+            }
+        except (TypeError, ValueError) as error:
+            raise ValueError("restart-plan publication contains malformed records") from error
+        if record.plan.run_id != run_id:
+            raise ValueError("restart-plan publication belongs to another run")
+        if record.plan.to_generation != to_generation:
+            raise ValueError("restart-plan publication belongs to another generation")
+        return cls(
+            record=record,
+            manifest_record=manifest_record,
+            successor_snapshot=successor_snapshot,
+            generation_head=generation_head,
+            quarantine_records=quarantine_records,
+            plan_entry=plan_entry,
+            manifest_entry=manifest_entry,
+            successor_snapshot_entry=successor_snapshot_entry,
+            generation_head_entry=generation_head_entry,
+            quarantine_entries=normalized_quarantine_entries,
+        )
+
+    @property
+    def plan(self) -> RestartPlan:
+        return self.record.plan
+
+    @property
+    def committed_at_unix_ms(self) -> int:
+        committed_at_unix_ms = self.plan_entry.committed_at_unix_ms
+        if committed_at_unix_ms is None:
+            raise AssertionError("validated publication lost its commit time")
+        return committed_at_unix_ms
+
+    @property
+    def transaction_sequence(self) -> int:
+        return self.plan_entry.transaction_sequence
+
+    def _validate_records(self) -> None:
+        plan = self.record.plan
+        if self.record.recovery_manifest_record_digest != self.manifest_record.digest:
+            raise ValueError(
+                "PersistedRestartPlanPublication manifest digest does not match its plan"
+            )
+        _validate_manifest_record_matches_plan(
+            self.record,
+            self.manifest_record,
+            path="PersistedRestartPlanPublication",
+        )
+        if self.record.to_generation_snapshot_digest != self.successor_snapshot.digest:
+            raise ValueError(
+                "PersistedRestartPlanPublication successor digest does not match its plan"
+            )
+        expected_assignment = RankAssignment.from_assignments(
+            run_id=plan.run_id,
+            generation=plan.to_generation,
+            assignments=plan.slot_assignments,
+            topology_digest=plan.topology_digest,
+        )
+        if (
+            self.successor_snapshot.assignment != expected_assignment
+            or self.successor_snapshot.previous_snapshot_digest
+            != self.record.from_generation_snapshot_digest
+        ):
+            raise ValueError(
+                "PersistedRestartPlanPublication successor does not implement its plan"
+            )
+        if (
+            self.generation_head.run_id != plan.run_id
+            or self.generation_head.generation != plan.to_generation
+            or self.generation_head.snapshot_digest != self.successor_snapshot.digest
+        ):
+            raise ValueError(
+                "PersistedRestartPlanPublication generation head does not identify its successor"
+            )
+        expected_quarantine_digests = self.record.quarantine_record_digests
+        if set(self.quarantine_records) != set(expected_quarantine_digests):
+            raise ValueError(
+                "PersistedRestartPlanPublication quarantine records do not match its plan"
+            )
+        for node_id, record in self.quarantine_records.items():
+            if record.node_id != node_id or record.digest != expected_quarantine_digests[node_id]:
+                raise ValueError(
+                    "PersistedRestartPlanPublication quarantine record does not match its plan"
+                )
+            _validate_quarantine_record_matches_plan(
+                self.record,
+                record,
+                path="PersistedRestartPlanPublication",
+            )
+        if set(self.quarantine_entries) != set(self.quarantine_records):
+            raise ValueError(
+                "PersistedRestartPlanPublication quarantine entries do not match its records"
+            )
+        if (
+            self.successor_snapshot.coordinator_id != self.record.coordinator_id
+            or self.successor_snapshot.lease_id != self.record.lease_id
+            or self.successor_snapshot.coordinator_lease_duration_ms
+            != self.record.coordinator_lease_duration_ms
+            or self.successor_snapshot.coordinator_fencing_token
+            != self.record.coordinator_fencing_token
+        ):
+            raise ValueError(
+                "PersistedRestartPlanPublication successor uses different publication authority"
+            )
+
+    def _validate_entries(self) -> None:
+        entries = {
+            "plan": self.plan_entry,
+            "manifest": self.manifest_entry,
+            "successor": self.successor_snapshot_entry,
+            "generation head": self.generation_head_entry,
+            **{
+                f"quarantine[{node_id!r}]": entry
+                for node_id, entry in self.quarantine_entries.items()
+            },
+        }
+        expected_values = {
+            "plan": self.record.to_json(),
+            "manifest": self.manifest_record.to_json(),
+            "successor": self.successor_snapshot.to_json(),
+            "generation head": self.generation_head.to_json(),
+            **{
+                f"quarantine[{node_id!r}]": record.to_json()
+                for node_id, record in self.quarantine_records.items()
+            },
+        }
+        commit_times: set[int | None] = set()
+        transaction_sequences: set[int] = set()
+        guard_provenance: set[tuple[object, ...]] = set()
+        for path, entry in entries.items():
+            if entry.value != expected_values[path]:
+                raise ValueError(
+                    f"PersistedRestartPlanPublication {path} entry does not match its record"
+                )
+            if path == "generation head":
+                expected_sequence = self.plan.to_generation + 1
+                if (
+                    entry.mutation_sequence != expected_sequence
+                    or entry.value_sequence != expected_sequence
+                    or entry.lifetime_sequence != 1
+                ):
+                    raise ValueError(
+                        "PersistedRestartPlanPublication generation head has invalid lineage"
+                    )
+            elif (
+                entry.mutation_sequence != 1
+                or entry.value_sequence != 1
+                or entry.lifetime_sequence != 1
+            ):
+                raise ValueError(f"PersistedRestartPlanPublication {path} entry is not immutable")
+            commit_times.add(entry.committed_at_unix_ms)
+            transaction_sequences.add(entry.transaction_sequence)
+            guard_provenance.add(_guard_provenance(entry))
+        if len(commit_times) != 1 or None in commit_times:
+            raise ValueError("PersistedRestartPlanPublication entries do not share one commit time")
+        if len(transaction_sequences) != 1:
+            raise ValueError("PersistedRestartPlanPublication entries do not share one transaction")
+        if len(guard_provenance) != 1:
+            raise ValueError(
+                "PersistedRestartPlanPublication entries do not share guard provenance"
+            )
+        provenance = next(iter(guard_provenance))
+        self._validate_guard(provenance)
+        transaction_sequence = next(iter(transaction_sequences))
+        guard_mutation_sequence = provenance[3]
+        if not isinstance(guard_mutation_sequence, int):
+            raise AssertionError("validated guard provenance lost its mutation sequence")
+        if transaction_sequence <= max(
+            self.generation_head_entry.mutation_sequence,
+            guard_mutation_sequence,
+        ):
+            raise ValueError(
+                "PersistedRestartPlanPublication transaction sequence predates its mutations"
+            )
+        committed_at_unix_ms = next(iter(commit_times))
+        if committed_at_unix_ms is None:
+            raise AssertionError("validated publication lost its commit time")
+        guard_committed_at_unix_ms = self.plan_entry.guard_committed_at_unix_ms
+        if guard_committed_at_unix_ms is None:
+            raise ValueError(
+                "PersistedRestartPlanPublication guard has no authoritative grant time"
+            )
+        if (
+            committed_at_unix_ms < guard_committed_at_unix_ms
+            or committed_at_unix_ms
+            >= guard_committed_at_unix_ms + self.record.coordinator_lease_duration_ms
+            or committed_at_unix_ms >= self.plan.restart_deadline_unix_ms
+        ):
+            raise ValueError(
+                "PersistedRestartPlanPublication commit is outside its authority window"
+            )
+
+    def _validate_guard(self, provenance: tuple[object, ...]) -> None:
+        run_digest = hashlib.sha256(self.plan.run_id.encode("utf-8")).hexdigest()
+        expected_guard_key = f"{_CONTROL_PREFIX}/runs/{run_digest}/coordinator-lease"
+        if (
+            provenance[0] != expected_guard_key
+            or provenance[1] != self.record.coordinator_fencing_token
+            or provenance[2] != self.record.coordinator_lease_digest
+        ):
+            raise ValueError(
+                "PersistedRestartPlanPublication has invalid coordinator guard provenance"
+            )
+
+
+def _guard_provenance(entry: ControlStoreEntry) -> tuple[object, ...]:
+    if (
+        entry.guard_key is None
+        or entry.guard_revision is None
+        or entry.guard_value_digest is None
+        or entry.guard_mutation_sequence is None
+        or entry.guard_value_sequence is None
+        or entry.guard_lifetime_sequence is None
+        or entry.guard_committed_at_unix_ms is None
+    ):
+        raise ValueError("PersistedRestartPlanPublication entry has incomplete guard provenance")
+    return (
+        entry.guard_key,
+        entry.guard_revision,
+        entry.guard_value_digest,
+        entry.guard_mutation_sequence,
+        entry.guard_value_sequence,
+        entry.guard_lifetime_sequence,
+        entry.guard_committed_at_unix_ms,
+    )
+
+
+def _node_record_mapping(
+    value: object,
+    *,
+    path: str,
+) -> dict[str, NodeQuarantineRecord]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{path} must be a mapping")
+    result: dict[str, NodeQuarantineRecord] = {}
+    for node_id, record in value.items():
+        if not isinstance(node_id, str) or not node_id.strip():
+            raise ValueError(f"{path} keys must be non-empty node IDs")
+        if not isinstance(record, NodeQuarantineRecord):
+            raise TypeError(f"{path} values must be NodeQuarantineRecord")
+        result[node_id] = record
+    return dict(sorted(result.items()))
+
+
+def _node_entry_mapping(
+    value: object,
+    *,
+    path: str,
+) -> dict[str, ControlStoreEntry]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{path} must be a mapping")
+    result: dict[str, ControlStoreEntry] = {}
+    for node_id, entry in value.items():
+        if not isinstance(node_id, str) or not node_id.strip():
+            raise ValueError(f"{path} keys must be non-empty node IDs")
+        if not isinstance(entry, ControlStoreEntry):
+            raise TypeError(f"{path} values must be ControlStoreEntry")
+        result[node_id] = entry
+    return dict(sorted(result.items()))
+
+
+def _validate_manifest_record_matches_plan(
+    plan_record: RestartPlanRecord,
+    manifest_record: RecoveryManifestRecord,
+    *,
+    path: str,
+) -> None:
+    plan = plan_record.plan
+    manifest = manifest_record.manifest
+    if (
+        manifest.manifest_id != plan.checkpoint_manifest_id
+        or manifest.run_id != plan.run_id
+        or manifest.source_generation > plan.from_generation
+        or manifest.step != plan.checkpoint_step
+        or manifest.topology_digest != plan.topology_digest
+    ):
+        raise ValueError(f"{path} manifest metadata does not match its plan")
+    if plan.recovery_mode == "recovery_verified" and manifest.trust != "recovery_verified":
+        raise ValueError(f"{path} verified recovery requires a verified manifest")
+    if plan.checkpoint_source == "durable" and manifest.trust != "recovery_verified":
+        raise ValueError(f"{path} durable recovery requires a verified manifest")
+
+
+def _validate_quarantine_record_matches_plan(
+    plan_record: RestartPlanRecord,
+    quarantine_record: NodeQuarantineRecord,
+    *,
+    path: str,
+) -> None:
+    plan = plan_record.plan
+    if (
+        quarantine_record.run_id != plan.run_id
+        or quarantine_record.plan_id != plan.plan_id
+        or quarantine_record.intent_id != plan.intent_id
+        or quarantine_record.from_generation != plan.from_generation
+        or quarantine_record.effective_generation != plan.to_generation
+        or quarantine_record.incident_ids != plan.incident_ids
+        or quarantine_record.reason_code != plan.reason_code
+    ):
+        raise ValueError(f"{path} quarantine record does not match its plan")
+    if (
+        quarantine_record.coordinator_id != plan_record.coordinator_id
+        or quarantine_record.lease_id != plan_record.lease_id
+        or quarantine_record.coordinator_lease_duration_ms
+        != plan_record.coordinator_lease_duration_ms
+        or quarantine_record.coordinator_fencing_token != plan_record.coordinator_fencing_token
+    ):
+        raise ValueError(f"{path} quarantine record uses different publication authority")
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,19 +627,15 @@ class RestartPlanManifestState:
         plan_record = self.generation_state.record
         plan = plan_record.plan
         manifest_record = self.resolved_manifest.record
-        manifest = manifest_record.manifest
         if plan_record.recovery_manifest_record_digest != manifest_record.digest:
             raise ValueError(
                 "RestartPlanManifestState manifest record digest does not match its plan"
             )
-        if (
-            manifest.manifest_id != plan.checkpoint_manifest_id
-            or manifest.run_id != plan.run_id
-            or manifest.source_generation > plan.from_generation
-            or manifest.step != plan.checkpoint_step
-            or manifest.topology_digest != plan.topology_digest
-        ):
-            raise ValueError("RestartPlanManifestState manifest metadata does not match its plan")
+        _validate_manifest_record_matches_plan(
+            plan_record,
+            manifest_record,
+            path="RestartPlanManifestState",
+        )
         source_assignment = self.resolved_manifest.source_assignment
         source_world_size = source_assignment.active_nodes * source_assignment.local_world_size
         if source_world_size != plan.expected_world_size:
@@ -246,14 +646,6 @@ class RestartPlanManifestState:
         ):
             raise ValueError(
                 "RestartPlanManifestState source assignment conflicts with its current generation"
-            )
-        if plan.recovery_mode == "recovery_verified" and manifest.trust != "recovery_verified":
-            raise ValueError(
-                "RestartPlanManifestState verified recovery requires a verified manifest"
-            )
-        if plan.checkpoint_source == "durable" and manifest.trust != "recovery_verified":
-            raise ValueError(
-                "RestartPlanManifestState durable recovery requires a verified manifest"
             )
 
     @property
@@ -302,34 +694,16 @@ class RestartPlanQuarantineState:
             raise ValueError(
                 "RestartPlanQuarantineState records must exactly cover the plan's quarantined nodes"
             )
-        plan = plan_record.plan
         for node_id, record in records.items():
             if record.digest != expected_digests[node_id]:
                 raise ValueError(
                     "RestartPlanQuarantineState quarantine record digest does not match its plan"
                 )
-            if (
-                record.run_id != plan.run_id
-                or record.plan_id != plan.plan_id
-                or record.intent_id != plan.intent_id
-                or record.from_generation != plan.from_generation
-                or record.effective_generation != plan.to_generation
-                or record.incident_ids != plan.incident_ids
-                or record.reason_code != plan.reason_code
-            ):
-                raise ValueError(
-                    "RestartPlanQuarantineState quarantine record does not match its plan"
-                )
-            if (
-                record.coordinator_id != plan_record.coordinator_id
-                or record.lease_id != plan_record.lease_id
-                or record.coordinator_lease_duration_ms != plan_record.coordinator_lease_duration_ms
-                or record.coordinator_fencing_token != plan_record.coordinator_fencing_token
-            ):
-                raise ValueError(
-                    "RestartPlanQuarantineState quarantine record uses different "
-                    "publication authority"
-                )
+            _validate_quarantine_record_matches_plan(
+                plan_record,
+                record,
+                path="RestartPlanQuarantineState",
+            )
         object.__setattr__(
             self,
             "quarantine_records",
@@ -860,6 +1234,7 @@ class RestartPlanCandidateState:
 
 
 __all__ = [
+    "PersistedRestartPlanPublication",
     "ResolvedRecoveryManifest",
     "RestartPlanCandidateState",
     "RestartPlanCertificationState",
