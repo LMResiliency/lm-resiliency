@@ -113,6 +113,7 @@ class RestartAckPreparer:
             records = _write_records(state)
             return PreparedRestartAckWrite(
                 records=records,
+                registration_authority=state.registration_authority,
                 coordinator_authority=state.coordinator_authority,
                 not_before_unix_ms=now_unix_ms,
                 deadline_unix_ms=min(

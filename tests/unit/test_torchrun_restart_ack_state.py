@@ -10,6 +10,9 @@ import pytest
 from lm_resiliency.integrations.torchrun._agent_registration import (
     AgentRegistrationManager,
 )
+from lm_resiliency.integrations.torchrun._agent_registration_history import (
+    AgentRegistrationAuthority,
+)
 from lm_resiliency.integrations.torchrun._control_store import InMemoryControlStore
 from lm_resiliency.integrations.torchrun._coordinator_lease import (
     CoordinatorLeaseManager,
@@ -96,7 +99,7 @@ def _state(
             clock=clock,
         ).prepare_initial_open(lease, current, intent)
     )
-    registration = AgentRegistrationManager(
+    registration_manager = AgentRegistrationManager(
         store,
         agent_identity=AgentIdentity(
             run_id=RUN_ID,
@@ -109,7 +112,8 @@ def _state(
         ),
         lease_duration_ms=400,
         clock=clock,
-    ).register()
+    )
+    registration = registration_manager.register()
     receipt = RestartAckReceiptRecord(
         acknowledgement=RestartAck(
             intent_id=intent.intent_id,
@@ -131,11 +135,17 @@ def _state(
         received_at_unix_ms=clock.now_unix_ms,
     )
     lease_entry = store.get(lease_manager.lease_key)
+    registration_entry = store.get(registration_manager.registration_key)
     assert lease_entry is not None
+    assert registration_entry is not None
     return store, AuthenticatedRestartAckState(
         receipt=receipt,
         opened=opened,
-        registration=registration,
+        registration_authority=AgentRegistrationAuthority.from_entry(
+            registration_entry,
+            run_id=RUN_ID,
+            node_id=node_id,
+        ),
         coordinator_authority=CoordinatorLeaseAuthority.from_entry(
             lease_entry,
             run_id=RUN_ID,
@@ -155,11 +165,12 @@ def test_authenticated_restart_ack_state_binds_inputs_without_mutation():
 
     assert state.receipt.intent_record == state.opened.prepared.record
     assert state.registration == state.receipt.authenticated_registration
+    assert state.registration_authority.registration == state.registration
     assert state.coordinator_authority.lease.record.run_id == RUN_ID
     assert {key: store.get_history(key) for key in histories_before} == histories_before
 
     with pytest.raises(AttributeError):
-        state.registration = state.registration
+        state.registration_authority = state.registration_authority
 
 
 def test_authenticated_restart_ack_state_rejects_different_intent():
@@ -201,9 +212,12 @@ def test_authenticated_restart_ack_state_rejects_different_registration():
     with pytest.raises(ValueError, match="current registration"):
         replace(
             state,
-            registration=replace(
-                state.registration,
-                fencing_token=state.registration.fencing_token + 1,
+            registration_authority=replace(
+                state.registration_authority,
+                registration=replace(
+                    state.registration,
+                    fencing_token=state.registration.fencing_token + 1,
+                ),
             ),
         )
 
@@ -238,6 +252,6 @@ def test_authenticated_restart_ack_state_requires_expected_types():
     with pytest.raises(TypeError, match="opened"):
         replace(state, opened={})
     with pytest.raises(TypeError, match="registration"):
-        replace(state, registration={})
+        replace(state, registration_authority={})
     with pytest.raises(TypeError, match="coordinator_authority"):
         replace(state, coordinator_authority={})
