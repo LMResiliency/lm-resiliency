@@ -920,9 +920,10 @@ signed publication, and requires the publication transaction and commit time
 to follow lifecycle closure, before returning the reauthorized recovery state.
 Repeated lifecycle, generation, or lease-history movement remains a retryable
 conflict; missing, mixed, causally impossible, or unsafe recovery evidence
-fails closed. For `latest`, the caller must supply the exact stable
-restart-acknowledgement evidence until historical acknowledgement collection
-is exposed directly to readback.
+fails closed. For `latest`, the caller supplies the exact stable
+restart-acknowledgement evidence reconstructed from the authenticated closed
+intent; the following readback integration wires that historical collection
+directly into this method.
 
 Before commit, the coordinator validates:
 
@@ -1161,9 +1162,12 @@ membership, causal transaction order, and a commit inside all three authority
 windows. It performs no store reads; a following stable reader supplies the
 durable dependencies before acknowledgement collection or quorum logic.
 
-The per-node receipt reader double-collects the current open intent, the
+The per-node receipt reader double-collects the restart-intent opening, the
 create-once acknowledgement key, complete agent-registration history, and
-complete coordinator-lease history. A never-created receipt key returns no
+complete coordinator-lease history. For the active preparation path it reads
+the current opening. After closure it can instead consume the durable opening
+retained by the authenticated lifecycle record, without reconstructing lost
+preparation revisions or time bounds. A never-created receipt key returns no
 acknowledgement. Deleted, rewritten, malformed, or orphaned receipts fail
 closed. Renewed registrations and coordinator leases do not invalidate an
 already committed receipt because the reader resolves the exact historical
@@ -1177,8 +1181,11 @@ separately exposes received, missing, successful, and explicitly failed node
 sets without making a quorum or restart-policy decision.
 
 A read-only collector obtains two identical full active-node observations while
-the durable restart-intent opening remains unchanged. Because acknowledgement
-keys are immutable create-once records, this double collect yields one stable
+the durable restart-intent opening remains unchanged. Before closure it also
+stabilizes the current opening. After closure it accepts an authenticated
+lifecycle value and reconstructs the same durable opening from the retained
+immutable intent and open-head entries. Because acknowledgement keys are
+immutable create-once records, this double collect yields one stable
 receipt-or-absence snapshot without requiring a store-wide read transaction.
 Repeated changes are retryable conflicts; contradictory per-node state fails
 closed as corruption. The collector still makes no quorum or restart decision.

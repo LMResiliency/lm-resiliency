@@ -937,11 +937,11 @@ class RestartPlanLatestEvidenceState:
                 "the exact current generation snapshot"
             )
         opened = self.acknowledgement_evidence.collection.opened
-        if opened.prepared.record != generation_state.intent_record:
+        if opened.record != generation_state.intent_record:
             raise ValueError(
                 "RestartPlanLatestEvidenceState acknowledgements answer another restart intent"
             )
-        if opened.prepared.current.snapshot.record != generation_state.from_snapshot:
+        if opened.generation_snapshot.record != generation_state.from_snapshot:
             raise ValueError(
                 "RestartPlanLatestEvidenceState acknowledgements belong to another generation"
             )

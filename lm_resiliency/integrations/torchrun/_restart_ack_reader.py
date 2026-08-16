@@ -36,8 +36,12 @@ from lm_resiliency.integrations.torchrun._restart_ack_persisted import (
 from lm_resiliency.integrations.torchrun._restart_ack_records import (
     RestartAckReceiptRecord,
 )
+from lm_resiliency.integrations.torchrun._restart_intent_lifecycle_auth import (
+    AuthenticatedInitialRestartIntentClosure,
+)
 from lm_resiliency.integrations.torchrun._restart_intent_open_execution import (
     CommittedInitialRestartIntentOpen,
+    PersistedInitialRestartIntentOpen,
 )
 from lm_resiliency.integrations.torchrun._restart_intent_open_reader import (
     RestartIntentOpenStateClosed,
@@ -92,13 +96,13 @@ class RestartAckReader:
         """Return the current intent's receipt for this node, if committed."""
 
         for _ in range(_MAX_READ_ATTEMPTS):
-            opened = self._read_open()
+            opened = PersistedInitialRestartIntentOpen.from_committed(self._read_open())
             acknowledgement_key = _acknowledgement_key(opened, self._node_id)
             receipt_state = self._receipt_state(acknowledgement_key)
             registration_history = self._read_registration_history()
             lease_history = self._read_lease_history()
             if (
-                opened != self._read_open()
+                opened != PersistedInitialRestartIntentOpen.from_committed(self._read_open())
                 or receipt_state != self._receipt_state(acknowledgement_key)
                 or registration_history != self._read_registration_history()
                 or lease_history != self._read_lease_history()
@@ -117,11 +121,45 @@ class RestartAckReader:
             "restart-acknowledgement dependencies changed repeatedly during read"
         )
 
+    def _read_for_opening(
+        self,
+        opened: PersistedInitialRestartIntentOpen,
+    ) -> PersistedRestartAck | None:
+        """Return this node's receipt for one authenticated historical opening."""
+
+        if not isinstance(opened, PersistedInitialRestartIntentOpen):
+            raise TypeError("opened must be PersistedInitialRestartIntentOpen")
+        if opened.run_id != self._run_id:
+            raise ValueError("opened restart intent belongs to another run")
+        acknowledgement_key = _acknowledgement_key(opened, self._node_id)
+        for _ in range(_MAX_READ_ATTEMPTS):
+            receipt_state = self._receipt_state(acknowledgement_key)
+            registration_history = self._read_registration_history()
+            lease_history = self._read_lease_history()
+            if (
+                receipt_state != self._receipt_state(acknowledgement_key)
+                or registration_history != self._read_registration_history()
+                or lease_history != self._read_lease_history()
+            ):
+                continue
+            receipt_entry = _current_receipt(receipt_state)
+            if receipt_entry is None:
+                return None
+            return self._authenticate(
+                receipt_entry,
+                opened=opened,
+                registration_history=registration_history,
+                lease_history=lease_history,
+            )
+        raise RestartAckReadConflict(
+            "historical restart-acknowledgement dependencies changed repeatedly during read"
+        )
+
     def _authenticate(
         self,
         receipt_entry: ControlStoreEntry,
         *,
-        opened: CommittedInitialRestartIntentOpen,
+        opened: PersistedInitialRestartIntentOpen,
         registration_history: AgentRegistrationHistory,
         lease_history: tuple[CoordinatorLeaseAuthority, ...],
     ) -> PersistedRestartAck:
@@ -258,9 +296,41 @@ class RestartAckCollector:
             "restart acknowledgements changed repeatedly during collection"
         )
 
+    def collect_for_closure(
+        self,
+        closure: AuthenticatedInitialRestartIntentClosure,
+    ) -> RestartAckCollection:
+        """Return stable acknowledgements for one authenticated closed intent."""
+
+        if not isinstance(closure, AuthenticatedInitialRestartIntentClosure):
+            raise TypeError("closure must be AuthenticatedInitialRestartIntentClosure")
+        if closure.intent.intent.run_id != self._run_id:
+            raise ValueError("restart-intent closure belongs to another run")
+        opened = _opening_from_closure(closure)
+        node_ids = _active_node_ids(opened)
+        for _ in range(_MAX_READ_ATTEMPTS):
+            first = self._read_receipts(node_ids, opened=opened)
+            second = self._read_receipts(node_ids, opened=opened)
+            if first != second:
+                continue
+            try:
+                return RestartAckCollection(
+                    opened=opened,
+                    receipts_by_node_id=second,
+                )
+            except (TypeError, ValueError) as error:
+                raise RestartAckCollectionReadCorrupt(
+                    "persisted acknowledgements contradict the closed intent"
+                ) from error
+        raise RestartAckCollectionReadConflict(
+            "historical restart acknowledgements changed repeatedly during collection"
+        )
+
     def _read_receipts(
         self,
         node_ids: tuple[str, ...],
+        *,
+        opened: PersistedInitialRestartIntentOpen | None = None,
     ) -> dict[str, PersistedRestartAck | None]:
         receipts: dict[str, PersistedRestartAck | None] = {}
         for node_id in node_ids:
@@ -273,7 +343,9 @@ class RestartAckCollector:
                 )
                 self._receipt_readers[node_id] = reader
             try:
-                receipts[node_id] = reader.read()
+                receipts[node_id] = (
+                    reader.read() if opened is None else reader._read_for_opening(opened)
+                )
             except RestartAckReadCorrupt as error:
                 raise RestartAckCollectionReadCorrupt(
                     f"persisted acknowledgement for node {node_id!r} is corrupt"
@@ -284,7 +356,7 @@ class RestartAckCollector:
                 ) from error
         return receipts
 
-    def _read_open(self) -> CommittedInitialRestartIntentOpen:
+    def _read_open(self) -> PersistedInitialRestartIntentOpen:
         try:
             opened = self._open_reader.read()
         except RestartIntentOpenStateClosed as error:
@@ -309,7 +381,7 @@ class RestartAckCollector:
             ) from error
         if opened is None:
             raise RestartAckCollectionReadConflict("no current restart intent is open")
-        return opened
+        return PersistedInitialRestartIntentOpen.from_committed(opened)
 
 
 def _current_receipt(
@@ -370,30 +442,42 @@ def _coordinator_authority(
 
 
 def _acknowledgement_key(
-    opened: CommittedInitialRestartIntentOpen,
+    opened: PersistedInitialRestartIntentOpen,
     node_id: str,
 ) -> str:
     node_digest = hashlib.sha256(node_id.encode("utf-8")).hexdigest()
-    return f"{opened.prepared.intent_key}/acknowledgements/{node_digest}"
+    return f"{opened.intent_key}/acknowledgements/{node_digest}"
 
 
 def _active_node_ids(
-    opened: CommittedInitialRestartIntentOpen,
+    opened: PersistedInitialRestartIntentOpen,
 ) -> tuple[str, ...]:
-    slot_to_node_id = opened.prepared.current.snapshot.record.assignment.slot_to_node_id
+    slot_to_node_id = opened.generation_snapshot.record.assignment.slot_to_node_id
     return tuple(slot_to_node_id[slot_id] for slot_id in sorted(slot_to_node_id))
 
 
 def _same_committed_opening(
-    left: CommittedInitialRestartIntentOpen,
-    right: CommittedInitialRestartIntentOpen,
+    left: PersistedInitialRestartIntentOpen,
+    right: PersistedInitialRestartIntentOpen,
 ) -> bool:
-    return (
-        left.prepared.intent_key == right.prepared.intent_key
-        and left.intent_entry == right.intent_entry
-        and left.prepared.intent_head_key == right.prepared.intent_head_key
-        and left.head_entry == right.head_entry
-    )
+    return left == right
+
+
+def _opening_from_closure(
+    closure: AuthenticatedInitialRestartIntentClosure,
+) -> PersistedInitialRestartIntentOpen:
+    try:
+        return PersistedInitialRestartIntentOpen(
+            record=closure.intent,
+            head=closure.open_head,
+            generation_snapshot=closure.generation_snapshot,
+            intent_entry=closure.state.intent_entry,
+            head_entry=closure.state.open_head_entry,
+        )
+    except (TypeError, ValueError) as error:
+        raise RestartAckCollectionReadCorrupt(
+            "restart-intent closure has contradictory opening state"
+        ) from error
 
 
 def _nonempty_string(value: object, path: str) -> str:

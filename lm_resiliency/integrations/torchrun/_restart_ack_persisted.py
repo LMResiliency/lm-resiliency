@@ -17,6 +17,8 @@ from lm_resiliency.integrations.torchrun._restart_ack_records import (
 )
 from lm_resiliency.integrations.torchrun._restart_intent_open_execution import (
     CommittedInitialRestartIntentOpen,
+    PersistedInitialRestartIntentOpen,
+    RestartIntentOpening,
 )
 
 
@@ -26,7 +28,7 @@ class PersistedRestartAck:
 
     receipt: RestartAckReceiptRecord
     receipt_entry: ControlStoreEntry
-    opened: CommittedInitialRestartIntentOpen
+    opened: RestartIntentOpening
     registration_authority: AgentRegistrationAuthority
     coordinator_authority: CoordinatorLeaseAuthority
 
@@ -35,8 +37,11 @@ class PersistedRestartAck:
             raise TypeError("PersistedRestartAck.receipt must be RestartAckReceiptRecord")
         if not isinstance(self.receipt_entry, ControlStoreEntry):
             raise TypeError("PersistedRestartAck.receipt_entry must be ControlStoreEntry")
-        if not isinstance(self.opened, CommittedInitialRestartIntentOpen):
-            raise TypeError("PersistedRestartAck.opened must be CommittedInitialRestartIntentOpen")
+        if not isinstance(
+            self.opened,
+            (CommittedInitialRestartIntentOpen, PersistedInitialRestartIntentOpen),
+        ):
+            raise TypeError("PersistedRestartAck.opened must be a restart-intent opening")
         if not isinstance(self.registration_authority, AgentRegistrationAuthority):
             raise TypeError(
                 "PersistedRestartAck.registration_authority must be AgentRegistrationAuthority"
@@ -54,7 +59,7 @@ class PersistedRestartAck:
         *,
         run_id: str,
         receipt_entry: ControlStoreEntry,
-        opened: CommittedInitialRestartIntentOpen,
+        opened: RestartIntentOpening,
         registration_authority: AgentRegistrationAuthority,
         coordinator_authority: CoordinatorLeaseAuthority,
     ) -> PersistedRestartAck:
@@ -90,7 +95,7 @@ class PersistedRestartAck:
         return self.receipt_entry.transaction_sequence
 
     def _validate_records(self) -> None:
-        if self.receipt.intent_record != self.opened.prepared.record:
+        if self.receipt.intent_record != self.opened.record:
             raise ValueError("PersistedRestartAck does not answer its committed restart intent")
         if self.receipt.received_at_unix_ms < self.opened.committed_at_unix_ms:
             raise ValueError("PersistedRestartAck receipt predates its committed restart intent")
@@ -100,7 +105,7 @@ class PersistedRestartAck:
         if self.coordinator_authority.lease.record.run_id != run_id:
             raise ValueError("PersistedRestartAck coordinator authority belongs to another run")
         active_node_ids = set(
-            self.opened.prepared.current.snapshot.record.assignment.slot_to_node_id.values()
+            self.opened.generation_snapshot.record.assignment.slot_to_node_id.values()
         )
         if self.receipt.acknowledgement.node_id not in active_node_ids:
             raise ValueError("PersistedRestartAck acknowledgement node is not active")
@@ -120,7 +125,7 @@ class PersistedRestartAck:
         authority = self.coordinator_authority
         expected_guard_digest = hashlib.sha256(authority.lease.record.to_json()).hexdigest()
         if (
-            entry.guard_key != self.opened.prepared.coordinator_lease_key
+            entry.guard_key != self.opened.coordinator_lease_key
             or entry.guard_revision != authority.lease.fencing_token
             or entry.guard_value_digest != expected_guard_digest
             or entry.guard_committed_at_unix_ms != authority.lease.granted_at_unix_ms

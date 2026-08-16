@@ -17,6 +17,8 @@ from lm_resiliency.integrations.torchrun._restart_ack_persisted import (
 )
 from lm_resiliency.integrations.torchrun._restart_intent_open_execution import (
     CommittedInitialRestartIntentOpen,
+    PersistedInitialRestartIntentOpen,
+    RestartIntentOpening,
 )
 
 
@@ -24,12 +26,15 @@ from lm_resiliency.integrations.torchrun._restart_intent_open_execution import (
 class RestartAckCollection:
     """One exact active-node acknowledgement observation."""
 
-    opened: CommittedInitialRestartIntentOpen
+    opened: RestartIntentOpening
     receipts_by_node_id: Mapping[str, PersistedRestartAck | None]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.opened, CommittedInitialRestartIntentOpen):
-            raise TypeError("RestartAckCollection.opened must be CommittedInitialRestartIntentOpen")
+        if not isinstance(
+            self.opened,
+            (CommittedInitialRestartIntentOpen, PersistedInitialRestartIntentOpen),
+        ):
+            raise TypeError("RestartAckCollection.opened must be a restart-intent opening")
         if not isinstance(self.receipts_by_node_id, Mapping):
             raise TypeError("RestartAckCollection.receipts_by_node_id must be a mapping")
         normalized: dict[str, PersistedRestartAck | None] = {}
@@ -67,7 +72,7 @@ class RestartAckCollection:
 
     @property
     def active_node_ids(self) -> tuple[str, ...]:
-        slot_to_node_id = self.opened.prepared.current.snapshot.record.assignment.slot_to_node_id
+        slot_to_node_id = self.opened.generation_snapshot.record.assignment.slot_to_node_id
         return tuple(dict.fromkeys(slot_to_node_id[slot_id] for slot_id in sorted(slot_to_node_id)))
 
     @property
@@ -123,7 +128,7 @@ class RestartAckEvidence:
             raise TypeError("event must be CheckpointInventoryEvent")
         if event.trust != "latest":
             return False
-        assignment = self.collection.opened.prepared.current.snapshot.record.assignment
+        assignment = self.collection.opened.generation_snapshot.record.assignment
         try:
             validate_worker_identity(event.reporter, assignment)
         except ProtocolValidationError:
@@ -148,13 +153,13 @@ def _nonempty_string(value: object, path: str) -> str:
 
 
 def _same_committed_opening(
-    left: CommittedInitialRestartIntentOpen,
-    right: CommittedInitialRestartIntentOpen,
+    left: RestartIntentOpening,
+    right: RestartIntentOpening,
 ) -> bool:
     return (
-        left.prepared.intent_key == right.prepared.intent_key
+        left.intent_key == right.intent_key
         and left.intent_entry == right.intent_entry
-        and left.prepared.intent_head_key == right.prepared.intent_head_key
+        and left.intent_head_key == right.intent_head_key
         and left.head_entry == right.head_entry
     )
 
