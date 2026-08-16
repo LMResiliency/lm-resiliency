@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import importlib
 import json
+import math
 import os
 import secrets
 import socket
@@ -89,6 +91,9 @@ _RESOURCE_IDS_ENV = "LM_RESILIENCY_RESOURCE_IDS"
 _RESTART_CONTEXT_ENV = "LM_RESILIENCY_RESTART_CONTEXT"
 _MAX_CONTEXT_BYTES = 64 * 1024
 _MAX_POLICY_BYTES = 64 * 1024
+_CONTEXT_FILE_SCHEMA_VERSION = 1
+_CONTEXT_LOCK_TIMEOUT_SECONDS = 1.0
+_CONTEXT_LOCK_POLL_SECONDS = 0.01
 _CONTROL_PREFIX = "lm_resiliency/torchrun/v1"
 _CLOSED_SCHEMA_VERSION = 1
 _ARRIVAL_SCHEMA_VERSION = 1
@@ -119,7 +124,7 @@ class TorchrunRuntimeConfigError(ValueError):
     """Raised when torchrun runtime configuration is unsafe or contradictory."""
 
 
-_RestartContextFileVersion = tuple[int, int]
+_RestartContextCleanupToken = str
 
 
 class RestartContextFileError(RuntimeError):
@@ -129,10 +134,10 @@ class RestartContextFileError(RuntimeError):
         self,
         message: str,
         *,
-        published_version: _RestartContextFileVersion | None = None,
+        published_token: _RestartContextCleanupToken | None = None,
     ) -> None:
         super().__init__(message)
-        self.published_version = published_version
+        self.published_token = published_token
 
 
 class _DuplicateJsonFieldError(ValueError):
@@ -416,7 +421,10 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             control_store,
             run_id=config.run_id,
         )
-        self._restart_context = RestartContextFile(config.restart_context_path)
+        self._restart_context = RestartContextFile(
+            config.restart_context_path,
+            monotonic_clock=monotonic_clock,
+        )
         run_digest = hashlib.sha256(config.run_id.encode("utf-8")).hexdigest()
         self._run_digest = run_digest
         self._closure_key = f"{_CONTROL_PREFIX}/runs/{run_digest}/rendezvous-closed"
@@ -493,7 +501,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         """Admit one authoritative fixed-size generation and park passive standbys."""
 
         formation_deadline = self._monotonic_clock() + self._config.policy.join_timeout_ms / 1_000
-        context_version: _RestartContextFileVersion | None = None
+        context_token: _RestartContextCleanupToken | None = None
         try:
             if self._is_closed_bounded(formation_deadline):
                 raise RendezvousClosedError
@@ -516,9 +524,10 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                 self._raise_heartbeat_error()
                 if current is not None:
                     if slot is not None:
-                        context_version = self._prepare_restart_context(
+                        context_token = self._prepare_restart_context(
                             current,
                             recovery_state,
+                            admission_deadline,
                         )
                         attempt, completion = self._wait_for_assigned_arrivals(
                             current,
@@ -578,9 +587,12 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                         self._monotonic_clock() + self._config.policy.join_timeout_ms / 1_000
                     )
         except BaseException:
-            if context_version is not None:
+            if context_token is not None:
                 try:
-                    self._restart_context.clear_if_version(context_version)
+                    self._restart_context.clear_if_token(
+                        context_token,
+                        deadline=self._context_cleanup_deadline(),
+                    )
                 except (OSError, RestartContextFileError):
                     pass
             self._cleanup_local_resources()
@@ -2750,9 +2762,16 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         self,
         recovery_state: RestartPlanPersistedRecoveryState,
     ) -> int:
-        now_unix_ms = self._clock()
+        try:
+            now_unix_ms = self._control_store.observe_time_unix_ms()
+        except Exception as error:
+            raise RendezvousConnectionError(
+                "failed to observe authoritative replacement rendezvous time"
+            ) from error
         if isinstance(now_unix_ms, bool) or not isinstance(now_unix_ms, int) or now_unix_ms < 1:
-            raise RendezvousConnectionError("replacement rendezvous clock returned an invalid time")
+            raise RendezvousConnectionError(
+                "control-store replacement rendezvous clock returned an invalid time"
+            )
         publication_time = recovery_state.publication.committed_at_unix_ms
         with self._replacement_clock_lock:
             if now_unix_ms < publication_time or (
@@ -2781,10 +2800,11 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         self,
         current: CurrentGeneration,
         recovery_state: RestartPlanPersistedRecoveryState | None,
-    ) -> _RestartContextFileVersion | None:
+        deadline: float,
+    ) -> _RestartContextCleanupToken | None:
         if current.snapshot.record.assignment.generation == 0:
             try:
-                self._restart_context.clear()
+                self._restart_context.clear(deadline=deadline)
             except (OSError, RestartContextFileError) as error:
                 raise RendezvousStateError(
                     "failed to clear stale initial restart context"
@@ -2794,16 +2814,22 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             raise RendezvousStateError("replacement generation lacks an authoritative restart plan")
         context = self._restart_context_for_plan(recovery_state.plan)
         try:
-            return self._restart_context.write(context)
+            return self._restart_context.write(context, deadline=deadline)
         except (OSError, RestartContextFileError) as error:
-            if isinstance(error, RestartContextFileError) and error.published_version is not None:
+            if isinstance(error, RestartContextFileError) and error.published_token is not None:
                 try:
-                    self._restart_context.clear_if_version(error.published_version)
+                    self._restart_context.clear_if_token(
+                        error.published_token,
+                        deadline=self._context_cleanup_deadline(),
+                    )
                 except (OSError, RestartContextFileError):
                     pass
             raise RendezvousStateError(
                 "failed to publish the replacement restart context"
             ) from error
+
+    def _context_cleanup_deadline(self) -> float:
+        return self._monotonic_clock() + _CONTEXT_LOCK_TIMEOUT_SECONDS
 
     def _restart_context_for_plan(self, plan: RestartPlan) -> RestartContext:
         try:
@@ -2885,33 +2911,51 @@ class RestartContextFile:
     """Atomically persist and validate one owner-only restart context."""
 
     path: Path
+    monotonic_clock: Callable[[], float] = time.monotonic
 
     def __post_init__(self) -> None:
         if not isinstance(self.path, Path):
             raise TypeError("path must be pathlib.Path")
+        if not callable(self.monotonic_clock):
+            raise TypeError("monotonic_clock must be callable")
         if not self.path.is_absolute():
             raise RestartContextFileError("restart-context path must be absolute")
         if self.path.name in {"", ".", ".."}:
             raise RestartContextFileError("restart-context path must name a file")
 
-    def write(self, context: RestartContext) -> _RestartContextFileVersion:
+    def write(
+        self,
+        context: RestartContext,
+        *,
+        deadline: float | None = None,
+    ) -> _RestartContextCleanupToken:
         if not isinstance(context, RestartContext):
             raise TypeError("context must be RestartContext")
-        encoded = (context.to_json() + "\n").encode("utf-8")
+        cleanup_token = secrets.token_hex(32)
+        encoded = (
+            json.dumps(
+                {
+                    "schema_version": _CONTEXT_FILE_SCHEMA_VERSION,
+                    "cleanup_token": cleanup_token,
+                    "context": context.to_dict(),
+                },
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8")
         if len(encoded) > _MAX_CONTEXT_BYTES:
             raise RestartContextFileError("restart context is too large")
         parent_descriptor = self._open_parent(create=True)
         assert parent_descriptor is not None
         descriptor = -1
         temporary = ""
-        published_version: _RestartContextFileVersion | None = None
         try:
-            fcntl.flock(parent_descriptor, fcntl.LOCK_EX)
+            self._acquire_parent_lock(parent_descriptor, deadline=deadline)
             self._reject_existing_symlink(parent_descriptor)
             descriptor, temporary = self._create_temporary_file(parent_descriptor)
             os.fchmod(descriptor, 0o600)
-            metadata = os.fstat(descriptor)
-            published_version = (metadata.st_dev, metadata.st_ino)
             with os.fdopen(descriptor, "wb") as stream:
                 descriptor = -1
                 stream.write(encoded)
@@ -2925,11 +2969,11 @@ class RestartContextFile:
             )
             temporary = ""
             self._fsync_directory(parent_descriptor)
-            return published_version
+            return cleanup_token
         except OSError as error:
             raise RestartContextFileError(
                 f"failed to publish restart context at {self.path}",
-                published_version=published_version if not temporary else None,
+                published_token=cleanup_token if not temporary else None,
             ) from error
         finally:
             if descriptor >= 0:
@@ -2950,54 +2994,20 @@ class RestartContextFile:
             raise RestartContextFileError(
                 f"restart-context directory does not exist for {self.path}"
             )
-        flags = (
-            os.O_RDONLY
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_NONBLOCK", 0)
-            | getattr(os, "O_CLOEXEC", 0)
-        )
         try:
-            descriptor = os.open(
-                self.path.name,
-                flags,
-                dir_fd=parent_descriptor,
-            )
-        except OSError as error:
-            os.close(parent_descriptor)
-            raise RestartContextFileError(
-                f"failed to open restart context at {self.path}"
-            ) from error
-        try:
-            metadata = os.fstat(descriptor)
-            self._validate_owned_private_file(metadata)
-            with os.fdopen(descriptor, "rb", closefd=False) as stream:
-                encoded = stream.read(_MAX_CONTEXT_BYTES + 1)
-            if len(encoded) > _MAX_CONTEXT_BYTES:
-                raise RestartContextFileError("restart-context file is too large")
+            encoded = self._read_encoded(parent_descriptor)
         finally:
-            os.close(descriptor)
             os.close(parent_descriptor)
-        try:
-            value = json.loads(
-                encoded,
-                object_pairs_hook=_strict_object,
-            )
-            if not isinstance(value, Mapping):
-                raise RestartContextFileError("restart-context JSON must contain an object")
-            return RestartContext.from_dict(value)
-        except _DuplicateJsonFieldError as error:
-            raise RestartContextFileError(str(error)) from error
-        except RestartContextFileError:
-            raise
-        except (TypeError, ValueError, UnicodeDecodeError) as error:
-            raise RestartContextFileError("restart-context file is malformed") from error
+        assert encoded is not None
+        _, context = self._decode_envelope(encoded)
+        return context
 
-    def clear(self) -> None:
+    def clear(self, *, deadline: float | None = None) -> None:
         parent_descriptor = self._open_parent(create=False)
         if parent_descriptor is None:
             return
         try:
-            fcntl.flock(parent_descriptor, fcntl.LOCK_EX)
+            self._acquire_parent_lock(parent_descriptor, deadline=deadline)
             self._reject_existing_symlink(parent_descriptor)
             try:
                 os.unlink(self.path.name, dir_fd=parent_descriptor)
@@ -3012,39 +3022,24 @@ class RestartContextFile:
         finally:
             os.close(parent_descriptor)
 
-    def clear_if_version(
+    def clear_if_token(
         self,
-        version: _RestartContextFileVersion,
+        cleanup_token: _RestartContextCleanupToken,
+        *,
+        deadline: float | None = None,
     ) -> bool:
-        if (
-            not isinstance(version, tuple)
-            or len(version) != 2
-            or any(
-                isinstance(value, bool) or not isinstance(value, int) or value < 0
-                for value in version
-            )
-        ):
-            raise TypeError("version must contain nonnegative device and inode integers")
+        self._validate_cleanup_token(cleanup_token)
         parent_descriptor = self._open_parent(create=False)
         if parent_descriptor is None:
             return False
         try:
-            fcntl.flock(parent_descriptor, fcntl.LOCK_EX)
+            self._acquire_parent_lock(parent_descriptor, deadline=deadline)
             self._reject_existing_symlink(parent_descriptor)
-            try:
-                metadata = os.stat(
-                    self.path.name,
-                    dir_fd=parent_descriptor,
-                    follow_symlinks=False,
-                )
-            except FileNotFoundError:
+            encoded = self._read_encoded(parent_descriptor, missing_ok=True)
+            if encoded is None:
                 return False
-            except OSError as error:
-                raise RestartContextFileError(
-                    f"failed to inspect restart context at {self.path}"
-                ) from error
-            self._validate_owned_private_file(metadata)
-            if (metadata.st_dev, metadata.st_ino) != version:
+            current_token, _ = self._decode_envelope(encoded)
+            if current_token != cleanup_token:
                 return False
             try:
                 os.unlink(self.path.name, dir_fd=parent_descriptor)
@@ -3058,6 +3053,140 @@ class RestartContextFile:
             return True
         finally:
             os.close(parent_descriptor)
+
+    def _acquire_parent_lock(
+        self,
+        parent_descriptor: int,
+        *,
+        deadline: float | None,
+    ) -> None:
+        now = self.monotonic_clock()
+        if isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(now):
+            raise RestartContextFileError("restart-context clock returned an invalid time")
+        logical_deadline = now + _CONTEXT_LOCK_TIMEOUT_SECONDS if deadline is None else deadline
+        if (
+            isinstance(logical_deadline, bool)
+            or not isinstance(logical_deadline, (int, float))
+            or not math.isfinite(logical_deadline)
+        ):
+            raise TypeError("deadline must be a monotonic number or None")
+        wall_deadline = time.monotonic() + max(0.0, logical_deadline - now)
+        previous_logical_now = float(now)
+        while True:
+            try:
+                fcntl.flock(
+                    parent_descriptor,
+                    fcntl.LOCK_EX | fcntl.LOCK_NB,
+                )
+                return
+            except OSError as error:
+                if error.errno not in {errno.EACCES, errno.EAGAIN}:
+                    raise RestartContextFileError(
+                        f"failed to lock restart-context directory for {self.path}"
+                    ) from error
+            logical_now = self.monotonic_clock()
+            if (
+                isinstance(logical_now, bool)
+                or not isinstance(logical_now, (int, float))
+                or not math.isfinite(logical_now)
+                or logical_now < previous_logical_now
+            ):
+                raise RestartContextFileError("restart-context clock returned an invalid time")
+            previous_logical_now = float(logical_now)
+            wall_now = time.monotonic()
+            if logical_now >= logical_deadline or wall_now >= wall_deadline:
+                raise RestartContextFileError(
+                    f"timed out locking restart-context directory for {self.path}"
+                )
+            time.sleep(
+                min(
+                    _CONTEXT_LOCK_POLL_SECONDS,
+                    max(0.0, wall_deadline - wall_now),
+                )
+            )
+
+    def _read_encoded(
+        self,
+        parent_descriptor: int,
+        *,
+        missing_ok: bool = False,
+    ) -> bytes | None:
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        try:
+            descriptor = os.open(
+                self.path.name,
+                flags,
+                dir_fd=parent_descriptor,
+            )
+        except FileNotFoundError:
+            if missing_ok:
+                return None
+            raise RestartContextFileError(
+                f"failed to open restart context at {self.path}"
+            ) from None
+        except OSError as error:
+            raise RestartContextFileError(
+                f"failed to open restart context at {self.path}"
+            ) from error
+        try:
+            metadata = os.fstat(descriptor)
+            self._validate_owned_private_file(metadata)
+            with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                encoded = stream.read(_MAX_CONTEXT_BYTES + 1)
+            if len(encoded) > _MAX_CONTEXT_BYTES:
+                raise RestartContextFileError("restart-context file is too large")
+            return encoded
+        finally:
+            os.close(descriptor)
+
+    @classmethod
+    def _decode_envelope(
+        cls,
+        encoded: bytes,
+    ) -> tuple[_RestartContextCleanupToken, RestartContext]:
+        try:
+            value = json.loads(
+                encoded,
+                object_pairs_hook=_strict_object,
+            )
+            if not isinstance(value, Mapping):
+                raise RestartContextFileError("restart-context JSON must contain an object")
+            expected = {"schema_version", "cleanup_token", "context"}
+            if set(value) != expected:
+                raise RestartContextFileError("restart-context envelope fields are invalid")
+            if (
+                type(value["schema_version"]) is not int
+                or value["schema_version"] != _CONTEXT_FILE_SCHEMA_VERSION
+            ):
+                raise RestartContextFileError("restart-context envelope schema version is invalid")
+            cleanup_token = cls._validate_cleanup_token(value["cleanup_token"])
+            context_value = value["context"]
+            if not isinstance(context_value, Mapping):
+                raise RestartContextFileError(
+                    "restart-context envelope context must contain an object"
+                )
+            return cleanup_token, RestartContext.from_dict(context_value)
+        except _DuplicateJsonFieldError as error:
+            raise RestartContextFileError(str(error)) from error
+        except RestartContextFileError:
+            raise
+        except (TypeError, ValueError, UnicodeDecodeError) as error:
+            raise RestartContextFileError("restart-context file is malformed") from error
+
+    @staticmethod
+    def _validate_cleanup_token(value: object) -> _RestartContextCleanupToken:
+        if not isinstance(value, str) or len(value) != 64 or value != value.lower():
+            raise RestartContextFileError("restart-context cleanup token is invalid")
+        try:
+            int(value, 16)
+        except ValueError as error:
+            raise RestartContextFileError("restart-context cleanup token is invalid") from error
+        return value
 
     def _open_parent(self, *, create: bool) -> int | None:
         directory_flags = (

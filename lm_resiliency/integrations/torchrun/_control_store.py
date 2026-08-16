@@ -223,6 +223,10 @@ class ControlStoreWrite:
 class ControlStore(Protocol):
     """Strongly consistent per-key compare-and-set storage."""
 
+    def observe_time_unix_ms(self) -> int:
+        """Return one authoritative, nondecreasing control-store time sample."""
+        ...
+
     def get(self, key: str) -> ControlStoreEntry | None:
         """Return the current value, or ``None`` when the key is absent."""
         ...
@@ -343,6 +347,10 @@ class InMemoryControlStore:
         self._transaction_sequence = 0
         self._clock = clock or _system_unix_ms
         self._last_now_unix_ms = 0
+
+    def observe_time_unix_ms(self) -> int:
+        with self._lock:
+            return self._store_now_unix_ms()
 
     def get(self, key: str) -> ControlStoreEntry | None:
         normalized_key = _control_key(key)

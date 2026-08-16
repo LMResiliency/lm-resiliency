@@ -1569,10 +1569,15 @@ arrival barrier. Each assigned node revalidates the plan, generation, deadline,
 and persisted context before publishing readiness; the immutable group-admission
 proof is the final shared decision observed before `next_rendezvous()` returns.
 A failed admission removes the context only when the current file is the exact
-device/inode version published by that handler incarnation, so an older handler
-cannot delete a replacement incarnation's atomic update. Passive standbys and
-removed nodes remain parked. The positive `num_nodes_waiting()` restart edge
-remains disabled until the following signaling slice.
+cryptographic cleanup token published by that handler incarnation, so an older
+handler cannot delete a replacement incarnation's atomic update even if the
+filesystem reuses an inode. Context publication and cleanup acquire the parent
+directory lock nonblocking under the admission or bounded-cleanup deadline, so
+a stale process cannot strand replacement admission. The replacement deadline
+is derived and revalidated from authoritative, nondecreasing control-store time
+rather than an agent wall clock. Passive standbys and removed nodes remain
+parked. The positive `num_nodes_waiting()` restart edge remains disabled until
+the following signaling slice.
 
 All handler incarnations use one immutable generation-scoped `PrefixStore` for
 PyTorch's worker bootstrap keys. Slot zero publishes one address/port pair and

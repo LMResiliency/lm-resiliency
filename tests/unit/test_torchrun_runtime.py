@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import queue
 import stat
@@ -796,19 +797,19 @@ def test_restart_context_file_writes_reads_replaces_and_clears(tmp_path: Path):
     context_file.clear()
 
 
-def test_restart_context_file_clears_only_the_written_file_version(
+def test_restart_context_file_clears_only_the_matching_cleanup_token(
     tmp_path: Path,
 ):
     path = tmp_path / "private" / "restart-context.json"
     context_file = RestartContextFile(path)
 
-    first_version = context_file.write(_context())
-    second_context = _context(plan_id="plan-2")
-    second_version = context_file.write(second_context)
+    first_token = context_file.write(_context())
+    second_token = context_file.write(_context())
 
-    assert context_file.clear_if_version(first_version) is False
-    assert context_file.read() == second_context
-    assert context_file.clear_if_version(second_version) is True
+    assert first_token != second_token
+    assert context_file.clear_if_token(first_token) is False
+    assert context_file.read() == _context()
+    assert context_file.clear_if_token(second_token) is True
     assert not path.exists()
 
 
@@ -1002,6 +1003,25 @@ def test_restart_context_file_clear_accepts_missing_parent(tmp_path: Path):
     RestartContextFile(path).clear()
 
     assert not path.parent.exists()
+
+
+def test_restart_context_file_lock_acquisition_is_bounded(tmp_path: Path):
+    path = tmp_path / "private" / "restart-context.json"
+    path.parent.mkdir(mode=0o700)
+    directory_descriptor = os.open(path.parent, os.O_RDONLY)
+    try:
+        fcntl.flock(directory_descriptor, fcntl.LOCK_EX)
+
+        with pytest.raises(RestartContextFileError, match="timed out locking"):
+            RestartContextFile(path).write(
+                _context(),
+                deadline=time.monotonic() + 0.03,
+            )
+    finally:
+        fcntl.flock(directory_descriptor, fcntl.LOCK_UN)
+        os.close(directory_descriptor)
+
+    assert not path.exists()
 
 
 @pytest.mark.parametrize("path", [Path("relative.json"), cast(Any, "not-a-path")])
@@ -2158,10 +2178,14 @@ def test_slot_aware_handler_does_not_publish_arrival_before_context_cleanup(
     )
     original_clear = RestartContextFile.clear
 
-    def fail_peer_clear(context_file: RestartContextFile) -> None:
+    def fail_peer_clear(
+        context_file: RestartContextFile,
+        *,
+        deadline: float | None = None,
+    ) -> None:
         if context_file.path == peer._config.restart_context_path:
             raise RestartContextFileError("injected context cleanup failure")
-        original_clear(context_file)
+        original_clear(context_file, deadline=deadline)
 
     monkeypatch.setattr(RestartContextFile, "clear", fail_peer_clear)
     peer_thread, peer_outcome = _start_rendezvous(peer)
@@ -3003,6 +3027,7 @@ def test_slot_aware_handler_never_partially_admits_replacement_after_deadline(
         handler._prepare_restart_context(
             cast(Any, handler._read_generation()),
             recovery_state,
+            deadline,
         )
     generation = handlers[0]._read_generation()
     assert generation is not None
@@ -3255,11 +3280,16 @@ def test_slot_aware_handler_clears_context_when_publication_fails_after_replace(
     )
     original_write = RestartContextFile.write
 
-    def publish_then_fail(context_file: RestartContextFile, context: RestartContext) -> None:
-        version = original_write(context_file, context)
+    def publish_then_fail(
+        context_file: RestartContextFile,
+        context: RestartContext,
+        *,
+        deadline: float | None = None,
+    ) -> None:
+        token = original_write(context_file, context, deadline=deadline)
         raise RestartContextFileError(
             "injected post-publication failure",
-            published_version=version,
+            published_token=token,
         )
 
     monkeypatch.setattr(RestartContextFile, "write", publish_then_fail)
@@ -3343,6 +3373,31 @@ def test_slot_aware_handler_rejects_replacement_clock_behind_publication(
         handler._replacement_deadline(cast(Any, recovery_state), None)
 
 
+def test_slot_aware_handler_uses_authoritative_store_time_for_replacement_deadline(
+    tmp_path: Path,
+):
+    client_clock = ManualClock(1_000)
+    store_clock = ManualClock(1_100)
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=InMemoryControlStore(clock=store_clock),
+        clock=client_clock,
+        agent_id="agent-b",
+    )
+    recovery_state = _static_recovery_state(
+        _replacement_plan(restart_deadline_unix_ms=1_050),
+        committed_at_unix_ms=1_000,
+    )
+
+    with pytest.raises(RendezvousTimeoutError):
+        handler._replacement_deadline(cast(Any, recovery_state), None)
+
+
 def test_slot_aware_handler_rejects_clock_regression_and_retains_first_deadline(
     tmp_path: Path,
 ):
@@ -3364,7 +3419,10 @@ def test_slot_aware_handler_rejects_clock_regression_and_retains_first_deadline(
     deadline = handler._replacement_deadline(cast(Any, recovery_state), None)
 
     clock.set(clock() - 1)
-    with pytest.raises(RendezvousConnectionError, match="clock regressed"):
+    with pytest.raises(
+        RendezvousConnectionError,
+        match="authoritative replacement rendezvous time",
+    ):
         handler._validate_replacement_deadline(cast(Any, recovery_state), deadline)
 
     clock.set(1_000)
