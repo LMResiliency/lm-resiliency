@@ -1558,14 +1558,17 @@ registration-history, and attempt-head reads complete, the handler samples
 authoritative control-store time once and uses that observation to recheck both
 the exclusive restart deadline and the exact registration's lease window. The
 shared attempt head must still name the admitted attempt. A completed
-replacement attempt advances only after every admitted handler has completed
-its final return validation and durably acknowledged the exact admission,
-registration, and consumption it observed. A descheduled peer therefore keeps
-the shared attempt head fixed until its return check completes; initial attempts
-retain the consumption-only advancement rule. Guarded barrier transactions pin
-their registration revision in retained history. Missing, unprepared, late, or
-superseded assigned nodes therefore fail instead of allowing an early or stale
-incarnation to launch a partial worker group.
+replacement attempt advances only after every assigned slot enters a subsequent
+`next_rendezvous()` call and durably acknowledges the prior admission and
+consumption. The acknowledgement is slot-scoped and guarded by the entering
+handler's live registration, so a normal heartbeat renewal is retried and a
+replacement incarnation can acknowledge its slot before joining a fresh
+attempt. A descheduled peer that has not re-entered therefore keeps the shared
+attempt head fixed; initial attempts retain the consumption-only advancement
+rule. Guarded barrier transactions pin their registration revision in retained
+history. Missing, unprepared, late, or superseded assigned nodes therefore fail
+instead of allowing an early or stale incarnation to launch a partial worker
+group.
 
 Registration release is best effort and bounded during local shutdown. If the
 backend remains unavailable, cleanup returns without waiting indefinitely and
@@ -1588,7 +1591,9 @@ unreadable; every outstanding token has its own fixed-length, digest-named
 durable invalidation marker, so delayed cleanup from an older handler cannot
 revalidate a newer failed context, long valid context basenames cannot overflow
 the filesystem component limit, and a later replacement context with a
-different token remains valid. The worker-visible file remains canonical root
+different token remains valid. An invalidation marker remains durable after
+physical context deletion, so a crash cannot resurrect a deleted context pair
+without its fence. The worker-visible file remains canonical root
 `RestartContext` JSON. The cleanup token and the context digest are stored in a
 hidden owner-only sidecar under the same directory lock, and final admission
 requires the exact token published by that handler incarnation. A normal
