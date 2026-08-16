@@ -13,6 +13,7 @@ import threading
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, ClassVar
@@ -22,7 +23,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - exercised by the Python 3.10 CI job.
     _toml = importlib.import_module("tomli")
 
-from torch.distributed import Store
+from torch.distributed import DistStoreError, PrefixStore, Store
 from torch.distributed.elastic.rendezvous import (
     RendezvousClosedError,
     RendezvousConnectionError,
@@ -40,6 +41,11 @@ from lm_resiliency.integrations.torchrun._agent_registration import (
     AgentRegistrationLost,
     AgentRegistrationManager,
     AgentRegistrationUnavailable,
+)
+from lm_resiliency.integrations.torchrun._agent_registration_history_reader import (
+    AgentRegistrationHistoryCorrupt,
+    AgentRegistrationHistoryError,
+    AgentRegistrationHistoryReader,
 )
 from lm_resiliency.integrations.torchrun._agent_registration_records import (
     HeldAgentRegistration,
@@ -349,6 +355,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         self._rendezvous_store = rendezvous_store
         self._bootstrap_store_info = bootstrap_store_info
         self._monotonic_clock = monotonic_clock
+        self._clock = clock
         self._agent_identity = config.build_agent_identity(
             agent_id=agent_id or secrets.token_hex(16),
             hostname=hostname or socket.getfqdn(),
@@ -365,6 +372,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         )
         self._restart_context = RestartContextFile(config.restart_context_path)
         run_digest = hashlib.sha256(config.run_id.encode("utf-8")).hexdigest()
+        self._run_digest = run_digest
         self._closure_key = f"{_CONTROL_PREFIX}/runs/{run_digest}/rendezvous-closed"
         self._closure_value = json.dumps(
             {
@@ -379,10 +387,13 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         self._registration: HeldAgentRegistration | None = None
         self._heartbeat_error: Exception | None = None
         self._heartbeat_thread: threading.Thread | None = None
+        self._heartbeat_last_now_unix_ms = 0
         self._stop_heartbeat_event = threading.Event()
         self._state_changed_event = threading.Event()
         self._closed_event = threading.Event()
         self._shutdown_lock = threading.Lock()
+        self._attempt_lock = threading.Lock()
+        self._next_attempt = 0
 
     @property
     def agent_identity(self) -> AgentIdentity:
@@ -407,9 +418,9 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
 
         if self.is_closed():
             raise RendezvousClosedError
-        self._ensure_registered()
-        deadline = self._monotonic_clock() + self._config.policy.join_timeout_ms / 1_000
+        formation_deadline = self._monotonic_clock() + self._config.policy.join_timeout_ms / 1_000
         try:
+            self._ensure_registered()
             while True:
                 if self.is_closed():
                     raise RendezvousClosedError
@@ -424,32 +435,28 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                             raise RendezvousStateError(
                                 "failed to clear stale initial restart context"
                             ) from error
-                        bootstrap = self._bootstrap_store_info
-                        if bootstrap is None:
-                            try:
-                                bootstrap = RendezvousStoreInfo.build(
-                                    slot,
-                                    self._rendezvous_store,
-                                    self._config.local_addr,
-                                )
-                            except Exception as error:
-                                raise RendezvousConnectionError(
-                                    "failed to publish rendezvous bootstrap information"
-                                ) from error
+                        attempt = self._claim_attempt()
+                        attempt_store = self._attempt_store(
+                            current.snapshot.record.assignment.generation,
+                            attempt,
+                        )
+                        bootstrap = self._build_bootstrap(
+                            slot,
+                            attempt_store,
+                            formation_deadline,
+                        )
                         return RendezvousInfo(
-                            self._rendezvous_store,
+                            attempt_store,
                             slot,
                             self._config.min_nodes,
                             bootstrap,
                         )
-                if not self._wait_for_change(deadline):
+                    wait_deadline = None
+                else:
+                    wait_deadline = formation_deadline
+                if not self._wait_for_change(wait_deadline):
                     raise RendezvousTimeoutError
-        except (
-            RendezvousClosedError,
-            RendezvousConnectionError,
-            RendezvousStateError,
-            RendezvousTimeoutError,
-        ):
+        except BaseException:
             if self._stop_heartbeat():
                 self._release_registration(raise_errors=False)
             raise
@@ -559,11 +566,22 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                 self._heartbeat_thread.start()
 
     def _heartbeat_loop(self) -> None:
-        interval_seconds = max(
-            self._config.policy.registration_lease_duration_ms / 3_000,
-            0.001,
-        )
-        while not self._stop_heartbeat_event.wait(interval_seconds):
+        while True:
+            with self._registration_lock:
+                registration = self._registration
+                if registration is None:
+                    return
+                try:
+                    delay_seconds = self._renewal_delay_seconds(registration)
+                except (
+                    AgentRegistrationClockError,
+                    AgentRegistrationLost,
+                ) as error:
+                    self._heartbeat_error = error
+                    self._state_changed_event.set()
+                    return
+            if self._stop_heartbeat_event.wait(delay_seconds):
+                return
             with self._registration_lock:
                 registration = self._registration
                 if registration is None:
@@ -583,6 +601,27 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                     self._heartbeat_error = error
                     self._state_changed_event.set()
                     return
+
+    def _renewal_delay_seconds(
+        self,
+        registration: HeldAgentRegistration,
+    ) -> float:
+        now_unix_ms = self._clock()
+        if isinstance(now_unix_ms, bool) or not isinstance(now_unix_ms, int) or now_unix_ms < 1:
+            raise AgentRegistrationClockError(
+                "agent registration heartbeat clock returned an invalid time"
+            )
+        if now_unix_ms < self._heartbeat_last_now_unix_ms:
+            raise AgentRegistrationClockError("agent registration heartbeat clock moved backward")
+        self._heartbeat_last_now_unix_ms = now_unix_ms
+        if now_unix_ms < registration.granted_at_unix_ms:
+            raise AgentRegistrationClockError(
+                "agent registration heartbeat clock precedes the authoritative grant"
+            )
+        remaining_ms = registration.expires_at_unix_ms - now_unix_ms
+        if remaining_ms <= 0:
+            raise AgentRegistrationLost("agent registration expired before the next heartbeat")
+        return remaining_ms / 3_000
 
     def _stop_heartbeat(self) -> bool:
         self._stop_heartbeat_event.set()
@@ -646,6 +685,85 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         except Exception as error:
             raise RendezvousConnectionError("generation backend failed") from error
 
+    def _claim_attempt(self) -> int:
+        with self._attempt_lock:
+            attempt = self._next_attempt
+            self._next_attempt += 1
+            return attempt
+
+    def _attempt_store(self, generation: int, attempt: int) -> Store:
+        prefix = (
+            f"{_CONTROL_PREFIX}/runs/{self._run_digest}/rendezvous/"
+            f"generation-{generation}/attempt-{attempt}/"
+        )
+        return PrefixStore(prefix, self._rendezvous_store)
+
+    def _build_bootstrap(
+        self,
+        slot: int,
+        store: Store,
+        deadline: float,
+    ) -> RendezvousStoreInfo:
+        bootstrap = self._bootstrap_store_info
+        if bootstrap is not None:
+            return bootstrap
+        remaining = deadline - self._monotonic_clock()
+        if remaining <= 0:
+            raise RendezvousTimeoutError
+        try:
+            store.set_timeout(timedelta(seconds=max(remaining, 0.001)))
+            return RendezvousStoreInfo.build(
+                slot,
+                store,
+                self._config.local_addr,
+            )
+        except DistStoreError as error:
+            raise RendezvousTimeoutError from error
+        except Exception as error:
+            if self._monotonic_clock() >= deadline:
+                raise RendezvousTimeoutError from error
+            raise RendezvousConnectionError(
+                "failed to publish rendezvous bootstrap information"
+            ) from error
+
+    def _validate_assigned_registration_history(self) -> None:
+        try:
+            history = AgentRegistrationHistoryReader(
+                self._control_store,
+                run_id=self._config.run_id,
+                node_id=self._config.node_id,
+            ).read()
+        except AgentRegistrationHistoryCorrupt as error:
+            raise RendezvousStateError("assigned agent registration history is corrupt") from error
+        except AgentRegistrationHistoryError as error:
+            raise RendezvousConnectionError(
+                "assigned agent registration history changed repeatedly"
+            ) from error
+        except Exception as error:
+            raise RendezvousConnectionError(
+                "failed to read assigned agent registration history"
+            ) from error
+        with self._registration_lock:
+            registration = self._registration
+        if (
+            registration is None
+            or history.current is None
+            or history.current.record != registration.record
+        ):
+            raise RendezvousConnectionError(
+                "assigned node registration no longer belongs to this handler"
+            )
+        for authority in history.authorities:
+            identity = authority.registration.record.agent_identity
+            if (
+                identity.environment_digest != self._agent_identity.environment_digest
+                or identity.local_world_size != self._agent_identity.local_world_size
+            ):
+                raise RendezvousStateError(
+                    "assigned node registration history is incompatible with "
+                    "the committed workload environment"
+                )
+
     def _initial_slot(self, current: CurrentGeneration) -> int | None:
         assignment = current.snapshot.record.assignment
         if assignment.generation != 0:
@@ -662,21 +780,24 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             )
         for slot, node_id in assignment.slot_to_node_id.items():
             if node_id == self._config.node_id:
+                self._validate_assigned_registration_history()
                 return slot
         return None
 
-    def _wait_for_change(self, deadline: float) -> bool:
-        remaining = deadline - self._monotonic_clock()
-        if remaining <= 0:
-            return False
-        self._state_changed_event.wait(
-            min(
+    def _wait_for_change(self, deadline: float | None) -> bool:
+        if deadline is None:
+            timeout = self._config.policy.poll_interval_ms / 1_000
+        else:
+            remaining = deadline - self._monotonic_clock()
+            if remaining <= 0:
+                return False
+            timeout = min(
                 remaining,
                 self._config.policy.poll_interval_ms / 1_000,
             )
-        )
+        self._state_changed_event.wait(timeout)
         self._state_changed_event.clear()
-        return self._monotonic_clock() < deadline
+        return deadline is None or self._monotonic_clock() < deadline
 
     def _validate_closure_entry(self, entry: ControlStoreEntry) -> None:
         if entry.value != self._closure_value:

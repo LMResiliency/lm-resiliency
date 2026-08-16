@@ -1485,10 +1485,24 @@ It registers every agent, renews that registration while the handler is alive,
 returns active nodes by logical slot, keeps unassigned agents blocked without
 reporting them as waiting, and propagates one immutable run-scoped closure that
 wakes parked standbys and releases registrations. It also clears any stale
-node-local restart context before the initial generation starts. Replacement
-generation admission, restart-context publication, and the positive
+node-local restart context before the initial generation starts. The join
+timeout bounds initial generation formation and worker bootstrap only; after
+generation zero exists, passive standbys remain parked until assignment,
+closure, cancellation, or registration failure. Registration heartbeats
+schedule each renewal from the returned lease's remaining lifetime rather than
+from a fixed interval. An assigned node ID is admitted only when its retained
+registration history has the same local worker count and environment digest as
+the current handler, so an incompatible process cannot reuse an expired node
+registration. Replacement generation admission, restart-context publication,
+and the positive
 `num_nodes_waiting()` restart edge are enabled only after authoritative
 restart-plan readback is integrated in the following slice.
+
+Every `next_rendezvous()` invocation uses an attempt-scoped `PrefixStore` for
+PyTorch's worker bootstrap keys. Bootstrap reads are bounded by the remaining
+join deadline, so a missing slot-zero publisher cannot strand other agents on
+the underlying store timeout and a retry cannot consume address/port values
+from a previous attempt.
 
 Passive standbys are not reported by `num_nodes_waiting()`. After a plan
 commits, the selected replacement becomes the only newly waiting node visible
