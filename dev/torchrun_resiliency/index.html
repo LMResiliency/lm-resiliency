@@ -436,7 +436,11 @@ reference integration does not require that experimental surface.</p>
 <p>The integration must also avoid depending on <code>--max-restarts</code> as its only
 replacement budget. Failure retries and membership changes have had different
 accounting behavior across torchrun versions. The coordinator should own an
-explicit <code>max_replacement_generations</code> policy.</p>
+explicit <code>max_replacement_generations</code> policy. The current runtime admits
+exactly one replacement generation because authoritative lifecycle readback
+currently proves only the first closed intent and successor. Configuration
+values greater than one fail closed until repeated lifecycle readback is
+implemented.</p>
 <h2 id="three-layer-architecture">Three-Layer Architecture<a class="headerlink" href="#three-layer-architecture" title="Permanent link">&para;</a></h2>
 <pre><code class="language-text">                    control store / coordinator
               restart plans, slot leases, quarantine
@@ -1686,8 +1690,10 @@ best-effort release, with lease expiry as the conservative fallback. Initial
 registration and the initial closure-state observation are bounded by the
 formation deadline. A stalled closure backend cannot defeat that timeout, and
 local shutdown interrupts a handler waiting on the daemonized closure read.</p>
-<p>Before publishing readiness, each assigned handler clears its stale node-local
-restart context. Slot zero owns one durable, generation-scoped attempt head,
+<p>Before publishing readiness, each assigned handler clears only a node-local
+restart context from another run. An initial-generation handler refuses to
+remove a current-run replacement context, so a stale incarnation cannot erase
+newer recovery state. Slot zero owns one durable, generation-scoped attempt head,
 while all assigned slots publish attempt-scoped arrivals tied to their live
 registration. Slot zero validates the complete registration set once and
 atomically publishes one immutable completion proof conditioned on the shared
@@ -1704,22 +1710,77 @@ completion proof, generation head, immutable generation snapshot, and absence
 of terminal closure. An incomplete attempt remains usable when a handler
 incarnation is replaced. A stale consumption from an incarnation that failed
 before returning does not satisfy its replacement; the replacement publishes
-its own consumption for the same completed attempt. A completed attempt
-advances only after every slot's current registration has a durable consumption
-record, so a replacement joins the completed attempt instead of splitting the
-worker group. Guarded barrier transactions pin their registration revision in
-retained history. Missing or unprepared assigned nodes therefore fail at the
-formation deadline instead of launching a partial worker group. After
-consumption completes, every handler performs one final closure and generation
-check before returning its slot.</p>
+its own consumption for the same completed attempt. For a replacement
+generation, a consumption record is a locally validated readiness claim rather
+than permission to return. Slot zero atomically commits one immutable
+group-admission proof only after every assigned slot has published readiness.
+That guarded transaction conditions on every readiness and live registration
+revision, the attempt and completion records, the generation head and immutable
+snapshot, and absence of terminal closure, and it must commit before the plan's
+exclusive restart deadline. Every replacement handler observes and validates
+the same admission proof before returning. The proof must name that handler's
+exact live registration and its exact consumption entry; a replacement
+incarnation must publish new readiness and cannot reuse the old decision. A
+temporarily absent or expired peer registration remains incomplete readiness
+until the deadline, while corrupt retained registration history still fails
+closed. After all blocking plan/context,
+registration-history, and attempt-head reads complete, the handler samples
+authoritative control-store time once and uses that observation to recheck both
+the exclusive restart deadline and the exact registration's lease window. The
+shared attempt head must still name the admitted attempt. A completed
+replacement attempt advances only after every assigned slot enters a subsequent
+<code>next_rendezvous()</code> call and durably acknowledges the prior admission and
+consumption. The acknowledgement is slot-scoped and guarded by the entering
+handler's live registration, so a normal heartbeat renewal is retried and a
+replacement incarnation can acknowledge its slot before joining a fresh
+attempt. A descheduled peer that has not re-entered therefore keeps the shared
+attempt head fixed; initial attempts retain the consumption-only advancement
+rule. Guarded barrier transactions pin their registration revision in retained
+history. Missing, unprepared, late, or superseded assigned nodes therefore fail
+instead of allowing an early or stale incarnation to launch a partial worker
+group.</p>
 <p>Registration release is best effort and bounded during local shutdown. If the
 backend remains unavailable, cleanup returns without waiting indefinitely and
 the registration expires under its existing lease. Global closure publication
 also runs through a bounded daemon operation; local heartbeat and registration
-cleanup still proceeds when the control store is unavailable.
-Replacement generation admission, restart-context publication, and the positive
-<code>num_nodes_waiting()</code> restart edge are enabled only after authoritative
-restart-plan readback is integrated in the following slice.</p>
+cleanup still proceeds when the control store is unavailable.</p>
+<p>For a replacement generation, the handler reads and reauthorizes the exact
+persisted restart-plan publication before admitting any assigned node. It
+requires the plan assignment to equal the committed generation, enforces the
+replacement budget and exclusive restart deadline, and writes the exact
+node-local <code>RestartContext</code> before the assigned node participates in the shared
+arrival barrier. Each assigned node revalidates the plan, generation, deadline,
+and persisted context before publishing readiness; the immutable group-admission
+proof is the final shared decision observed before <code>next_rendezvous()</code> returns.
+A failed admission first durably invalidates the exact cryptographic cleanup
+token published by that handler incarnation, then attempts bounded physical
+removal. If the directory lock is unavailable, the stale file remains
+unreadable; every outstanding token has its own fixed-length, digest-named
+durable invalidation marker, so delayed cleanup from an older handler cannot
+revalidate a newer failed context, long valid context basenames cannot overflow
+the filesystem component limit, and a later replacement context with a
+different token remains valid. An invalidation marker remains durable after
+physical context deletion, so a crash cannot resurrect a deleted context pair
+without its fence. The worker-visible file remains canonical root
+<code>RestartContext</code> JSON. The cleanup token and the context digest are stored in a
+hidden owner-only sidecar under the same directory lock. The sidecar also binds
+publication to the writer's verified registration ID and store-stamped
+registration mutation sequence. An older registration cannot overwrite a
+context published by a later registration, while a normal heartbeat renewal of
+the same immutable registration may advance the mutation sequence. Final
+admission requires the exact token published by that handler incarnation. A
+normal heartbeat renewal may advance the registration fencing token, but
+admission accepts it only when retained authority history proves uninterrupted
+ownership by the same immutable registration and agent incarnation. Context
+cleanup also removes and directory-syncs an orphaned sidecar when a crash
+leaves metadata without its root context. Context
+publication and cleanup acquire the parent
+directory lock nonblocking under the admission or bounded-cleanup deadline, so
+a stale process cannot strand replacement admission. The replacement deadline
+is derived and revalidated from authoritative, nondecreasing control-store time
+rather than an agent wall clock. Passive standbys and removed nodes remain
+parked. The positive <code>num_nodes_waiting()</code> restart edge remains disabled until
+the following signaling slice.</p>
 <p>All handler incarnations use one immutable generation-scoped <code>PrefixStore</code> for
 PyTorch's worker bootstrap keys. Slot zero publishes one address/port pair and
 later retries or replacement agent incarnations reuse it, so no process-local
@@ -1731,11 +1792,12 @@ supplies an already running agent-owned bootstrap endpoint, the handler reports
 creates the worker-side TCP store. After bounded bootstrap reads complete, every
 returned store is restored to the shared configured join timeout so later stock
 agent coordination does not inherit rank-specific remaining-deadline values.</p>
-<p>Passive standbys are not reported by <code>num_nodes_waiting()</code>. After a plan
-commits, the selected replacement becomes the only newly waiting node visible
-to active agents. This is the restart edge: a random late node must not trigger
-scale-up. This mechanism is used only when the next plan admits at least one
-standby; it is not a generic restart signal for unchanged membership.</p>
+<p>Passive standbys are not reported by <code>num_nodes_waiting()</code>. In the following
+signaling slice, after a plan commits, the selected replacement becomes the only
+newly waiting node visible to active agents. This is the restart edge: a random
+late node must not trigger scale-up. The mechanism is used only when the next
+plan admits at least one standby; it is not a generic restart signal for
+unchanged membership.</p>
 <p>Before returning an admitted node from <code>next_rendezvous()</code>, the handler:</p>
 <ol>
 <li>validates that the assignment belongs to the latest committed generation;</li>
@@ -2045,7 +2107,7 @@ changing torchrun's default behavior:</p>
 schema_version = 1
 control_endpoint = &quot;control.internal:443&quot;
 replacement_only = true
-max_replacement_generations = 2
+max_replacement_generations = 1
 registration_lease_duration_ms = 30000
 poll_interval_ms = 1000
 join_timeout_ms = 300000
