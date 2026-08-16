@@ -1512,9 +1512,15 @@ does not hold the handler's ownership lock, so local shutdown remains bounded
 while registration is stalled. A registration response arriving after local
 shutdown is not installed or heartbeated and expires conservatively.
 Before any assigned handler returns generation zero, it publishes a
-generation-scoped arrival tied to its live registration and waits until every
-committed slot has a live matching arrival. Missing assigned nodes therefore
-fail at the formation deadline instead of launching a partial worker group.
+generation- and attempt-scoped arrival tied to its live registration and waits
+until every committed slot has a live matching arrival for the same attempt.
+Each slot claims its next attempt through durable control-store state, so a
+surviving or replacement handler cannot reuse an arrival from a prior worker
+launch. Missing assigned nodes therefore fail at the formation deadline instead
+of launching a partial worker group.
+Registration release is best effort and bounded during local shutdown. If the
+backend remains unavailable, cleanup returns without waiting indefinitely and
+the registration expires under its existing lease.
 Replacement generation admission, restart-context publication, and the positive
 `num_nodes_waiting()` restart edge are enabled only after authoritative
 restart-plan readback is integrated in the following slice.

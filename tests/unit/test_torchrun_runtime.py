@@ -1047,11 +1047,17 @@ def _seed_assigned_arrival(
     with handler._registration_lock:
         registration = handler._registration
     assert registration is not None
+    attempt = handler._claim_arrival_attempt(
+        generation=generation,
+        slot=slot,
+        deadline=time.monotonic() + 1,
+    )
     store.compare_set(
-        handler._arrival_key(generation, slot),
+        handler._arrival_key(generation, attempt, slot),
         expected_revision=None,
         value=handler._arrival_value(
             generation=generation,
+            attempt=attempt,
             slot=slot,
             registration=registration,
         ),
@@ -1232,13 +1238,13 @@ def test_slot_aware_handler_reuses_generation_scoped_bootstrap_store(
         args=(second_outcome,),
     )
     second_thread.start()
+    time.sleep(0.02)
+    assert second_thread.is_alive()
+
+    second_a = handler_a.next_rendezvous()
     second_thread.join(timeout=2)
     assert not second_thread.is_alive()
     second_b = second_outcome.get_nowait()
-    assert isinstance(second_b, type(first_a))
-    assert second_b.bootstrap_store_info == first_a.bootstrap_store_info
-
-    second_a = handler_a.next_rendezvous()
     assert isinstance(second_b, type(second_a))
     assert second_b.bootstrap_store_info == second_a.bootstrap_store_info
     assert handler_a.use_agent_store is False
@@ -1672,6 +1678,51 @@ def test_slot_aware_handler_shutdown_is_bounded_by_stuck_heartbeat(
     _wait_until(
         lambda: handler._heartbeat_thread is not None and not handler._heartbeat_thread.is_alive()
     )
+    assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_shutdown_is_bounded_by_stuck_registration_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    _initialize_generation(store, clock, ("node-a",))
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-a",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-a",
+    )
+    handler.next_rendezvous()
+    original_release = handler._registration_manager.release
+    started = threading.Event()
+    unblock = threading.Event()
+
+    def delayed_release(registration: Any) -> int:
+        started.set()
+        unblock.wait(timeout=2)
+        return original_release(registration)
+
+    monkeypatch.setattr(
+        handler._registration_manager,
+        "release",
+        delayed_release,
+    )
+
+    before = time.monotonic()
+    assert handler.shutdown() is False
+    elapsed = time.monotonic() - before
+
+    assert elapsed < 0.5
+    assert started.is_set()
+    unblock.set()
+    _wait_until(lambda: handler._registration is None)
     assert handler.shutdown() is True
 
 

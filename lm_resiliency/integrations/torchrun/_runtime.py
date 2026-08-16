@@ -74,6 +74,7 @@ _MAX_POLICY_BYTES = 64 * 1024
 _CONTROL_PREFIX = "lm_resiliency/torchrun/v1"
 _CLOSED_SCHEMA_VERSION = 1
 _ARRIVAL_SCHEMA_VERSION = 1
+_ARRIVAL_ATTEMPT_SCHEMA_VERSION = 1
 _SHARED_FIELDS = {
     "control_endpoint",
     "replacement_only",
@@ -401,6 +402,8 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         self._heartbeat_thread: threading.Thread | None = None
         self._heartbeat_last_now_unix_ms = 0
         self._stop_heartbeat_event = threading.Event()
+        self._release_thread: threading.Thread | None = None
+        self._release_error: Exception | None = None
         self._state_changed_event = threading.Event()
         self._closed_event = threading.Event()
         self._shutdown_lock = threading.Lock()
@@ -668,27 +671,64 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             registration = self._registration
             if registration is None:
                 return True
-            try:
-                self._registration_manager.release(registration)
-            except (
-                AgentRegistrationClockError,
-                AgentRegistrationCorrupt,
-                AgentRegistrationLost,
-                AgentRegistrationUnavailable,
-            ) as error:
-                if raise_errors:
-                    raise RendezvousConnectionError(
-                        "failed to release the agent registration"
-                    ) from error
-                return False
-            except Exception as error:
-                if raise_errors:
-                    raise RendezvousConnectionError(
-                        "agent registration backend failed during release"
-                    ) from error
-                return False
-            self._registration = None
+            thread = self._release_thread
+            if thread is None:
+                self._release_error = None
+                thread = threading.Thread(
+                    target=self._release_registration_worker,
+                    args=(registration,),
+                    name=f"lm-resiliency-release-{self._config.node_id}",
+                    daemon=True,
+                )
+                self._release_thread = thread
+                thread.start()
+        if thread is not threading.current_thread():
+            thread.join(
+                timeout=max(
+                    self._config.policy.poll_interval_ms / 500,
+                    0.1,
+                )
+            )
+        if thread.is_alive():
+            return False
+        with self._registration_lock:
+            error = self._release_error
+            self._release_thread = None
+            self._release_error = None
+        if error is None:
             return True
+        if raise_errors:
+            if isinstance(
+                error,
+                (
+                    AgentRegistrationClockError,
+                    AgentRegistrationCorrupt,
+                    AgentRegistrationLost,
+                    AgentRegistrationUnavailable,
+                ),
+            ):
+                raise RendezvousConnectionError(
+                    "failed to release the agent registration"
+                ) from error
+            raise RendezvousConnectionError(
+                "agent registration backend failed during release"
+            ) from error
+        return False
+
+    def _release_registration_worker(
+        self,
+        registration: HeldAgentRegistration,
+    ) -> None:
+        error: Exception | None = None
+        try:
+            self._registration_manager.release(registration)
+        except Exception as release_error:
+            error = release_error
+        with self._registration_lock:
+            if error is None and self._registration == registration:
+                self._registration = None
+            self._release_error = error
+        self._state_changed_event.set()
 
     def _raise_heartbeat_error(self) -> None:
         error = self._heartbeat_error
@@ -824,12 +864,22 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             raise RendezvousConnectionError(
                 "assigned node lost its registration before the arrival barrier"
             )
+        attempt = self._claim_arrival_attempt(
+            generation=assignment.generation,
+            slot=slot,
+            deadline=deadline,
+        )
         arrival_value = self._arrival_value(
             generation=assignment.generation,
+            attempt=attempt,
             slot=slot,
             registration=registration,
         )
-        arrival_key = self._arrival_key(assignment.generation, slot)
+        arrival_key = self._arrival_key(
+            assignment.generation,
+            attempt,
+            slot,
+        )
         try:
             entry = self._control_store.get(arrival_key)
             if entry is None:
@@ -846,19 +896,11 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                             "rendezvous arrival changed without a current record"
                         )
             elif entry.value != arrival_value:
-                try:
-                    entry = self._control_store.compare_set(
-                        arrival_key,
-                        expected_revision=entry.revision,
-                        value=arrival_value,
-                    )
-                except ControlStoreConflict as error:
-                    raise RendezvousConnectionError(
-                        "rendezvous arrival changed during agent replacement"
-                    ) from error
+                raise RendezvousStateError("rendezvous attempt slot was claimed by another agent")
             self._validate_arrival_entry(
                 entry,
                 generation=assignment.generation,
+                attempt=attempt,
                 slot=slot,
                 node_id=self._config.node_id,
             )
@@ -875,7 +917,11 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             for assigned_slot, node_id in assignment.slot_to_node_id.items():
                 try:
                     assigned_entry = self._control_store.get(
-                        self._arrival_key(assignment.generation, assigned_slot)
+                        self._arrival_key(
+                            assignment.generation,
+                            attempt,
+                            assigned_slot,
+                        )
                     )
                 except Exception as error:
                     raise RendezvousConnectionError("failed to read rendezvous arrivals") from error
@@ -885,6 +931,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                 self._validate_arrival_entry(
                     assigned_entry,
                     generation=assignment.generation,
+                    attempt=attempt,
                     slot=assigned_slot,
                     node_id=node_id,
                 )
@@ -893,22 +940,157 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             if not self._wait_for_change(deadline):
                 raise RendezvousTimeoutError
 
-    def _arrival_key(self, generation: int, slot: int) -> str:
+    def _claim_arrival_attempt(
+        self,
+        *,
+        generation: int,
+        slot: int,
+        deadline: float,
+    ) -> int:
+        key = self._arrival_attempt_key(generation, slot)
+        while True:
+            if self.is_closed():
+                raise RendezvousClosedError
+            self._raise_heartbeat_error()
+            try:
+                entry = self._control_store.get(key)
+                if entry is None:
+                    expected_revision = None
+                    attempt = 1
+                else:
+                    previous_attempt = self._validate_arrival_attempt_entry(
+                        entry,
+                        generation=generation,
+                        slot=slot,
+                    )
+                    expected_revision = entry.revision
+                    attempt = previous_attempt + 1
+                value = self._arrival_attempt_value(
+                    generation=generation,
+                    slot=slot,
+                    attempt=attempt,
+                )
+                try:
+                    committed = self._control_store.compare_set(
+                        key,
+                        expected_revision=expected_revision,
+                        value=value,
+                    )
+                except ControlStoreConflict:
+                    if not self._wait_for_change(deadline):
+                        raise RendezvousTimeoutError
+                    continue
+                self._validate_arrival_attempt_entry(
+                    committed,
+                    generation=generation,
+                    slot=slot,
+                    expected_attempt=attempt,
+                )
+                return attempt
+            except (RendezvousClosedError, RendezvousStateError, RendezvousTimeoutError):
+                raise
+            except Exception as error:
+                raise RendezvousConnectionError(
+                    "failed to claim a rendezvous arrival attempt"
+                ) from error
+
+    def _arrival_attempt_key(self, generation: int, slot: int) -> str:
         return (
             f"{_CONTROL_PREFIX}/runs/{self._run_digest}/rendezvous/"
-            f"generation-{generation}/arrivals/slot-{slot}"
+            f"generation-{generation}/arrival-attempts/slot-{slot}"
+        )
+
+    def _arrival_attempt_value(
+        self,
+        *,
+        generation: int,
+        slot: int,
+        attempt: int,
+    ) -> bytes:
+        return json.dumps(
+            {
+                "attempt": attempt,
+                "generation": generation,
+                "logical_node_slot": slot,
+                "run_id": self._config.run_id,
+                "schema_version": _ARRIVAL_ATTEMPT_SCHEMA_VERSION,
+            },
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+
+    def _validate_arrival_attempt_entry(
+        self,
+        entry: ControlStoreEntry,
+        *,
+        generation: int,
+        slot: int,
+        expected_attempt: int | None = None,
+    ) -> int:
+        try:
+            payload = json.loads(
+                entry.value.decode("utf-8"),
+                object_pairs_hook=_strict_object,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            raise RendezvousStateError("rendezvous arrival attempt record is malformed") from error
+        expected_fields = {
+            "attempt",
+            "generation",
+            "logical_node_slot",
+            "run_id",
+            "schema_version",
+        }
+        if not isinstance(payload, dict) or set(payload) != expected_fields:
+            raise RendezvousStateError("rendezvous arrival attempt record has invalid fields")
+        attempt = payload["attempt"]
+        if (
+            isinstance(attempt, bool)
+            or not isinstance(attempt, int)
+            or attempt < 1
+            or isinstance(payload["generation"], bool)
+            or not isinstance(payload["generation"], int)
+            or isinstance(payload["logical_node_slot"], bool)
+            or not isinstance(payload["logical_node_slot"], int)
+            or payload["schema_version"] != _ARRIVAL_ATTEMPT_SCHEMA_VERSION
+            or isinstance(payload["schema_version"], bool)
+            or not isinstance(payload["schema_version"], int)
+            or payload["run_id"] != self._config.run_id
+            or payload["generation"] != generation
+            or payload["logical_node_slot"] != slot
+            or (expected_attempt is not None and attempt != expected_attempt)
+        ):
+            raise RendezvousStateError("rendezvous arrival attempt record does not match its slot")
+        if (
+            entry.mutation_sequence != attempt
+            or entry.value_sequence != attempt
+            or entry.lifetime_sequence != 1
+            or entry.guard_key is not None
+        ):
+            raise RendezvousStateError(
+                "rendezvous arrival attempt record has invalid store provenance"
+            )
+        return attempt
+
+    def _arrival_key(self, generation: int, attempt: int, slot: int) -> str:
+        return (
+            f"{_CONTROL_PREFIX}/runs/{self._run_digest}/rendezvous/"
+            f"generation-{generation}/attempt-{attempt}/arrivals/slot-{slot}"
         )
 
     def _arrival_value(
         self,
         *,
         generation: int,
+        attempt: int,
         slot: int,
         registration: HeldAgentRegistration,
     ) -> bytes:
         return json.dumps(
             {
                 "agent_id": registration.record.agent_identity.agent_id,
+                "attempt": attempt,
                 "generation": generation,
                 "logical_node_slot": slot,
                 "node_id": registration.record.agent_identity.node_id,
@@ -926,6 +1108,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         entry: ControlStoreEntry,
         *,
         generation: int,
+        attempt: int,
         slot: int,
         node_id: str,
     ) -> None:
@@ -938,6 +1121,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             raise RendezvousStateError("rendezvous arrival record is malformed") from error
         expected_fields = {
             "agent_id",
+            "attempt",
             "generation",
             "logical_node_slot",
             "node_id",
@@ -950,6 +1134,8 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         if (
             isinstance(payload["generation"], bool)
             or not isinstance(payload["generation"], int)
+            or isinstance(payload["attempt"], bool)
+            or not isinstance(payload["attempt"], int)
             or isinstance(payload["logical_node_slot"], bool)
             or not isinstance(payload["logical_node_slot"], int)
             or payload["schema_version"] != _ARRIVAL_SCHEMA_VERSION
@@ -957,6 +1143,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             or not isinstance(payload["schema_version"], int)
             or payload["run_id"] != self._config.run_id
             or payload["generation"] != generation
+            or payload["attempt"] != attempt
             or payload["logical_node_slot"] != slot
             or payload["node_id"] != node_id
         ):
