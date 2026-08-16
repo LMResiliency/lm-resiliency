@@ -825,8 +825,43 @@ class RestartPlanPlacementState:
         return dict(sorted(histories.items()))
 
 
+@dataclass(frozen=True, slots=True)
+class RestartPlanCandidateState:
+    """One recovery- and placement-admitted plan candidate."""
+
+    recovery_state: RestartPlanRecoveryEvidenceState
+    placement_state: RestartPlanPlacementState
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.recovery_state, RestartPlanRecoveryEvidenceState):
+            raise TypeError(
+                "RestartPlanCandidateState.recovery_state must be RestartPlanRecoveryEvidenceState"
+            )
+        if not isinstance(self.placement_state, RestartPlanPlacementState):
+            raise TypeError(
+                "RestartPlanCandidateState.placement_state must be RestartPlanPlacementState"
+            )
+        recovery_generation_state = self.recovery_state.copy_state.inventory_state.quarantine_state.manifest_state.generation_state
+        if recovery_generation_state != self.placement_state.generation_state:
+            raise ValueError(
+                "RestartPlanCandidateState recovery and placement states "
+                "do not describe the same plan generation"
+            )
+        if self.placement_state.observed_at_unix_ms >= self.plan.restart_deadline_unix_ms:
+            raise ValueError("RestartPlanCandidateState restart deadline has elapsed")
+
+    @property
+    def plan(self) -> RestartPlan:
+        return self.recovery_state.plan
+
+    @property
+    def manifest(self) -> RecoveryManifest:
+        return self.recovery_state.manifest
+
+
 __all__ = [
     "ResolvedRecoveryManifest",
+    "RestartPlanCandidateState",
     "RestartPlanCertificationState",
     "RestartPlanCopyEligibilityState",
     "RestartPlanGenerationState",

@@ -816,6 +816,11 @@ and must match the planned local worker count and the coordinator's expected
 `environment_digest`. Trusted hardware inventory, previously committed
 quarantine state, recovery evidence, and atomic publication remain separate
 admission boundaries.
+`RestartPlanCandidateState` composes one placement state with one recovery
+evidence state only when both describe the exact same lifecycle and generation
+records. The registration observation must also precede the plan's exclusive
+restart deadline. This value is still only a publication candidate: trusted
+prior quarantine and the atomic store transaction remain separate gates.
 
 Before commit, the coordinator validates:
 
