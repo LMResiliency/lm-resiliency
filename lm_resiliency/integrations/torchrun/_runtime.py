@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import importlib
 import json
@@ -118,8 +119,20 @@ class TorchrunRuntimeConfigError(ValueError):
     """Raised when torchrun runtime configuration is unsafe or contradictory."""
 
 
+_RestartContextFileVersion = tuple[int, int]
+
+
 class RestartContextFileError(RuntimeError):
     """Raised when the node-local restart-context file is unsafe or malformed."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        published_version: _RestartContextFileVersion | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.published_version = published_version
 
 
 class _DuplicateJsonFieldError(ValueError):
@@ -480,7 +493,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         """Admit one authoritative fixed-size generation and park passive standbys."""
 
         formation_deadline = self._monotonic_clock() + self._config.policy.join_timeout_ms / 1_000
-        context_written = False
+        context_version: _RestartContextFileVersion | None = None
         try:
             if self._is_closed_bounded(formation_deadline):
                 raise RendezvousClosedError
@@ -503,13 +516,9 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                 self._raise_heartbeat_error()
                 if current is not None:
                     if slot is not None:
-                        context_written = current.snapshot.record.assignment.generation > 0
-                        context_written = (
-                            self._prepare_restart_context(
-                                current,
-                                recovery_state,
-                            )
-                            or context_written
+                        context_version = self._prepare_restart_context(
+                            current,
+                            recovery_state,
                         )
                         attempt, completion = self._wait_for_assigned_arrivals(
                             current,
@@ -569,9 +578,9 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                         self._monotonic_clock() + self._config.policy.join_timeout_ms / 1_000
                     )
         except BaseException:
-            if context_written:
+            if context_version is not None:
                 try:
-                    self._restart_context.clear()
+                    self._restart_context.clear_if_version(context_version)
                 except (OSError, RestartContextFileError):
                     pass
             self._cleanup_local_resources()
@@ -2270,6 +2279,11 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                 recovery_state,
             )
             if admission is not None:
+                self._validate_replacement_return(
+                    current,
+                    recovery_state,
+                    deadline,
+                )
                 return admission
             if slot == 0:
                 self._try_commit_replacement_admission(
@@ -2287,6 +2301,11 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                     recovery_state,
                 )
                 if admission is not None:
+                    self._validate_replacement_return(
+                        current,
+                        recovery_state,
+                        deadline,
+                    )
                     return admission
             if not self._wait_for_change(deadline):
                 admission = self._read_replacement_admission(
@@ -2296,8 +2315,35 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                     recovery_state,
                 )
                 if admission is not None:
+                    self._validate_replacement_return(
+                        current,
+                        recovery_state,
+                        deadline,
+                    )
                     return admission
                 raise RendezvousTimeoutError
+
+    def _validate_replacement_return(
+        self,
+        current: CurrentGeneration,
+        recovery_state: RestartPlanPersistedRecoveryState,
+        deadline: float,
+    ) -> None:
+        self._validate_final_admission_state(
+            current,
+            recovery_state,
+            deadline,
+        )
+        self._raise_heartbeat_error()
+        with self._registration_lock:
+            registration = self._registration
+        if registration is None:
+            raise RendezvousConnectionError("replacement agent no longer owns its registration")
+        current_registration = self._current_assigned_registration(self._config.node_id)
+        if current_registration.record != registration.record:
+            raise RendezvousConnectionError(
+                "replacement agent registration changed before admission"
+            )
 
     def _try_commit_replacement_admission(
         self,
@@ -2735,7 +2781,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         self,
         current: CurrentGeneration,
         recovery_state: RestartPlanPersistedRecoveryState | None,
-    ) -> bool:
+    ) -> _RestartContextFileVersion | None:
         if current.snapshot.record.assignment.generation == 0:
             try:
                 self._restart_context.clear()
@@ -2743,17 +2789,21 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                 raise RendezvousStateError(
                     "failed to clear stale initial restart context"
                 ) from error
-            return False
+            return None
         if recovery_state is None:
             raise RendezvousStateError("replacement generation lacks an authoritative restart plan")
         context = self._restart_context_for_plan(recovery_state.plan)
         try:
-            self._restart_context.write(context)
+            return self._restart_context.write(context)
         except (OSError, RestartContextFileError) as error:
+            if isinstance(error, RestartContextFileError) and error.published_version is not None:
+                try:
+                    self._restart_context.clear_if_version(error.published_version)
+                except (OSError, RestartContextFileError):
+                    pass
             raise RendezvousStateError(
                 "failed to publish the replacement restart context"
             ) from error
-        return True
 
     def _restart_context_for_plan(self, plan: RestartPlan) -> RestartContext:
         try:
@@ -2844,7 +2894,7 @@ class RestartContextFile:
         if self.path.name in {"", ".", ".."}:
             raise RestartContextFileError("restart-context path must name a file")
 
-    def write(self, context: RestartContext) -> None:
+    def write(self, context: RestartContext) -> _RestartContextFileVersion:
         if not isinstance(context, RestartContext):
             raise TypeError("context must be RestartContext")
         encoded = (context.to_json() + "\n").encode("utf-8")
@@ -2854,10 +2904,14 @@ class RestartContextFile:
         assert parent_descriptor is not None
         descriptor = -1
         temporary = ""
+        published_version: _RestartContextFileVersion | None = None
         try:
+            fcntl.flock(parent_descriptor, fcntl.LOCK_EX)
             self._reject_existing_symlink(parent_descriptor)
             descriptor, temporary = self._create_temporary_file(parent_descriptor)
             os.fchmod(descriptor, 0o600)
+            metadata = os.fstat(descriptor)
+            published_version = (metadata.st_dev, metadata.st_ino)
             with os.fdopen(descriptor, "wb") as stream:
                 descriptor = -1
                 stream.write(encoded)
@@ -2871,9 +2925,11 @@ class RestartContextFile:
             )
             temporary = ""
             self._fsync_directory(parent_descriptor)
+            return published_version
         except OSError as error:
             raise RestartContextFileError(
-                f"failed to publish restart context at {self.path}"
+                f"failed to publish restart context at {self.path}",
+                published_version=published_version if not temporary else None,
             ) from error
         finally:
             if descriptor >= 0:
@@ -2941,6 +2997,7 @@ class RestartContextFile:
         if parent_descriptor is None:
             return
         try:
+            fcntl.flock(parent_descriptor, fcntl.LOCK_EX)
             self._reject_existing_symlink(parent_descriptor)
             try:
                 os.unlink(self.path.name, dir_fd=parent_descriptor)
@@ -2952,6 +3009,53 @@ class RestartContextFile:
                     f"failed to remove restart context at {self.path}"
                 ) from error
             self._fsync_directory(parent_descriptor)
+        finally:
+            os.close(parent_descriptor)
+
+    def clear_if_version(
+        self,
+        version: _RestartContextFileVersion,
+    ) -> bool:
+        if (
+            not isinstance(version, tuple)
+            or len(version) != 2
+            or any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+                for value in version
+            )
+        ):
+            raise TypeError("version must contain nonnegative device and inode integers")
+        parent_descriptor = self._open_parent(create=False)
+        if parent_descriptor is None:
+            return False
+        try:
+            fcntl.flock(parent_descriptor, fcntl.LOCK_EX)
+            self._reject_existing_symlink(parent_descriptor)
+            try:
+                metadata = os.stat(
+                    self.path.name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return False
+            except OSError as error:
+                raise RestartContextFileError(
+                    f"failed to inspect restart context at {self.path}"
+                ) from error
+            self._validate_owned_private_file(metadata)
+            if (metadata.st_dev, metadata.st_ino) != version:
+                return False
+            try:
+                os.unlink(self.path.name, dir_fd=parent_descriptor)
+            except FileNotFoundError:
+                return False
+            except OSError as error:
+                raise RestartContextFileError(
+                    f"failed to remove restart context at {self.path}"
+                ) from error
+            self._fsync_directory(parent_descriptor)
+            return True
         finally:
             os.close(parent_descriptor)
 

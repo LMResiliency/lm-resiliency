@@ -796,6 +796,22 @@ def test_restart_context_file_writes_reads_replaces_and_clears(tmp_path: Path):
     context_file.clear()
 
 
+def test_restart_context_file_clears_only_the_written_file_version(
+    tmp_path: Path,
+):
+    path = tmp_path / "private" / "restart-context.json"
+    context_file = RestartContextFile(path)
+
+    first_version = context_file.write(_context())
+    second_context = _context(plan_id="plan-2")
+    second_version = context_file.write(second_context)
+
+    assert context_file.clear_if_version(first_version) is False
+    assert context_file.read() == second_context
+    assert context_file.clear_if_version(second_version) is True
+    assert not path.exists()
+
+
 def test_restart_context_file_preserves_previous_value_when_replace_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3240,8 +3256,11 @@ def test_slot_aware_handler_clears_context_when_publication_fails_after_replace(
     original_write = RestartContextFile.write
 
     def publish_then_fail(context_file: RestartContextFile, context: RestartContext) -> None:
-        original_write(context_file, context)
-        raise RestartContextFileError("injected post-publication failure")
+        version = original_write(context_file, context)
+        raise RestartContextFileError(
+            "injected post-publication failure",
+            published_version=version,
+        )
 
     monkeypatch.setattr(RestartContextFile, "write", publish_then_fail)
 
@@ -3352,6 +3371,95 @@ def test_slot_aware_handler_rejects_clock_regression_and_retains_first_deadline(
     monotonic_clock.advance(deadline)
     with pytest.raises(RendezvousTimeoutError):
         handler._validate_replacement_deadline(cast(Any, recovery_state), deadline)
+
+
+def test_slot_aware_handler_rechecks_deadline_before_returning_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    monotonic_clock = ManualMonotonicClock()
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=InMemoryControlStore(clock=clock),
+        clock=clock,
+        agent_id="agent-b",
+        monotonic_clock=monotonic_clock,
+    )
+    recovery_state = _static_recovery_state(
+        _replacement_plan(restart_deadline_unix_ms=clock() + 50)
+    )
+    deadline = monotonic_clock() + 0.05
+    monkeypatch.setattr(
+        handler,
+        "_validate_final_admission_state",
+        lambda _current, state, final_deadline: handler._validate_replacement_deadline(
+            state,
+            final_deadline,
+        ),
+    )
+
+    clock.advance(50)
+    monotonic_clock.advance(0.05)
+
+    with pytest.raises(RendezvousTimeoutError):
+        handler._validate_replacement_return(
+            cast(Any, object()),
+            cast(Any, recovery_state),
+            deadline,
+        )
+
+
+def test_slot_aware_handler_requires_live_registration_before_returning_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+    )
+    deadline = time.monotonic() + 1
+    handler._ensure_registered(deadline)
+    with handler._registration_lock:
+        registration = handler._registration
+    assert registration is not None
+    assert handler._stop_heartbeat() is True
+    handler._registration_manager.release(registration)
+    replacement_manager = AgentRegistrationManager(
+        store,
+        agent_identity=replace(
+            handler.agent_identity,
+            agent_id="replacement-agent-b",
+        ),
+        lease_duration_ms=handler._config.policy.registration_lease_duration_ms,
+        clock=clock,
+    )
+    replacement_manager.register()
+    monkeypatch.setattr(handler, "_validate_final_admission_state", lambda *_args: None)
+
+    with pytest.raises(
+        RendezvousConnectionError,
+        match="registration changed before admission",
+    ):
+        handler._validate_replacement_return(
+            cast(Any, object()),
+            cast(Any, _static_recovery_state(_replacement_plan())),
+            deadline,
+        )
 
 
 def test_slot_aware_handler_rejects_assignment_size_mismatch(tmp_path: Path):

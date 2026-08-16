@@ -1546,12 +1546,13 @@ That guarded transaction conditions on every readiness and live registration
 revision, the attempt and completion records, the generation head and immutable
 snapshot, and absence of terminal closure, and it must commit before the plan's
 exclusive restart deadline. Every replacement handler observes and validates
-the same admission proof before returning. A completed replacement attempt
-advances only after this proof exists; initial attempts retain the
-consumption-only advancement rule. Guarded barrier transactions pin their
-registration revision in retained history. Missing, unprepared, or late
-assigned nodes therefore fail at the shared deadline instead of allowing an
-early node to launch a partial worker group.
+the same admission proof before returning, then rechecks the original deadline
+and confirms that its exact agent incarnation still owns one live
+registration. A completed replacement attempt advances only after this proof
+exists; initial attempts retain the consumption-only advancement rule. Guarded
+barrier transactions pin their registration revision in retained history.
+Missing, unprepared, late, or superseded assigned nodes therefore fail instead
+of allowing an early or stale incarnation to launch a partial worker group.
 
 Registration release is best effort and bounded during local shutdown. If the
 backend remains unavailable, cleanup returns without waiting indefinitely and
@@ -1567,8 +1568,10 @@ node-local `RestartContext` before the assigned node participates in the shared
 arrival barrier. Each assigned node revalidates the plan, generation, deadline,
 and persisted context before publishing readiness; the immutable group-admission
 proof is the final shared decision observed before `next_rendezvous()` returns.
-A failed admission clears any context written by that attempt. Passive standbys
-and removed nodes remain parked. The positive `num_nodes_waiting()` restart edge
+A failed admission removes the context only when the current file is the exact
+device/inode version published by that handler incarnation, so an older handler
+cannot delete a replacement incarnation's atomic update. Passive standbys and
+removed nodes remain parked. The positive `num_nodes_waiting()` restart edge
 remains disabled until the following signaling slice.
 
 All handler incarnations use one immutable generation-scoped `PrefixStore` for
