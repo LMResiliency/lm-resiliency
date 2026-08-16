@@ -855,6 +855,13 @@ authenticated lifecycle read into that fence without mutating the store. An
 open or missing intent, repeated read contention, or an already-committed
 successor remains a retryable publication conflict; contradictory persisted
 lifecycle state fails closed as corruption.
+`PreparedRestartPlanPublication` then composes the authenticated coordinator
+authority with that exact lifecycle fence. It requires the candidate's intent,
+closure, and source generation to match the authenticated lifecycle; requires
+the publication authority to be at or after the closing authority in the same
+durable lease history; and merges the lifecycle and candidate revision
+conditions into immutable transaction inputs. It still performs no store
+access, quarantine-resource authorization, execution, or result verification.
 
 Before commit, the coordinator validates:
 
