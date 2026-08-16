@@ -916,11 +916,13 @@ eligibility, and exactly one trust path: persisted trusted certifications for
 publication, the authenticated closed restart-intent lifecycle, and the exact
 manifest source snapshot. It requires the lifecycle's source snapshot and
 immediate successor, including authoritative store metadata, to equal the
-signed publication before returning the reauthorized recovery state. Repeated
-dependency movement remains a retryable conflict; missing, mixed, or unsafe
-recovery evidence fails closed. For `latest`, the caller must supply the exact
-stable restart-acknowledgement evidence until historical acknowledgement
-collection is exposed directly to readback.
+signed publication, and requires the publication transaction and commit time
+to follow lifecycle closure, before returning the reauthorized recovery state.
+Repeated lifecycle, generation, or lease-history movement remains a retryable
+conflict; missing, mixed, causally impossible, or unsafe recovery evidence
+fails closed. For `latest`, the caller must supply the exact stable
+restart-acknowledgement evidence until historical acknowledgement collection
+is exposed directly to readback.
 
 Before commit, the coordinator validates:
 

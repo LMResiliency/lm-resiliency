@@ -2469,6 +2469,8 @@ def _recovery_reader() -> tuple[
         lifecycle=_lifecycle_record(),
         generation_snapshot=records.current.snapshot,
         immediate_successor=current.snapshot,
+        transaction_sequence=publication.transaction_sequence - 1,
+        closed_at_unix_ms=publication.committed_at_unix_ms,
     )
     reader._lifecycle_reader = cast(Any, SequenceLifecycleReader([lifecycle]))
     reader._generation_reader = cast(
@@ -2551,6 +2553,36 @@ def test_restart_plan_publication_reader_recovery_requires_exact_successor():
         reader.read_recovery_state()
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("transaction_sequence", 30),
+        ("closed_at_unix_ms", 1_201),
+    ],
+)
+def test_restart_plan_publication_reader_recovery_requires_closure_before_publication(
+    field: str,
+    value: int,
+):
+    reader, _, lifecycle, _ = _recovery_reader()
+    reader._lifecycle_reader = cast(
+        Any,
+        SequenceLifecycleReader(
+            [
+                SimpleNamespace(
+                    **{
+                        **vars(lifecycle),
+                        field: value,
+                    }
+                )
+            ]
+        ),
+    )
+
+    with pytest.raises(RestartPlanPublicationReadCorrupt, match="closed lifecycle"):
+        reader.read_recovery_state()
+
+
 def test_restart_plan_publication_reader_recovery_retries_lifecycle_change():
     reader, publication, lifecycle, _ = _recovery_reader()
     changed = SimpleNamespace(**vars(lifecycle), observation=1)
@@ -2581,7 +2613,23 @@ def test_restart_plan_publication_reader_recovery_rejects_repeated_lifecycle_cha
             RestartPlanPublicationReadConflict,
         ),
         (
+            CoordinatorLeaseHistoryError("busy"),
+            RestartPlanPublicationReadConflict,
+        ),
+        (
+            GenerationStateError("busy"),
+            RestartPlanPublicationReadConflict,
+        ),
+        (
             RestartIntentLifecycleReadCorrupt("bad"),
+            RestartPlanPublicationReadCorrupt,
+        ),
+        (
+            CoordinatorLeaseHistoryCorrupt("bad"),
+            RestartPlanPublicationReadCorrupt,
+        ),
+        (
+            GenerationStateCorrupt("bad"),
             RestartPlanPublicationReadCorrupt,
         ),
     ],

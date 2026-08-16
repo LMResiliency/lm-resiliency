@@ -339,11 +339,19 @@ class RestartPlanPublicationReader:
     def _read_lifecycle(self) -> AuthenticatedInitialRestartIntentClosure:
         try:
             lifecycle = self._lifecycle_reader.read()
-        except RestartIntentLifecycleReadCorrupt as error:
+        except (
+            CoordinatorLeaseHistoryCorrupt,
+            GenerationStateCorrupt,
+            RestartIntentLifecycleReadCorrupt,
+        ) as error:
             raise RestartPlanPublicationReadCorrupt(
                 "restart-intent lifecycle is corrupt while reauthorizing publication"
             ) from error
-        except RestartIntentLifecycleReadError as error:
+        except (
+            CoordinatorLeaseHistoryError,
+            GenerationStateError,
+            RestartIntentLifecycleReadError,
+        ) as error:
             raise RestartPlanPublicationReadConflict(
                 "restart-intent lifecycle changed repeatedly while reauthorizing publication"
             ) from error
@@ -388,6 +396,8 @@ class RestartPlanPublicationReader:
             or lifecycle.generation_snapshot.record.digest
             != publication.record.from_generation_snapshot_digest
             or successor != expected_successor
+            or publication.transaction_sequence <= lifecycle.transaction_sequence
+            or publication.committed_at_unix_ms < lifecycle.closed_at_unix_ms
         ):
             raise RestartPlanPublicationReadCorrupt(
                 "restart-plan publication does not match its closed lifecycle"
