@@ -190,15 +190,21 @@ def test_restart_ack_reader_accepts_historical_authorities_after_renewal():
     clock, store, lease_manager, lease, registration_manager, registration, _ = _state(
         commit_receipt=True
     )
-    clock.set(1_010)
-    registration_manager.renew(registration)
+    current_registration = registration
+    for now_unix_ms in (1_010, 1_020, 1_030, 1_040):
+        clock.set(now_unix_ms)
+        current_registration = registration_manager.renew(current_registration)
     lease_manager.renew(lease)
 
     persisted = RestartAckReader(store, run_id=RUN_ID, node_id="node-a").read()
+    registration_history = store.get_history(registration_manager.registration_key)
 
     assert persisted is not None
     assert persisted.registration_authority.registration == registration
     assert persisted.coordinator_authority.lease == lease
+    assert registration_history[0].revision == registration.fencing_token
+    assert registration_history[-1].revision == current_registration.fencing_token
+    assert len(registration_history) == 2
 
 
 def test_restart_ack_reader_is_node_scoped():

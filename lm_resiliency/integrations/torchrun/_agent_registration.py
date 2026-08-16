@@ -211,7 +211,7 @@ class AgentRegistrationManager:
                         "active agent registration uses a different lease duration"
                     )
                 try:
-                    entry = self._store.compare_set_in_window(
+                    entry = self._store.compare_refresh_in_window(
                         self._registration_key,
                         expected_revision=current.fencing_token,
                         not_before_unix_ms=now_unix_ms,
@@ -284,7 +284,7 @@ class AgentRegistrationManager:
         if registration.expires_at_unix_ms <= now_unix_ms:
             raise AgentRegistrationLost("agent registration expired before renewal")
         try:
-            entry = self._store.compare_set_in_window(
+            entry = self._store.compare_refresh_in_window(
                 self._registration_key,
                 expected_revision=registration.fencing_token,
                 not_before_unix_ms=now_unix_ms,

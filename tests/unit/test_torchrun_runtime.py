@@ -8,6 +8,7 @@ import stat
 import threading
 import time
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable, cast
 
@@ -16,6 +17,7 @@ from torch.distributed import HashStore
 from torch.distributed.elastic.rendezvous import (
     RendezvousClosedError,
     RendezvousConnectionError,
+    RendezvousInfo,
     RendezvousParameters,
     RendezvousStateError,
     RendezvousStoreInfo,
@@ -1018,6 +1020,44 @@ def _wait_until(predicate: Callable[[], bool], *, timeout: float = 2.0) -> None:
     raise AssertionError("condition did not become true before the timeout")
 
 
+def _start_rendezvous(
+    handler: SlotAwareRendezvousHandler,
+) -> tuple[threading.Thread, queue.Queue[BaseException | object]]:
+    outcome: queue.Queue[BaseException | object] = queue.Queue()
+
+    def rendezvous() -> None:
+        try:
+            outcome.put(handler.next_rendezvous())
+        except BaseException as error:
+            outcome.put(error)
+
+    thread = threading.Thread(target=rendezvous)
+    thread.start()
+    return thread, outcome
+
+
+def _seed_assigned_arrival(
+    handler: SlotAwareRendezvousHandler,
+    store: InMemoryControlStore,
+    *,
+    generation: int,
+    slot: int,
+) -> None:
+    handler._ensure_registered()
+    with handler._registration_lock:
+        registration = handler._registration
+    assert registration is not None
+    store.compare_set(
+        handler._arrival_key(generation, slot),
+        expected_revision=None,
+        value=handler._arrival_value(
+            generation=generation,
+            slot=slot,
+            registration=registration,
+        ),
+    )
+
+
 def test_slot_aware_handler_admits_initial_assignment_with_stable_rank(
     tmp_path: Path,
 ):
@@ -1038,8 +1078,22 @@ def test_slot_aware_handler_admits_initial_assignment_with_stable_rank(
         clock=clock,
         agent_id="agent-b",
     )
+    peer = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-a",
+            min_nodes=2,
+            max_nodes=3,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-a",
+    )
+    peer_thread, peer_outcome = _start_rendezvous(peer)
 
     info = handler.next_rendezvous()
+    peer_thread.join(timeout=2)
+    peer_info = peer_outcome.get_nowait()
 
     assert handler.get_backend() == "lm_resiliency"
     assert handler.get_run_id() == RUN_ID
@@ -1047,6 +1101,8 @@ def test_slot_aware_handler_admits_initial_assignment_with_stable_rank(
     assert info.rank == 1
     assert info.world_size == 2
     assert info.bootstrap_store_info == RendezvousStoreInfo("master.example", 29500)
+    assert isinstance(peer_info, RendezvousInfo)
+    assert peer_info.rank == 0
     assert not config.restart_context_path.exists()
     registration = AgentRegistrationReader(
         store,
@@ -1057,6 +1113,7 @@ def test_slot_aware_handler_admits_initial_assignment_with_stable_rank(
     assert registration.record.agent_identity == handler.agent_identity
 
     assert handler.shutdown() is True
+    assert peer.shutdown() is True
     assert handler.shutdown() is True
     assert (
         AgentRegistrationReader(
@@ -1066,6 +1123,33 @@ def test_slot_aware_handler_admits_initial_assignment_with_stable_rank(
         ).get("node-b")
         is None
     )
+
+
+def test_slot_aware_handler_times_out_when_an_assigned_slot_never_arrives(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    _initialize_generation(store, clock, ("node-a", "node-b"))
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-a",
+            min_nodes=2,
+            max_nodes=3,
+            join_timeout_ms=60,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-a",
+    )
+
+    before = time.monotonic()
+    with pytest.raises(RendezvousTimeoutError):
+        handler.next_rendezvous()
+
+    assert time.monotonic() - before < 0.5
+    assert handler.shutdown() is True
 
 
 def test_slot_aware_handler_reuses_generation_scoped_bootstrap_store(
@@ -1118,6 +1202,8 @@ def test_slot_aware_handler_reuses_generation_scoped_bootstrap_store(
     first_b = first_outcome.get_nowait()
     assert isinstance(first_b, type(first_a))
     assert first_b.bootstrap_store_info == first_a.bootstrap_store_info
+    assert first_a.store.timeout == timedelta(milliseconds=handler_a._config.policy.join_timeout_ms)
+    assert first_b.store.timeout == first_a.store.timeout
 
     assert handler_b.shutdown() is True
     replacement_b = _handler(
@@ -1185,6 +1271,21 @@ def test_slot_aware_handler_bounds_bootstrap_read_and_ignores_stale_unprefixed_k
         rendezvous_store=rendezvous_store,
         bootstrap_store_info=None,
     )
+    peer = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-a",
+            min_nodes=2,
+            max_nodes=3,
+            join_timeout_ms=60,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-a",
+        rendezvous_store=rendezvous_store,
+        bootstrap_store_info=None,
+    )
+    _seed_assigned_arrival(peer, store, generation=0, slot=0)
 
     before = time.monotonic()
     with pytest.raises(RendezvousTimeoutError):
@@ -1193,6 +1294,7 @@ def test_slot_aware_handler_bounds_bootstrap_read_and_ignores_stale_unprefixed_k
 
     assert elapsed < 0.5
     assert handler.shutdown() is True
+    assert peer.shutdown() is True
 
 
 def test_slot_aware_handler_rechecks_closure_after_bootstrap_wait(
@@ -1215,6 +1317,20 @@ def test_slot_aware_handler_rechecks_closure_after_bootstrap_wait(
         rendezvous_store=rendezvous_store,
         bootstrap_store_info=None,
     )
+    peer = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-a",
+            min_nodes=2,
+            max_nodes=3,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-a",
+        rendezvous_store=rendezvous_store,
+        bootstrap_store_info=None,
+    )
+    _seed_assigned_arrival(peer, store, generation=0, slot=0)
     outcome: queue.Queue[BaseException | object] = queue.Queue()
 
     def rendezvous() -> None:
@@ -1244,6 +1360,7 @@ def test_slot_aware_handler_rechecks_closure_after_bootstrap_wait(
 
     assert isinstance(outcome.get_nowait(), RendezvousClosedError)
     assert handler.shutdown() is True
+    assert peer.shutdown() is True
 
 
 def test_slot_aware_handler_rechecks_heartbeat_after_bootstrap_wait(
@@ -1266,6 +1383,20 @@ def test_slot_aware_handler_rechecks_heartbeat_after_bootstrap_wait(
         rendezvous_store=rendezvous_store,
         bootstrap_store_info=None,
     )
+    peer = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-a",
+            min_nodes=2,
+            max_nodes=3,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-a",
+        rendezvous_store=rendezvous_store,
+        bootstrap_store_info=None,
+    )
+    _seed_assigned_arrival(peer, store, generation=0, slot=0)
     outcome: queue.Queue[BaseException | object] = queue.Queue()
 
     def rendezvous() -> None:
@@ -1295,6 +1426,7 @@ def test_slot_aware_handler_rechecks_heartbeat_after_bootstrap_wait(
 
     assert isinstance(outcome.get_nowait(), RendezvousConnectionError)
     assert handler.shutdown() is True
+    assert peer.shutdown() is True
 
 
 def test_slot_aware_handler_parks_standby_without_reporting_waiting_node(
@@ -1644,7 +1776,10 @@ def test_slot_aware_handler_rejects_job_wide_environment_drift(tmp_path: Path):
         agent_id="agent-b",
     )
 
-    assert first.next_rendezvous().rank == 0
+    first._ensure_registered()
+    current = first._read_generation()
+    assert current is not None
+    assert first._initial_slot(current) == 0
     with pytest.raises(RendezvousStateError, match="committed workload environment"):
         second.next_rendezvous()
 

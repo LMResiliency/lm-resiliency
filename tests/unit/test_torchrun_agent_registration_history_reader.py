@@ -160,6 +160,30 @@ def test_registration_history_reader_verifies_renewal_and_replacement():
     )
 
 
+def test_registration_history_reader_accepts_compacted_equivalent_renewals():
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    manager = _manager(store, clock, "agent-a")
+    initial = manager.register()
+    current = initial
+    for now_unix_ms in (1_010, 1_020, 1_030, 1_040):
+        clock.set(now_unix_ms)
+        current = manager.renew(current)
+
+    history = AgentRegistrationHistoryReader(
+        store,
+        run_id=RUN_ID,
+        node_id=NODE_ID,
+    ).read()
+
+    assert tuple(authority.registration for authority in history.authorities) == (
+        initial,
+        current,
+    )
+    assert history.authorities[-1].mutation_sequence == 5
+    assert history.current == current
+
+
 def test_registration_history_reader_preserves_release_and_recreate():
     clock = ManualClock()
     store = InMemoryControlStore(clock=clock)
@@ -289,7 +313,6 @@ def test_registration_history_reader_rejects_current_missing_from_history():
     ),
     [
         (3, 2, 1, 1, 1_010, "transaction sequences"),
-        (4, 3, 1, 1, 1_010, "omits a key mutation"),
         (3, 2, 2, 1, 1_010, "value sequence"),
         (5, 5, 3, 3, 1_010, "key lifetime"),
         (3, 2, 1, 1, 999, "grant times"),

@@ -253,6 +253,56 @@ def test_guarded_transaction_commits_when_revision_conditions_hold():
     assert committed["run/restart-intents/intent-a"].value == b"intent-a"
 
 
+def test_guarded_transaction_pins_condition_revision_during_refresh_compaction():
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    guard = _guard(store)
+    registration = store.compare_set_in_window(
+        "run/registration",
+        expected_revision=None,
+        not_before_unix_ms=1_000,
+        deadline_unix_ms=None,
+        value=b"same-registration",
+    )
+    clock.now_unix_ms = 1_001
+    referenced = store.compare_refresh_in_window(
+        "run/registration",
+        expected_revision=registration.revision,
+        not_before_unix_ms=1_001,
+        deadline_unix_ms=1_100,
+        value=b"same-registration",
+    )
+    store.compare_set_many_guarded(
+        {
+            "run/receipt": ControlStoreWrite(
+                expected_revision=None,
+                value=b"receipt",
+            )
+        },
+        guard_key="run/coordinator-lease",
+        expected_guard_revision=guard.revision,
+        not_before_unix_ms=1_001,
+        deadline_unix_ms=1_100,
+        conditions={"run/registration": referenced.revision},
+    )
+    current = referenced
+    for now_unix_ms in (1_002, 1_003, 1_004):
+        clock.now_unix_ms = now_unix_ms
+        current = store.compare_refresh_in_window(
+            "run/registration",
+            expected_revision=current.revision,
+            not_before_unix_ms=now_unix_ms,
+            deadline_unix_ms=1_100,
+            value=b"same-registration",
+        )
+
+    assert store.get_history("run/registration") == (
+        registration,
+        referenced,
+        current,
+    )
+
+
 def test_guarded_transaction_rejects_condition_conflict_without_partial_writes():
     clock = ManualClock()
     store = InMemoryControlStore(clock=clock)

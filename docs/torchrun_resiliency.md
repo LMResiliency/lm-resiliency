@@ -339,6 +339,15 @@ store-time-guarded mutation. Expiry takeover creates a new registration ID and
 fencing token. Registration keys are independently scoped by hashed run and node
 identity, so agents on different nodes do not contend.
 
+Equivalent heartbeat renewals use a store refresh operation that compacts
+unreferenced intermediate values. The retained history keeps the initial and
+current values of each registration lifetime plus every revision consumed by a
+successful guarded transaction condition. Acknowledgements and plan commits
+therefore retain the exact registration authority they used, while long-running
+active and standby agents do not accumulate one durable history entry per
+heartbeat. History readers accept compacted same-registration mutation gaps only
+when the skipped renewals could all have completed before lease expiry.
+
 The coordinator does not enumerate arbitrary control-store keys. A registration
 reader receives the trusted scheduler node-ID set explicitly, derives the same
 hashed keys as the agents, and reads only those registrations. After completing
@@ -1129,11 +1138,12 @@ expected run and node, requires an authoritative commit time, rejects guarded
 registration writes, and preserves the store transaction, mutation, value, and
 lifetime sequences. It also rejects impossible per-entry sequence lineage. The
 following stable reader validates that the retained history begins at the
-initial sequences and contains every renewal, replacement, and recreated-key
-transition. It rejects overlapping registrations, expired renewals, recurrent
-registration identities or fencing tokens, and a current value that is not the
-retained tail. A released registration remains visible in the immutable history
-while the current value is absent.
+initial sequences and contains every replacement and recreated-key transition,
+plus the compacted same-registration renewal boundaries needed to prove lease
+continuity. It rejects overlapping registrations, expired renewal spans,
+recurrent registration identities or fencing tokens, and a current value that
+is not the retained tail. A released registration remains visible in the
+immutable history while the current value is absent.
 
 The restart-acknowledgement state reader double-collects the current open
 intent, verified agent-registration history, and durable coordinator-lease
@@ -1164,12 +1174,12 @@ windows. It performs no store reads; a following stable reader supplies the
 durable dependencies before acknowledgement collection or quorum logic.
 
 The per-node receipt reader double-collects the restart-intent opening, the
-create-once acknowledgement key, complete agent-registration history, and
-complete coordinator-lease history. For the active preparation path it reads
-the current opening. After closure it can instead consume the durable opening
-retained by the authenticated lifecycle record, without reconstructing lost
-preparation revisions or time bounds. A never-created receipt key returns no
-acknowledgement. Deleted, rewritten, malformed, or orphaned receipts fail
+create-once acknowledgement key, verified retained agent-registration history,
+and complete coordinator-lease history. For the active preparation path it
+reads the current opening. After closure it can instead consume the durable
+opening retained by the authenticated lifecycle record, without reconstructing
+lost preparation revisions or time bounds. A never-created receipt key returns
+no acknowledgement. Deleted, rewritten, malformed, or orphaned receipts fail
 closed. Renewed registrations and coordinator leases do not invalidate an
 already committed receipt because the reader resolves the exact historical
 authorities stamped into that receipt.
@@ -1501,6 +1511,10 @@ standbys cannot create or replace that record. Initial registration backend I/O
 does not hold the handler's ownership lock, so local shutdown remains bounded
 while registration is stalled. A registration response arriving after local
 shutdown is not installed or heartbeated and expires conservatively.
+Before any assigned handler returns generation zero, it publishes a
+generation-scoped arrival tied to its live registration and waits until every
+committed slot has a live matching arrival. Missing assigned nodes therefore
+fail at the formation deadline instead of launching a partial worker group.
 Replacement generation admission, restart-context publication, and the positive
 `num_nodes_waiting()` restart edge are enabled only after authoritative
 restart-plan readback is integrated in the following slice.
@@ -1513,7 +1527,9 @@ are bounded by the remaining join deadline, so a missing slot-zero publisher
 cannot strand other agents on the underlying store timeout. When the deployment
 supplies an already running agent-owned bootstrap endpoint, the handler reports
 `use_agent_store=True`; a generated endpoint reports `False` so the stock agent
-creates the worker-side TCP store.
+creates the worker-side TCP store. After bounded bootstrap reads complete, every
+returned store is restored to the shared configured join timeout so later stock
+agent coordination does not inherit rank-specific remaining-deadline values.
 
 Passive standbys are not reported by `num_nodes_waiting()`. After a plan
 commits, the selected replacement becomes the only newly waiting node visible
