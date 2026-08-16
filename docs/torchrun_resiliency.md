@@ -1611,8 +1611,13 @@ directory lock nonblocking under the admission or bounded-cleanup deadline, so
 a stale process cannot strand replacement admission. The replacement deadline
 is derived and revalidated from authoritative, nondecreasing control-store time
 rather than an agent wall clock. Passive standbys and removed nodes remain
-parked. The positive `num_nodes_waiting()` restart edge remains disabled until
-the following signaling slice.
+parked until a committed successor selects them. After one handler has returned
+workers for a generation, `num_nodes_waiting()` compares that exact admitted
+assignment with the latest authoritative successor. It reports only newly
+assigned standby nodes whose current registrations are live and compatible
+with the workload. A transient generation, plan, registration, or authoritative
+time read returns zero so healthy workers continue running; contradictory
+persisted state fails closed.
 
 All handler incarnations use one immutable generation-scoped `PrefixStore` for
 PyTorch's worker bootstrap keys. Slot zero publishes one address/port pair and
@@ -1626,12 +1631,15 @@ creates the worker-side TCP store. After bounded bootstrap reads complete, every
 returned store is restored to the shared configured join timeout so later stock
 agent coordination does not inherit rank-specific remaining-deadline values.
 
-Passive standbys are not reported by `num_nodes_waiting()`. In the following
-signaling slice, after a plan commits, the selected replacement becomes the only
-newly waiting node visible to active agents. This is the restart edge: a random
-late node must not trigger scale-up. The mechanism is used only when the next
-plan admits at least one standby; it is not a generic restart signal for
-unchanged membership.
+Passive standbys are not reported by `num_nodes_waiting()`. After a plan
+commits, the selected replacement becomes the only newly waiting node visible
+to handlers that already returned the prior active generation. This is the
+restart edge: a random late node, an unregistered selected node, an expired
+registration, or a handler that has not launched workers must not trigger
+scale-up. After a handler successfully admits the successor, its recorded
+assignment advances and the signal returns to zero. The mechanism is used only
+when the next plan admits at least one standby; it is not a generic restart
+signal for unchanged membership.
 
 Before returning an admitted node from `next_rendezvous()`, the handler:
 

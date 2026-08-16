@@ -167,6 +167,11 @@ class StaticRecoveryStateReader:
         return self._state
 
 
+class FailingRecoveryStateReader:
+    def read_recovery_state(self) -> object:
+        raise RuntimeError("control plane unavailable")
+
+
 def _static_recovery_state(
     plan: RestartPlan,
     *,
@@ -2545,6 +2550,196 @@ def test_slot_aware_handler_parks_standby_without_reporting_waiting_node(
     assert reader.get("node-b") is None
     assert standby.shutdown() is True
     assert closer.shutdown() is True
+
+
+def test_slot_aware_handler_reports_only_live_plan_selected_replacement(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    manager, lease, current = _initialize_generation(store, clock, ("node-a",))
+    active = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-a",
+            min_nodes=1,
+            max_nodes=3,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-a",
+    )
+    assert active.next_rendezvous().rank == 0
+
+    random_config = _handler_config(
+        tmp_path,
+        node_id="node-c",
+        min_nodes=1,
+        max_nodes=3,
+    )
+    random_manager = AgentRegistrationManager(
+        store,
+        agent_identity=random_config.build_agent_identity(
+            agent_id="agent-c",
+            hostname="node-c.example",
+        ),
+        lease_duration_ms=random_config.policy.registration_lease_duration_ms,
+        clock=clock,
+    )
+    random_registration = random_manager.register()
+    plan = _replacement_plan(node_id="node-b")
+    successor = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    manager.commit_successor(lease, current, successor)
+    active._publication_reader = cast(Any, FailingRecoveryStateReader())
+
+    assert active.num_nodes_waiting() == 0
+
+    active._publication_reader = cast(
+        Any,
+        StaticRecoveryStateReader(_static_recovery_state(plan)),
+    )
+
+    assert active.num_nodes_waiting() == 0
+
+    selected_config = _handler_config(
+        tmp_path,
+        node_id="node-b",
+        min_nodes=1,
+        max_nodes=3,
+    )
+    selected_manager = AgentRegistrationManager(
+        store,
+        agent_identity=selected_config.build_agent_identity(
+            agent_id="agent-b",
+            hostname="node-b.example",
+        ),
+        lease_duration_ms=selected_config.policy.registration_lease_duration_ms,
+        clock=clock,
+    )
+    selected_registration = selected_manager.register()
+
+    assert active.num_nodes_waiting() == 1
+
+    selected_manager.release(selected_registration)
+    random_manager.release(random_registration)
+    assert active.shutdown() is True
+
+
+def test_slot_aware_handler_rejects_incompatible_selected_replacement(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    manager, lease, current = _initialize_generation(store, clock, ("node-a",))
+    active = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-a",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-a",
+    )
+    assert active.next_rendezvous().rank == 0
+    selected_config = replace(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        environment_digest="environment-v2",
+    )
+    selected_manager = AgentRegistrationManager(
+        store,
+        agent_identity=selected_config.build_agent_identity(
+            agent_id="agent-b",
+            hostname="node-b.example",
+        ),
+        lease_duration_ms=selected_config.policy.registration_lease_duration_ms,
+        clock=clock,
+    )
+    selected_registration = selected_manager.register()
+    plan = _replacement_plan(node_id="node-b")
+    successor = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    manager.commit_successor(lease, current, successor)
+    active._publication_reader = cast(
+        Any,
+        StaticRecoveryStateReader(_static_recovery_state(plan)),
+    )
+
+    with pytest.raises(RendezvousStateError, match="incompatible"):
+        active.num_nodes_waiting()
+
+    selected_manager.release(selected_registration)
+    assert active.shutdown() is True
+
+
+def test_slot_aware_handler_hides_expired_selected_replacement(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    manager, lease, current = _initialize_generation(store, clock, ("node-a",))
+    active = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-a",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-a",
+    )
+    assert active.next_rendezvous().rank == 0
+    selected_config = _handler_config(
+        tmp_path,
+        node_id="node-b",
+        min_nodes=1,
+        max_nodes=2,
+    )
+    selected_manager = AgentRegistrationManager(
+        store,
+        agent_identity=selected_config.build_agent_identity(
+            agent_id="agent-b",
+            hostname="node-b.example",
+        ),
+        lease_duration_ms=50,
+        clock=clock,
+    )
+    selected_manager.register()
+    plan = _replacement_plan(
+        node_id="node-b",
+        restart_deadline_unix_ms=100_000,
+    )
+    successor = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    manager.commit_successor(lease, current, successor)
+    active._publication_reader = cast(
+        Any,
+        StaticRecoveryStateReader(_static_recovery_state(plan)),
+    )
+    clock.advance(51)
+
+    assert active.num_nodes_waiting() == 0
+    assert active.shutdown() is True
 
 
 def test_slot_aware_handler_local_shutdown_does_not_close_shared_run(

@@ -492,6 +492,8 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         self._closure_read_lock = threading.Lock()
         self._replacement_clock_lock = threading.Lock()
         self._last_replacement_now_unix_ms: int | None = None
+        self._admitted_assignment_lock = threading.Lock()
+        self._admitted_assignment: RankAssignment | None = None
         self._shutdown_lock = threading.Lock()
 
     @property
@@ -601,6 +603,9 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                                 admission_deadline,
                                 context_token,
                             )
+                        self._record_admitted_assignment(
+                            current.snapshot.record.assignment,
+                        )
                         return RendezvousInfo(
                             bootstrap_store,
                             slot,
@@ -768,12 +773,95 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         self._state_changed_event.set()
 
     def num_nodes_waiting(self) -> int:
-        """Hide passive standbys until a committed replacement plan exists."""
+        """Expose only live plan-selected replacement nodes to healthy workers."""
 
         if self.is_closed():
             return 0
         self._raise_heartbeat_error()
-        return 0
+        with self._admitted_assignment_lock:
+            admitted = self._admitted_assignment
+        if admitted is None:
+            return 0
+        try:
+            current = self._read_generation()
+            if (
+                current is None
+                or current.snapshot.record.assignment.generation <= admitted.generation
+            ):
+                return 0
+            successor = current.snapshot.record.assignment
+            if successor.generation != admitted.generation + 1:
+                raise RendezvousStateError("replacement signal skipped an admitted generation")
+            recovery_state = self._read_recovery_state()
+        except RendezvousConnectionError:
+            return 0
+        if recovery_state is None:
+            raise RendezvousStateError(
+                "replacement generation lacks an authoritative restart-plan publication"
+            )
+        self._validate_replacement_generation(current, recovery_state)
+        admitted_nodes = set(admitted.slot_to_node_id.values())
+        successor_nodes = set(successor.slot_to_node_id.values())
+        replacement_nodes = successor_nodes - admitted_nodes
+        if not replacement_nodes:
+            raise RendezvousStateError("replacement generation does not admit a new standby node")
+        if len(replacement_nodes) > self._config.max_nodes - self._config.min_nodes:
+            raise RendezvousStateError("replacement generation exceeds configured standby capacity")
+        try:
+            now_unix_ms = self._replacement_now_unix_ms(recovery_state)
+            if now_unix_ms >= recovery_state.plan.restart_deadline_unix_ms:
+                return 0
+            for node_id in sorted(replacement_nodes):
+                registration = self._replacement_signal_registration(node_id)
+                if registration is None:
+                    return 0
+                self._validate_registration_window(
+                    registration,
+                    now_unix_ms=now_unix_ms,
+                )
+        except RendezvousConnectionError:
+            return 0
+        return len(replacement_nodes)
+
+    def _record_admitted_assignment(self, assignment: RankAssignment) -> None:
+        with self._admitted_assignment_lock:
+            previous = self._admitted_assignment
+            if previous is not None and assignment.generation < previous.generation:
+                raise RendezvousStateError("admitted generation moved backward")
+            self._admitted_assignment = assignment
+
+    def _replacement_signal_registration(
+        self,
+        node_id: str,
+    ) -> HeldAgentRegistration | None:
+        try:
+            history = AgentRegistrationHistoryReader(
+                self._control_store,
+                run_id=self._config.run_id,
+                node_id=node_id,
+            ).read()
+        except AgentRegistrationHistoryCorrupt as error:
+            raise RendezvousStateError(
+                "selected replacement registration history is corrupt"
+            ) from error
+        except AgentRegistrationHistoryError:
+            return None
+        except Exception:
+            return None
+        registration = history.current
+        if registration is None:
+            return None
+        identity = registration.record.agent_identity
+        if identity.run_id != self._config.run_id or identity.node_id != node_id:
+            raise RendezvousStateError("selected replacement registration has the wrong identity")
+        if (
+            identity.local_world_size != self._config.local_world_size
+            or identity.environment_digest != self._agent_identity.environment_digest
+        ):
+            raise RendezvousStateError(
+                "selected replacement registration is incompatible with the workload"
+            )
+        return registration
 
     def shutdown(self) -> bool:
         self._closed_event.set()
@@ -3412,23 +3500,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                 raise RendezvousStateError(
                     "replacement generation lacks an authoritative restart-plan publication"
                 )
-            plan = recovery_state.plan
-            expected_assignment = RankAssignment.from_assignments(
-                run_id=plan.run_id,
-                generation=plan.to_generation,
-                assignments=plan.slot_assignments,
-                topology_digest=plan.topology_digest,
-            )
-            if (
-                plan.run_id != self._config.run_id
-                or plan.to_generation != assignment.generation
-                or expected_assignment != assignment
-                or plan.expected_world_size
-                != self._config.min_nodes * self._config.local_world_size
-            ):
-                raise RendezvousStateError(
-                    "replacement plan does not match the committed generation assignment"
-                )
+            self._validate_replacement_generation(current, recovery_state)
             admission_deadline = self._replacement_deadline(
                 recovery_state,
                 formation_deadline,
@@ -3436,6 +3508,29 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         self._ensure_job_compatibility()
         self._validate_assigned_registration_history()
         return slot, recovery_state, admission_deadline
+
+    def _validate_replacement_generation(
+        self,
+        current: CurrentGeneration,
+        recovery_state: RestartPlanPersistedRecoveryState,
+    ) -> None:
+        assignment = current.snapshot.record.assignment
+        plan = recovery_state.plan
+        expected_assignment = RankAssignment.from_assignments(
+            run_id=plan.run_id,
+            generation=plan.to_generation,
+            assignments=plan.slot_assignments,
+            topology_digest=plan.topology_digest,
+        )
+        if (
+            plan.run_id != self._config.run_id
+            or plan.to_generation != assignment.generation
+            or expected_assignment != assignment
+            or plan.expected_world_size != self._config.min_nodes * self._config.local_world_size
+        ):
+            raise RendezvousStateError(
+                "replacement plan does not match the committed generation assignment"
+            )
 
     def _read_recovery_state(self) -> RestartPlanPersistedRecoveryState | None:
         try:
