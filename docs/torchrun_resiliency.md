@@ -992,6 +992,14 @@ coordinator authority in store transaction order. Conflicts distinguish
 changed intent state, lost registration, lost coordinator ownership, elapsed
 intent time, and contradictory store time.
 
+After coordinator failover, one strict persisted-receipt value reconstructs a
+committed acknowledgement from its canonical store entry, committed intent
+opening, complete agent-registration authority, and coordinator authority. It
+requires immutable key lineage, exact guard provenance, active generation
+membership, causal transaction order, and a commit inside all three authority
+windows. It performs no store reads; a following stable reader supplies the
+durable dependencies before acknowledgement collection or quorum logic.
+
 For a crashed or unreachable node, no preparation is assumed.
 
 ## API: lm-resiliency to the Framework
