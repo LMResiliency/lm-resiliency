@@ -39,6 +39,11 @@ from lm_resiliency.integrations.torchrun._restart_ack_records import (
 from lm_resiliency.integrations.torchrun._restart_intent_lifecycle_auth import (
     AuthenticatedInitialRestartIntentClosure,
 )
+from lm_resiliency.integrations.torchrun._restart_intent_lifecycle_reader import (
+    InitialRestartIntentLifecycleReader,
+    RestartIntentLifecycleReadCorrupt,
+    RestartIntentLifecycleReadError,
+)
 from lm_resiliency.integrations.torchrun._restart_intent_open_execution import (
     CommittedInitialRestartIntentOpen,
     PersistedInitialRestartIntentOpen,
@@ -268,6 +273,10 @@ class RestartAckCollector:
             store,
             run_id=self._run_id,
         )
+        self._lifecycle_reader = InitialRestartIntentLifecycleReader(
+            store,
+            run_id=self._run_id,
+        )
         self._receipt_readers: dict[str, RestartAckReader] = {}
 
     def collect(self) -> RestartAckCollection:
@@ -306,12 +315,17 @@ class RestartAckCollector:
             raise TypeError("closure must be AuthenticatedInitialRestartIntentClosure")
         if closure.intent.intent.run_id != self._run_id:
             raise ValueError("restart-intent closure belongs to another run")
-        opened = _opening_from_closure(closure)
-        node_ids = _active_node_ids(opened)
         for _ in range(_MAX_READ_ATTEMPTS):
+            current_closure = self._read_closure()
+            if current_closure != closure:
+                continue
+            opened = _opening_from_closure(current_closure)
+            node_ids = _active_node_ids(opened)
             first = self._read_receipts(node_ids, opened=opened)
+            if self._read_closure() != current_closure:
+                continue
             second = self._read_receipts(node_ids, opened=opened)
-            if first != second:
+            if first != second or self._read_closure() != current_closure:
                 continue
             try:
                 return RestartAckCollection(
@@ -382,6 +396,29 @@ class RestartAckCollector:
         if opened is None:
             raise RestartAckCollectionReadConflict("no current restart intent is open")
         return PersistedInitialRestartIntentOpen.from_committed(opened)
+
+    def _read_closure(self) -> AuthenticatedInitialRestartIntentClosure:
+        try:
+            closure = self._lifecycle_reader.read()
+        except RestartIntentLifecycleReadCorrupt as error:
+            raise RestartAckCollectionReadCorrupt(
+                "persisted restart-intent lifecycle is corrupt"
+            ) from error
+        except RestartIntentLifecycleReadError as error:
+            raise RestartAckCollectionReadConflict(
+                "restart-intent lifecycle changed repeatedly during collection"
+            ) from error
+        except (CoordinatorLeaseHistoryCorrupt, GenerationStateCorrupt) as error:
+            raise RestartAckCollectionReadCorrupt(
+                "restart-intent lifecycle dependencies are corrupt"
+            ) from error
+        except (CoordinatorLeaseHistoryError, GenerationStateError) as error:
+            raise RestartAckCollectionReadConflict(
+                "restart-intent lifecycle dependencies changed repeatedly"
+            ) from error
+        if closure is None:
+            raise RestartAckCollectionReadConflict("restart intent is not closed")
+        return closure
 
 
 def _current_receipt(

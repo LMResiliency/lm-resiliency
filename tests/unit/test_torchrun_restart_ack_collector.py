@@ -231,6 +231,32 @@ def test_restart_ack_collector_reconstructs_historical_receipts_after_closure():
     assert collection.received_node_ids == ("node-a", "node-b")
 
 
+def test_restart_ack_collector_rejects_deleted_closed_opening():
+    store, _, clock, lease = _state_details(
+        committed_node_ids=("node-a", "node-b"),
+    )
+    prepared = RestartIntentClosurePreparer(
+        store,
+        run_id=RUN_ID,
+        clock=clock,
+    ).prepare_initial_closure(lease)
+    RestartIntentClosureExecutor(
+        store,
+        run_id=RUN_ID,
+    ).execute_initial_closure(prepared)
+    lifecycle_reader = InitialRestartIntentLifecycleReader(store, run_id=RUN_ID)
+    closure = lifecycle_reader.read()
+    assert closure is not None
+    intent_entry = closure.state.intent_entry
+    store.compare_delete(
+        lifecycle_reader.intent_key(closure.intent.intent.intent_id),
+        expected_revision=intent_entry.revision,
+    )
+
+    with pytest.raises(RestartAckCollectionReadCorrupt, match="lifecycle"):
+        RestartAckCollector(store, run_id=RUN_ID).collect_for_closure(closure)
+
+
 class SequencedCollector(RestartAckCollector):
     def __init__(
         self,

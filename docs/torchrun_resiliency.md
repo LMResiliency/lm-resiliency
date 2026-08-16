@@ -922,8 +922,9 @@ Repeated lifecycle, generation, or lease-history movement remains a retryable
 conflict; missing, mixed, causally impossible, or unsafe recovery evidence
 fails closed. For `latest`, the caller supplies the exact stable
 restart-acknowledgement evidence reconstructed from the authenticated closed
-intent; the following readback integration wires that historical collection
-directly into this method.
+intent by calling the historical acknowledgement collector and passing the
+resulting evidence to `read_recovery_state()`. Direct collector wiring remains
+a following integration step.
 
 Before commit, the coordinator validates:
 
