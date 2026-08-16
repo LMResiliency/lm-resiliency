@@ -51,6 +51,7 @@ They support one or two hosts through standard `torchrun` arguments.
 | Framework | Example | Framework-owned path |
 |---|---|---|
 | PyTorch | [pytorch.py](production_loops/pytorch.py) | DDP forward, backward, and `AdamW.step()` |
+| PyTorch with torchrun replacement | [torchrun.py](production_loops/torchrun.py) | DDP, SCOUT localization, GEMINI recovery, standby replacement, and stable logical ranks |
 | TorchTitan | [torchtitan.py](production_loops/torchtitan.py) | `Trainer.train()` |
 | Megatron Core | [megatron.py](production_loops/megatron.py) | `training.train()` and `train_step()` |
 | DeepSpeed | [deepspeed.py](production_loops/deepspeed.py) | `DeepSpeedEngine.backward()` and `DeepSpeedEngine.step()` |
@@ -75,6 +76,35 @@ torchrun --nnodes=2 --nproc-per-node=8 --module \
 
 Replace the module and artifact directory for PyTorch, Megatron Core, or DeepSpeed.
 Use a different rendezvous port for concurrent jobs.
+
+Run the complete torchrun replacement campaign on one host with six GPUs:
+
+```bash
+python -m examples.production_loops.torchrun orchestrate \
+  --workspace /tmp/lm-resiliency-torchrun \
+  --gpus 0,1,2,3,4,5
+```
+
+Run the same campaign across two hosts with three GPUs per host and a shared
+workspace:
+
+```bash
+python -m examples.production_loops.torchrun orchestrate \
+  --workspace /shared/lm-resiliency-torchrun \
+  --gpus 0,1,2 \
+  --remote-host "$REMOTE_HOST" \
+  --remote-gpus 0,1,2 \
+  --remote-python "$REMOTE_PYTHON" \
+  --remote-source-dir /tmp/lm-resiliency-torchrun-source \
+  --rdzv-host "$LOCAL_HOST"
+```
+
+The orchestrator runs an uninterrupted baseline, starts four active agents and
+two parked standbys, injects SCOUT replay faults at optimizer steps 3 and 6,
+publishes manager-owned recovery plans, and requires GEMINI to restore verified
+steps 2 and 5 exactly before training resumes. It also verifies slot
+inheritance, clean agent shutdown, exact losses and RNG state, and strict final
+tensor error bounds against the baseline.
 
 Each example runs ten steps by default.
 Set `--steps` to change the duration.

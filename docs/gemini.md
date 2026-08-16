@@ -160,10 +160,19 @@ SDC. An SDC in one group therefore rejects the candidate on every rank.
 GEMINI serializes only completed slots.
 Each shard is written to a same-directory temporary file, flushed, and atomically renamed before it becomes visible to recovery.
 Restart mirrors use the same publication rule.
-Temporary files left by a terminated writer are ignored and removed before the next write to that shard, while latest-mode recovery walks older generations until it finds the newest shard set that every rank can load and validate.
+Temporary files carry a boot and PID-namespace ownership scope. Files left by a
+terminated writer in the same scope are removed before the next write to that
+shard; temporary files from another host or PID namespace are never reaped using
+local PID checks. Latest-mode recovery walks older generations until it finds the
+newest shard set that every rank can load and validate.
 At a dense accepted boundary, it persists the latest local CPU checkpoint and received peer replica as recovery-verified.
 At a dynamic recipe-cycle boundary, it persists them as the new candidate and records candidate and recovery-verified steps separately.
 Each rank owns its status sidecar; several workers on one node never update the same mutable trust record.
+The sidecar is also published by same-directory replacement. Remote filesystem
+clients can briefly observe incomplete bytes while another client replaces the
+file, so readers retry only byte, UTF-8, and JSON visibility failures for a
+bounded interval. A persistently malformed sidecar, or any decoded identity,
+schema, or trust mismatch, still fails closed.
 A persisted peer shard carries the corresponding peer status so recovery can reconstruct the verified generation after node loss.
 If newer status cannot be established, recovery selects the common verified step conservatively.
 With `verify_integrity=True`, it stores a CRC-32 for each shard and treats a checksum failure or missing checksum metadata as an unavailable shard.

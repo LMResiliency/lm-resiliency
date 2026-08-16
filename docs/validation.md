@@ -94,6 +94,31 @@ Dedicated lifecycle programs additionally validate FSDP2 and HSDP on the same tw
 The executable one-host and two-host `torchrun` commands are documented in [Production-loop examples](../examples/README.md).
 The same examples enable the integration campaign directly with `--inject-fault`.
 
+### Torchrun standby replacement
+
+On 2026-08-16, the native torchrun replacement campaign passed on two hosts
+using three A100 GPUs per host with PyTorch 2.13.0 and CUDA 13. The campaign
+used four active logical ranks and two parked standby agents over a TCP
+rendezvous, with shared GEMINI checkpoint storage.
+
+SCOUT injected and exactly localized replay-only SDC on logical rank 3 at
+optimizer steps 3 and 6. The manager published one replacement plan per
+incident. GEMINI restored recovery-verified steps 2 and 5 bitwise on every
+rank; `node-e` and then `node-f` inherited logical slot 3 while the localized
+nodes remained excluded. All six torchrun agents exited cleanly after step 8.
+
+The resilient run matched the uninterrupted baseline exactly for losses, RNG,
+and caller-owned step state. The maximum final absolute difference was
+`2.91e-11` for model tensors and `2.33e-10` for AdamW tensors, below the fixed
+`1e-10` and `1e-9` bounds used by the example. Checkpoint restoration itself
+remained bitwise exact; the final tolerance accounts only for NCCL reduction
+order after physical-rank replacement.
+
+The campaign also exposed and corrected two cross-host checkpoint-filesystem
+issues: local PID checks no longer reap another host's live temporary shard,
+and status readers tolerate only bounded transient remote-client visibility of
+partially replaced JSON.
+
 ## Native PyTorch
 
 The package-root `enable_resiliency()` API was validated with a deterministic three-block transformer and AdamW.

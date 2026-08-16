@@ -27,6 +27,11 @@ The complete CPU unit suite qualifies these representative combinations:
 
 The primary combination also passes the distributed framework campaign.
 Production Megatron grouped-expert validation used PyTorch 2.10.0 and Transformer Engine 2.10.0.
+The native `torchrun.handlers` rendezvous integration uses the supported
+PyTorch 2.10-2.13 entry-point contract. Its complete standby-replacement
+campaign was validated with PyTorch 2.13.0 on one host and across two A100
+hosts; the supported-version CPU matrix covers handler construction and the
+manager-owned recovery-plan protocol on every declared PyTorch minor.
 
 CUDA, NCCL, GPU, and topology details for distributed runs are recorded in [Validation](validation.md).
 

@@ -1,8 +1,10 @@
 """Tests for the GEMINI checkpoint engine with mocked distributed state."""
 
+import json
 import pickle
 import tempfile
 import threading
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -50,6 +52,36 @@ def test_checkpoint_status_store_is_rank_scoped(tmp_dir):
     assert rank_one.read() == one_status
     assert rank_zero.path.name == "GEMINI_CHECKPOINT_STATUS.rank-0"
     assert rank_one.path.name == "GEMINI_CHECKPOINT_STATUS.rank-1"
+
+
+def test_checkpoint_status_retries_transient_partial_json(tmp_dir):
+    store = CheckpointStatusStore(tmp_dir, rank=0, run_id="run-a", topology_id="topology-a")
+    status = CheckpointStatus(candidate_step=10, recovery_verified_step=5)
+    store.write(status)
+    complete = store.path.read_bytes()
+
+    with (
+        patch.object(
+            Path,
+            "read_bytes",
+            autospec=True,
+            side_effect=[b'{"schema_version":2,"run_id":"run-a', complete],
+        ),
+        patch("lm_resiliency.checkpointing.disk.time.sleep"),
+    ):
+        assert store.read() == status
+
+
+def test_checkpoint_status_persistently_malformed_json_fails_closed(tmp_dir, monkeypatch):
+    store = CheckpointStatusStore(tmp_dir, rank=0)
+    store.path.write_text('{"schema_version":', encoding="utf-8")
+    monkeypatch.setattr(
+        "lm_resiliency.checkpointing.disk._STATUS_READ_RETRY_SECONDS",
+        0.0,
+    )
+
+    with pytest.raises(json.JSONDecodeError):
+        store.read()
 
 
 def test_checkpoint_status_rejects_another_run_or_topology(tmp_dir):
