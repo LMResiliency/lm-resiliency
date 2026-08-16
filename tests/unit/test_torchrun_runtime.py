@@ -813,6 +813,30 @@ def test_restart_context_file_clears_only_the_matching_cleanup_token(
     assert not path.exists()
 
 
+def test_restart_context_file_invalidates_context_while_directory_lock_is_held(
+    tmp_path: Path,
+):
+    path = tmp_path / "private" / "restart-context.json"
+    monotonic_clock = ManualMonotonicClock()
+    context_file = RestartContextFile(path, monotonic_clock=monotonic_clock)
+    cleanup_token = context_file.write(_context())
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    fcntl.flock(directory, fcntl.LOCK_EX)
+    try:
+        context_file.invalidate(cleanup_token)
+
+        with pytest.raises(RestartContextFileError, match="invalidated"):
+            context_file.read()
+        with pytest.raises(RestartContextFileError, match="timed out locking"):
+            context_file.clear_if_token(
+                cleanup_token,
+                deadline=monotonic_clock(),
+            )
+    finally:
+        fcntl.flock(directory, fcntl.LOCK_UN)
+        os.close(directory)
+
+
 def test_restart_context_file_preserves_previous_value_when_replace_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3349,6 +3373,66 @@ def test_slot_aware_handler_clears_replacement_context_after_admission_failure(
     assert handler.shutdown() is True
 
 
+def test_slot_aware_handler_invalidates_context_when_cleanup_cannot_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    manager, lease, current = _initialize_generation(store, clock, ("node-a",))
+    plan = _replacement_plan()
+    successor = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    manager.commit_successor(lease, current, successor)
+    config = _handler_config(
+        tmp_path,
+        node_id="node-b",
+        min_nodes=1,
+        max_nodes=2,
+    )
+    handler = _handler(
+        config,
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+    )
+    handler._publication_reader = cast(
+        Any,
+        StaticRecoveryStateReader(_static_recovery_state(plan)),
+    )
+
+    def fail_after_context(*_args: object) -> object:
+        assert RestartContextFile(config.restart_context_path).read() == RestartContext.from_plan(
+            plan,
+            "node-b",
+        )
+        raise RendezvousConnectionError("injected arrival failure")
+
+    def fail_cleanup(
+        _context_file: RestartContextFile,
+        _cleanup_token: str,
+        *,
+        deadline: float | None = None,
+    ) -> bool:
+        del deadline
+        raise RestartContextFileError("injected cleanup lock timeout")
+
+    monkeypatch.setattr(handler, "_wait_for_assigned_arrivals", fail_after_context)
+    monkeypatch.setattr(RestartContextFile, "clear_if_token", fail_cleanup)
+
+    with pytest.raises(RendezvousConnectionError, match="injected arrival failure"):
+        handler.next_rendezvous()
+
+    assert config.restart_context_path.exists()
+    with pytest.raises(RestartContextFileError, match="invalidated"):
+        RestartContextFile(config.restart_context_path).read()
+    handler.shutdown()
+
+
 def test_slot_aware_handler_rejects_replacement_clock_behind_publication(
     tmp_path: Path,
 ):
@@ -3436,6 +3520,7 @@ def test_slot_aware_handler_rechecks_deadline_before_returning_admission(
     monkeypatch: pytest.MonkeyPatch,
 ):
     clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
     monotonic_clock = ManualMonotonicClock()
     handler = _handler(
         _handler_config(
@@ -3444,33 +3529,42 @@ def test_slot_aware_handler_rechecks_deadline_before_returning_admission(
             min_nodes=1,
             max_nodes=2,
         ),
-        store=InMemoryControlStore(clock=clock),
+        store=store,
         clock=clock,
         agent_id="agent-b",
         monotonic_clock=monotonic_clock,
     )
-    recovery_state = _static_recovery_state(
-        _replacement_plan(restart_deadline_unix_ms=clock() + 50)
+    plan = _replacement_plan(restart_deadline_unix_ms=clock() + 50)
+    recovery_state = _static_recovery_state(plan)
+    assignment = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
     )
     deadline = monotonic_clock() + 0.05
+    handler._ensure_registered(time.monotonic() + 1)
+
+    def validate_after_blocking_work(*_args: object, **_kwargs: object) -> None:
+        clock.advance(50)
+        monotonic_clock.advance(0.05)
+
     monkeypatch.setattr(
         handler,
         "_validate_final_admission_state",
-        lambda _current, state, final_deadline: handler._validate_replacement_deadline(
-            state,
-            final_deadline,
-        ),
+        validate_after_blocking_work,
     )
-
-    clock.advance(50)
-    monotonic_clock.advance(0.05)
+    monkeypatch.setattr(handler, "_validate_current_arrival_attempt", lambda *_args: None)
 
     with pytest.raises(RendezvousTimeoutError):
         handler._validate_replacement_return(
             cast(Any, object()),
+            assignment,
+            1,
             cast(Any, recovery_state),
             deadline,
         )
+    assert handler.shutdown() is True
 
 
 def test_slot_aware_handler_requires_live_registration_before_returning_admission(
@@ -3507,7 +3601,19 @@ def test_slot_aware_handler_requires_live_registration_before_returning_admissio
         clock=clock,
     )
     replacement_manager.register()
-    monkeypatch.setattr(handler, "_validate_final_admission_state", lambda *_args: None)
+    monkeypatch.setattr(
+        handler,
+        "_validate_final_admission_state",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(handler, "_validate_current_arrival_attempt", lambda *_args: None)
+    plan = _replacement_plan()
+    assignment = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
 
     with pytest.raises(
         RendezvousConnectionError,
@@ -3515,9 +3621,110 @@ def test_slot_aware_handler_requires_live_registration_before_returning_admissio
     ):
         handler._validate_replacement_return(
             cast(Any, object()),
-            cast(Any, _static_recovery_state(_replacement_plan())),
+            assignment,
+            1,
+            cast(Any, _static_recovery_state(plan)),
             deadline,
         )
+
+
+def test_slot_aware_handler_uses_authoritative_time_for_final_registration_expiry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    client_clock = ManualClock()
+    store_clock = ManualClock()
+    store = InMemoryControlStore(clock=store_clock)
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=store,
+        clock=client_clock,
+        agent_id="agent-b",
+    )
+    handler._ensure_registered(time.monotonic() + 1)
+    assert handler._stop_heartbeat() is True
+    plan = _replacement_plan(restart_deadline_unix_ms=100_000)
+    assignment = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    monkeypatch.setattr(handler, "_validate_final_admission_state", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(handler, "_validate_current_arrival_attempt", lambda *_args: None)
+    store_clock.advance(handler._config.policy.registration_lease_duration_ms)
+
+    with pytest.raises(
+        RendezvousConnectionError,
+        match="registration has expired",
+    ):
+        handler._validate_replacement_return(
+            cast(Any, object()),
+            assignment,
+            1,
+            cast(Any, _static_recovery_state(plan)),
+            time.monotonic() + 1,
+        )
+    handler.shutdown()
+
+
+def test_slot_aware_handler_rejects_advanced_attempt_before_returning_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+    )
+    handler._ensure_registered(time.monotonic() + 1)
+    with handler._registration_lock:
+        registration = handler._registration
+    assert registration is not None
+    plan = _replacement_plan()
+    assignment = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    store.compare_set(
+        handler._arrival_attempt_key(assignment.generation),
+        expected_revision=None,
+        value=handler._arrival_attempt_value(
+            generation=assignment.generation,
+            attempt=2,
+            registration=registration,
+        ),
+    )
+    monkeypatch.setattr(handler, "_validate_final_admission_state", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(
+        RendezvousStateError,
+        match="does not match its generation",
+    ):
+        handler._validate_replacement_return(
+            cast(Any, object()),
+            assignment,
+            1,
+            cast(Any, _static_recovery_state(plan)),
+            time.monotonic() + 1,
+        )
+
+    assert handler.shutdown() is True
 
 
 def test_slot_aware_handler_rejects_assignment_size_mismatch(tmp_path: Path):

@@ -1546,13 +1546,16 @@ That guarded transaction conditions on every readiness and live registration
 revision, the attempt and completion records, the generation head and immutable
 snapshot, and absence of terminal closure, and it must commit before the plan's
 exclusive restart deadline. Every replacement handler observes and validates
-the same admission proof before returning, then rechecks the original deadline
-and confirms that its exact agent incarnation still owns one live
-registration. A completed replacement attempt advances only after this proof
-exists; initial attempts retain the consumption-only advancement rule. Guarded
-barrier transactions pin their registration revision in retained history.
-Missing, unprepared, late, or superseded assigned nodes therefore fail instead
-of allowing an early or stale incarnation to launch a partial worker group.
+the same admission proof before returning. After all blocking plan/context,
+registration-history, and attempt-head reads complete, the handler samples
+authoritative control-store time once and uses that observation to recheck both
+the exclusive restart deadline and the exact registration's lease window. The
+shared attempt head must still name the admitted attempt. A completed
+replacement attempt advances only after this proof exists; initial attempts
+retain the consumption-only advancement rule. Guarded barrier transactions pin
+their registration revision in retained history. Missing, unprepared, late, or
+superseded assigned nodes therefore fail instead of allowing an early or stale
+incarnation to launch a partial worker group.
 
 Registration release is best effort and bounded during local shutdown. If the
 backend remains unavailable, cleanup returns without waiting indefinitely and
@@ -1568,10 +1571,11 @@ node-local `RestartContext` before the assigned node participates in the shared
 arrival barrier. Each assigned node revalidates the plan, generation, deadline,
 and persisted context before publishing readiness; the immutable group-admission
 proof is the final shared decision observed before `next_rendezvous()` returns.
-A failed admission removes the context only when the current file is the exact
-cryptographic cleanup token published by that handler incarnation, so an older
-handler cannot delete a replacement incarnation's atomic update even if the
-filesystem reuses an inode. Context publication and cleanup acquire the parent
+A failed admission first durably invalidates the exact cryptographic cleanup
+token published by that handler incarnation, then attempts bounded physical
+removal. If the directory lock is unavailable, the stale file remains
+unreadable; because invalidation is token-specific, a later replacement
+context remains valid. Context publication and cleanup acquire the parent
 directory lock nonblocking under the admission or bounded-cleanup deadline, so
 a stale process cannot strand replacement admission. The replacement deadline
 is derived and revalidated from authoritative, nondecreasing control-store time
