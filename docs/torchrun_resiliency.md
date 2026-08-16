@@ -1008,6 +1008,13 @@ closed. Renewed registrations and coordinator leases do not invalidate an
 already committed receipt because the reader resolves the exact historical
 authorities stamped into that receipt.
 
+An immutable collection value binds one receipt-or-absence observation to every
+active node in the committed generation. Its keys must exactly match the
+generation assignment, every receipt must answer the same intent opening and
+match its node key, and the mapping is frozen in active-slot order. The value
+separately exposes received, missing, successful, and explicitly failed node
+sets without making a quorum or restart-policy decision.
+
 For a crashed or unreachable node, no preparation is assumed.
 
 ## API: lm-resiliency to the Framework
