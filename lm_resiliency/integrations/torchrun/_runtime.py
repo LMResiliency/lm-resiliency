@@ -7,20 +7,54 @@ import importlib
 import json
 import os
 import secrets
+import socket
 import stat
+import threading
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, ClassVar
+from typing import Any, Callable, ClassVar
 
 try:
     _toml = importlib.import_module("tomllib")
 except ModuleNotFoundError:  # pragma: no cover - exercised by the Python 3.10 CI job.
     _toml = importlib.import_module("tomli")
 
-from torch.distributed.elastic.rendezvous import RendezvousParameters
+from torch.distributed import Store
+from torch.distributed.elastic.rendezvous import (
+    RendezvousClosedError,
+    RendezvousConnectionError,
+    RendezvousHandler,
+    RendezvousInfo,
+    RendezvousParameters,
+    RendezvousStateError,
+    RendezvousStoreInfo,
+    RendezvousTimeoutError,
+)
 
+from lm_resiliency.integrations.torchrun._agent_registration import (
+    AgentRegistrationClockError,
+    AgentRegistrationCorrupt,
+    AgentRegistrationLost,
+    AgentRegistrationManager,
+    AgentRegistrationUnavailable,
+)
+from lm_resiliency.integrations.torchrun._agent_registration_records import (
+    HeldAgentRegistration,
+)
+from lm_resiliency.integrations.torchrun._control_store import (
+    ControlStore,
+    ControlStoreConflict,
+    ControlStoreEntry,
+)
+from lm_resiliency.integrations.torchrun._generation_reader import (
+    CurrentGeneration,
+    GenerationStateCorrupt,
+    GenerationStateError,
+    GenerationStateReader,
+)
 from lm_resiliency.integrations.torchrun._protocol import AgentIdentity, RestartContext
 
 _BACKEND = "lm_resiliency"
@@ -31,6 +65,8 @@ _RESOURCE_IDS_ENV = "LM_RESILIENCY_RESOURCE_IDS"
 _RESTART_CONTEXT_ENV = "LM_RESILIENCY_RESTART_CONTEXT"
 _MAX_CONTEXT_BYTES = 64 * 1024
 _MAX_POLICY_BYTES = 64 * 1024
+_CONTROL_PREFIX = "lm_resiliency/torchrun/v1"
+_CLOSED_SCHEMA_VERSION = 1
 _SHARED_FIELDS = {
     "control_endpoint",
     "replacement_only",
@@ -278,6 +314,381 @@ class TorchrunRuntimeConfig:
             local_addr=params.local_addr,
             source_path=source_path,
         )
+
+
+class SlotAwareRendezvousHandler(RendezvousHandler):
+    """Admit the initial fixed-size worker group and park passive standbys."""
+
+    use_agent_store = True
+
+    def __init__(
+        self,
+        config: TorchrunRuntimeConfig,
+        *,
+        control_store: ControlStore,
+        rendezvous_store: Store,
+        clock: Callable[[], int],
+        agent_id: str | None = None,
+        hostname: str | None = None,
+        bootstrap_store_info: RendezvousStoreInfo | None = None,
+        monotonic_clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if not isinstance(config, TorchrunRuntimeConfig):
+            raise TypeError("config must be TorchrunRuntimeConfig")
+        if not callable(clock):
+            raise TypeError("clock must be callable")
+        if not callable(monotonic_clock):
+            raise TypeError("monotonic_clock must be callable")
+        if bootstrap_store_info is not None and not isinstance(
+            bootstrap_store_info,
+            RendezvousStoreInfo,
+        ):
+            raise TypeError("bootstrap_store_info must be RendezvousStoreInfo or None")
+        self._config = config
+        self._control_store = control_store
+        self._rendezvous_store = rendezvous_store
+        self._bootstrap_store_info = bootstrap_store_info
+        self._monotonic_clock = monotonic_clock
+        self._agent_identity = config.build_agent_identity(
+            agent_id=agent_id or secrets.token_hex(16),
+            hostname=hostname or socket.getfqdn(),
+        )
+        self._registration_manager = AgentRegistrationManager(
+            control_store,
+            agent_identity=self._agent_identity,
+            lease_duration_ms=config.policy.registration_lease_duration_ms,
+            clock=clock,
+        )
+        self._generation_reader = GenerationStateReader(
+            control_store,
+            run_id=config.run_id,
+        )
+        self._restart_context = RestartContextFile(config.restart_context_path)
+        run_digest = hashlib.sha256(config.run_id.encode("utf-8")).hexdigest()
+        self._closure_key = f"{_CONTROL_PREFIX}/runs/{run_digest}/rendezvous-closed"
+        self._closure_value = json.dumps(
+            {
+                "run_id": config.run_id,
+                "schema_version": _CLOSED_SCHEMA_VERSION,
+            },
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        self._registration_lock = threading.RLock()
+        self._registration: HeldAgentRegistration | None = None
+        self._heartbeat_error: Exception | None = None
+        self._heartbeat_thread: threading.Thread | None = None
+        self._stop_heartbeat_event = threading.Event()
+        self._state_changed_event = threading.Event()
+        self._closed_event = threading.Event()
+        self._shutdown_lock = threading.Lock()
+
+    @property
+    def agent_identity(self) -> AgentIdentity:
+        """Return the immutable identity registered by this handler."""
+
+        return self._agent_identity
+
+    @property
+    def closure_key(self) -> str:
+        """Return the run-scoped immutable closure key."""
+
+        return self._closure_key
+
+    def get_backend(self) -> str:
+        return _BACKEND
+
+    def get_run_id(self) -> str:
+        return self._config.run_id
+
+    def next_rendezvous(self) -> RendezvousInfo:
+        """Block passive standbys and admit only the initial committed assignment."""
+
+        if self.is_closed():
+            raise RendezvousClosedError
+        self._ensure_registered()
+        deadline = self._monotonic_clock() + self._config.policy.join_timeout_ms / 1_000
+        try:
+            while True:
+                if self.is_closed():
+                    raise RendezvousClosedError
+                self._raise_heartbeat_error()
+                current = self._read_generation()
+                if current is not None:
+                    slot = self._initial_slot(current)
+                    if slot is not None:
+                        try:
+                            self._restart_context.clear()
+                        except (OSError, RestartContextFileError) as error:
+                            raise RendezvousStateError(
+                                "failed to clear stale initial restart context"
+                            ) from error
+                        bootstrap = self._bootstrap_store_info
+                        if bootstrap is None:
+                            try:
+                                bootstrap = RendezvousStoreInfo.build(
+                                    slot,
+                                    self._rendezvous_store,
+                                    self._config.local_addr,
+                                )
+                            except Exception as error:
+                                raise RendezvousConnectionError(
+                                    "failed to publish rendezvous bootstrap information"
+                                ) from error
+                        return RendezvousInfo(
+                            self._rendezvous_store,
+                            slot,
+                            self._config.min_nodes,
+                            bootstrap,
+                        )
+                if not self._wait_for_change(deadline):
+                    raise RendezvousTimeoutError
+        except (
+            RendezvousClosedError,
+            RendezvousConnectionError,
+            RendezvousStateError,
+            RendezvousTimeoutError,
+        ):
+            if self._stop_heartbeat():
+                self._release_registration(raise_errors=False)
+            raise
+
+    def is_closed(self) -> bool:
+        if self._closed_event.is_set():
+            return True
+        try:
+            entry = self._control_store.get(self._closure_key)
+            if entry is None:
+                if self._control_store.has_history(self._closure_key):
+                    raise RendezvousStateError(
+                        "rendezvous closure record was deleted after publication"
+                    )
+                return False
+            self._validate_closure_entry(entry)
+        except RendezvousStateError:
+            raise
+        except Exception as error:
+            raise RendezvousConnectionError("failed to read rendezvous closure state") from error
+        self._closed_event.set()
+        self._state_changed_event.set()
+        return True
+
+    def set_closed(self) -> None:
+        try:
+            entry = self._control_store.get(self._closure_key)
+            if entry is None:
+                if self._control_store.has_history(self._closure_key):
+                    raise RendezvousStateError(
+                        "rendezvous closure record was deleted after publication"
+                    )
+                try:
+                    entry = self._control_store.compare_set(
+                        self._closure_key,
+                        expected_revision=None,
+                        value=self._closure_value,
+                    )
+                except ControlStoreConflict:
+                    entry = self._control_store.get(self._closure_key)
+                    if entry is None:
+                        raise RendezvousStateError(
+                            "rendezvous closure changed without a current record"
+                        )
+            self._validate_closure_entry(entry)
+        except RendezvousStateError:
+            raise
+        except Exception as error:
+            raise RendezvousConnectionError("failed to publish rendezvous closure state") from error
+        self._closed_event.set()
+        self._state_changed_event.set()
+        if self._stop_heartbeat():
+            self._release_registration(raise_errors=False)
+
+    def num_nodes_waiting(self) -> int:
+        """Hide passive standbys until a committed replacement plan exists."""
+
+        if self.is_closed():
+            return 0
+        self._raise_heartbeat_error()
+        return 0
+
+    def shutdown(self) -> bool:
+        with self._shutdown_lock:
+            succeeded = True
+            try:
+                self.set_closed()
+            except (RendezvousConnectionError, RendezvousStateError):
+                succeeded = False
+                self._closed_event.set()
+                self._state_changed_event.set()
+            heartbeat_stopped = self._stop_heartbeat()
+            if not heartbeat_stopped:
+                succeeded = False
+            elif not self._release_registration(raise_errors=False):
+                succeeded = False
+            thread = self._heartbeat_thread
+            if thread is not None and thread.is_alive():
+                succeeded = False
+            return succeeded
+
+    def _ensure_registered(self) -> None:
+        self._raise_heartbeat_error()
+        with self._registration_lock:
+            if self._registration is None:
+                try:
+                    self._registration = self._registration_manager.register()
+                except AgentRegistrationCorrupt as error:
+                    raise RendezvousStateError("agent registration state is corrupt") from error
+                except (
+                    AgentRegistrationClockError,
+                    AgentRegistrationLost,
+                    AgentRegistrationUnavailable,
+                ) as error:
+                    raise RendezvousConnectionError(
+                        "failed to acquire the agent registration"
+                    ) from error
+                except Exception as error:
+                    raise RendezvousConnectionError("agent registration backend failed") from error
+            thread = self._heartbeat_thread
+            if thread is None or not thread.is_alive():
+                self._heartbeat_thread = threading.Thread(
+                    target=self._heartbeat_loop,
+                    name=f"lm-resiliency-registration-{self._config.node_id}",
+                    daemon=True,
+                )
+                self._heartbeat_thread.start()
+
+    def _heartbeat_loop(self) -> None:
+        interval_seconds = max(
+            self._config.policy.registration_lease_duration_ms / 3_000,
+            0.001,
+        )
+        while not self._stop_heartbeat_event.wait(interval_seconds):
+            with self._registration_lock:
+                registration = self._registration
+                if registration is None:
+                    return
+                try:
+                    self._registration = self._registration_manager.renew(registration)
+                except (
+                    AgentRegistrationClockError,
+                    AgentRegistrationCorrupt,
+                    AgentRegistrationLost,
+                    AgentRegistrationUnavailable,
+                ) as error:
+                    self._heartbeat_error = error
+                    self._state_changed_event.set()
+                    return
+                except Exception as error:
+                    self._heartbeat_error = error
+                    self._state_changed_event.set()
+                    return
+
+    def _stop_heartbeat(self) -> bool:
+        self._stop_heartbeat_event.set()
+        self._state_changed_event.set()
+        thread = self._heartbeat_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(
+                timeout=max(
+                    self._config.policy.poll_interval_ms / 500,
+                    0.1,
+                )
+            )
+        return thread is None or not thread.is_alive()
+
+    def _release_registration(self, *, raise_errors: bool) -> bool:
+        with self._registration_lock:
+            registration = self._registration
+            if registration is None:
+                return True
+            try:
+                self._registration_manager.release(registration)
+            except (
+                AgentRegistrationClockError,
+                AgentRegistrationCorrupt,
+                AgentRegistrationLost,
+                AgentRegistrationUnavailable,
+            ) as error:
+                if raise_errors:
+                    raise RendezvousConnectionError(
+                        "failed to release the agent registration"
+                    ) from error
+                return False
+            except Exception as error:
+                if raise_errors:
+                    raise RendezvousConnectionError(
+                        "agent registration backend failed during release"
+                    ) from error
+                return False
+            self._registration = None
+            return True
+
+    def _raise_heartbeat_error(self) -> None:
+        error = self._heartbeat_error
+        if error is None:
+            return
+        if isinstance(error, AgentRegistrationCorrupt):
+            raise RendezvousStateError(
+                "agent registration heartbeat found corrupt state"
+            ) from error
+        raise RendezvousConnectionError("agent registration heartbeat failed") from error
+
+    def _read_generation(self) -> CurrentGeneration | None:
+        try:
+            return self._generation_reader.current()
+        except GenerationStateCorrupt as error:
+            raise RendezvousStateError("generation state is corrupt") from error
+        except GenerationStateError as error:
+            raise RendezvousConnectionError(
+                "generation state changed repeatedly during rendezvous"
+            ) from error
+        except Exception as error:
+            raise RendezvousConnectionError("generation backend failed") from error
+
+    def _initial_slot(self, current: CurrentGeneration) -> int | None:
+        assignment = current.snapshot.record.assignment
+        if assignment.generation != 0:
+            raise RendezvousStateError(
+                "replacement generations are not supported by this handler revision"
+            )
+        if assignment.active_nodes != self._config.min_nodes:
+            raise RendezvousStateError(
+                "initial assignment active node count does not match min_nodes"
+            )
+        if assignment.local_world_size != self._config.local_world_size:
+            raise RendezvousStateError(
+                "initial assignment local world size does not match runtime configuration"
+            )
+        for slot, node_id in assignment.slot_to_node_id.items():
+            if node_id == self._config.node_id:
+                return slot
+        return None
+
+    def _wait_for_change(self, deadline: float) -> bool:
+        remaining = deadline - self._monotonic_clock()
+        if remaining <= 0:
+            return False
+        self._state_changed_event.wait(
+            min(
+                remaining,
+                self._config.policy.poll_interval_ms / 1_000,
+            )
+        )
+        self._state_changed_event.clear()
+        return self._monotonic_clock() < deadline
+
+    def _validate_closure_entry(self, entry: ControlStoreEntry) -> None:
+        if entry.value != self._closure_value:
+            raise RendezvousStateError("rendezvous closure record is malformed")
+        if (
+            entry.mutation_sequence != 1
+            or entry.value_sequence != 1
+            or entry.lifetime_sequence != 1
+        ):
+            raise RendezvousStateError("rendezvous closure record is not immutable")
+        if entry.guard_key is not None:
+            raise RendezvousStateError("rendezvous closure record must be unguarded")
 
 
 @dataclass(frozen=True, slots=True)
@@ -758,6 +1169,7 @@ def _boolean(value: object, path: str) -> bool:
 __all__ = [
     "RestartContextFile",
     "RestartContextFileError",
+    "SlotAwareRendezvousHandler",
     "TorchrunRendezvousPolicy",
     "TorchrunRuntimeConfig",
     "TorchrunRuntimeConfigError",

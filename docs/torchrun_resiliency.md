@@ -1480,6 +1480,16 @@ named by the committed plan:
 - exactly `min_nodes` slots complete the rendezvous; and
 - returned group rank is derived from logical slot, not arrival order.
 
+The first runtime slice admits only the immutable generation-zero assignment.
+It registers every agent, renews that registration while the handler is alive,
+returns active nodes by logical slot, keeps unassigned agents blocked without
+reporting them as waiting, and propagates one immutable run-scoped closure that
+wakes parked standbys and releases registrations. It also clears any stale
+node-local restart context before the initial generation starts. Replacement
+generation admission, restart-context publication, and the positive
+`num_nodes_waiting()` restart edge are enabled only after authoritative
+restart-plan readback is integrated in the following slice.
+
 Passive standbys are not reported by `num_nodes_waiting()`. After a plan
 commits, the selected replacement becomes the only newly waiting node visible
 to active agents. This is the restart edge: a random late node must not trigger
