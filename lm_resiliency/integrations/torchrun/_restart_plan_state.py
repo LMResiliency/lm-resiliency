@@ -25,6 +25,9 @@ from lm_resiliency.integrations.torchrun._protocol import (
 from lm_resiliency.integrations.torchrun._quarantine_records import (
     NodeQuarantineRecord,
 )
+from lm_resiliency.integrations.torchrun._restart_ack_evidence import (
+    RestartAckEvidence,
+)
 from lm_resiliency.integrations.torchrun._restart_intent_records import (
     RestartIntentLifecycleRecord,
     RestartIntentRecord,
@@ -498,11 +501,70 @@ class RestartPlanCertificationState:
         return self.inventory_state.manifest
 
 
+@dataclass(frozen=True, slots=True)
+class RestartPlanLatestEvidenceState:
+    """One inventory-bound latest plan authorized by restart acknowledgements."""
+
+    inventory_state: RestartPlanInventoryState
+    acknowledgement_evidence: RestartAckEvidence
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.inventory_state, RestartPlanInventoryState):
+            raise TypeError(
+                "RestartPlanLatestEvidenceState.inventory_state must be RestartPlanInventoryState"
+            )
+        if not isinstance(self.acknowledgement_evidence, RestartAckEvidence):
+            raise TypeError(
+                "RestartPlanLatestEvidenceState.acknowledgement_evidence must be RestartAckEvidence"
+            )
+        manifest_state = self.inventory_state.quarantine_state.manifest_state
+        generation_state = manifest_state.generation_state
+        manifest = manifest_state.manifest
+        if manifest.trust != "latest":
+            raise ValueError("RestartPlanLatestEvidenceState requires a latest manifest")
+        if manifest.source_generation != generation_state.plan.from_generation:
+            raise ValueError(
+                "RestartPlanLatestEvidenceState latest manifest is not from the current generation"
+            )
+        if (
+            manifest_state.resolved_manifest.source_snapshot.record
+            != generation_state.from_snapshot
+        ):
+            raise ValueError(
+                "RestartPlanLatestEvidenceState latest manifest does not use "
+                "the exact current generation snapshot"
+            )
+        opened = self.acknowledgement_evidence.collection.opened
+        if opened.prepared.record != generation_state.intent_record:
+            raise ValueError(
+                "RestartPlanLatestEvidenceState acknowledgements answer another restart intent"
+            )
+        if opened.prepared.current.snapshot.record != generation_state.from_snapshot:
+            raise ValueError(
+                "RestartPlanLatestEvidenceState acknowledgements belong to another generation"
+            )
+        for event in self.inventory_state.inventory_events.values():
+            if not self.acknowledgement_evidence.authorizes_latest_inventory(event):
+                raise ValueError(
+                    "RestartPlanLatestEvidenceState inventory event is not authorized "
+                    "by restart acknowledgement evidence"
+                )
+
+    @property
+    def plan(self) -> RestartPlan:
+        return self.inventory_state.plan
+
+    @property
+    def manifest(self) -> RecoveryManifest:
+        return self.inventory_state.manifest
+
+
 __all__ = [
     "ResolvedRecoveryManifest",
     "RestartPlanCertificationState",
     "RestartPlanGenerationState",
     "RestartPlanInventoryState",
+    "RestartPlanLatestEvidenceState",
     "RestartPlanManifestState",
     "RestartPlanQuarantineState",
 ]
