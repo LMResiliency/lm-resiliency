@@ -1154,11 +1154,11 @@ signed publication, and requires the publication transaction and commit time
 to follow lifecycle closure, before returning the reauthorized recovery state.
 Repeated lifecycle, generation, or lease-history movement remains a retryable
 conflict; missing, mixed, causally impossible, or unsafe recovery evidence
-fails closed. For <code>latest</code>, the caller supplies the exact stable
-restart-acknowledgement evidence reconstructed from the authenticated closed
-intent by calling the historical acknowledgement collector and passing the
-resulting evidence to <code>read_recovery_state()</code>. Direct collector wiring remains
-a following integration step.</p>
+fails closed. For <code>latest</code>, <code>read_recovery_state()</code> automatically reconstructs
+the exact stable restart-acknowledgement evidence from the same authenticated
+closed intent when the caller does not supply evidence explicitly. Collector
+contention remains retryable; missing, corrupted, or contradictory historical
+receipts fail closed.</p>
 <p>Before commit, the coordinator validates:</p>
 <ul>
 <li>the plan is fenced to the same intent ID, run, generation, incidents, and
