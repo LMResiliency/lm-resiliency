@@ -1218,6 +1218,12 @@ generation assignment, every receipt must answer the same intent opening and
 match its node key, and the mapping is frozen in active-slot order. The value
 separately exposes received, missing, successful, and explicitly failed node
 sets without making a quorum or restart-policy decision.</p>
+<p>A read-only collector obtains two identical full active-node observations while
+the durable restart-intent opening remains unchanged. Because acknowledgement
+keys are immutable create-once records, this double collect yields one stable
+receipt-or-absence snapshot without requiring a store-wide read transaction.
+Repeated changes are retryable conflicts; contradictory per-node state fails
+closed as corruption. The collector still makes no quorum or restart decision.</p>
 <p>For a crashed or unreachable node, no preparation is assumed.</p>
 <h2 id="api-lm-resiliency-to-the-framework">API: lm-resiliency to the Framework<a class="headerlink" href="#api-lm-resiliency-to-the-framework" title="Permanent link">&para;</a></h2>
 <p>The framework receives a platform-neutral recovery request. It does not receive
