@@ -850,6 +850,11 @@ lifecycle head from one authenticated closure. It rejects any closure whose
 successor generation is already committed. Candidate identity, live-store
 observation, transaction execution, and committed-result verification remain
 separate layers.
+`RestartPlanPublicationLifecycleReader` converts the existing stable,
+authenticated lifecycle read into that fence without mutating the store. An
+open or missing intent, repeated read contention, or an already-committed
+successor remains a retryable publication conflict; contradictory persisted
+lifecycle state fails closed as corruption.
 
 Before commit, the coordinator validates:
 
