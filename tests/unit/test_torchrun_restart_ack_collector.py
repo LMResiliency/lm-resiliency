@@ -22,11 +22,6 @@ from lm_resiliency.integrations.torchrun._protocol import (
     RestartIntent,
     SlotAssignment,
 )
-from lm_resiliency.integrations.torchrun._restart_ack_collector import (
-    RestartAckCollectionReadConflict,
-    RestartAckCollectionReadCorrupt,
-    RestartAckCollector,
-)
 from lm_resiliency.integrations.torchrun._restart_ack_execution import (
     RestartAckExecutor,
 )
@@ -37,6 +32,9 @@ from lm_resiliency.integrations.torchrun._restart_ack_preparation import (
     RestartAckPreparer,
 )
 from lm_resiliency.integrations.torchrun._restart_ack_reader import (
+    RestartAckCollectionReadConflict,
+    RestartAckCollectionReadCorrupt,
+    RestartAckCollector,
     RestartAckReadConflict,
     RestartAckReadCorrupt,
     RestartAckReader,
@@ -168,7 +166,7 @@ def _state(
     return store, persisted
 
 
-def test_restart_ack_collector_returns_stable_complete_snapshot():
+def test_restart_ack_reader_returns_stable_complete_snapshot():
     store, _ = _state(committed_node_ids=("node-a", "node-b"))
 
     collection = RestartAckCollector(store, run_id=RUN_ID).collect()
@@ -178,7 +176,7 @@ def test_restart_ack_collector_returns_stable_complete_snapshot():
     assert collection.missing_node_ids == ()
 
 
-def test_restart_ack_collector_preserves_stable_absence():
+def test_restart_ack_reader_preserves_stable_absence():
     store, _ = _state(committed_node_ids=("node-a",))
 
     collection = RestartAckCollector(store, run_id=RUN_ID).collect()
@@ -210,7 +208,7 @@ class SequencedCollector(RestartAckCollector):
         }
 
 
-def test_restart_ack_collector_retries_receipt_committed_between_scans():
+def test_restart_ack_reader_retries_receipt_committed_between_scans():
     store, received = _state(committed_node_ids=("node-a", "node-b"))
     collector = SequencedCollector(store, received=received)
 
@@ -251,7 +249,7 @@ class FailingOpenReader:
         ),
     ],
 )
-def test_restart_ack_collector_translates_per_node_reader_errors(
+def test_restart_ack_reader_translates_per_node_reader_errors(
     error,
     expected,
     message,
@@ -284,7 +282,7 @@ def test_restart_ack_collector_translates_per_node_reader_errors(
         ),
     ],
 )
-def test_restart_ack_collector_translates_open_reader_errors(
+def test_restart_ack_reader_translates_open_reader_errors(
     error,
     expected,
     message,
@@ -297,7 +295,7 @@ def test_restart_ack_collector_translates_open_reader_errors(
         collector.collect()
 
 
-def test_restart_ack_collector_requires_current_open_intent():
+def test_restart_ack_reader_requires_current_open_intent():
     store = InMemoryControlStore(clock=ManualClock())
 
     with pytest.raises(RestartAckCollectionReadConflict, match="no current"):
@@ -305,7 +303,7 @@ def test_restart_ack_collector_requires_current_open_intent():
 
 
 @pytest.mark.parametrize("run_id", ["", " "])
-def test_restart_ack_collector_validates_run_id(run_id):
+def test_restart_ack_reader_validates_run_id(run_id):
     store = InMemoryControlStore(clock=ManualClock())
 
     with pytest.raises(ValueError, match="non-empty"):
