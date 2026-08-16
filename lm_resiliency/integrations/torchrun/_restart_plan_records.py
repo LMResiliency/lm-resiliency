@@ -18,6 +18,7 @@ from lm_resiliency.integrations.torchrun._protocol import (
     ProtocolValidationError,
     RecoveryManifest,
     RestartPlan,
+    WorkerIdentity,
 )
 
 
@@ -211,6 +212,15 @@ class RestartPlanEvidenceRecord:
                 event_mapping.get("schema_version"),
                 f"RestartPlanEvidenceRecord.inventory_events[{normalized_event_id!r}]",
                 expected=CheckpointInventoryEvent.SCHEMA_VERSION,
+            )
+            reporter_mapping = _mapping(
+                event_mapping.get("reporter"),
+                (f"RestartPlanEvidenceRecord.inventory_events[{normalized_event_id!r}].reporter"),
+            )
+            _schema_version(
+                reporter_mapping.get("schema_version"),
+                (f"RestartPlanEvidenceRecord.inventory_events[{normalized_event_id!r}].reporter"),
+                expected=WorkerIdentity.SCHEMA_VERSION,
             )
             try:
                 inventory_events[normalized_event_id] = CheckpointInventoryEvent.from_dict(

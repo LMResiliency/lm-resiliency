@@ -410,6 +410,25 @@ def test_restart_plan_evidence_record_requires_exact_nested_schema(
         )
 
 
+@pytest.mark.parametrize("schema_version", [1.0, "1", None, False])
+def test_restart_plan_evidence_record_requires_exact_reporter_schema(
+    schema_version,
+):
+    value = _evidence_record().to_dict()
+    events = dict(value["inventory_events"])
+    event = dict(events["inventory-0"])
+    reporter = dict(event["reporter"])
+    reporter["schema_version"] = schema_version
+    event["reporter"] = reporter
+    events["inventory-0"] = event
+    value["inventory_events"] = events
+
+    with pytest.raises(ValueError, match="reporter.schema_version"):
+        RestartPlanEvidenceRecord.from_json(
+            json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
+        )
+
+
 def test_restart_plan_record_round_trips_as_canonical_json():
     record = _plan_record()
 
