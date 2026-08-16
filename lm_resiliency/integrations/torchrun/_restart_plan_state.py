@@ -13,11 +13,13 @@ from lm_resiliency.integrations.torchrun._generation_records import (
     GenerationSnapshotRecord,
 )
 from lm_resiliency.integrations.torchrun._protocol import (
+    CheckpointCertification,
     CheckpointInventoryEvent,
     ProtocolValidationError,
     RankAssignment,
     RecoveryManifest,
     RestartPlan,
+    checkpoint_inventory_digest,
     validate_worker_identity,
 )
 from lm_resiliency.integrations.torchrun._quarantine_records import (
@@ -427,8 +429,78 @@ class RestartPlanInventoryState:
         return self.quarantine_state.manifest_state.manifest
 
 
+@dataclass(frozen=True, slots=True)
+class RestartPlanCertificationState:
+    """One inventory-bound plan authorized by trusted checkpoint certification."""
+
+    inventory_state: RestartPlanInventoryState
+    certifications: tuple[CheckpointCertification, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.inventory_state, RestartPlanInventoryState):
+            raise TypeError(
+                "RestartPlanCertificationState.inventory_state must be RestartPlanInventoryState"
+            )
+        if not isinstance(self.certifications, tuple):
+            raise TypeError("RestartPlanCertificationState.certifications must be a tuple")
+        manifest = self.inventory_state.manifest
+        if manifest.trust != "recovery_verified":
+            raise ValueError("RestartPlanCertificationState requires a recovery-verified manifest")
+        plan = self.inventory_state.plan
+        certification_ids: set[str] = set()
+        certified_event_digests: dict[str, str] = {}
+        for certification in self.certifications:
+            if not isinstance(certification, CheckpointCertification):
+                raise TypeError(
+                    "RestartPlanCertificationState.certifications values "
+                    "must be CheckpointCertification"
+                )
+            if certification.certification_id in certification_ids:
+                raise ValueError("RestartPlanCertificationState certification IDs must be unique")
+            certification_ids.add(certification.certification_id)
+            if (
+                certification.run_id != manifest.run_id
+                or certification.source_generation != manifest.source_generation
+                or certification.step != manifest.step
+                or certification.topology_digest != manifest.topology_digest
+                or certification.checkpoint_source != plan.checkpoint_source
+                or certification.checkpoint_id != plan.checkpoint_id
+                or certification.expected_world_size != plan.expected_world_size
+            ):
+                raise ValueError(
+                    "RestartPlanCertificationState certification does not match its plan"
+                )
+            for event_id, digest in certification.inventory_event_digests.items():
+                previous_digest = certified_event_digests.get(event_id)
+                if previous_digest is not None and previous_digest != digest:
+                    raise ValueError(
+                        "RestartPlanCertificationState certifications contain "
+                        "conflicting inventory digests"
+                    )
+                certified_event_digests[event_id] = digest
+        for event_id, event in self.inventory_state.inventory_events.items():
+            if certified_event_digests.get(event_id) != checkpoint_inventory_digest(event):
+                raise ValueError(
+                    "RestartPlanCertificationState inventory event is not exactly certified"
+                )
+        object.__setattr__(
+            self,
+            "certifications",
+            tuple(sorted(self.certifications, key=lambda value: value.certification_id)),
+        )
+
+    @property
+    def plan(self) -> RestartPlan:
+        return self.inventory_state.plan
+
+    @property
+    def manifest(self) -> RecoveryManifest:
+        return self.inventory_state.manifest
+
+
 __all__ = [
     "ResolvedRecoveryManifest",
+    "RestartPlanCertificationState",
     "RestartPlanGenerationState",
     "RestartPlanInventoryState",
     "RestartPlanManifestState",
