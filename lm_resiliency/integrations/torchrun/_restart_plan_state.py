@@ -13,9 +13,12 @@ from lm_resiliency.integrations.torchrun._generation_records import (
     GenerationSnapshotRecord,
 )
 from lm_resiliency.integrations.torchrun._protocol import (
+    CheckpointInventoryEvent,
+    ProtocolValidationError,
     RankAssignment,
     RecoveryManifest,
     RestartPlan,
+    validate_worker_identity,
 )
 from lm_resiliency.integrations.torchrun._quarantine_records import (
     NodeQuarantineRecord,
@@ -330,9 +333,104 @@ class RestartPlanQuarantineState:
         return self.manifest_state.plan
 
 
+@dataclass(frozen=True, slots=True)
+class RestartPlanInventoryState:
+    """One quarantine-bound plan linked to exact checkpoint inventory events."""
+
+    quarantine_state: RestartPlanQuarantineState
+    inventory_events: Mapping[str, CheckpointInventoryEvent]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.quarantine_state, RestartPlanQuarantineState):
+            raise TypeError(
+                "RestartPlanInventoryState.quarantine_state must be RestartPlanQuarantineState"
+            )
+        if not isinstance(self.inventory_events, Mapping):
+            raise TypeError("RestartPlanInventoryState.inventory_events must be a mapping")
+        events: dict[str, CheckpointInventoryEvent] = {}
+        for event_id, event in self.inventory_events.items():
+            if not isinstance(event_id, str) or not event_id.strip():
+                raise ValueError(
+                    "RestartPlanInventoryState.inventory_events keys must be non-empty event IDs"
+                )
+            if not isinstance(event, CheckpointInventoryEvent):
+                raise TypeError(
+                    "RestartPlanInventoryState.inventory_events values "
+                    "must be CheckpointInventoryEvent"
+                )
+            if event.event_id != event_id:
+                raise ValueError(
+                    "RestartPlanInventoryState inventory event ID does not match its key"
+                )
+            events[event_id] = event
+        events = dict(sorted(events.items()))
+        manifest = self.quarantine_state.manifest_state.manifest
+        referenced_event_ids = {
+            copy.inventory_event_id
+            for rank_copies in manifest.rank_copies
+            for copy in rank_copies.copies
+        }
+        if set(events) != referenced_event_ids:
+            raise ValueError(
+                "RestartPlanInventoryState events must exactly cover the manifest's references"
+            )
+        source_assignment = self.quarantine_state.manifest_state.resolved_manifest.source_assignment
+        for event in events.values():
+            if (
+                event.run_id != manifest.run_id
+                or event.generation != manifest.source_generation
+                or event.step != manifest.step
+                or event.topology_digest != manifest.topology_digest
+            ):
+                raise ValueError(
+                    "RestartPlanInventoryState inventory event does not match its manifest"
+                )
+            try:
+                validate_worker_identity(event.reporter, source_assignment)
+            except ProtocolValidationError as error:
+                raise ValueError(
+                    "RestartPlanInventoryState inventory reporter does not match "
+                    "the source assignment"
+                ) from error
+            if event.trust == "candidate" or (
+                manifest.trust == "recovery_verified" and event.trust != "recovery_verified"
+            ):
+                raise ValueError(
+                    "RestartPlanInventoryState inventory trust is incompatible with its manifest"
+                )
+        for rank_copies in manifest.rank_copies:
+            for copy in rank_copies.copies:
+                event = events[copy.inventory_event_id]
+                if copy not in event.copies:
+                    raise ValueError(
+                        "RestartPlanInventoryState manifest copy does not match its inventory event"
+                    )
+                if (
+                    copy.storage_kind in {"memory", "node_local"}
+                    and copy.holder_node_id != event.reporter.node_id
+                ):
+                    raise ValueError(
+                        "RestartPlanInventoryState local copy was not reported by its holder"
+                    )
+        object.__setattr__(
+            self,
+            "inventory_events",
+            MappingProxyType(events),
+        )
+
+    @property
+    def plan(self) -> RestartPlan:
+        return self.quarantine_state.plan
+
+    @property
+    def manifest(self) -> RecoveryManifest:
+        return self.quarantine_state.manifest_state.manifest
+
+
 __all__ = [
     "ResolvedRecoveryManifest",
     "RestartPlanGenerationState",
+    "RestartPlanInventoryState",
     "RestartPlanManifestState",
     "RestartPlanQuarantineState",
 ]
