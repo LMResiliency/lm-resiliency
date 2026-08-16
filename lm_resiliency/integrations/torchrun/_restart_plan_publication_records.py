@@ -20,7 +20,13 @@ from lm_resiliency.integrations.torchrun._quarantine_store import node_quarantin
 from lm_resiliency.integrations.torchrun._restart_plan_publication_lifecycle import (
     RestartPlanPublicationLifecycleFence,
 )
-from lm_resiliency.integrations.torchrun._restart_plan_state import RestartPlanCandidateState
+from lm_resiliency.integrations.torchrun._restart_plan_records import (
+    RestartPlanEvidenceRecord,
+)
+from lm_resiliency.integrations.torchrun._restart_plan_state import (
+    RestartPlanCandidateState,
+    RestartPlanCertificationState,
+)
 
 _CONTROL_PREFIX = "lm_resiliency/torchrun/v1"
 
@@ -64,6 +70,11 @@ class RestartPlanPublicationRecords:
             raise ValueError(
                 "RestartPlanPublicationRecords current and manifest source snapshots disagree"
             )
+        plan_record = self.candidate.placement_state.generation_state.record
+        if plan_record.recovery_evidence_record_digest != self.recovery_evidence_record.digest:
+            raise ValueError(
+                "RestartPlanPublicationRecords recovery evidence digest does not match its plan"
+            )
 
     @property
     def run_prefix(self) -> str:
@@ -79,6 +90,13 @@ class RestartPlanPublicationRecords:
     @property
     def recovery_manifest_key(self) -> str:
         return recovery_manifest_key(
+            self.candidate.plan.run_id,
+            self.candidate.plan.to_generation,
+        )
+
+    @property
+    def recovery_evidence_key(self) -> str:
+        return recovery_evidence_key(
             self.candidate.plan.run_id,
             self.candidate.plan.to_generation,
         )
@@ -129,6 +147,24 @@ class RestartPlanPublicationRecords:
         )
 
     @property
+    def recovery_evidence_record(self) -> RestartPlanEvidenceRecord:
+        recovery_state = self.candidate.recovery_state
+        inventory_state = recovery_state.copy_state.inventory_state
+        trust_state = recovery_state.trust_state
+        certifications = (
+            trust_state.certifications
+            if isinstance(trust_state, RestartPlanCertificationState)
+            else ()
+        )
+        return RestartPlanEvidenceRecord(
+            plan_id=self.candidate.plan.plan_id,
+            run_id=self.candidate.plan.run_id,
+            manifest_id=self.candidate.manifest.manifest_id,
+            inventory_events=inventory_state.inventory_events,
+            certifications=certifications,
+        )
+
+    @property
     def deadline_unix_ms(self) -> int:
         registration_expiries = []
         for history in self.candidate.placement_state.registration_histories.values():
@@ -161,6 +197,11 @@ class RestartPlanPublicationRecords:
             self.recovery_manifest_key: ControlStoreWrite(
                 expected_revision=None,
                 value=manifest_state.resolved_manifest.record.to_json(),
+                require_never_created=True,
+            ),
+            self.recovery_evidence_key: ControlStoreWrite(
+                expected_revision=None,
+                value=self.recovery_evidence_record.to_json(),
                 require_never_created=True,
             ),
             self.plan_key: ControlStoreWrite(
@@ -403,10 +444,17 @@ def recovery_manifest_key(run_id: str, to_generation: int) -> str:
     return f"{restart_plan_key(run_id, to_generation)}/recovery-manifest"
 
 
+def recovery_evidence_key(run_id: str, to_generation: int) -> str:
+    """Return the canonical recovery-evidence key beneath one restart plan."""
+
+    return f"{restart_plan_key(run_id, to_generation)}/recovery-evidence"
+
+
 __all__ = [
     "PreparedRestartPlanPublication",
     "RestartPlanPublicationAuthority",
     "RestartPlanPublicationRecords",
+    "recovery_evidence_key",
     "recovery_manifest_key",
     "restart_plan_key",
 ]
