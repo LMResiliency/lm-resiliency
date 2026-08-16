@@ -1510,14 +1510,24 @@ compatibility identity, and every other assigned node must match it; unassigned
 standbys cannot create or replace that record. Initial registration backend I/O
 does not hold the handler's ownership lock, so local shutdown remains bounded
 while registration is stalled. A registration response arriving after local
-shutdown is not installed or heartbeated and expires conservatively.
-Before any assigned handler returns generation zero, it publishes a
-generation- and attempt-scoped arrival tied to its live registration and waits
-until every committed slot has a live matching arrival for the same attempt.
-Each slot claims its next attempt through durable control-store state, so a
-surviving or replacement handler cannot reuse an arrival from a prior worker
-launch. Missing assigned nodes therefore fail at the formation deadline instead
-of launching a partial worker group.
+shutdown is not installed or heartbeated; a daemon performs an explicit
+best-effort release, with lease expiry as the conservative fallback. Initial
+registration itself is bounded by the formation deadline.
+
+Before publishing readiness, each assigned handler clears its stale node-local
+restart context. Slot zero owns one durable, generation-scoped attempt head,
+while all assigned slots publish attempt-scoped arrivals tied to their live
+registration. Slot zero validates the complete registration set once and
+atomically publishes one immutable completion proof conditioned on the shared
+attempt head plus every arrival and registration revision. Other slots wait on
+that proof instead of rereading every registration history, keeping control
+store work linear in the active node count. An incomplete attempt remains
+usable when a handler incarnation is replaced; a completed attempt advances
+the shared head before the next worker launch. Missing or unprepared assigned
+nodes therefore fail at the formation deadline instead of launching a partial
+worker group. After bootstrap completes, every handler revalidates the
+generation head before returning its slot.
+
 Registration release is best effort and bounded during local shutdown. If the
 backend remains unavailable, cleanup returns without waiting indefinitely and
 the registration expires under its existing lease.
