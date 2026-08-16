@@ -1067,7 +1067,7 @@ def test_slot_aware_handler_admits_initial_assignment_with_stable_rank(
     )
 
 
-def test_slot_aware_handler_uses_attempt_scoped_bootstrap_store(
+def test_slot_aware_handler_reuses_generation_scoped_bootstrap_store(
     tmp_path: Path,
 ):
     clock = ManualClock()
@@ -1118,19 +1118,47 @@ def test_slot_aware_handler_uses_attempt_scoped_bootstrap_store(
     assert isinstance(first_b, type(first_a))
     assert first_b.bootstrap_store_info == first_a.bootstrap_store_info
 
+    assert handler_b.shutdown() is True
+    replacement_b = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=2,
+            max_nodes=3,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-b-replacement",
+        rendezvous_store=rendezvous_store,
+        bootstrap_store_info=None,
+    )
+
+    def replacement_rendezvous_b(outcome: queue.Queue[BaseException | object]) -> None:
+        try:
+            outcome.put(replacement_b.next_rendezvous())
+        except BaseException as error:
+            outcome.put(error)
+
     second_outcome: queue.Queue[BaseException | object] = queue.Queue()
-    second_thread = threading.Thread(target=rendezvous_b, args=(second_outcome,))
+    second_thread = threading.Thread(
+        target=replacement_rendezvous_b,
+        args=(second_outcome,),
+    )
     second_thread.start()
-    time.sleep(0.02)
-    assert second_thread.is_alive()
-    second_a = handler_a.next_rendezvous()
     second_thread.join(timeout=2)
+    assert not second_thread.is_alive()
     second_b = second_outcome.get_nowait()
+    assert isinstance(second_b, type(first_a))
+    assert second_b.bootstrap_store_info == first_a.bootstrap_store_info
+
+    second_a = handler_a.next_rendezvous()
     assert isinstance(second_b, type(second_a))
     assert second_b.bootstrap_store_info == second_a.bootstrap_store_info
+    assert handler_a.use_agent_store is False
+    assert replacement_b.use_agent_store is False
 
     assert handler_a.shutdown() is True
-    assert handler_b.shutdown() is True
+    assert replacement_b.shutdown() is True
 
 
 def test_slot_aware_handler_bounds_bootstrap_read_and_ignores_stale_unprefixed_keys(
@@ -1220,6 +1248,68 @@ def test_slot_aware_handler_parks_standby_without_reporting_waiting_node(
     assert reader.get("node-b") is None
     assert standby.shutdown() is True
     assert closer.shutdown() is True
+
+
+def test_slot_aware_handler_local_shutdown_does_not_close_shared_run(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    _initialize_generation(store, clock, ("node-a",))
+    first = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=3,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+    )
+    second = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-c",
+            min_nodes=1,
+            max_nodes=3,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-c",
+    )
+    first_outcome: queue.Queue[BaseException | object] = queue.Queue()
+    second_outcome: queue.Queue[BaseException | object] = queue.Queue()
+
+    def rendezvous(
+        handler: SlotAwareRendezvousHandler,
+        outcome: queue.Queue[BaseException | object],
+    ) -> None:
+        try:
+            outcome.put(handler.next_rendezvous())
+        except BaseException as error:
+            outcome.put(error)
+
+    first_thread = threading.Thread(target=rendezvous, args=(first, first_outcome))
+    second_thread = threading.Thread(target=rendezvous, args=(second, second_outcome))
+    first_thread.start()
+    second_thread.start()
+    reader = AgentRegistrationReader(store, run_id=RUN_ID, clock=clock)
+    _wait_until(lambda: reader.get("node-b") is not None)
+    _wait_until(lambda: reader.get("node-c") is not None)
+
+    assert first.shutdown() is True
+    first_thread.join(timeout=2)
+    assert isinstance(first_outcome.get_nowait(), RendezvousClosedError)
+    assert not store.has_history(first.closure_key)
+    assert not second.is_closed()
+    assert second_thread.is_alive()
+
+    second.set_closed()
+    second_thread.join(timeout=2)
+
+    assert isinstance(second_outcome.get_nowait(), RendezvousClosedError)
+    assert second.shutdown() is True
 
 
 def test_slot_aware_handler_renews_active_registration(tmp_path: Path):
@@ -1544,4 +1634,41 @@ def test_slot_aware_handler_rejects_deleted_closure_record(tmp_path: Path):
     with pytest.raises(RendezvousStateError, match="deleted"):
         second.is_closed()
 
-    assert second.shutdown() is False
+    assert second.shutdown() is True
+
+
+def test_slot_aware_handler_retries_closure_created_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-a",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-a",
+    )
+    original_has_history = store.has_history
+    published = False
+
+    def publish_before_history(key: str) -> bool:
+        nonlocal published
+        if key == handler.closure_key and not published:
+            published = True
+            store.compare_set(
+                handler.closure_key,
+                expected_revision=None,
+                value=handler._closure_value,
+            )
+        return original_has_history(key)
+
+    monkeypatch.setattr(store, "has_history", publish_before_history)
+
+    assert handler.is_closed()
+    assert handler.shutdown() is True

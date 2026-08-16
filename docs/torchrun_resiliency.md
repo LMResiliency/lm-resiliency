@@ -1488,9 +1488,11 @@ wakes parked standbys and releases registrations. It also clears any stale
 node-local restart context before the initial generation starts. The join
 timeout bounds initial generation formation and worker bootstrap only; after
 generation zero exists, passive standbys remain parked until assignment,
-closure, cancellation, or registration failure. Registration heartbeats
-schedule each renewal from the returned lease's remaining lifetime rather than
-from a fixed interval. An assigned node ID is admitted only when its retained
+explicit shared closure, local shutdown, cancellation, or registration failure.
+Local `shutdown()` releases only that handler's resources; only `set_closed()`
+publishes the run-scoped terminal closure. Registration heartbeats schedule
+each renewal from the returned lease's remaining lifetime rather than from a
+fixed interval. An assigned node ID is admitted only when its retained
 registration history has the same local worker count and environment digest as
 the current handler, so an incompatible process cannot reuse an expired node
 registration. Replacement generation admission, restart-context publication,
@@ -1498,11 +1500,15 @@ and the positive
 `num_nodes_waiting()` restart edge are enabled only after authoritative
 restart-plan readback is integrated in the following slice.
 
-Every `next_rendezvous()` invocation uses an attempt-scoped `PrefixStore` for
-PyTorch's worker bootstrap keys. Bootstrap reads are bounded by the remaining
-join deadline, so a missing slot-zero publisher cannot strand other agents on
-the underlying store timeout and a retry cannot consume address/port values
-from a previous attempt.
+All handler incarnations use one immutable generation-scoped `PrefixStore` for
+PyTorch's worker bootstrap keys. Slot zero publishes one address/port pair and
+later retries or replacement agent incarnations reuse it, so no process-local
+attempt counter can split the worker group across namespaces. Bootstrap reads
+are bounded by the remaining join deadline, so a missing slot-zero publisher
+cannot strand other agents on the underlying store timeout. When the deployment
+supplies an already running agent-owned bootstrap endpoint, the handler reports
+`use_agent_store=True`; a generated endpoint reports `False` so the stock agent
+creates the worker-side TCP store.
 
 Passive standbys are not reported by `num_nodes_waiting()`. After a plan
 commits, the selected replacement becomes the only newly waiting node visible

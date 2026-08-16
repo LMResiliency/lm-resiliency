@@ -325,8 +325,6 @@ class TorchrunRuntimeConfig:
 class SlotAwareRendezvousHandler(RendezvousHandler):
     """Admit the initial fixed-size worker group and park passive standbys."""
 
-    use_agent_store = True
-
     def __init__(
         self,
         config: TorchrunRuntimeConfig,
@@ -392,14 +390,18 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         self._state_changed_event = threading.Event()
         self._closed_event = threading.Event()
         self._shutdown_lock = threading.Lock()
-        self._attempt_lock = threading.Lock()
-        self._next_attempt = 0
 
     @property
     def agent_identity(self) -> AgentIdentity:
         """Return the immutable identity registered by this handler."""
 
         return self._agent_identity
+
+    @property
+    def use_agent_store(self) -> bool:
+        """Return whether the supplied bootstrap endpoint is agent-owned."""
+
+        return self._bootstrap_store_info is not None
 
     @property
     def closure_key(self) -> str:
@@ -435,18 +437,16 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                             raise RendezvousStateError(
                                 "failed to clear stale initial restart context"
                             ) from error
-                        attempt = self._claim_attempt()
-                        attempt_store = self._attempt_store(
+                        bootstrap_store = self._bootstrap_store(
                             current.snapshot.record.assignment.generation,
-                            attempt,
                         )
                         bootstrap = self._build_bootstrap(
                             slot,
-                            attempt_store,
+                            bootstrap_store,
                             formation_deadline,
                         )
                         return RendezvousInfo(
-                            attempt_store,
+                            bootstrap_store,
                             slot,
                             self._config.min_nodes,
                             bootstrap,
@@ -465,14 +465,9 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         if self._closed_event.is_set():
             return True
         try:
-            entry = self._control_store.get(self._closure_key)
+            entry = self._read_closure_entry()
             if entry is None:
-                if self._control_store.has_history(self._closure_key):
-                    raise RendezvousStateError(
-                        "rendezvous closure record was deleted after publication"
-                    )
                 return False
-            self._validate_closure_entry(entry)
         except RendezvousStateError:
             raise
         except Exception as error:
@@ -483,12 +478,8 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
 
     def set_closed(self) -> None:
         try:
-            entry = self._control_store.get(self._closure_key)
+            entry = self._read_closure_entry()
             if entry is None:
-                if self._control_store.has_history(self._closure_key):
-                    raise RendezvousStateError(
-                        "rendezvous closure record was deleted after publication"
-                    )
                 try:
                     entry = self._control_store.compare_set(
                         self._closure_key,
@@ -522,12 +513,8 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
     def shutdown(self) -> bool:
         with self._shutdown_lock:
             succeeded = True
-            try:
-                self.set_closed()
-            except (RendezvousConnectionError, RendezvousStateError):
-                succeeded = False
-                self._closed_event.set()
-                self._state_changed_event.set()
+            self._closed_event.set()
+            self._state_changed_event.set()
             heartbeat_stopped = self._stop_heartbeat()
             if not heartbeat_stopped:
                 succeeded = False
@@ -628,12 +615,15 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         self._state_changed_event.set()
         thread = self._heartbeat_thread
         if thread is not None and thread is not threading.current_thread():
-            thread.join(
-                timeout=max(
-                    self._config.policy.poll_interval_ms / 500,
-                    0.1,
+            try:
+                thread.join(
+                    timeout=max(
+                        self._config.policy.poll_interval_ms / 500,
+                        0.1,
+                    )
                 )
-            )
+            except RuntimeError:
+                return False
         return thread is None or not thread.is_alive()
 
     def _release_registration(self, *, raise_errors: bool) -> bool:
@@ -685,16 +675,10 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         except Exception as error:
             raise RendezvousConnectionError("generation backend failed") from error
 
-    def _claim_attempt(self) -> int:
-        with self._attempt_lock:
-            attempt = self._next_attempt
-            self._next_attempt += 1
-            return attempt
-
-    def _attempt_store(self, generation: int, attempt: int) -> Store:
+    def _bootstrap_store(self, generation: int) -> Store:
         prefix = (
             f"{_CONTROL_PREFIX}/runs/{self._run_digest}/rendezvous/"
-            f"generation-{generation}/attempt-{attempt}/"
+            f"generation-{generation}/bootstrap/"
         )
         return PrefixStore(prefix, self._rendezvous_store)
 
@@ -712,10 +696,19 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             raise RendezvousTimeoutError
         try:
             store.set_timeout(timedelta(seconds=max(remaining, 0.001)))
-            return RendezvousStoreInfo.build(
-                slot,
-                store,
-                self._config.local_addr,
+            keys = [
+                RendezvousStoreInfo.MASTER_ADDR_KEY,
+                RendezvousStoreInfo.MASTER_PORT_KEY,
+            ]
+            if slot == 0 and not store.check(keys):
+                return RendezvousStoreInfo.build(
+                    slot,
+                    store,
+                    self._config.local_addr,
+                )
+            return RendezvousStoreInfo(
+                store.get(RendezvousStoreInfo.MASTER_ADDR_KEY).decode("utf-8"),
+                int(store.get(RendezvousStoreInfo.MASTER_PORT_KEY).decode("utf-8")),
             )
         except DistStoreError as error:
             raise RendezvousTimeoutError from error
@@ -725,6 +718,19 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             raise RendezvousConnectionError(
                 "failed to publish rendezvous bootstrap information"
             ) from error
+
+    def _read_closure_entry(self) -> ControlStoreEntry | None:
+        entry = self._control_store.get(self._closure_key)
+        if entry is not None:
+            self._validate_closure_entry(entry)
+            return entry
+        if not self._control_store.has_history(self._closure_key):
+            return None
+        entry = self._control_store.get(self._closure_key)
+        if entry is None:
+            raise RendezvousStateError("rendezvous closure record was deleted after publication")
+        self._validate_closure_entry(entry)
+        return entry
 
     def _validate_assigned_registration_history(self) -> None:
         try:
