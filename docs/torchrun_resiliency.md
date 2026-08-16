@@ -1520,8 +1520,10 @@ registration and the initial closure-state observation are bounded by the
 formation deadline. A stalled closure backend cannot defeat that timeout, and
 local shutdown interrupts a handler waiting on the daemonized closure read.
 
-Before publishing readiness, each assigned handler clears its stale node-local
-restart context. Slot zero owns one durable, generation-scoped attempt head,
+Before publishing readiness, each assigned handler clears only a node-local
+restart context from another run. An initial-generation handler refuses to
+remove a current-run replacement context, so a stale incarnation cannot erase
+newer recovery state. Slot zero owns one durable, generation-scoped attempt head,
 while all assigned slots publish attempt-scoped arrivals tied to their live
 registration. Slot zero validates the complete registration set once and
 atomically publishes one immutable completion proof conditioned on the shared
@@ -1546,7 +1548,12 @@ That guarded transaction conditions on every readiness and live registration
 revision, the attempt and completion records, the generation head and immutable
 snapshot, and absence of terminal closure, and it must commit before the plan's
 exclusive restart deadline. Every replacement handler observes and validates
-the same admission proof before returning. After all blocking plan/context,
+the same admission proof before returning. The proof must name that handler's
+exact live registration and its exact consumption entry; a replacement
+incarnation must publish new readiness and cannot reuse the old decision. A
+temporarily absent or expired peer registration remains incomplete readiness
+until the deadline, while corrupt retained registration history still fails
+closed. After all blocking plan/context,
 registration-history, and attempt-head reads complete, the handler samples
 authoritative control-store time once and uses that observation to recheck both
 the exclusive restart deadline and the exact registration's lease window. The
@@ -1574,8 +1581,10 @@ proof is the final shared decision observed before `next_rendezvous()` returns.
 A failed admission first durably invalidates the exact cryptographic cleanup
 token published by that handler incarnation, then attempts bounded physical
 removal. If the directory lock is unavailable, the stale file remains
-unreadable; because invalidation is token-specific, a later replacement
-context remains valid. Context publication and cleanup acquire the parent
+unreadable; every outstanding token has its own durable invalidation marker, so
+delayed cleanup from an older handler cannot revalidate a newer failed context,
+and a later replacement context with a different token remains valid. Context
+publication and cleanup acquire the parent
 directory lock nonblocking under the admission or bounded-cleanup deadline, so
 a stale process cannot strand replacement admission. The replacement deadline
 is derived and revalidated from authoritative, nondecreasing control-store time

@@ -837,6 +837,24 @@ def test_restart_context_file_invalidates_context_while_directory_lock_is_held(
         os.close(directory)
 
 
+def test_restart_context_file_preserves_every_invalidated_token(
+    tmp_path: Path,
+):
+    path = tmp_path / "private" / "restart-context.json"
+    context_file = RestartContextFile(path)
+    old_token = context_file.write(_context(plan_id="plan-old"))
+    current_token = context_file.write(_context(plan_id="plan-current"))
+
+    context_file.invalidate(current_token)
+    context_file.invalidate(old_token)
+
+    with pytest.raises(RestartContextFileError, match="invalidated"):
+        context_file.read()
+
+    context_file.write(_context(plan_id="plan-new"))
+    assert context_file.read() == _context(plan_id="plan-new")
+
+
 def test_restart_context_file_preserves_previous_value_when_replace_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1212,6 +1230,40 @@ def _seed_assigned_arrival(
     threading.Thread(target=complete_attempt, daemon=True).start()
 
 
+def _stub_replacement_return_evidence(
+    handler: SlotAwareRendezvousHandler,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    slot: int = 0,
+) -> tuple[object, object]:
+    with handler._registration_lock:
+        registration = handler._registration
+    assert registration is not None
+    completion = object()
+    admission = object()
+    consumption = SimpleNamespace(revision=101, transaction_sequence=202)
+    monkeypatch.setattr(
+        handler,
+        "_validate_replacement_admission_entry",
+        lambda *_args, **_kwargs: {
+            str(slot): {
+                "agent_id": registration.record.agent_identity.agent_id,
+                "consumption_revision": consumption.revision,
+                "consumption_transaction_sequence": consumption.transaction_sequence,
+                "node_id": registration.record.agent_identity.node_id,
+                "registration_id": registration.record.registration_id,
+                "registration_revision": registration.fencing_token,
+            }
+        },
+    )
+    monkeypatch.setattr(
+        handler,
+        "_read_arrival_consumption",
+        lambda *_args, **_kwargs: consumption,
+    )
+    return completion, admission
+
+
 def test_slot_aware_handler_refreshes_leader_registration_before_completion(
     tmp_path: Path,
 ):
@@ -1364,7 +1416,7 @@ def test_slot_aware_handler_admits_initial_assignment_with_stable_rank(
         max_nodes=3,
     )
     context_file = RestartContextFile(config.restart_context_path)
-    context_file.write(_context())
+    context_file.write(replace(_context(), run_id="previous-run"))
     handler = _handler(
         config,
         store=store,
@@ -2200,18 +2252,19 @@ def test_slot_aware_handler_does_not_publish_arrival_before_context_cleanup(
         clock=clock,
         agent_id="agent-a",
     )
-    original_clear = RestartContextFile.clear
+    original_clear = RestartContextFile.clear_stale_for_run
 
     def fail_peer_clear(
         context_file: RestartContextFile,
+        run_id: str,
         *,
         deadline: float | None = None,
-    ) -> None:
+    ) -> bool:
         if context_file.path == peer._config.restart_context_path:
             raise RestartContextFileError("injected context cleanup failure")
-        original_clear(context_file, deadline=deadline)
+        return original_clear(context_file, run_id, deadline=deadline)
 
-    monkeypatch.setattr(RestartContextFile, "clear", fail_peer_clear)
+    monkeypatch.setattr(RestartContextFile, "clear_stale_for_run", fail_peer_clear)
     peer_thread, peer_outcome = _start_rendezvous(peer)
 
     with pytest.raises(RendezvousTimeoutError):
@@ -2228,6 +2281,38 @@ def test_slot_aware_handler_does_not_publish_arrival_before_context_cleanup(
     assert store.get(leader._arrival_key(0, attempt, 1)) is None
     assert leader.shutdown() is True
     assert peer.shutdown() is True
+
+
+def test_slot_aware_handler_refuses_to_clear_current_run_context_for_initial_generation(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    _, _, current = _initialize_generation(store, clock, ("node-a",))
+    config = _handler_config(
+        tmp_path,
+        node_id="node-a",
+        min_nodes=1,
+        max_nodes=2,
+    )
+    context_file = RestartContextFile(config.restart_context_path)
+    context_file.write(_context())
+    handler = _handler(
+        config,
+        store=store,
+        clock=clock,
+        agent_id="agent-a",
+    )
+
+    with pytest.raises(RendezvousStateError, match="stale initial restart context"):
+        handler._prepare_restart_context(
+            current,
+            None,
+            time.monotonic() + 1,
+        )
+
+    assert context_file.read() == _context()
+    assert handler.shutdown() is True
 
 
 def test_slot_aware_handler_reads_registration_histories_linearly(
@@ -3373,6 +3458,64 @@ def test_slot_aware_handler_clears_replacement_context_after_admission_failure(
     assert handler.shutdown() is True
 
 
+def test_slot_aware_handler_always_cleans_registration_when_context_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=InMemoryControlStore(clock=clock),
+        clock=clock,
+        agent_id="agent-b",
+    )
+    cleanup_token = "a" * 64
+    cleaned = False
+    current = SimpleNamespace()
+    monkeypatch.setattr(handler, "_is_closed_bounded", lambda _deadline: False)
+    monkeypatch.setattr(handler, "_ensure_registered", lambda _deadline: None)
+    monkeypatch.setattr(handler, "_read_generation", lambda: current)
+    monkeypatch.setattr(
+        handler,
+        "_generation_admission",
+        lambda *_args: (0, object(), time.monotonic() + 1),
+    )
+    monkeypatch.setattr(
+        handler,
+        "_prepare_restart_context",
+        lambda *_args: cleanup_token,
+    )
+    monkeypatch.setattr(
+        handler,
+        "_wait_for_assigned_arrivals",
+        lambda *_args: (_ for _ in ()).throw(
+            RendezvousConnectionError("original admission failure")
+        ),
+    )
+    monkeypatch.setattr(
+        handler,
+        "_invalidate_and_clear_restart_context",
+        lambda _token: (_ for _ in ()).throw(RendezvousStateError("context cleanup failure")),
+    )
+
+    def cleanup() -> bool:
+        nonlocal cleaned
+        cleaned = True
+        return True
+
+    monkeypatch.setattr(handler, "_cleanup_local_resources", cleanup)
+
+    with pytest.raises(RendezvousConnectionError, match="original admission failure"):
+        handler.next_rendezvous()
+
+    assert cleaned is True
+
+
 def test_slot_aware_handler_invalidates_context_when_cleanup_cannot_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3555,16 +3698,122 @@ def test_slot_aware_handler_rechecks_deadline_before_returning_admission(
         validate_after_blocking_work,
     )
     monkeypatch.setattr(handler, "_validate_current_arrival_attempt", lambda *_args: None)
+    completion, admission = _stub_replacement_return_evidence(
+        handler,
+        monkeypatch,
+    )
 
     with pytest.raises(RendezvousTimeoutError):
         handler._validate_replacement_return(
             cast(Any, object()),
             assignment,
             1,
+            0,
+            cast(Any, completion),
+            cast(Any, admission),
             cast(Any, recovery_state),
             deadline,
         )
     assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_binds_admission_to_returning_registration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=InMemoryControlStore(clock=clock),
+        clock=clock,
+        agent_id="agent-b",
+    )
+    handler._ensure_registered(time.monotonic() + 1)
+    with handler._registration_lock:
+        registration = handler._registration
+    assert registration is not None
+    plan = _replacement_plan()
+    assignment = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    monkeypatch.setattr(handler, "_validate_final_admission_state", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        handler,
+        "_validate_replacement_admission_entry",
+        lambda *_a, **_k: {
+            "0": {
+                "agent_id": "old-agent-b",
+                "consumption_revision": 10,
+                "consumption_transaction_sequence": 11,
+                "node_id": "node-b",
+                "registration_id": "old-registration",
+                "registration_revision": registration.fencing_token,
+            }
+        },
+    )
+
+    with pytest.raises(
+        RendezvousConnectionError,
+        match="does not include this agent registration",
+    ):
+        handler._validate_replacement_return(
+            cast(Any, object()),
+            assignment,
+            1,
+            0,
+            cast(Any, object()),
+            cast(Any, object()),
+            cast(Any, _static_recovery_state(plan)),
+            time.monotonic() + 1,
+        )
+
+    assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_treats_missing_peer_registration_as_not_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-a",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=InMemoryControlStore(clock=clock),
+        clock=clock,
+        agent_id="agent-a",
+    )
+    assignment = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=(SlotAssignment(0, "node-b", 0, 2),),
+        topology_digest="topology-v1",
+    )
+    monkeypatch.setattr(
+        handler,
+        "_try_current_assigned_registration",
+        lambda _node_id: None,
+    )
+
+    assert (
+        handler._arrival_consumption_state(
+            assignment,
+            1,
+            cast(Any, object()),
+        )
+        is None
+    )
 
 
 def test_slot_aware_handler_requires_live_registration_before_returning_admission(
@@ -3614,6 +3863,10 @@ def test_slot_aware_handler_requires_live_registration_before_returning_admissio
         assignments=plan.slot_assignments,
         topology_digest=plan.topology_digest,
     )
+    completion, admission = _stub_replacement_return_evidence(
+        handler,
+        monkeypatch,
+    )
 
     with pytest.raises(
         RendezvousConnectionError,
@@ -3623,6 +3876,9 @@ def test_slot_aware_handler_requires_live_registration_before_returning_admissio
             cast(Any, object()),
             assignment,
             1,
+            0,
+            cast(Any, completion),
+            cast(Any, admission),
             cast(Any, _static_recovery_state(plan)),
             deadline,
         )
@@ -3657,6 +3913,10 @@ def test_slot_aware_handler_uses_authoritative_time_for_final_registration_expir
     )
     monkeypatch.setattr(handler, "_validate_final_admission_state", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(handler, "_validate_current_arrival_attempt", lambda *_args: None)
+    completion, admission = _stub_replacement_return_evidence(
+        handler,
+        monkeypatch,
+    )
     store_clock.advance(handler._config.policy.registration_lease_duration_ms)
 
     with pytest.raises(
@@ -3667,6 +3927,9 @@ def test_slot_aware_handler_uses_authoritative_time_for_final_registration_expir
             cast(Any, object()),
             assignment,
             1,
+            0,
+            cast(Any, completion),
+            cast(Any, admission),
             cast(Any, _static_recovery_state(plan)),
             time.monotonic() + 1,
         )
@@ -3711,6 +3974,10 @@ def test_slot_aware_handler_rejects_advanced_attempt_before_returning_admission(
         ),
     )
     monkeypatch.setattr(handler, "_validate_final_admission_state", lambda *_args, **_kwargs: None)
+    completion, admission = _stub_replacement_return_evidence(
+        handler,
+        monkeypatch,
+    )
 
     with pytest.raises(
         RendezvousStateError,
@@ -3720,6 +3987,9 @@ def test_slot_aware_handler_rejects_advanced_attempt_before_returning_admission(
             cast(Any, object()),
             assignment,
             1,
+            0,
+            cast(Any, completion),
+            cast(Any, admission),
             cast(Any, _static_recovery_state(plan)),
             time.monotonic() + 1,
         )

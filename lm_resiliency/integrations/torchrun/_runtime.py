@@ -589,9 +589,17 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                         self._monotonic_clock() + self._config.policy.join_timeout_ms / 1_000
                     )
         except BaseException:
-            if context_token is not None:
-                self._invalidate_and_clear_restart_context(context_token)
-            self._cleanup_local_resources()
+            try:
+                if context_token is not None:
+                    try:
+                        self._invalidate_and_clear_restart_context(context_token)
+                    except (OSError, RestartContextFileError, RendezvousStateError):
+                        pass
+            finally:
+                try:
+                    self._cleanup_local_resources()
+                except Exception:
+                    pass
             raise
 
     def is_closed(self) -> bool:
@@ -1598,6 +1606,38 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         )
         return current
 
+    def _try_current_assigned_registration(
+        self,
+        node_id: str,
+    ) -> HeldAgentRegistration | None:
+        try:
+            history = AgentRegistrationHistoryReader(
+                self._control_store,
+                run_id=self._config.run_id,
+                node_id=node_id,
+            ).read()
+        except AgentRegistrationHistoryCorrupt as error:
+            raise RendezvousStateError("arrived agent registration history is corrupt") from error
+        except AgentRegistrationHistoryError as error:
+            raise RendezvousConnectionError(
+                "arrived agent registration history changed repeatedly"
+            ) from error
+        current = history.current
+        if current is None:
+            return None
+        now_unix_ms = self._clock()
+        if (
+            isinstance(now_unix_ms, bool)
+            or not isinstance(now_unix_ms, int)
+            or now_unix_ms < current.granted_at_unix_ms
+        ):
+            raise RendezvousConnectionError(
+                "rendezvous arrival clock is invalid for its registration"
+            )
+        if current.expires_at_unix_ms <= now_unix_ms:
+            return None
+        return current
+
     def _read_current_assigned_registration(
         self,
         node_id: str,
@@ -2116,7 +2156,9 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         conditions: dict[str, int] = {}
         consumptions: dict[str, dict[str, Any]] = {}
         for slot, node_id in assignment.slot_to_node_id.items():
-            registration = self._current_assigned_registration(node_id)
+            registration = self._try_current_assigned_registration(node_id)
+            if registration is None:
+                return None
             entry = self._read_arrival_consumption(
                 assignment,
                 attempt,
@@ -2334,6 +2376,9 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                     current,
                     assignment,
                     attempt,
+                    slot,
+                    completion,
+                    admission,
                     recovery_state,
                     deadline,
                 )
@@ -2358,6 +2403,9 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                         current,
                         assignment,
                         attempt,
+                        slot,
+                        completion,
+                        admission,
                         recovery_state,
                         deadline,
                     )
@@ -2374,6 +2422,9 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                         current,
                         assignment,
                         attempt,
+                        slot,
+                        completion,
+                        admission,
                         recovery_state,
                         deadline,
                     )
@@ -2385,6 +2436,9 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         current: CurrentGeneration,
         assignment: RankAssignment,
         attempt: int,
+        slot: int,
+        completion: ControlStoreEntry,
+        admission: ControlStoreEntry,
         recovery_state: RestartPlanPersistedRecoveryState,
         deadline: float,
     ) -> None:
@@ -2403,6 +2457,36 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         if current_registration.record != registration.record:
             raise RendezvousConnectionError(
                 "replacement agent registration changed before admission"
+            )
+        consumptions = self._validate_replacement_admission_entry(
+            admission,
+            assignment=assignment,
+            attempt=attempt,
+            completion=completion,
+            recovery_state=recovery_state,
+        )
+        metadata = consumptions[str(slot)]
+        if (
+            metadata["registration_id"] != current_registration.record.registration_id
+            or metadata["agent_id"] != current_registration.record.agent_identity.agent_id
+            or metadata["registration_revision"] != current_registration.fencing_token
+        ):
+            raise RendezvousConnectionError(
+                "replacement admission does not include this agent registration"
+            )
+        consumption = self._read_arrival_consumption(
+            assignment,
+            attempt,
+            slot,
+            completion,
+            current_registration,
+        )
+        if consumption is None or (
+            metadata["consumption_revision"] != consumption.revision
+            or metadata["consumption_transaction_sequence"] != consumption.transaction_sequence
+        ):
+            raise RendezvousConnectionError(
+                "replacement admission does not include this agent consumption"
             )
         self._validate_current_arrival_attempt(assignment, attempt)
         now_unix_ms = self._replacement_now_unix_ms(recovery_state)
@@ -2483,7 +2567,9 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         now_unix_ms = self._replacement_now_unix_ms(recovery_state)
         store_deadline_unix_ms = recovery_state.plan.restart_deadline_unix_ms
         for metadata in consumptions.values():
-            registration = self._current_assigned_registration(metadata["node_id"])
+            registration = self._try_current_assigned_registration(metadata["node_id"])
+            if registration is None:
+                return
             if (
                 registration.record.registration_id != metadata["registration_id"]
                 or registration.record.agent_identity.agent_id != metadata["agent_id"]
@@ -2867,7 +2953,10 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
     ) -> _RestartContextCleanupToken | None:
         if current.snapshot.record.assignment.generation == 0:
             try:
-                self._restart_context.clear(deadline=deadline)
+                self._restart_context.clear_stale_for_run(
+                    self._config.run_id,
+                    deadline=deadline,
+                )
             except (OSError, RestartContextFileError) as error:
                 raise RendezvousStateError(
                     "failed to clear stale initial restart context"
@@ -3075,8 +3164,7 @@ class RestartContextFile:
             encoded = self._read_encoded(parent_descriptor)
             assert encoded is not None
             cleanup_token, context = self._decode_envelope(encoded)
-            invalidated_token = self._read_invalidated_token(parent_descriptor)
-            if invalidated_token == cleanup_token:
+            if self._is_invalidated(parent_descriptor, cleanup_token):
                 raise RestartContextFileError("restart context has been invalidated")
             return context
         finally:
@@ -3108,7 +3196,7 @@ class RestartContextFile:
         try:
             descriptor, temporary = self._create_temporary_file(
                 parent_descriptor,
-                target_name=self._invalidation_name,
+                target_name=self._invalidation_name(cleanup_token),
             )
             os.fchmod(descriptor, 0o600)
             with os.fdopen(descriptor, "wb") as stream:
@@ -3118,7 +3206,7 @@ class RestartContextFile:
                 os.fsync(stream.fileno())
             os.replace(
                 temporary,
-                self._invalidation_name,
+                self._invalidation_name(cleanup_token),
                 src_dir_fd=parent_descriptor,
                 dst_dir_fd=parent_descriptor,
             )
@@ -3161,6 +3249,41 @@ class RestartContextFile:
         finally:
             os.close(parent_descriptor)
 
+    def clear_stale_for_run(
+        self,
+        run_id: str,
+        *,
+        deadline: float | None = None,
+    ) -> bool:
+        if not isinstance(run_id, str) or not run_id:
+            raise TypeError("run_id must be a non-empty string")
+        parent_descriptor = self._open_parent(create=False)
+        if parent_descriptor is None:
+            return False
+        try:
+            self._acquire_parent_lock(parent_descriptor, deadline=deadline)
+            self._reject_existing_symlink(parent_descriptor)
+            encoded = self._read_encoded(parent_descriptor, missing_ok=True)
+            if encoded is None:
+                return False
+            _, context = self._decode_envelope(encoded)
+            if context.run_id == run_id:
+                raise RestartContextFileError(
+                    "refusing to remove a restart context for the current run"
+                )
+            try:
+                os.unlink(self.path.name, dir_fd=parent_descriptor)
+            except FileNotFoundError:
+                return False
+            except OSError as error:
+                raise RestartContextFileError(
+                    f"failed to remove restart context at {self.path}"
+                ) from error
+            self._fsync_directory(parent_descriptor)
+            return True
+        finally:
+            os.close(parent_descriptor)
+
     def clear_if_token(
         self,
         cleanup_token: _RestartContextCleanupToken,
@@ -3187,6 +3310,17 @@ class RestartContextFile:
             except OSError as error:
                 raise RestartContextFileError(
                     f"failed to remove restart context at {self.path}"
+                ) from error
+            try:
+                os.unlink(
+                    self._invalidation_name(cleanup_token),
+                    dir_fd=parent_descriptor,
+                )
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                raise RestartContextFileError(
+                    f"failed to remove restart-context invalidation for {self.path}"
                 ) from error
             self._fsync_directory(parent_descriptor)
             return True
@@ -3286,18 +3420,19 @@ class RestartContextFile:
         finally:
             os.close(descriptor)
 
-    def _read_invalidated_token(
+    def _is_invalidated(
         self,
         parent_descriptor: int,
-    ) -> _RestartContextCleanupToken | None:
+        cleanup_token: _RestartContextCleanupToken,
+    ) -> bool:
         encoded = self._read_encoded(
             parent_descriptor,
             missing_ok=True,
-            name=self._invalidation_name,
+            name=self._invalidation_name(cleanup_token),
             maximum_bytes=_MAX_CONTEXT_INVALIDATION_BYTES,
         )
         if encoded is None:
-            return None
+            return False
         try:
             value = json.loads(
                 encoded,
@@ -3310,7 +3445,7 @@ class RestartContextFile:
                 or value["schema_version"] != _CONTEXT_INVALIDATION_SCHEMA_VERSION
             ):
                 raise RestartContextFileError("restart-context invalidation marker is malformed")
-            return self._validate_cleanup_token(value["cleanup_token"])
+            return self._validate_cleanup_token(value["cleanup_token"]) == cleanup_token
         except _DuplicateJsonFieldError as error:
             raise RestartContextFileError(str(error)) from error
         except RestartContextFileError:
@@ -3483,9 +3618,9 @@ class RestartContextFile:
             f"failed to allocate a temporary restart context for {self.path}"
         )
 
-    @property
-    def _invalidation_name(self) -> str:
-        return f".{self.path.name}.invalidated"
+    def _invalidation_name(self, cleanup_token: _RestartContextCleanupToken) -> str:
+        self._validate_cleanup_token(cleanup_token)
+        return f".{self.path.name}.invalidated-{cleanup_token}"
 
     @staticmethod
     def _validate_owned_private_file(metadata: os.stat_result) -> None:
