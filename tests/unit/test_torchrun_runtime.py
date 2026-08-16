@@ -1048,8 +1048,10 @@ def _seed_assigned_arrival(
     with handler._registration_lock:
         registration = handler._registration
     assert registration is not None
+    current = handler._read_generation()
+    assert current is not None
     attempt = handler._claim_shared_arrival_attempt(
-        generation=generation,
+        assignment=current.snapshot.record.assignment,
         slot=slot,
         registration=registration,
         deadline=deadline,
@@ -1064,8 +1066,6 @@ def _seed_assigned_arrival(
             registration=registration,
         ),
     )
-    current = handler._read_generation()
-    assert current is not None
 
     def complete_attempt() -> None:
         while time.monotonic() < deadline:
@@ -1119,7 +1119,7 @@ def test_slot_aware_handler_refreshes_leader_registration_before_completion(
     assert original_leader_registration is not None
     assert peer_registration is not None
     attempt = leader._claim_shared_arrival_attempt(
-        generation=0,
+        assignment=current.snapshot.record.assignment,
         slot=0,
         registration=original_leader_registration,
         deadline=deadline,
@@ -1178,7 +1178,7 @@ def test_slot_aware_handler_classifies_duplicate_completion_fields_as_corruption
         registration = handler._registration
     assert registration is not None
     attempt = handler._claim_shared_arrival_attempt(
-        generation=0,
+        assignment=current.snapshot.record.assignment,
         slot=0,
         registration=registration,
         deadline=deadline,
@@ -1432,9 +1432,11 @@ def test_slot_aware_handler_reuses_incomplete_attempt_after_leader_replacement(
     with original_leader._registration_lock:
         original_registration = original_leader._registration
     assert original_registration is not None
+    current = original_leader._read_generation()
+    assert current is not None
     assert (
         original_leader._claim_shared_arrival_attempt(
-            generation=0,
+            assignment=current.snapshot.record.assignment,
             slot=0,
             registration=original_registration,
             deadline=deadline,
@@ -1483,6 +1485,105 @@ def test_slot_aware_handler_reuses_incomplete_attempt_after_leader_replacement(
     assert attempt == 1
     assert replacement.shutdown() is True
     assert peer.shutdown() is True
+
+
+def test_slot_aware_handler_replacement_consumes_completed_attempt_before_advance(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    _, _, current = _initialize_generation(store, clock, ("node-a", "node-b"))
+    original_leader = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-a",
+            min_nodes=2,
+            max_nodes=3,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-a-original",
+    )
+    peer = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=2,
+            max_nodes=3,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+    )
+    deadline = time.monotonic() + 1
+    original_leader._ensure_registered(deadline)
+    peer._ensure_registered(deadline)
+    with original_leader._registration_lock:
+        original_registration = original_leader._registration
+    with peer._registration_lock:
+        peer_registration = peer._registration
+    assert original_registration is not None
+    assert peer_registration is not None
+    assignment = current.snapshot.record.assignment
+    attempt = original_leader._claim_shared_arrival_attempt(
+        assignment=assignment,
+        slot=0,
+        registration=original_registration,
+        deadline=deadline,
+    )
+    for slot, handler, registration in (
+        (0, original_leader, original_registration),
+        (1, peer, peer_registration),
+    ):
+        store.compare_set(
+            original_leader._arrival_key(0, attempt, slot),
+            expected_revision=None,
+            value=handler._arrival_value(
+                generation=0,
+                attempt=attempt,
+                slot=slot,
+                registration=registration,
+            ),
+        )
+    original_leader._try_complete_arrival_attempt(
+        assignment,
+        attempt,
+        original_registration,
+    )
+    completion = store.get(original_leader._arrival_completion_key(0, attempt))
+    assert completion is not None
+    assert original_leader.shutdown() is True
+
+    peer_info = peer.next_rendezvous()
+    peer_consumption = store.get(peer._arrival_consumption_key(0, attempt, 1))
+    assert peer_info.rank == 1
+    assert peer_consumption is not None
+
+    replacement = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-a",
+            min_nodes=2,
+            max_nodes=3,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-a-replacement",
+    )
+    replacement_info = replacement.next_rendezvous()
+    replacement_consumption = store.get(replacement._arrival_consumption_key(0, attempt, 0))
+    attempt_entry = store.get(replacement._arrival_attempt_key(0))
+
+    assert replacement_info.rank == 0
+    assert replacement_consumption is not None
+    assert attempt_entry is not None
+    current_attempt, _, _ = replacement._validate_arrival_attempt_entry(
+        attempt_entry,
+        generation=0,
+    )
+    assert current_attempt == attempt
+    assert peer.shutdown() is True
+    assert replacement.shutdown() is True
 
 
 def test_slot_aware_handler_bounds_bootstrap_read_and_ignores_stale_unprefixed_keys(
@@ -1821,8 +1922,10 @@ def test_slot_aware_handler_reads_registration_histories_linearly(
     with handlers[0]._registration_lock:
         leader_registration = handlers[0]._registration
     assert leader_registration is not None
+    current = handlers[0]._read_generation()
+    assert current is not None
     attempt = handlers[0]._claim_shared_arrival_attempt(
-        generation=0,
+        assignment=current.snapshot.record.assignment,
         slot=0,
         registration=leader_registration,
         deadline=deadline,

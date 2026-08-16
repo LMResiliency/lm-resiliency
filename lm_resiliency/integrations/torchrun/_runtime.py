@@ -82,6 +82,7 @@ _CLOSED_SCHEMA_VERSION = 1
 _ARRIVAL_SCHEMA_VERSION = 1
 _ARRIVAL_ATTEMPT_SCHEMA_VERSION = 1
 _ARRIVAL_COMPLETION_SCHEMA_VERSION = 1
+_ARRIVAL_CONSUMPTION_SCHEMA_VERSION = 1
 _SHARED_FIELDS = {
     "control_endpoint",
     "replacement_only",
@@ -419,7 +420,6 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         self._release_error: Exception | None = None
         self._closure_thread: threading.Thread | None = None
         self._closure_error: Exception | None = None
-        self._last_arrival_attempts: dict[int, int] = {}
         self._state_changed_event = threading.Event()
         self._closed_event = threading.Event()
         self._closure_lock = threading.Lock()
@@ -471,7 +471,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                             raise RendezvousStateError(
                                 "failed to clear stale initial restart context"
                             ) from error
-                        self._wait_for_assigned_arrivals(
+                        attempt, completion = self._wait_for_assigned_arrivals(
                             current,
                             slot,
                             formation_deadline,
@@ -489,6 +489,12 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                         self._raise_heartbeat_error()
                         if self._read_generation() != current:
                             raise RendezvousConnectionError("generation changed during rendezvous")
+                        self._publish_arrival_consumption(
+                            current.snapshot.record.assignment,
+                            attempt,
+                            slot,
+                            completion,
+                        )
                         return RendezvousInfo(
                             bootstrap_store,
                             slot,
@@ -953,7 +959,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         current: CurrentGeneration,
         slot: int,
         deadline: float,
-    ) -> None:
+    ) -> tuple[int, ControlStoreEntry]:
         assignment = current.snapshot.record.assignment
         with self._registration_lock:
             registration = self._registration
@@ -962,11 +968,18 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                 "assigned node lost its registration before the arrival barrier"
             )
         attempt = self._claim_shared_arrival_attempt(
-            generation=assignment.generation,
+            assignment=assignment,
             slot=slot,
             registration=registration,
             deadline=deadline,
         )
+        completion = self._read_arrival_completion(
+            assignment,
+            attempt,
+            None,
+        )
+        if completion is not None:
+            return attempt, completion
         arrival_value = self._arrival_value(
             generation=assignment.generation,
             attempt=attempt,
@@ -997,7 +1010,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                 completion = self._read_arrival_completion(
                     assignment,
                     attempt,
-                    registration,
+                    None,
                 )
                 if completion is not None:
                     raise RendezvousConnectionError(
@@ -1032,11 +1045,10 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             completion = self._read_arrival_completion(
                 assignment,
                 attempt,
-                registration,
+                None,
             )
             if completion is not None:
-                self._last_arrival_attempts[assignment.generation] = attempt
-                return
+                return attempt, completion
             if slot == 0:
                 self._try_complete_arrival_attempt(
                     assignment,
@@ -1049,11 +1061,12 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
     def _claim_shared_arrival_attempt(
         self,
         *,
-        generation: int,
+        assignment: RankAssignment,
         slot: int,
         registration: HeldAgentRegistration,
         deadline: float,
     ) -> int:
+        generation = assignment.generation
         key = self._arrival_attempt_key(generation)
         while True:
             if self.is_closed():
@@ -1084,29 +1097,53 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                     attempt, _, _ = self._validate_arrival_attempt_entry(
                         entry,
                         generation=generation,
+                        leader_node_id=assignment.slot_to_node_id[0],
                     )
-                    completed = (
-                        self._control_store.get(self._arrival_completion_key(generation, attempt))
+                    completion = self._read_arrival_completion(
+                        assignment,
+                        attempt,
+                        None,
+                    )
+                    own_consumption = None
+                    if completion is not None:
+                        own_consumption = self._read_arrival_consumption(
+                            assignment,
+                            attempt,
+                            slot,
+                            completion,
+                        )
+                    if completion is not None and own_consumption is None:
+                        committed = entry
+                    elif (
+                        slot == 0
+                        and completion is not None
+                        and self._arrival_consumption_conditions(
+                            assignment,
+                            attempt,
+                            completion,
+                        )
                         is not None
-                    )
-                    last_attempt = self._last_arrival_attempts.get(generation, 0)
-                    if slot == 0 and (completed or attempt <= last_attempt):
+                    ):
                         next_attempt = attempt + 1
                         value = self._arrival_attempt_value(
                             generation=generation,
                             attempt=next_attempt,
                             registration=registration,
                         )
-                        try:
-                            committed = self._control_store.compare_set(
-                                key,
-                                expected_revision=entry.revision,
-                                value=value,
-                            )
-                        except ControlStoreConflict:
+                        advanced = self._advance_arrival_attempt(
+                            assignment,
+                            entry,
+                            attempt,
+                            next_attempt,
+                            value,
+                            registration,
+                            completion,
+                        )
+                        if advanced is None:
                             continue
+                        committed = advanced
                         attempt = next_attempt
-                    elif completed or attempt <= last_attempt:
+                    elif completion is not None:
                         if not self._wait_for_change(deadline):
                             raise RendezvousTimeoutError
                         continue
@@ -1116,6 +1153,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                     committed,
                     generation=generation,
                     expected_attempt=attempt,
+                    leader_node_id=assignment.slot_to_node_id[0],
                 )
                 return attempt
             except (RendezvousClosedError, RendezvousStateError, RendezvousTimeoutError):
@@ -1124,6 +1162,73 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                 raise RendezvousConnectionError(
                     "failed to claim a rendezvous arrival attempt"
                 ) from error
+
+    def _advance_arrival_attempt(
+        self,
+        assignment: RankAssignment,
+        current_entry: ControlStoreEntry,
+        current_attempt: int,
+        next_attempt: int,
+        value: bytes,
+        registration: HeldAgentRegistration,
+        completion: ControlStoreEntry,
+    ) -> ControlStoreEntry | None:
+        conditions = self._arrival_consumption_conditions(
+            assignment,
+            current_attempt,
+            completion,
+        )
+        if conditions is None:
+            return None
+        completion_key = self._arrival_completion_key(
+            assignment.generation,
+            current_attempt,
+        )
+        conditions[completion_key] = completion.revision
+        with self._registration_lock:
+            current_registration = self._registration
+        if current_registration is None or current_registration.record != registration.record:
+            raise RendezvousConnectionError("arrival leader no longer owns its agent registration")
+        now_unix_ms = self._clock()
+        if (
+            isinstance(now_unix_ms, bool)
+            or not isinstance(now_unix_ms, int)
+            or now_unix_ms < current_registration.granted_at_unix_ms
+            or now_unix_ms >= current_registration.expires_at_unix_ms
+        ):
+            raise RendezvousConnectionError(
+                "rendezvous attempt advance is outside the registration window"
+            )
+        attempt_key = self._arrival_attempt_key(assignment.generation)
+        try:
+            result = self._control_store.compare_set_many_guarded(
+                {
+                    attempt_key: ControlStoreWrite(
+                        expected_revision=current_entry.revision,
+                        value=value,
+                    )
+                },
+                guard_key=self._registration_manager.registration_key,
+                expected_guard_revision=current_registration.fencing_token,
+                not_before_unix_ms=now_unix_ms,
+                deadline_unix_ms=current_registration.expires_at_unix_ms,
+                conditions=conditions,
+            )
+        except ControlStoreConflict:
+            return None
+        except Exception as error:
+            raise RendezvousConnectionError(
+                "failed to advance the rendezvous arrival attempt"
+            ) from error
+        committed = result[attempt_key]
+        self._validate_arrival_attempt_entry(
+            committed,
+            generation=assignment.generation,
+            expected_attempt=next_attempt,
+            leader_node_id=assignment.slot_to_node_id[0],
+        )
+        self._state_changed_event.set()
+        return committed
 
     def _arrival_attempt_key(self, generation: int) -> str:
         return (
@@ -1158,6 +1263,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         *,
         generation: int,
         expected_attempt: int | None = None,
+        leader_node_id: str | None = None,
     ) -> tuple[int, str, str]:
         try:
             payload = json.loads(
@@ -1196,11 +1302,19 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         for field in ("leader_agent_id", "leader_registration_id"):
             if not isinstance(payload[field], str) or not payload[field]:
                 raise RendezvousStateError(f"rendezvous arrival attempt record has invalid {field}")
+        expected_guard_key = (
+            None
+            if attempt == 1 or leader_node_id is None
+            else agent_registration_key(self._config.run_id, leader_node_id)
+        )
         if (
             entry.mutation_sequence != attempt
             or entry.value_sequence != attempt
             or entry.lifetime_sequence != 1
-            or entry.guard_key is not None
+            or (attempt == 1 and entry.guard_key is not None)
+            or (
+                attempt > 1 and leader_node_id is not None and entry.guard_key != expected_guard_key
+            )
         ):
             raise RendezvousStateError(
                 "rendezvous arrival attempt record has invalid store provenance"
@@ -1369,6 +1483,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             attempt_entry,
             generation=assignment.generation,
             expected_attempt=attempt,
+            leader_node_id=assignment.slot_to_node_id[0],
         )
         conditions[attempt_key] = attempt_entry.revision
         for assigned_slot, node_id in assignment.slot_to_node_id.items():
@@ -1461,7 +1576,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         self,
         assignment: RankAssignment,
         attempt: int,
-        registration: HeldAgentRegistration,
+        registration: HeldAgentRegistration | None,
     ) -> ControlStoreEntry | None:
         key = self._arrival_completion_key(assignment.generation, attempt)
         try:
@@ -1512,8 +1627,8 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         *,
         assignment: RankAssignment,
         attempt: int,
-        registration: HeldAgentRegistration,
-    ) -> None:
+        registration: HeldAgentRegistration | None,
+    ) -> Mapping[str, Mapping[str, Any]]:
         try:
             payload = json.loads(
                 entry.value.decode("utf-8"),
@@ -1577,8 +1692,9 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                     raise RendezvousStateError(f"rendezvous arrival completion has invalid {field}")
             if node_id == self._config.node_id:
                 own_arrival = arrival
-        if own_arrival is None or (
-            own_arrival["registration_id"] != registration.record.registration_id
+        if registration is not None and (
+            own_arrival is None
+            or own_arrival["registration_id"] != registration.record.registration_id
             or own_arrival["agent_id"] != registration.record.agent_identity.agent_id
         ):
             raise RendezvousConnectionError(
@@ -1597,6 +1713,284 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             or entry.guard_revision != slot_zero["registration_revision"]
         ):
             raise RendezvousStateError("rendezvous arrival completion has invalid store provenance")
+        return arrivals
+
+    def _publish_arrival_consumption(
+        self,
+        assignment: RankAssignment,
+        attempt: int,
+        slot: int,
+        completion: ControlStoreEntry,
+    ) -> None:
+        with self._registration_lock:
+            registration = self._registration
+        if registration is None:
+            raise RendezvousConnectionError(
+                "assigned node lost its registration before consuming rendezvous"
+            )
+        key = self._arrival_consumption_key(
+            assignment.generation,
+            attempt,
+            slot,
+        )
+        value = self._arrival_consumption_value(
+            generation=assignment.generation,
+            attempt=attempt,
+            slot=slot,
+            registration=registration,
+            completion=completion,
+        )
+        try:
+            existing = self._control_store.get(key)
+        except Exception as error:
+            raise RendezvousConnectionError("failed to read rendezvous consumption") from error
+        if existing is not None:
+            self._validate_arrival_consumption_entry(
+                existing,
+                assignment=assignment,
+                attempt=attempt,
+                slot=slot,
+                completion=completion,
+                registration=registration,
+            )
+            return
+        now_unix_ms = self._clock()
+        if (
+            isinstance(now_unix_ms, bool)
+            or not isinstance(now_unix_ms, int)
+            or now_unix_ms < registration.granted_at_unix_ms
+            or now_unix_ms >= registration.expires_at_unix_ms
+        ):
+            raise RendezvousConnectionError(
+                "rendezvous consumption is outside the registration window"
+            )
+        completion_key = self._arrival_completion_key(
+            assignment.generation,
+            attempt,
+        )
+        try:
+            result = self._control_store.compare_set_many_guarded(
+                {
+                    key: ControlStoreWrite(
+                        expected_revision=None,
+                        value=value,
+                        require_never_created=True,
+                    )
+                },
+                guard_key=self._registration_manager.registration_key,
+                expected_guard_revision=registration.fencing_token,
+                not_before_unix_ms=now_unix_ms,
+                deadline_unix_ms=registration.expires_at_unix_ms,
+                conditions={completion_key: completion.revision},
+            )
+        except ControlStoreConflict:
+            try:
+                existing = self._control_store.get(key)
+            except Exception as error:
+                raise RendezvousConnectionError(
+                    "failed to resolve concurrent rendezvous consumption"
+                ) from error
+            if existing is None:
+                raise RendezvousConnectionError(
+                    "rendezvous consumption changed without a current record"
+                )
+            self._validate_arrival_consumption_entry(
+                existing,
+                assignment=assignment,
+                attempt=attempt,
+                slot=slot,
+                completion=completion,
+                registration=registration,
+            )
+            return
+        except Exception as error:
+            raise RendezvousConnectionError("failed to publish rendezvous consumption") from error
+        self._validate_arrival_consumption_entry(
+            result[key],
+            assignment=assignment,
+            attempt=attempt,
+            slot=slot,
+            completion=completion,
+            registration=registration,
+        )
+        self._state_changed_event.set()
+
+    def _arrival_consumption_conditions(
+        self,
+        assignment: RankAssignment,
+        attempt: int,
+        completion: ControlStoreEntry,
+    ) -> dict[str, int] | None:
+        conditions: dict[str, int] = {}
+        for slot in assignment.slot_to_node_id:
+            entry = self._read_arrival_consumption(
+                assignment,
+                attempt,
+                slot,
+                completion,
+            )
+            if entry is None:
+                return None
+            conditions[
+                self._arrival_consumption_key(
+                    assignment.generation,
+                    attempt,
+                    slot,
+                )
+            ] = entry.revision
+        return conditions
+
+    def _read_arrival_consumption(
+        self,
+        assignment: RankAssignment,
+        attempt: int,
+        slot: int,
+        completion: ControlStoreEntry,
+    ) -> ControlStoreEntry | None:
+        key = self._arrival_consumption_key(
+            assignment.generation,
+            attempt,
+            slot,
+        )
+        try:
+            entry = self._control_store.get(key)
+        except Exception as error:
+            raise RendezvousConnectionError("failed to read rendezvous consumption") from error
+        if entry is None:
+            return None
+        self._validate_arrival_consumption_entry(
+            entry,
+            assignment=assignment,
+            attempt=attempt,
+            slot=slot,
+            completion=completion,
+            registration=None,
+        )
+        return entry
+
+    def _arrival_consumption_key(
+        self,
+        generation: int,
+        attempt: int,
+        slot: int,
+    ) -> str:
+        return (
+            f"{_CONTROL_PREFIX}/runs/{self._run_digest}/rendezvous/"
+            f"generation-{generation}/attempt-{attempt}/consumed/slot-{slot}"
+        )
+
+    def _arrival_consumption_value(
+        self,
+        *,
+        generation: int,
+        attempt: int,
+        slot: int,
+        registration: HeldAgentRegistration,
+        completion: ControlStoreEntry,
+    ) -> bytes:
+        return json.dumps(
+            {
+                "agent_id": registration.record.agent_identity.agent_id,
+                "attempt": attempt,
+                "completion_digest": hashlib.sha256(completion.value).hexdigest(),
+                "generation": generation,
+                "logical_node_slot": slot,
+                "node_id": registration.record.agent_identity.node_id,
+                "registration_id": registration.record.registration_id,
+                "registration_revision": registration.fencing_token,
+                "run_id": self._config.run_id,
+                "schema_version": _ARRIVAL_CONSUMPTION_SCHEMA_VERSION,
+            },
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+
+    def _validate_arrival_consumption_entry(
+        self,
+        entry: ControlStoreEntry,
+        *,
+        assignment: RankAssignment,
+        attempt: int,
+        slot: int,
+        completion: ControlStoreEntry,
+        registration: HeldAgentRegistration | None,
+    ) -> None:
+        try:
+            payload = json.loads(
+                entry.value.decode("utf-8"),
+                object_pairs_hook=_strict_object,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            raise RendezvousStateError("rendezvous consumption is malformed") from error
+        expected_fields = {
+            "agent_id",
+            "attempt",
+            "completion_digest",
+            "generation",
+            "logical_node_slot",
+            "node_id",
+            "registration_id",
+            "registration_revision",
+            "run_id",
+            "schema_version",
+        }
+        if not isinstance(payload, dict) or set(payload) != expected_fields:
+            raise RendezvousStateError("rendezvous consumption has invalid fields")
+        expected_node_id = assignment.slot_to_node_id.get(slot)
+        expected_digest = hashlib.sha256(completion.value).hexdigest()
+        if (
+            expected_node_id is None
+            or payload["run_id"] != self._config.run_id
+            or payload["generation"] != assignment.generation
+            or payload["attempt"] != attempt
+            or payload["logical_node_slot"] != slot
+            or payload["node_id"] != expected_node_id
+            or payload["completion_digest"] != expected_digest
+            or payload["schema_version"] != _ARRIVAL_CONSUMPTION_SCHEMA_VERSION
+            or any(
+                isinstance(payload[field], bool) or not isinstance(payload[field], int)
+                for field in (
+                    "generation",
+                    "attempt",
+                    "logical_node_slot",
+                    "registration_revision",
+                    "schema_version",
+                )
+            )
+            or payload["registration_revision"] < 1
+        ):
+            raise RendezvousStateError(
+                "rendezvous consumption does not match its completed attempt"
+            )
+        for field in ("agent_id", "registration_id"):
+            if not isinstance(payload[field], str) or not payload[field]:
+                raise RendezvousStateError(f"rendezvous consumption has invalid {field}")
+        if (
+            not isinstance(payload["completion_digest"], str)
+            or len(payload["completion_digest"]) != 64
+        ):
+            raise RendezvousStateError("rendezvous consumption has invalid completion digest")
+        if registration is not None and (
+            payload["registration_id"] != registration.record.registration_id
+            or payload["agent_id"] != registration.record.agent_identity.agent_id
+            or payload["registration_revision"] != registration.fencing_token
+        ):
+            raise RendezvousConnectionError(
+                "rendezvous attempt was consumed by another agent registration"
+            )
+        if (
+            entry.mutation_sequence != 1
+            or entry.value_sequence != 1
+            or entry.lifetime_sequence != 1
+            or entry.guard_key
+            != agent_registration_key(
+                self._config.run_id,
+                expected_node_id,
+            )
+            or entry.guard_revision != payload["registration_revision"]
+        ):
+            raise RendezvousStateError("rendezvous consumption has invalid store provenance")
 
     def _initial_slot(self, current: CurrentGeneration) -> int | None:
         assignment = current.snapshot.record.assignment

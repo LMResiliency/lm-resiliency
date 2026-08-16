@@ -303,6 +303,48 @@ def test_guarded_transaction_pins_condition_revision_during_refresh_compaction()
     )
 
 
+def test_guarded_transaction_pins_guard_revision_during_refresh_compaction():
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    guard = _guard(store)
+    clock.now_unix_ms = 1_001
+    referenced = store.compare_refresh_in_window(
+        "run/coordinator-lease",
+        expected_revision=guard.revision,
+        not_before_unix_ms=1_001,
+        deadline_unix_ms=1_100,
+        value=b"lease-a",
+    )
+    store.compare_set_many_guarded(
+        {
+            "run/generation-head": ControlStoreWrite(
+                expected_revision=None,
+                value=b"generation-0",
+            )
+        },
+        guard_key="run/coordinator-lease",
+        expected_guard_revision=referenced.revision,
+        not_before_unix_ms=1_001,
+        deadline_unix_ms=1_100,
+    )
+    current = referenced
+    for now_unix_ms in (1_002, 1_003, 1_004):
+        clock.now_unix_ms = now_unix_ms
+        current = store.compare_refresh_in_window(
+            "run/coordinator-lease",
+            expected_revision=current.revision,
+            not_before_unix_ms=now_unix_ms,
+            deadline_unix_ms=1_100,
+            value=b"lease-a",
+        )
+
+    assert store.get_history("run/coordinator-lease") == (
+        guard,
+        referenced,
+        current,
+    )
+
+
 def test_guarded_transaction_rejects_condition_conflict_without_partial_writes():
     clock = ManualClock()
     store = InMemoryControlStore(clock=clock)

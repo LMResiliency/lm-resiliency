@@ -622,6 +622,9 @@ class InMemoryControlStore:
             for key, revision in normalized_conditions.items():
                 if revision is not None:
                     self._pinned_revisions.setdefault(key, set()).add(revision)
+            self._pinned_revisions.setdefault(normalized_guard_key, set()).add(
+                normalized_guard_revision
+            )
             return MappingProxyType(committed)
 
     def _compact_equivalent_refreshes(self, key: str) -> None:
