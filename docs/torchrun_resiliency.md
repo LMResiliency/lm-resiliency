@@ -1495,8 +1495,13 @@ each renewal from the returned lease's remaining lifetime rather than from a
 fixed interval. An assigned node ID is admitted only when its retained
 registration history has the same local worker count and environment digest as
 the current handler, so an incompatible process cannot reuse an expired node
-registration. Replacement generation admission, restart-context publication,
-and the positive
+registration. The first assigned node commits one immutable run-scoped workload
+compatibility identity, and every other assigned node must match it; unassigned
+standbys cannot create or replace that record. Initial registration backend I/O
+does not hold the handler's ownership lock, so local shutdown remains bounded
+while registration is stalled. A registration response arriving after local
+shutdown is not installed or heartbeated and expires conservatively.
+Replacement generation admission, restart-context publication, and the positive
 `num_nodes_waiting()` restart edge are enabled only after authoritative
 restart-plan readback is integrated in the following slice.
 

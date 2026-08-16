@@ -15,6 +15,7 @@ import pytest
 from torch.distributed import HashStore
 from torch.distributed.elastic.rendezvous import (
     RendezvousClosedError,
+    RendezvousConnectionError,
     RendezvousParameters,
     RendezvousStateError,
     RendezvousStoreInfo,
@@ -928,7 +929,7 @@ def _handler_config(
     node_id: str,
     min_nodes: int,
     max_nodes: int,
-    registration_lease_duration_ms: int = 120,
+    registration_lease_duration_ms: int = 30_000,
     poll_interval_ms: int = 10,
     join_timeout_ms: int = 500,
 ) -> TorchrunRuntimeConfig:
@@ -1194,6 +1195,108 @@ def test_slot_aware_handler_bounds_bootstrap_read_and_ignores_stale_unprefixed_k
     assert handler.shutdown() is True
 
 
+def test_slot_aware_handler_rechecks_closure_after_bootstrap_wait(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    _initialize_generation(store, clock, ("node-a", "node-b"))
+    rendezvous_store = HashStore()
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=2,
+            max_nodes=3,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+        rendezvous_store=rendezvous_store,
+        bootstrap_store_info=None,
+    )
+    outcome: queue.Queue[BaseException | object] = queue.Queue()
+
+    def rendezvous() -> None:
+        try:
+            outcome.put(handler.next_rendezvous())
+        except BaseException as error:
+            outcome.put(error)
+
+    thread = threading.Thread(target=rendezvous)
+    thread.start()
+    _wait_until(
+        lambda: (
+            AgentRegistrationReader(
+                store,
+                run_id=RUN_ID,
+                clock=clock,
+            ).get("node-b")
+            is not None
+        )
+    )
+
+    handler.set_closed()
+    bootstrap_store = handler._bootstrap_store(0)
+    bootstrap_store.set(RendezvousStoreInfo.MASTER_ADDR_KEY, "master.example")
+    bootstrap_store.set(RendezvousStoreInfo.MASTER_PORT_KEY, "29500")
+    thread.join(timeout=2)
+
+    assert isinstance(outcome.get_nowait(), RendezvousClosedError)
+    assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_rechecks_heartbeat_after_bootstrap_wait(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    _initialize_generation(store, clock, ("node-a", "node-b"))
+    rendezvous_store = HashStore()
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=2,
+            max_nodes=3,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+        rendezvous_store=rendezvous_store,
+        bootstrap_store_info=None,
+    )
+    outcome: queue.Queue[BaseException | object] = queue.Queue()
+
+    def rendezvous() -> None:
+        try:
+            outcome.put(handler.next_rendezvous())
+        except BaseException as error:
+            outcome.put(error)
+
+    thread = threading.Thread(target=rendezvous)
+    thread.start()
+    _wait_until(
+        lambda: (
+            AgentRegistrationReader(
+                store,
+                run_id=RUN_ID,
+                clock=clock,
+            ).get("node-b")
+            is not None
+        )
+    )
+
+    handler._heartbeat_error = RuntimeError("registration lost")
+    bootstrap_store = handler._bootstrap_store(0)
+    bootstrap_store.set(RendezvousStoreInfo.MASTER_ADDR_KEY, "master.example")
+    bootstrap_store.set(RendezvousStoreInfo.MASTER_PORT_KEY, "29500")
+    thread.join(timeout=2)
+
+    assert isinstance(outcome.get_nowait(), RendezvousConnectionError)
+    assert handler.shutdown() is True
+
+
 def test_slot_aware_handler_parks_standby_without_reporting_waiting_node(
     tmp_path: Path,
 ):
@@ -1410,6 +1513,7 @@ def test_slot_aware_handler_shutdown_is_bounded_by_stuck_heartbeat(
             node_id="node-a",
             min_nodes=1,
             max_nodes=2,
+            registration_lease_duration_ms=90,
         ),
         store=store,
         clock=clock,
@@ -1508,6 +1612,159 @@ def test_slot_aware_handler_rejects_incompatible_node_id_reuse(tmp_path: Path):
         handler.next_rendezvous()
 
     assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_rejects_job_wide_environment_drift(tmp_path: Path):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    _initialize_generation(store, clock, ("node-a", "node-b"))
+    first = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-a",
+            min_nodes=2,
+            max_nodes=3,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-a",
+    )
+    second = _handler(
+        replace(
+            _handler_config(
+                tmp_path,
+                node_id="node-b",
+                min_nodes=2,
+                max_nodes=3,
+            ),
+            environment_digest="environment-v2",
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+    )
+
+    assert first.next_rendezvous().rank == 0
+    with pytest.raises(RendezvousStateError, match="committed workload environment"):
+        second.next_rendezvous()
+
+    assert first.shutdown() is True
+    assert second.shutdown() is True
+
+
+def test_slot_aware_handler_standby_cannot_commit_job_compatibility(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    _initialize_generation(store, clock, ("node-a",))
+    standby = _handler(
+        replace(
+            _handler_config(
+                tmp_path,
+                node_id="node-b",
+                min_nodes=1,
+                max_nodes=2,
+            ),
+            environment_digest="environment-v2",
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+    )
+    active = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-a",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-a",
+    )
+    standby_outcome: queue.Queue[BaseException | object] = queue.Queue()
+
+    def rendezvous_standby() -> None:
+        try:
+            standby_outcome.put(standby.next_rendezvous())
+        except BaseException as error:
+            standby_outcome.put(error)
+
+    standby_thread = threading.Thread(target=rendezvous_standby)
+    standby_thread.start()
+    _wait_until(
+        lambda: (
+            AgentRegistrationReader(
+                store,
+                run_id=RUN_ID,
+                clock=clock,
+            ).get("node-b")
+            is not None
+        )
+    )
+
+    assert store.get(active._compatibility_key) is None
+    assert active.next_rendezvous().rank == 0
+    assert store.get(active._compatibility_key) is not None
+
+    assert standby.shutdown() is True
+    standby_thread.join(timeout=2)
+    assert isinstance(standby_outcome.get_nowait(), RendezvousClosedError)
+    assert active.shutdown() is True
+
+
+def test_slot_aware_handler_shutdown_is_bounded_during_registration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    _initialize_generation(store, clock, ("node-a",))
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-a",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=store,
+        clock=clock,
+        agent_id="agent-a",
+    )
+    original_register = handler._registration_manager.register
+    started = threading.Event()
+    release = threading.Event()
+    outcome: queue.Queue[BaseException | object] = queue.Queue()
+
+    def delayed_registration() -> Any:
+        registration = original_register()
+        started.set()
+        release.wait(timeout=2)
+        return registration
+
+    def rendezvous() -> None:
+        try:
+            outcome.put(handler.next_rendezvous())
+        except BaseException as error:
+            outcome.put(error)
+
+    monkeypatch.setattr(
+        handler._registration_manager,
+        "register",
+        delayed_registration,
+    )
+    thread = threading.Thread(target=rendezvous)
+    thread.start()
+    assert started.wait(timeout=1)
+
+    before = time.monotonic()
+    assert handler.shutdown() is True
+    assert time.monotonic() - before < 0.5
+
+    release.set()
+    thread.join(timeout=2)
+    assert isinstance(outcome.get_nowait(), RendezvousClosedError)
 
 
 def test_slot_aware_handler_cleans_up_registration_on_cancellation(

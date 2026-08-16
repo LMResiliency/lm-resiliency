@@ -372,6 +372,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         run_digest = hashlib.sha256(config.run_id.encode("utf-8")).hexdigest()
         self._run_digest = run_digest
         self._closure_key = f"{_CONTROL_PREFIX}/runs/{run_digest}/rendezvous-closed"
+        self._compatibility_key = f"{_CONTROL_PREFIX}/runs/{run_digest}/rendezvous-compatibility"
         self._closure_value = json.dumps(
             {
                 "run_id": config.run_id,
@@ -381,8 +382,20 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             separators=(",", ":"),
             sort_keys=True,
         ).encode("utf-8")
+        self._compatibility_value = json.dumps(
+            {
+                "environment_digest": self._agent_identity.environment_digest,
+                "local_world_size": self._agent_identity.local_world_size,
+                "run_id": config.run_id,
+                "schema_version": 1,
+            },
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
         self._registration_lock = threading.RLock()
         self._registration: HeldAgentRegistration | None = None
+        self._registration_inflight = False
         self._heartbeat_error: Exception | None = None
         self._heartbeat_thread: threading.Thread | None = None
         self._heartbeat_last_now_unix_ms = 0
@@ -445,6 +458,9 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                             bootstrap_store,
                             formation_deadline,
                         )
+                        if self.is_closed():
+                            raise RendezvousClosedError
+                        self._raise_heartbeat_error()
                         return RendezvousInfo(
                             bootstrap_store,
                             slot,
@@ -457,8 +473,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                 if not self._wait_for_change(wait_deadline):
                     raise RendezvousTimeoutError
         except BaseException:
-            if self._stop_heartbeat():
-                self._release_registration(raise_errors=False)
+            self._cleanup_local_resources()
             raise
 
     def is_closed(self) -> bool:
@@ -499,8 +514,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             raise RendezvousConnectionError("failed to publish rendezvous closure state") from error
         self._closed_event.set()
         self._state_changed_event.set()
-        if self._stop_heartbeat():
-            self._release_registration(raise_errors=False)
+        self._cleanup_local_resources()
 
     def num_nodes_waiting(self) -> int:
         """Hide passive standbys until a committed replacement plan exists."""
@@ -511,46 +525,63 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         return 0
 
     def shutdown(self) -> bool:
+        self._closed_event.set()
+        self._state_changed_event.set()
+        return self._cleanup_local_resources()
+
+    def _cleanup_local_resources(self) -> bool:
         with self._shutdown_lock:
-            succeeded = True
-            self._closed_event.set()
-            self._state_changed_event.set()
             heartbeat_stopped = self._stop_heartbeat()
-            if not heartbeat_stopped:
-                succeeded = False
-            elif not self._release_registration(raise_errors=False):
-                succeeded = False
+            registration_released = heartbeat_stopped and self._release_registration(
+                raise_errors=False
+            )
             thread = self._heartbeat_thread
-            if thread is not None and thread.is_alive():
-                succeeded = False
-            return succeeded
+            return (
+                heartbeat_stopped
+                and registration_released
+                and (thread is None or not thread.is_alive())
+            )
 
     def _ensure_registered(self) -> None:
         self._raise_heartbeat_error()
         with self._registration_lock:
-            if self._registration is None:
-                try:
-                    self._registration = self._registration_manager.register()
-                except AgentRegistrationCorrupt as error:
-                    raise RendezvousStateError("agent registration state is corrupt") from error
-                except (
-                    AgentRegistrationClockError,
-                    AgentRegistrationLost,
-                    AgentRegistrationUnavailable,
-                ) as error:
-                    raise RendezvousConnectionError(
-                        "failed to acquire the agent registration"
-                    ) from error
-                except Exception as error:
-                    raise RendezvousConnectionError("agent registration backend failed") from error
-            thread = self._heartbeat_thread
-            if thread is None or not thread.is_alive():
-                self._heartbeat_thread = threading.Thread(
-                    target=self._heartbeat_loop,
-                    name=f"lm-resiliency-registration-{self._config.node_id}",
-                    daemon=True,
-                )
-                self._heartbeat_thread.start()
+            if self._registration is not None:
+                self._start_heartbeat_locked()
+                return
+            if self._registration_inflight:
+                raise RendezvousConnectionError("agent registration is already in progress")
+            self._registration_inflight = True
+        try:
+            registration = self._registration_manager.register()
+        except AgentRegistrationCorrupt as error:
+            raise RendezvousStateError("agent registration state is corrupt") from error
+        except (
+            AgentRegistrationClockError,
+            AgentRegistrationLost,
+            AgentRegistrationUnavailable,
+        ) as error:
+            raise RendezvousConnectionError("failed to acquire the agent registration") from error
+        except Exception as error:
+            raise RendezvousConnectionError("agent registration backend failed") from error
+        finally:
+            with self._registration_lock:
+                self._registration_inflight = False
+        with self._registration_lock:
+            if self._closed_event.is_set() or self._stop_heartbeat_event.is_set():
+                raise RendezvousClosedError
+            self._registration = registration
+            self._start_heartbeat_locked()
+
+    def _start_heartbeat_locked(self) -> None:
+        thread = self._heartbeat_thread
+        if thread is None or not thread.is_alive():
+            thread = threading.Thread(
+                target=self._heartbeat_loop,
+                name=f"lm-resiliency-registration-{self._config.node_id}",
+                daemon=True,
+            )
+            thread.start()
+            self._heartbeat_thread = thread
 
     def _heartbeat_loop(self) -> None:
         while True:
@@ -786,9 +817,49 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             )
         for slot, node_id in assignment.slot_to_node_id.items():
             if node_id == self._config.node_id:
+                self._ensure_job_compatibility()
                 self._validate_assigned_registration_history()
                 return slot
         return None
+
+    def _ensure_job_compatibility(self) -> None:
+        try:
+            entry = self._control_store.get(self._compatibility_key)
+            if entry is None:
+                if self._control_store.has_history(self._compatibility_key):
+                    entry = self._control_store.get(self._compatibility_key)
+                    if entry is None:
+                        raise RendezvousStateError("rendezvous compatibility record was deleted")
+                else:
+                    try:
+                        entry = self._control_store.compare_set(
+                            self._compatibility_key,
+                            expected_revision=None,
+                            value=self._compatibility_value,
+                        )
+                    except ControlStoreConflict:
+                        entry = self._control_store.get(self._compatibility_key)
+                        if entry is None:
+                            raise RendezvousStateError(
+                                "rendezvous compatibility changed without a current record"
+                            )
+            if entry.value != self._compatibility_value:
+                raise RendezvousStateError(
+                    "assigned node is incompatible with the committed workload environment"
+                )
+            if (
+                entry.mutation_sequence != 1
+                or entry.value_sequence != 1
+                or entry.lifetime_sequence != 1
+                or entry.guard_key is not None
+            ):
+                raise RendezvousStateError("rendezvous compatibility record is not immutable")
+        except RendezvousStateError:
+            raise
+        except Exception as error:
+            raise RendezvousConnectionError(
+                "failed to validate rendezvous workload compatibility"
+            ) from error
 
     def _wait_for_change(self, deadline: float | None) -> bool:
         if deadline is None:
