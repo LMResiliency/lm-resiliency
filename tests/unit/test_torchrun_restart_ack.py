@@ -161,7 +161,7 @@ def _prepared() -> tuple[
             records=records,
             coordinator_authority=authority,
             not_before_unix_ms=1_000,
-            deadline_unix_ms=1_500,
+            deadline_unix_ms=1_400,
         ),
     )
 
@@ -198,7 +198,7 @@ def test_prepared_restart_ack_accepts_renewed_coordinator_authority():
         prepared,
         coordinator_authority=renewed_authority,
         not_before_unix_ms=1_010,
-        deadline_unix_ms=1_500,
+        deadline_unix_ms=1_400,
     )
 
     assert renewed_prepared.lease == renewed
@@ -299,6 +299,13 @@ def test_prepared_restart_ack_rejects_deadline_after_lease_expiry():
             coordinator_authority=authority,
             deadline_unix_ms=1_500,
         )
+
+
+def test_prepared_restart_ack_rejects_deadline_after_registration_expiry():
+    _, _, _, prepared = _prepared()
+
+    with pytest.raises(ValueError, match="agent registration"):
+        replace(prepared, deadline_unix_ms=1_450)
 
 
 def test_prepared_restart_ack_requires_expected_types():

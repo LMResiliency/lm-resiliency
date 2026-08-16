@@ -53,6 +53,8 @@ class PreparedRestartAckWrite:
             raise ValueError("PreparedRestartAckWrite deadline exceeds coordinator lease")
         if self.deadline_unix_ms > receipt.intent_record.intent.prepare_deadline_unix_ms:
             raise ValueError("PreparedRestartAckWrite deadline exceeds restart intent")
+        if self.deadline_unix_ms > receipt.registration_expires_at_unix_ms:
+            raise ValueError("PreparedRestartAckWrite deadline exceeds agent registration")
 
     @property
     def lease(self) -> HeldCoordinatorLease:
