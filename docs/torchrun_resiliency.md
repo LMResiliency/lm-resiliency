@@ -786,6 +786,10 @@ publication.
 inventory event, source-generation reporter identity, local holder, and
 compatible trust state. It does not prove copy completeness, holder
 availability, acknowledgement authorization, or trusted certification.
+For `recovery_verified` manifests, `RestartPlanCertificationState` requires
+matching trusted catalog records whose canonical event digests cover every
+referenced inventory event. It still does not prove copy completeness or
+holder availability.
 
 Before commit, the coordinator validates:
 

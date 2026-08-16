@@ -13,6 +13,7 @@ from lm_resiliency.integrations.torchrun._generation_records import (
     GenerationSnapshotRecord,
 )
 from lm_resiliency.integrations.torchrun._protocol import (
+    CheckpointCertification,
     CheckpointCopy,
     CheckpointInventoryEvent,
     RankAssignment,
@@ -22,6 +23,7 @@ from lm_resiliency.integrations.torchrun._protocol import (
     RestartPlan,
     SlotAssignment,
     WorkerIdentity,
+    checkpoint_inventory_digest,
 )
 from lm_resiliency.integrations.torchrun._quarantine_records import (
     NodeQuarantineRecord,
@@ -37,6 +39,7 @@ from lm_resiliency.integrations.torchrun._restart_plan_records import (
 )
 from lm_resiliency.integrations.torchrun._restart_plan_state import (
     ResolvedRecoveryManifest,
+    RestartPlanCertificationState,
     RestartPlanGenerationState,
     RestartPlanInventoryState,
     RestartPlanManifestState,
@@ -1219,5 +1222,255 @@ def test_restart_plan_inventory_state_does_not_claim_copy_eligibility():
     )
 
     state = _inventory_state(quarantine_state=quarantine_state)
+
+    assert not state.manifest.rank_copies[0].copies[0].complete
+
+
+def _verified_inventory_state(
+    *,
+    manifest: RecoveryManifest | None = None,
+) -> RestartPlanInventoryState:
+    selected_manifest = manifest or replace(_manifest(), trust="recovery_verified")
+    plan = replace(_plan(), recovery_mode="recovery_verified")
+    quarantine_state = _quarantine_state(
+        manifest_state=_manifest_state(
+            manifest=selected_manifest,
+            plan=plan,
+        )
+    )
+    return _inventory_state(quarantine_state=quarantine_state)
+
+
+def _certification(
+    state: RestartPlanInventoryState,
+    *,
+    certification_id: str = "certification-40",
+    inventory_event_digests: dict[str, str] | None = None,
+) -> CheckpointCertification:
+    return CheckpointCertification(
+        certification_id=certification_id,
+        run_id=state.manifest.run_id,
+        source_generation=state.manifest.source_generation,
+        step=state.manifest.step,
+        topology_digest=state.manifest.topology_digest,
+        checkpoint_source=state.plan.checkpoint_source,
+        checkpoint_id=state.plan.checkpoint_id,
+        expected_world_size=state.plan.expected_world_size,
+        certification_kind="dense_consensus",
+        inventory_event_digests=inventory_event_digests
+        or {
+            event_id: checkpoint_inventory_digest(event)
+            for event_id, event in state.inventory_events.items()
+        },
+    )
+
+
+def _certification_state() -> RestartPlanCertificationState:
+    inventory_state = _verified_inventory_state()
+    return RestartPlanCertificationState(
+        inventory_state=inventory_state,
+        certifications=(_certification(inventory_state),),
+    )
+
+
+def test_restart_plan_certification_state_binds_exact_certifications():
+    state = _certification_state()
+
+    assert state.plan == state.inventory_state.plan
+    assert state.manifest == state.inventory_state.manifest
+    assert tuple(cert.certification_id for cert in state.certifications) == ("certification-40",)
+
+
+def test_restart_plan_certification_state_requires_exact_types():
+    state = _certification_state()
+
+    with pytest.raises(TypeError, match="inventory_state must be"):
+        replace(state, inventory_state=state.inventory_state.quarantine_state)
+
+    with pytest.raises(TypeError, match="must be a tuple"):
+        replace(state, certifications=list(state.certifications))
+
+    with pytest.raises(TypeError, match="must be CheckpointCertification"):
+        replace(state, certifications=(state.certifications[0].to_dict(),))
+
+
+def test_restart_plan_certification_state_requires_verified_manifest():
+    state = _inventory_state()
+
+    with pytest.raises(ValueError, match="requires a recovery-verified manifest"):
+        RestartPlanCertificationState(
+            inventory_state=state,
+            certifications=(),
+        )
+
+
+def test_restart_plan_certification_state_sorts_and_rejects_duplicate_ids():
+    inventory_state = _verified_inventory_state()
+    first = _certification(
+        inventory_state,
+        certification_id="certification-b",
+    )
+    second = _certification(
+        inventory_state,
+        certification_id="certification-a",
+    )
+    state = RestartPlanCertificationState(
+        inventory_state=inventory_state,
+        certifications=(first, second),
+    )
+
+    assert tuple(cert.certification_id for cert in state.certifications) == (
+        "certification-a",
+        "certification-b",
+    )
+
+    with pytest.raises(ValueError, match="IDs must be unique"):
+        replace(state, certifications=(first, first))
+
+
+@pytest.mark.parametrize(
+    "certification",
+    [
+        replace(_certification(_verified_inventory_state()), run_id="other-run"),
+        replace(
+            _certification(_verified_inventory_state()),
+            source_generation=3,
+        ),
+        replace(_certification(_verified_inventory_state()), step=39),
+        replace(
+            _certification(_verified_inventory_state()),
+            topology_digest="topology-v2",
+        ),
+        replace(
+            _certification(_verified_inventory_state()),
+            checkpoint_source="durable",
+            checkpoint_id="durable-40",
+        ),
+        replace(
+            _certification(_verified_inventory_state()),
+            expected_world_size=8,
+        ),
+    ],
+)
+def test_restart_plan_certification_state_rejects_metadata_mismatch(certification):
+    with pytest.raises(ValueError, match="does not match its plan"):
+        RestartPlanCertificationState(
+            inventory_state=_verified_inventory_state(),
+            certifications=(certification,),
+        )
+
+
+def test_restart_plan_certification_state_requires_every_event_digest():
+    inventory_state = _verified_inventory_state()
+    digests = {
+        event_id: checkpoint_inventory_digest(event)
+        for event_id, event in inventory_state.inventory_events.items()
+    }
+    digests.pop("inventory-3")
+
+    with pytest.raises(ValueError, match="not exactly certified"):
+        RestartPlanCertificationState(
+            inventory_state=inventory_state,
+            certifications=(
+                _certification(
+                    inventory_state,
+                    inventory_event_digests=digests,
+                ),
+            ),
+        )
+
+
+def test_restart_plan_certification_state_rejects_wrong_event_digest():
+    inventory_state = _verified_inventory_state()
+    digests = {
+        event_id: checkpoint_inventory_digest(event)
+        for event_id, event in inventory_state.inventory_events.items()
+    }
+    digests["inventory-0"] = "0" * 64
+
+    with pytest.raises(ValueError, match="not exactly certified"):
+        RestartPlanCertificationState(
+            inventory_state=inventory_state,
+            certifications=(
+                _certification(
+                    inventory_state,
+                    inventory_event_digests=digests,
+                ),
+            ),
+        )
+
+
+def test_restart_plan_certification_state_rejects_conflicting_event_digests():
+    inventory_state = _verified_inventory_state()
+    first = _certification(
+        inventory_state,
+        certification_id="certification-a",
+    )
+    second_digests = dict(first.inventory_event_digests)
+    second_digests["inventory-0"] = "0" * 64
+    second = _certification(
+        inventory_state,
+        certification_id="certification-b",
+        inventory_event_digests=second_digests,
+    )
+
+    with pytest.raises(ValueError, match="conflicting inventory digests"):
+        RestartPlanCertificationState(
+            inventory_state=inventory_state,
+            certifications=(first, second),
+        )
+
+
+def test_restart_plan_certification_state_allows_certification_across_records():
+    inventory_state = _verified_inventory_state()
+    event_ids = tuple(inventory_state.inventory_events)
+    first = _certification(
+        inventory_state,
+        certification_id="certification-a",
+        inventory_event_digests={
+            event_id: checkpoint_inventory_digest(inventory_state.inventory_events[event_id])
+            for event_id in event_ids[:2]
+        },
+    )
+    second = _certification(
+        inventory_state,
+        certification_id="certification-b",
+        inventory_event_digests={
+            event_id: checkpoint_inventory_digest(inventory_state.inventory_events[event_id])
+            for event_id in event_ids[2:]
+        },
+    )
+
+    state = RestartPlanCertificationState(
+        inventory_state=inventory_state,
+        certifications=(second, first),
+    )
+
+    assert len(state.certifications) == 2
+
+
+def test_restart_plan_certification_state_does_not_claim_copy_eligibility():
+    manifest = replace(_manifest(), trust="recovery_verified")
+    incomplete_manifest = replace(
+        manifest,
+        rank_copies=(
+            replace(
+                manifest.rank_copies[0],
+                copies=(
+                    replace(
+                        manifest.rank_copies[0].copies[0],
+                        complete=False,
+                    ),
+                ),
+            ),
+            *manifest.rank_copies[1:],
+        ),
+    )
+    inventory_state = _verified_inventory_state(manifest=incomplete_manifest)
+
+    state = RestartPlanCertificationState(
+        inventory_state=inventory_state,
+        certifications=(_certification(inventory_state),),
+    )
 
     assert not state.manifest.rank_copies[0].copies[0].complete
