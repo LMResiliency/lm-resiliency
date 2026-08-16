@@ -1140,7 +1140,14 @@ every atomic publication entry, decodes the stable bundle through
 generation-head revisions plus store metadata to equal the authoritative
 current generation. Missing, malformed, mixed, or substituted state fails
 closed; repeated head movement remains a retryable read conflict. This first
-readback boundary still does not reauthorize lifecycle or checkpoint evidence.</p>
+readback boundary still does not reauthorize lifecycle or checkpoint evidence.
+<code>RestartPlanPersistedRecoveryState</code> reauthorizes the checkpoint side of one
+persisted publication without reading or mutating the store. It resolves the
+exact manifest source generation, quarantine records, inventory events, copy
+eligibility, and exactly one trust path: persisted trusted certifications for
+<code>recovery_verified</code>, or supplied restart-acknowledgement evidence for <code>latest</code>.
+It still does not authenticate the closed lifecycle or make the publication
+visible to rendezvous.</p>
 <p>Before commit, the coordinator validates:</p>
 <ul>
 <li>the plan is fenced to the same intent ID, run, generation, incidents, and
