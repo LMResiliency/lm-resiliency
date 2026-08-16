@@ -8,7 +8,7 @@ import json
 import os
 import secrets
 import stat
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -21,10 +21,13 @@ except ModuleNotFoundError:  # pragma: no cover - exercised by the Python 3.10 C
 
 from torch.distributed.elastic.rendezvous import RendezvousParameters
 
-from lm_resiliency.integrations.torchrun._protocol import RestartContext
+from lm_resiliency.integrations.torchrun._protocol import AgentIdentity, RestartContext
 
 _BACKEND = "lm_resiliency"
 _NODE_ID_ENV = "LM_RESILIENCY_NODE_ID"
+_LOCAL_WORLD_SIZE_ENV = "LM_RESILIENCY_LOCAL_WORLD_SIZE"
+_ENVIRONMENT_DIGEST_ENV = "LM_RESILIENCY_ENVIRONMENT_DIGEST"
+_RESOURCE_IDS_ENV = "LM_RESILIENCY_RESOURCE_IDS"
 _RESTART_CONTEXT_ENV = "LM_RESILIENCY_RESTART_CONTEXT"
 _MAX_CONTEXT_BYTES = 64 * 1024
 _MAX_POLICY_BYTES = 64 * 1024
@@ -38,7 +41,10 @@ _SHARED_FIELDS = {
 }
 _RUNTIME_FIELDS = _SHARED_FIELDS | {
     "config",
+    "environment_digest",
+    "local_world_size",
     "node_id",
+    "resource_ids",
     "restart_context_path",
 }
 
@@ -116,7 +122,10 @@ class TorchrunRuntimeConfig:
     endpoint: str
     min_nodes: int
     max_nodes: int
+    local_world_size: int
     node_id: str
+    environment_digest: str
+    resource_ids: tuple[str, ...]
     restart_context_path: Path
     local_addr: str | None
     source_path: Path
@@ -132,7 +141,14 @@ class TorchrunRuntimeConfig:
             raise TorchrunRuntimeConfigError(
                 "max_nodes must exceed min_nodes to provide standby capacity"
             )
+        _positive_integer(self.local_world_size, "local_world_size")
         _nonempty_string(self.node_id, "node_id")
+        _nonempty_string(self.environment_digest, "environment_digest")
+        object.__setattr__(
+            self,
+            "resource_ids",
+            _resource_ids(self.resource_ids, "resource_ids"),
+        )
         if not isinstance(self.restart_context_path, Path):
             raise TypeError("restart_context_path must be pathlib.Path")
         if not self.restart_context_path.is_absolute():
@@ -153,7 +169,37 @@ class TorchrunRuntimeConfig:
                 "endpoint": self.endpoint,
                 "min_nodes": self.min_nodes,
                 "max_nodes": self.max_nodes,
+                "local_world_size": self.local_world_size,
             }
+        )
+
+    @property
+    def agent_environment_digest(self) -> str:
+        """Return the workload and runtime identity recorded for this agent."""
+
+        return _canonical_digest(
+            {
+                "runtime": self.registration_digest,
+                "workload_environment": self.environment_digest,
+            }
+        )
+
+    def build_agent_identity(
+        self,
+        *,
+        agent_id: str,
+        hostname: str,
+    ) -> AgentIdentity:
+        """Build the immutable agent identity for this handler incarnation."""
+
+        return AgentIdentity(
+            run_id=self.run_id,
+            node_id=self.node_id,
+            agent_id=_nonempty_string(agent_id, "agent_id"),
+            hostname=_nonempty_string(hostname, "hostname"),
+            local_world_size=self.local_world_size,
+            resource_ids=self.resource_ids,
+            environment_digest=self.agent_environment_digest,
         )
 
     @classmethod
@@ -194,6 +240,22 @@ class TorchrunRuntimeConfig:
             "node_id",
             _NODE_ID_ENV,
         )
+        local_world_size = _node_integer_value(
+            params.get("local_world_size"),
+            resolved_environment.get(_LOCAL_WORLD_SIZE_ENV),
+            "local_world_size",
+            _LOCAL_WORLD_SIZE_ENV,
+        )
+        environment_digest = _node_value(
+            params.get("environment_digest"),
+            resolved_environment.get(_ENVIRONMENT_DIGEST_ENV),
+            "environment_digest",
+            _ENVIRONMENT_DIGEST_ENV,
+        )
+        resource_ids = _node_resource_ids(
+            params.get("resource_ids"),
+            resolved_environment.get(_RESOURCE_IDS_ENV),
+        )
         restart_context_path = Path(
             _node_value(
                 params.get("restart_context_path"),
@@ -208,7 +270,10 @@ class TorchrunRuntimeConfig:
             endpoint=params.endpoint,
             min_nodes=params.min_nodes,
             max_nodes=params.max_nodes,
+            local_world_size=local_world_size,
             node_id=node_id,
+            environment_digest=environment_digest,
+            resource_ids=resource_ids,
             restart_context_path=restart_context_path,
             local_addr=params.local_addr,
             source_path=source_path,
@@ -570,6 +635,77 @@ def _node_value(
     if value is None:
         raise TorchrunRuntimeConfigError(f"{parameter_name} or {environment_name} must be provided")
     return value
+
+
+def _node_integer_value(
+    parameter: object,
+    environment: object,
+    parameter_name: str,
+    environment_name: str,
+) -> int:
+    parameter_value = None if parameter is None else _positive_integer(parameter, parameter_name)
+    environment_value = (
+        None if environment is None else _positive_integer(environment, environment_name)
+    )
+    if (
+        parameter_value is not None
+        and environment_value is not None
+        and parameter_value != environment_value
+    ):
+        raise TorchrunRuntimeConfigError(f"{parameter_name} conflicts with {environment_name}")
+    value = parameter_value if parameter_value is not None else environment_value
+    if value is None:
+        raise TorchrunRuntimeConfigError(f"{parameter_name} or {environment_name} must be provided")
+    return value
+
+
+def _node_resource_ids(
+    parameter: object,
+    environment: object,
+) -> tuple[str, ...]:
+    parameter_value = None if parameter is None else _resource_ids(parameter, "resource_ids")
+    environment_value = (
+        None if environment is None else _resource_ids(environment, _RESOURCE_IDS_ENV)
+    )
+    if (
+        parameter_value is not None
+        and environment_value is not None
+        and parameter_value != environment_value
+    ):
+        raise TorchrunRuntimeConfigError(f"resource_ids conflicts with {_RESOURCE_IDS_ENV}")
+    value = parameter_value if parameter_value is not None else environment_value
+    if value is None:
+        raise TorchrunRuntimeConfigError(f"resource_ids or {_RESOURCE_IDS_ENV} must be provided")
+    return value
+
+
+def _resource_ids(value: object, path: str) -> tuple[str, ...]:
+    items: Sequence[object]
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized == "[]":
+            items = ()
+        else:
+            if normalized.startswith("[") or normalized.endswith("]"):
+                raise TorchrunRuntimeConfigError(
+                    f"{path} must be a semicolon-delimited resource list or []"
+                )
+            items = tuple(normalized.split(";"))
+    elif isinstance(value, Sequence) and not isinstance(
+        value,
+        (bytes, bytearray),
+    ):
+        items = value
+    else:
+        raise TorchrunRuntimeConfigError(
+            f"{path} must be a semicolon-delimited resource list or sequence"
+        )
+    result = tuple(
+        _nonempty_string(item, f"{path}[{index}]").strip() for index, item in enumerate(items)
+    )
+    if len(result) != len(set(result)):
+        raise TorchrunRuntimeConfigError(f"{path} resource IDs must be unique")
+    return tuple(sorted(result))
 
 
 def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
