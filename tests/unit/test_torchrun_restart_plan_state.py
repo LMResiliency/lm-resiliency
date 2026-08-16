@@ -45,6 +45,7 @@ from lm_resiliency.integrations.torchrun._restart_plan_state import (
     RestartPlanInventoryState,
     RestartPlanManifestState,
     RestartPlanQuarantineState,
+    RestartPlanRecoveryEvidenceState,
 )
 
 RUN_ID = "training-run"
@@ -1459,6 +1460,48 @@ def test_restart_plan_copy_eligibility_state_rejects_wrong_checkpoint_id():
                 _durable_manifest(checkpoint_id="durable-other"),
                 plan=_durable_plan(),
             )
+        )
+
+
+def test_restart_plan_recovery_evidence_state_accepts_verified_certification():
+    inventory_state = _verified_inventory_state(
+        manifest=replace(_shared_manifest(), trust="recovery_verified")
+    )
+    certification_state = RestartPlanCertificationState(
+        inventory_state=inventory_state,
+        certifications=(_certification(inventory_state),),
+    )
+
+    state = RestartPlanRecoveryEvidenceState(
+        copy_state=RestartPlanCopyEligibilityState(inventory_state),
+        trust_state=certification_state,
+    )
+
+    assert state.plan == inventory_state.plan
+    assert state.manifest == inventory_state.manifest
+
+
+def test_restart_plan_recovery_evidence_state_requires_exact_types():
+    copy_state = _copy_eligibility_state()
+    certification_state = _certification_state()
+
+    with pytest.raises(TypeError, match="copy_state must be"):
+        RestartPlanRecoveryEvidenceState(
+            copy_state=copy_state.inventory_state,
+            trust_state=certification_state,
+        )
+    with pytest.raises(TypeError, match="trust_state must be"):
+        RestartPlanRecoveryEvidenceState(
+            copy_state=copy_state,
+            trust_state=copy_state,
+        )
+
+
+def test_restart_plan_recovery_evidence_state_rejects_cross_inventory_evidence():
+    with pytest.raises(ValueError, match="same inventory state"):
+        RestartPlanRecoveryEvidenceState(
+            copy_state=_copy_eligibility_state(),
+            trust_state=_certification_state(),
         )
 
 

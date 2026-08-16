@@ -65,11 +65,13 @@ from lm_resiliency.integrations.torchrun._restart_plan_records import (
 )
 from lm_resiliency.integrations.torchrun._restart_plan_state import (
     ResolvedRecoveryManifest,
+    RestartPlanCopyEligibilityState,
     RestartPlanGenerationState,
     RestartPlanInventoryState,
     RestartPlanLatestEvidenceState,
     RestartPlanManifestState,
     RestartPlanQuarantineState,
+    RestartPlanRecoveryEvidenceState,
 )
 
 RUN_ID = "training-run"
@@ -656,3 +658,20 @@ def test_restart_plan_latest_evidence_state_does_not_claim_copy_eligibility():
     )
 
     assert not state.manifest.rank_copies[0].copies[0].complete
+
+
+def test_restart_plan_recovery_evidence_state_accepts_latest_acknowledgements():
+    event = _latest_event()
+    evidence, _ = _evidence(event=event)
+    inventory_state = _latest_inventory_state(evidence, event)
+
+    state = RestartPlanRecoveryEvidenceState(
+        copy_state=RestartPlanCopyEligibilityState(inventory_state),
+        trust_state=RestartPlanLatestEvidenceState(
+            inventory_state=inventory_state,
+            acknowledgement_evidence=evidence,
+        ),
+    )
+
+    assert state.plan == inventory_state.plan
+    assert state.manifest == inventory_state.manifest
