@@ -1003,7 +1003,11 @@ generation, and successor generation; the exact node-to-quarantine-record
 digest map; and the coordinator lease identity that authorized publication.
 Its quarantine keys must exactly match <code>quarantined_node_ids</code>. The envelope is
 strict and immutable, but it is not a substitute for <code>validate_restart_plan()</code>
-or for the later atomic publication transaction.</p>
+or for the later atomic publication transaction.
+<code>RestartPlanGenerationState</code> binds that envelope to the exact closed intent,
+current generation, successor generation, successor assignment, and shared
+coordinator publication authority. Manifest and quarantine resolution remain
+separate cross-record checks.</p>
 <p>Before commit, the coordinator validates:</p>
 <ul>
 <li>the plan is fenced to the same intent ID, run, generation, incidents, and
