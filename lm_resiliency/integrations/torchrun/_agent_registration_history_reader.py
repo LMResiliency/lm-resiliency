@@ -187,9 +187,14 @@ def _validate_transition(
         )
     if lifetime_delta not in (0, 1):
         raise AgentRegistrationHistoryCorrupt("agent-registration history omits a key lifetime")
-    if mutation_delta != (1 if lifetime_delta == 0 else 2):
-        raise AgentRegistrationHistoryCorrupt("agent-registration history omits a key mutation")
     same_record = current_registration.record == previous_registration.record
+    if lifetime_delta == 0 and same_record:
+        if mutation_delta < 1:
+            raise AgentRegistrationHistoryCorrupt(
+                "agent-registration mutation sequence does not advance"
+            )
+    elif mutation_delta != (1 if lifetime_delta == 0 else 2):
+        raise AgentRegistrationHistoryCorrupt("agent-registration history omits a key mutation")
     expected_value_delta = 0 if lifetime_delta == 0 and same_record else 1
     if value_delta != expected_value_delta:
         raise AgentRegistrationHistoryCorrupt(
@@ -200,7 +205,11 @@ def _validate_transition(
             raise AgentRegistrationHistoryCorrupt(
                 "one agent registration crosses a recreated key lifetime"
             )
-        if current_registration.granted_at_unix_ms >= previous_registration.expires_at_unix_ms:
+        latest_valid_grant = (
+            previous_registration.granted_at_unix_ms
+            + mutation_delta * previous_registration.record.lease_duration_ms
+        )
+        if current_registration.granted_at_unix_ms >= latest_valid_grant:
             raise AgentRegistrationHistoryCorrupt(
                 "agent-registration history renews an expired registration"
             )

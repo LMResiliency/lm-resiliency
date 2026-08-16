@@ -127,6 +127,56 @@ def test_control_store_value_sequence_changes_only_with_value_or_lifetime():
     assert recreated.value_sequence == 3
 
 
+def test_control_store_compacts_equivalent_unpinned_refreshes():
+    clock = ManualClock(100)
+    store = InMemoryControlStore(clock=clock)
+    created = store.compare_set_in_window(
+        "run/registration",
+        expected_revision=None,
+        not_before_unix_ms=100,
+        deadline_unix_ms=None,
+        value=b"same",
+    )
+    current = created
+    for now_unix_ms in (101, 102, 103, 104):
+        clock.now_unix_ms = now_unix_ms
+        current = store.compare_refresh_in_window(
+            "run/registration",
+            expected_revision=current.revision,
+            not_before_unix_ms=now_unix_ms,
+            deadline_unix_ms=200,
+            value=b"same",
+        )
+
+    assert store.get_history("run/registration") == (created, current)
+    assert current.mutation_sequence == 5
+    assert current.value_sequence == 1
+    assert current.lifetime_sequence == 1
+
+
+def test_control_store_refresh_rejects_changed_value():
+    clock = ManualClock(100)
+    store = InMemoryControlStore(clock=clock)
+    created = store.compare_set_in_window(
+        "run/registration",
+        expected_revision=None,
+        not_before_unix_ms=100,
+        deadline_unix_ms=None,
+        value=b"same",
+    )
+
+    with pytest.raises(ValueError, match="equal"):
+        store.compare_refresh_in_window(
+            "run/registration",
+            expected_revision=created.revision,
+            not_before_unix_ms=100,
+            deadline_unix_ms=200,
+            value=b"different",
+        )
+
+    assert store.get("run/registration") == created
+
+
 def test_control_store_rejects_stale_update_and_delete():
     store = InMemoryControlStore()
     created = store.compare_set("run/control", expected_revision=None, value=b"one")

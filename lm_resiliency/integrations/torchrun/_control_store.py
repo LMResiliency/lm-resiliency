@@ -228,11 +228,13 @@ class ControlStore(Protocol):
         ...
 
     def get_history(self, key: str) -> tuple[ControlStoreEntry, ...]:
-        """Return every committed value for ``key`` in mutation order.
+        """Return retained authoritative values for ``key`` in mutation order.
 
         Deletes are represented by revision, mutation, transaction, and
         lifetime gaps between adjacent value entries rather than synthetic
-        values.
+        values. Backends may compact equivalent refreshes while retaining the
+        first value in the lifetime, the current value, and every revision
+        consumed by a successful guarded transaction condition.
         """
         ...
 
@@ -277,6 +279,23 @@ class ControlStore(Protocol):
         """
         ...
 
+    def compare_refresh_in_window(
+        self,
+        key: str,
+        *,
+        expected_revision: int,
+        not_before_unix_ms: int,
+        deadline_unix_ms: int,
+        value: bytes,
+    ) -> ControlStoreEntry:
+        """Refresh one unchanged value and compact unreferenced renewals.
+
+        The current value must equal ``value``. The store retains the first
+        value in the current key lifetime, every revision consumed by a
+        successful guarded transaction condition, and the latest refresh.
+        """
+        ...
+
     def compare_delete_in_window(
         self,
         key: str,
@@ -316,6 +335,7 @@ class InMemoryControlStore:
         self._lock = threading.RLock()
         self._entries: dict[str, ControlStoreEntry] = {}
         self._histories: dict[str, list[ControlStoreEntry]] = {}
+        self._pinned_revisions: dict[str, set[int]] = {}
         self._last_revisions: dict[str, int] = {}
         self._mutation_sequences: dict[str, int] = {}
         self._value_sequences: dict[str, int] = {}
@@ -410,6 +430,55 @@ class InMemoryControlStore:
                 committed_at_unix_ms=now_unix_ms,
                 transaction_sequence=self._next_transaction_sequence(),
             )
+
+    def compare_refresh_in_window(
+        self,
+        key: str,
+        *,
+        expected_revision: int,
+        not_before_unix_ms: int,
+        deadline_unix_ms: int,
+        value: bytes,
+    ) -> ControlStoreEntry:
+        normalized_key = _control_key(key)
+        normalized_revision = _required_revision(expected_revision)
+        normalized_not_before = _positive_integer(
+            not_before_unix_ms,
+            "not_before_unix_ms",
+        )
+        normalized_deadline = _positive_integer(
+            deadline_unix_ms,
+            "deadline_unix_ms",
+        )
+        if normalized_not_before >= normalized_deadline:
+            raise ValueError("not_before_unix_ms must be before deadline_unix_ms")
+        normalized_value = _control_value(value)
+        with self._lock:
+            self._require_revision(normalized_key, normalized_revision)
+            current = self._entries[normalized_key]
+            if current.value != normalized_value:
+                raise ValueError("refresh value must equal the current control-store value")
+            now_unix_ms = self._store_now_unix_ms()
+            if now_unix_ms < normalized_not_before:
+                raise ControlStoreTooEarly(
+                    normalized_key,
+                    normalized_not_before,
+                    now_unix_ms,
+                )
+            if now_unix_ms >= normalized_deadline:
+                raise ControlStoreDeadlineExceeded(
+                    normalized_key,
+                    normalized_deadline,
+                    now_unix_ms,
+                )
+            entry = self._set_entry(
+                normalized_key,
+                normalized_value,
+                committed_at_unix_ms=now_unix_ms,
+                transaction_sequence=self._next_transaction_sequence(),
+            )
+            self._compact_equivalent_refreshes(normalized_key)
+            return entry
 
     def compare_delete_in_window(
         self,
@@ -550,7 +619,33 @@ class InMemoryControlStore:
                 )
                 for key, write in normalized_writes.items()
             }
+            for key, revision in normalized_conditions.items():
+                if revision is not None:
+                    self._pinned_revisions.setdefault(key, set()).add(revision)
+            self._pinned_revisions.setdefault(normalized_guard_key, set()).add(
+                normalized_guard_revision
+            )
             return MappingProxyType(committed)
+
+    def _compact_equivalent_refreshes(self, key: str) -> None:
+        history = self._histories[key]
+        latest = history[-1]
+        start = len(history) - 1
+        while start > 0:
+            previous = history[start - 1]
+            if (
+                previous.value_sequence != latest.value_sequence
+                or previous.lifetime_sequence != latest.lifetime_sequence
+            ):
+                break
+            start -= 1
+        pinned = self._pinned_revisions.get(key, set())
+        compacted_run = [
+            entry
+            for index, entry in enumerate(history[start:])
+            if index == 0 or entry.revision == latest.revision or entry.revision in pinned
+        ]
+        self._histories[key] = [*history[:start], *compacted_run]
 
     def _require_revision(self, key: str, expected_revision: int | None) -> None:
         entry = self._entries.get(key)

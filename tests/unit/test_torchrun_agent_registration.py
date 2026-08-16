@@ -67,6 +67,26 @@ class ExpireDuringMutationStore(InMemoryControlStore):
             value=value,
         )
 
+    def compare_refresh_in_window(
+        self,
+        key: str,
+        *,
+        expected_revision: int,
+        not_before_unix_ms: int,
+        deadline_unix_ms: int,
+        value: bytes,
+    ):
+        if self.expire_next_mutation:
+            self._manual_clock.set(deadline_unix_ms)
+            self.expire_next_mutation = False
+        return super().compare_refresh_in_window(
+            key,
+            expected_revision=expected_revision,
+            not_before_unix_ms=not_before_unix_ms,
+            deadline_unix_ms=deadline_unix_ms,
+            value=value,
+        )
+
     def compare_delete_in_window(
         self,
         key: str,
@@ -102,6 +122,27 @@ class DelayResponseStore(InMemoryControlStore):
         value: bytes,
     ):
         entry = super().compare_set_in_window(
+            key,
+            expected_revision=expected_revision,
+            not_before_unix_ms=not_before_unix_ms,
+            deadline_unix_ms=deadline_unix_ms,
+            value=value,
+        )
+        if self.delay_next_response_ms:
+            self._manual_clock.advance(self.delay_next_response_ms)
+            self.delay_next_response_ms = 0
+        return entry
+
+    def compare_refresh_in_window(
+        self,
+        key: str,
+        *,
+        expected_revision: int,
+        not_before_unix_ms: int,
+        deadline_unix_ms: int,
+        value: bytes,
+    ):
+        entry = super().compare_refresh_in_window(
             key,
             expected_revision=expected_revision,
             not_before_unix_ms=not_before_unix_ms,
