@@ -1595,12 +1595,16 @@ different token remains valid. An invalidation marker remains durable after
 physical context deletion, so a crash cannot resurrect a deleted context pair
 without its fence. The worker-visible file remains canonical root
 `RestartContext` JSON. The cleanup token and the context digest are stored in a
-hidden owner-only sidecar under the same directory lock, and final admission
-requires the exact token published by that handler incarnation. A normal
-heartbeat renewal may advance the registration fencing token, but admission
-accepts it only when retained authority history proves uninterrupted ownership
-by the same immutable registration and agent incarnation. Context publication
-and cleanup acquire the parent
+hidden owner-only sidecar under the same directory lock. The sidecar also binds
+publication to the writer's verified registration ID and store-stamped
+registration mutation sequence. An older registration cannot overwrite a
+context published by a later registration, while a normal heartbeat renewal of
+the same immutable registration may advance the mutation sequence. Final
+admission requires the exact token published by that handler incarnation. A
+normal heartbeat renewal may advance the registration fencing token, but
+admission accepts it only when retained authority history proves uninterrupted
+ownership by the same immutable registration and agent incarnation. Context
+publication and cleanup acquire the parent
 directory lock nonblocking under the admission or bounded-cleanup deadline, so
 a stale process cannot strand replacement admission. The replacement deadline
 is derived and revalidated from authoritative, nondecreasing control-store time

@@ -94,7 +94,7 @@ _MAX_CONTEXT_BYTES = 64 * 1024
 _MAX_CONTEXT_METADATA_BYTES = 1_024
 _MAX_CONTEXT_INVALIDATION_BYTES = 1_024
 _MAX_POLICY_BYTES = 64 * 1024
-_CONTEXT_METADATA_SCHEMA_VERSION = 1
+_CONTEXT_METADATA_SCHEMA_VERSION = 2
 _CONTEXT_INVALIDATION_SCHEMA_VERSION = 1
 _CONTEXT_LOCK_TIMEOUT_SECONDS = 1.0
 _CONTEXT_LOCK_POLL_SECONDS = 0.01
@@ -130,6 +130,22 @@ class TorchrunRuntimeConfigError(ValueError):
 
 
 _RestartContextCleanupToken = str
+
+
+@dataclass(frozen=True, slots=True)
+class _RestartContextOwnership:
+    registration_id: str
+    mutation_sequence: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.registration_id, str) or not self.registration_id:
+            raise TypeError("registration_id must be a non-empty string")
+        if (
+            isinstance(self.mutation_sequence, bool)
+            or not isinstance(self.mutation_sequence, int)
+            or self.mutation_sequence < 1
+        ):
+            raise TypeError("mutation_sequence must be a positive integer")
 
 
 class RestartContextFileError(RuntimeError):
@@ -1086,6 +1102,9 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         return entry
 
     def _validate_assigned_registration_history(self) -> None:
+        self._current_restart_context_ownership()
+
+    def _current_restart_context_ownership(self) -> _RestartContextOwnership:
         try:
             history = AgentRegistrationHistoryReader(
                 self._control_store,
@@ -1108,6 +1127,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             registration is None
             or history.current is None
             or history.current.record != registration.record
+            or not history.authorities
         ):
             raise RendezvousConnectionError(
                 "assigned node registration no longer belongs to this handler"
@@ -1122,6 +1142,15 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                     "assigned node registration history is incompatible with "
                     "the committed workload environment"
                 )
+        current_authority = history.authorities[-1]
+        if current_authority.registration != history.current:
+            raise RendezvousStateError(
+                "assigned node registration history has an invalid current authority"
+            )
+        return _RestartContextOwnership(
+            registration_id=history.current.record.registration_id,
+            mutation_sequence=current_authority.mutation_sequence,
+        )
 
     def _wait_for_assigned_arrivals(
         self,
@@ -3499,8 +3528,13 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         if recovery_state is None:
             raise RendezvousStateError("replacement generation lacks an authoritative restart plan")
         context = self._restart_context_for_plan(recovery_state.plan)
+        ownership = self._current_restart_context_ownership()
         try:
-            return self._restart_context.write(context, deadline=deadline)
+            return self._restart_context.write(
+                context,
+                deadline=deadline,
+                ownership=ownership,
+            )
         except (OSError, RestartContextFileError) as error:
             if isinstance(error, RestartContextFileError) and error.published_token is not None:
                 self._invalidate_and_clear_restart_context(error.published_token)
@@ -3628,12 +3662,15 @@ class RestartContextFile:
         context: RestartContext,
         *,
         deadline: float | None = None,
+        ownership: _RestartContextOwnership | None = None,
     ) -> _RestartContextCleanupToken:
         if not isinstance(context, RestartContext):
             raise TypeError("context must be RestartContext")
+        if ownership is not None and not isinstance(ownership, _RestartContextOwnership):
+            raise TypeError("ownership must be _RestartContextOwnership or None")
         cleanup_token = secrets.token_hex(32)
         encoded = (context.to_json() + "\n").encode("utf-8")
-        metadata = self._encode_metadata(cleanup_token, encoded)
+        metadata = self._encode_metadata(cleanup_token, encoded, ownership)
         if len(encoded) > _MAX_CONTEXT_BYTES:
             raise RestartContextFileError("restart context is too large")
         parent_descriptor = self._open_parent(create=True)
@@ -3646,6 +3683,21 @@ class RestartContextFile:
         try:
             self._acquire_parent_lock(parent_descriptor, deadline=deadline)
             self._reject_existing_symlink(parent_descriptor)
+            existing_metadata = self._read_encoded(
+                parent_descriptor,
+                missing_ok=True,
+                name=self._metadata_name(),
+                maximum_bytes=_MAX_CONTEXT_METADATA_BYTES,
+            )
+            existing_ownership = (
+                None
+                if existing_metadata is None
+                else self._decode_metadata_record(existing_metadata)[2]
+            )
+            self._validate_replacement_ownership(
+                existing=existing_ownership,
+                replacement=ownership,
+            )
             context_descriptor, context_temporary = self._create_temporary_file(parent_descriptor)
             metadata_descriptor, metadata_temporary = self._create_temporary_file(
                 parent_descriptor,
@@ -3851,7 +3903,7 @@ class RestartContextFile:
             )
             if metadata is None:
                 return False
-            current_token, _ = self._decode_metadata_record(metadata)
+            current_token, _, _ = self._decode_metadata_record(metadata)
             if current_token != cleanup_token:
                 return False
             self._unlink_context_pair(parent_descriptor)
@@ -4021,6 +4073,7 @@ class RestartContextFile:
         cls,
         cleanup_token: _RestartContextCleanupToken,
         context: bytes,
+        ownership: _RestartContextOwnership | None,
     ) -> bytes:
         cls._validate_cleanup_token(cleanup_token)
         encoded = (
@@ -4029,6 +4082,10 @@ class RestartContextFile:
                     "schema_version": _CONTEXT_METADATA_SCHEMA_VERSION,
                     "cleanup_token": cleanup_token,
                     "context_sha256": hashlib.sha256(context).hexdigest(),
+                    "registration_id": (None if ownership is None else ownership.registration_id),
+                    "registration_mutation_sequence": (
+                        None if ownership is None else ownership.mutation_sequence
+                    ),
                 },
                 allow_nan=False,
                 separators=(",", ":"),
@@ -4046,7 +4103,7 @@ class RestartContextFile:
         encoded: bytes,
         context: bytes,
     ) -> _RestartContextCleanupToken:
-        cleanup_token, context_digest = cls._decode_metadata_record(encoded)
+        cleanup_token, context_digest, _ = cls._decode_metadata_record(encoded)
         if not secrets.compare_digest(
             context_digest,
             hashlib.sha256(context).hexdigest(),
@@ -4058,7 +4115,7 @@ class RestartContextFile:
     def _decode_metadata_record(
         cls,
         encoded: bytes,
-    ) -> tuple[_RestartContextCleanupToken, str]:
+    ) -> tuple[_RestartContextCleanupToken, str, _RestartContextOwnership | None]:
         try:
             value = json.loads(
                 encoded,
@@ -4068,7 +4125,13 @@ class RestartContextFile:
                 raise RestartContextFileError(
                     "restart-context metadata JSON must contain an object"
                 )
-            expected = {"schema_version", "cleanup_token", "context_sha256"}
+            expected = {
+                "schema_version",
+                "cleanup_token",
+                "context_sha256",
+                "registration_id",
+                "registration_mutation_sequence",
+            }
             if set(value) != expected:
                 raise RestartContextFileError("restart-context metadata fields are invalid")
             if (
@@ -4090,13 +4153,48 @@ class RestartContextFile:
                 raise RestartContextFileError(
                     "restart-context metadata digest is invalid"
                 ) from error
-            return cleanup_token, context_digest
+            registration_id = value["registration_id"]
+            mutation_sequence = value["registration_mutation_sequence"]
+            if registration_id is None and mutation_sequence is None:
+                ownership = None
+            elif (
+                isinstance(registration_id, str)
+                and registration_id
+                and (type(mutation_sequence) is int and mutation_sequence >= 1)
+            ):
+                ownership = _RestartContextOwnership(
+                    registration_id=registration_id,
+                    mutation_sequence=mutation_sequence,
+                )
+            else:
+                raise RestartContextFileError("restart-context metadata ownership is invalid")
+            return cleanup_token, context_digest, ownership
         except _DuplicateJsonFieldError as error:
             raise RestartContextFileError(str(error)) from error
         except RestartContextFileError:
             raise
         except (TypeError, ValueError, UnicodeDecodeError) as error:
             raise RestartContextFileError("restart-context metadata is malformed") from error
+
+    @staticmethod
+    def _validate_replacement_ownership(
+        *,
+        existing: _RestartContextOwnership | None,
+        replacement: _RestartContextOwnership | None,
+    ) -> None:
+        if existing is None:
+            return
+        if replacement is None:
+            raise RestartContextFileError(
+                "unowned restart context cannot replace registration-owned state"
+            )
+        if replacement.mutation_sequence < existing.mutation_sequence or (
+            replacement.mutation_sequence == existing.mutation_sequence
+            and replacement.registration_id != existing.registration_id
+        ):
+            raise RestartContextFileError(
+                "stale registration cannot replace a newer restart context"
+            )
 
     @staticmethod
     def _validate_cleanup_token(value: object) -> _RestartContextCleanupToken:

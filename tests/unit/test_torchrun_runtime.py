@@ -53,6 +53,7 @@ from lm_resiliency.integrations.torchrun._runtime import (
     TorchrunRendezvousPolicy,
     TorchrunRuntimeConfig,
     TorchrunRuntimeConfigError,
+    _RestartContextOwnership,
 )
 
 RUN_ID = "training-run"
@@ -814,6 +815,38 @@ def test_restart_context_file_clears_only_the_matching_cleanup_token(
     assert context_file.read() == _context()
     assert context_file.clear_if_token(second_token) is True
     assert not path.exists()
+
+
+def test_restart_context_file_fences_registration_ownership(
+    tmp_path: Path,
+):
+    path = tmp_path / "private" / "restart-context.json"
+    context_file = RestartContextFile(path)
+    original = _RestartContextOwnership("registration-a", 1)
+    replacement = _RestartContextOwnership("registration-b", 2)
+
+    context_file.write(_context(plan_id="plan-a"), ownership=original)
+    replacement_token = context_file.write(
+        _context(plan_id="plan-b"),
+        ownership=replacement,
+    )
+
+    with pytest.raises(RestartContextFileError, match="stale registration"):
+        context_file.write(_context(plan_id="stale-plan"), ownership=original)
+
+    assert context_file.read_with_token() == (
+        replacement_token,
+        _context(plan_id="plan-b"),
+    )
+
+    renewed_token = context_file.write(
+        _context(plan_id="plan-b-renewed"),
+        ownership=_RestartContextOwnership("registration-b", 3),
+    )
+    assert context_file.read_with_token() == (
+        renewed_token,
+        _context(plan_id="plan-b-renewed"),
+    )
 
 
 def test_restart_context_file_invalidates_context_while_directory_lock_is_held(
@@ -3683,8 +3716,14 @@ def test_slot_aware_handler_clears_context_when_publication_fails_after_replace(
         context: RestartContext,
         *,
         deadline: float | None = None,
+        ownership: _RestartContextOwnership | None = None,
     ) -> None:
-        token = original_write(context_file, context, deadline=deadline)
+        token = original_write(
+            context_file,
+            context,
+            deadline=deadline,
+            ownership=ownership,
+        )
         raise RestartContextFileError(
             "injected post-publication failure",
             published_token=token,
@@ -4278,6 +4317,63 @@ def test_slot_aware_handler_requires_live_registration_before_returning_admissio
             deadline,
             "a" * 64,
         )
+
+
+def test_slot_aware_handler_cannot_borrow_replacement_registration_ownership(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    config = _handler_config(
+        tmp_path,
+        node_id="node-b",
+        min_nodes=1,
+        max_nodes=2,
+    )
+    stale_handler = _handler(
+        config,
+        store=store,
+        clock=clock,
+        agent_id="agent-b-stale",
+    )
+    deadline = time.monotonic() + 1
+    stale_handler._ensure_registered(deadline)
+    stale_ownership = stale_handler._current_restart_context_ownership()
+    with stale_handler._registration_lock:
+        stale_registration = stale_handler._registration
+    assert stale_registration is not None
+    assert stale_handler._stop_heartbeat() is True
+    stale_handler._registration_manager.release(stale_registration)
+
+    replacement_handler = _handler(
+        config,
+        store=store,
+        clock=clock,
+        agent_id="agent-b-replacement",
+    )
+    replacement_handler._ensure_registered(deadline)
+    replacement_ownership = replacement_handler._current_restart_context_ownership()
+    context_file = RestartContextFile(config.restart_context_path)
+    replacement_token = context_file.write(
+        _context(plan_id="replacement-plan"),
+        ownership=replacement_ownership,
+    )
+
+    with pytest.raises(
+        RendezvousConnectionError,
+        match="registration no longer belongs",
+    ):
+        stale_handler._current_restart_context_ownership()
+    with pytest.raises(RestartContextFileError, match="stale registration"):
+        context_file.write(
+            _context(plan_id="stale-plan"),
+            ownership=stale_ownership,
+        )
+    assert context_file.read_with_token() == (
+        replacement_token,
+        _context(plan_id="replacement-plan"),
+    )
+    assert replacement_handler.shutdown() is True
 
 
 def test_slot_aware_handler_uses_authoritative_time_for_final_registration_expiry(
