@@ -964,8 +964,13 @@ Each retained agent-registration value is first decoded as one immutable
 authority. The strict decoder binds canonical registration bytes to the
 expected run and node, requires an authoritative commit time, rejects guarded
 registration writes, and preserves the store transaction, mutation, value, and
-lifetime sequences. It also rejects impossible per-entry sequence lineage. A
-following reader validates the complete registration history and current tail.
+lifetime sequences. It also rejects impossible per-entry sequence lineage. The
+following stable reader validates that the retained history begins at the
+initial sequences and contains every renewal, replacement, and recreated-key
+transition. It rejects overlapping registrations, expired renewals, recurrent
+registration identities or fencing tokens, and a current value that is not the
+retained tail. A released registration remains visible in the immutable history
+while the current value is absent.
 
 For a crashed or unreachable node, no preparation is assumed.
 
