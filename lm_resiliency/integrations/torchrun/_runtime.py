@@ -224,6 +224,8 @@ class RestartContextFile:
         parent = self._prepare_parent()
         self._reject_existing_symlink()
         encoded = (context.to_json() + "\n").encode("utf-8")
+        if len(encoded) > _MAX_CONTEXT_BYTES:
+            raise RestartContextFileError("restart context is too large")
         descriptor, temporary = tempfile.mkstemp(
             prefix=f".{self.path.name}.",
             suffix=".tmp",
@@ -255,7 +257,7 @@ class RestartContextFile:
 
     def read(self) -> RestartContext:
         self._validate_parent()
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         try:
             descriptor = os.open(self.path, flags)
         except OSError as error:
@@ -290,6 +292,7 @@ class RestartContextFile:
         try:
             self.path.unlink()
         except FileNotFoundError:
+            self._fsync_directory(self.path.parent)
             return
         except OSError as error:
             raise RestartContextFileError(

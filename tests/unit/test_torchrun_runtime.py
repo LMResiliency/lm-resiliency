@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -365,6 +366,19 @@ def test_restart_context_file_preserves_previous_value_when_replace_fails(
     assert list(path.parent.glob(f".{path.name}.*.tmp")) == []
 
 
+def test_restart_context_file_rejects_oversized_value_before_replace(tmp_path: Path):
+    path = tmp_path / "private" / "restart-context.json"
+    context_file = RestartContextFile(path)
+    context_file.write(_context())
+    oversized = replace(_context(plan_id="oversized"), reason_code="x" * (70 * 1024))
+
+    with pytest.raises(RestartContextFileError, match="too large"):
+        context_file.write(oversized)
+
+    assert context_file.read() == _context()
+    assert list(path.parent.glob(f".{path.name}.*.tmp")) == []
+
+
 def test_restart_context_file_closes_descriptor_when_permission_setup_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -435,6 +449,17 @@ def test_restart_context_file_rejects_symlink_path(tmp_path: Path):
         context_file.clear()
 
 
+def test_restart_context_file_rejects_fifo_without_blocking(tmp_path: Path):
+    parent = tmp_path / "private"
+    parent.mkdir(mode=0o700)
+    path = parent / "restart-context.json"
+    os.mkfifo(path, mode=0o600)
+    context_file = RestartContextFile(path)
+
+    with pytest.raises(RestartContextFileError, match="not a regular file"):
+        context_file.read()
+
+
 def test_restart_context_file_rejects_symlink_parent(tmp_path: Path):
     actual = tmp_path / "actual"
     actual.mkdir(mode=0o700)
@@ -454,6 +479,37 @@ def test_restart_context_file_rejects_insecure_file_permissions(tmp_path: Path):
 
     with pytest.raises(RestartContextFileError, match="group or other"):
         context_file.read()
+
+
+def test_restart_context_file_retries_directory_sync_after_failed_clear(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    path = tmp_path / "private" / "restart-context.json"
+    context_file = RestartContextFile(path)
+    context_file.write(_context())
+    original_sync = RestartContextFile._fsync_directory
+    calls = 0
+
+    def flaky_sync(directory: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("injected directory sync failure")
+        original_sync(directory)
+
+    monkeypatch.setattr(
+        RestartContextFile,
+        "_fsync_directory",
+        staticmethod(flaky_sync),
+    )
+
+    with pytest.raises(OSError, match="injected directory sync failure"):
+        context_file.clear()
+
+    assert not path.exists()
+    context_file.clear()
+    assert calls == 2
 
 
 @pytest.mark.parametrize("path", [Path("relative.json"), cast(Any, "not-a-path")])
