@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import threading
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -52,6 +53,8 @@ from lm_resiliency.integrations.torchrun._restart_ack_preparation import (
     RestartAckPreparer,
 )
 from lm_resiliency.integrations.torchrun._restart_ack_reader import (
+    RestartAckCollectionReadConflict,
+    RestartAckCollectionReadCorrupt,
     RestartAckCollector,
     RestartAckReader,
 )
@@ -76,6 +79,11 @@ from lm_resiliency.integrations.torchrun._restart_intent_open_execution import (
 from lm_resiliency.integrations.torchrun._restart_intent_records import (
     RestartIntentHeadRecord,
     RestartIntentLifecycleRecord,
+)
+from lm_resiliency.integrations.torchrun._restart_plan_publication import (
+    RestartPlanPublicationReadConflict,
+    RestartPlanPublicationReadCorrupt,
+    RestartPlanPublicationReader,
 )
 from lm_resiliency.integrations.torchrun._restart_plan_records import (
     RecoveryManifestRecord,
@@ -106,6 +114,56 @@ class ManualClock:
     def __call__(self) -> int:
         with self._lock:
             return self.now_unix_ms
+
+
+class StaticAckCollector:
+    def __init__(
+        self,
+        result: RestartAckCollection | Exception | object,
+    ) -> None:
+        self.result = result
+        self.closures: list[object] = []
+
+    def collect_for_closure(self, closure: object) -> RestartAckCollection:
+        self.closures.append(closure)
+        if isinstance(self.result, Exception):
+            raise self.result
+        return cast(RestartAckCollection, self.result)
+
+
+class StaticLatestPublicationReader(RestartPlanPublicationReader):
+    def __init__(
+        self,
+        publication: PersistedRestartPlanPublication,
+        generation_state: RestartPlanGenerationState,
+        source_snapshot: StoredGenerationSnapshot,
+        collector: StaticAckCollector,
+    ) -> None:
+        super().__init__(InMemoryControlStore(), run_id=RUN_ID)
+        self._publication = publication
+        self._source_snapshot = source_snapshot
+        self._static_lifecycle = SimpleNamespace(
+            intent=generation_state.intent_record,
+            lifecycle=generation_state.lifecycle_record,
+            generation_snapshot=source_snapshot,
+            immediate_successor=self._stored_successor(publication),
+            transaction_sequence=publication.transaction_sequence - 1,
+            closed_at_unix_ms=publication.committed_at_unix_ms,
+        )
+        self._ack_collector = cast(Any, collector)
+
+    def read(self) -> PersistedRestartPlanPublication:
+        return self._publication
+
+    def _read_lifecycle(self) -> Any:
+        return self._static_lifecycle
+
+    def _read_manifest_source(
+        self,
+        publication: PersistedRestartPlanPublication,
+    ) -> StoredGenerationSnapshot:
+        assert publication == self._publication
+        return self._source_snapshot
 
 
 def _event(
@@ -472,6 +530,104 @@ def _persisted_latest_recovery_inputs(
         generation_state,
         manifest_state.resolved_manifest.source_snapshot,
     )
+
+
+def _automatic_latest_reader(
+    evidence: RestartAckEvidence,
+    event: CheckpointInventoryEvent,
+    *,
+    collector_result: RestartAckCollection | Exception | object | None = None,
+) -> tuple[StaticLatestPublicationReader, StaticAckCollector]:
+    publication, generation_state, source_snapshot = _persisted_latest_recovery_inputs(
+        evidence,
+        event,
+    )
+    collector = StaticAckCollector(
+        evidence.collection if collector_result is None else collector_result
+    )
+    return (
+        StaticLatestPublicationReader(
+            publication,
+            generation_state,
+            source_snapshot,
+            collector,
+        ),
+        collector,
+    )
+
+
+def test_publication_reader_automatically_collects_latest_acknowledgements():
+    event = _latest_event()
+    evidence, _ = _evidence(event=event, close_intent=True)
+    reader, collector = _automatic_latest_reader(evidence, event)
+
+    state = reader.read_recovery_state()
+
+    assert state is not None
+    assert isinstance(state.recovery_state.trust_state, RestartPlanLatestEvidenceState)
+    assert state.recovery_state.trust_state.acknowledgement_evidence == evidence
+    assert collector.closures == [reader._static_lifecycle]
+
+
+def test_publication_reader_explicit_latest_evidence_skips_collection():
+    event = _latest_event()
+    evidence, _ = _evidence(event=event, close_intent=True)
+    reader, collector = _automatic_latest_reader(
+        evidence,
+        event,
+        collector_result=AssertionError("collector should not run"),
+    )
+
+    state = reader.read_recovery_state(acknowledgement_evidence=evidence)
+
+    assert state is not None
+    assert state.recovery_state.trust_state.acknowledgement_evidence == evidence
+    assert collector.closures == []
+
+
+@pytest.mark.parametrize(
+    ("collector_error", "expected"),
+    [
+        (
+            RestartAckCollectionReadConflict("busy"),
+            RestartPlanPublicationReadConflict,
+        ),
+        (
+            RestartAckCollectionReadCorrupt("bad"),
+            RestartPlanPublicationReadCorrupt,
+        ),
+    ],
+)
+def test_publication_reader_translates_automatic_collection_errors(
+    collector_error: Exception,
+    expected: type[Exception],
+):
+    event = _latest_event()
+    evidence, _ = _evidence(event=event, close_intent=True)
+    reader, _ = _automatic_latest_reader(
+        evidence,
+        event,
+        collector_result=collector_error,
+    )
+
+    with pytest.raises(expected):
+        reader.read_recovery_state()
+
+
+def test_publication_reader_rejects_contradictory_collector_output():
+    event = _latest_event()
+    evidence, _ = _evidence(event=event, close_intent=True)
+    reader, _ = _automatic_latest_reader(
+        evidence,
+        event,
+        collector_result=object(),
+    )
+
+    with pytest.raises(
+        RestartPlanPublicationReadCorrupt,
+        match="historical restart acknowledgements contradict",
+    ):
+        reader.read_recovery_state()
 
 
 def test_persisted_latest_recovery_accepts_matching_acknowledgements():
