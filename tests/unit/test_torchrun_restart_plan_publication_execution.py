@@ -114,6 +114,11 @@ class TamperedPublicationResultStore(InMemoryControlStore):
                 mutation_sequence=4,
                 value_sequence=4,
             )
+        elif self._tamper == "head_revision":
+            committed[generation_head_key] = replace(
+                committed[generation_head_key],
+                revision=2,
+            )
         elif self._tamper == "immutable_lineage":
             committed[immutable_key] = replace(
                 committed[immutable_key],
@@ -442,6 +447,7 @@ def test_executor_rejects_store_time_before_preparation():
         "transaction",
         "guard",
         "head_lineage",
+        "head_revision",
         "immutable_lineage",
         "time",
         "order",

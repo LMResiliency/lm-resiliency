@@ -110,7 +110,8 @@ class CommittedRestartPlanPublication:
         if key == records.generation_head_key:
             generation = records.candidate.plan.to_generation
             if (
-                entry.mutation_sequence != generation + 1
+                entry.revision == records.current.head_revision
+                or entry.mutation_sequence != generation + 1
                 or entry.value_sequence != generation + 1
                 or entry.lifetime_sequence != 1
             ):
