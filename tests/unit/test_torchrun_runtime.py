@@ -44,6 +44,11 @@ def _parameters(
     max_nodes: int = 3,
     **config: object,
 ) -> RendezvousParameters:
+    runtime_config = {
+        "local_world_size": "2",
+        "environment_digest": "environment-v1",
+        **config,
+    }
     return RendezvousParameters(
         backend="lm_resiliency",
         endpoint="rdzv.example:29400",
@@ -52,7 +57,7 @@ def _parameters(
         max_nodes=max_nodes,
         local_addr="node-a.example",
         config=str(path),
-        **config,
+        **runtime_config,
     )
 
 
@@ -159,6 +164,100 @@ def test_runtime_config_registration_digest_includes_node_range(tmp_path: Path):
     assert first.registration_digest != second.registration_digest
 
 
+def test_runtime_config_registration_digest_includes_local_world_size(tmp_path: Path):
+    source = _write_policy(tmp_path / "rendezvous.toml")
+    common: Any = {
+        "node_id": "node-a",
+        "restart_context_path": "/run/context.json",
+    }
+    first = TorchrunRuntimeConfig.from_parameters(
+        _parameters(source, local_world_size="2", **common),
+        environment={},
+    )
+    second = TorchrunRuntimeConfig.from_parameters(
+        _parameters(source, local_world_size="4", **common),
+        environment={},
+    )
+
+    assert first.registration_digest != second.registration_digest
+
+
+def test_runtime_config_builds_agent_identity(tmp_path: Path):
+    source = _write_policy(tmp_path / "rendezvous.toml")
+    config = TorchrunRuntimeConfig.from_parameters(
+        _parameters(
+            source,
+            node_id="node-a",
+            restart_context_path="/run/context.json",
+        ),
+        environment={},
+    )
+
+    identity = config.build_agent_identity(
+        agent_id="agent-a",
+        hostname="host-a",
+    )
+
+    assert identity.run_id == RUN_ID
+    assert identity.node_id == "node-a"
+    assert identity.agent_id == "agent-a"
+    assert identity.hostname == "host-a"
+    assert identity.local_world_size == 2
+    assert identity.resource_ids == ()
+    assert identity.environment_digest == config.agent_environment_digest
+
+
+def test_runtime_config_resolves_agent_identity_inputs_from_environment(
+    tmp_path: Path,
+):
+    source = _write_policy(tmp_path / "rendezvous.toml")
+    environment = {
+        "LM_RESILIENCY_NODE_ID": "node-a",
+        "LM_RESILIENCY_LOCAL_WORLD_SIZE": "4",
+        "LM_RESILIENCY_ENVIRONMENT_DIGEST": "environment-v2",
+        "LM_RESILIENCY_RESTART_CONTEXT": "/run/context.json",
+    }
+
+    config = TorchrunRuntimeConfig.from_parameters(
+        _parameters(
+            source,
+            local_world_size=None,
+            environment_digest=None,
+        ),
+        environment=environment,
+    )
+
+    assert config.node_id == "node-a"
+    assert config.local_world_size == 4
+    assert config.environment_digest == "environment-v2"
+    assert config.restart_context_path == Path("/run/context.json")
+
+
+def test_runtime_config_agent_environment_digest_binds_workload_and_runtime(
+    tmp_path: Path,
+):
+    source = _write_policy(tmp_path / "rendezvous.toml")
+    common: Any = {
+        "node_id": "node-a",
+        "restart_context_path": "/run/context.json",
+    }
+    first = TorchrunRuntimeConfig.from_parameters(
+        _parameters(source, environment_digest="environment-v1", **common),
+        environment={},
+    )
+    different_workload = TorchrunRuntimeConfig.from_parameters(
+        _parameters(source, environment_digest="environment-v2", **common),
+        environment={},
+    )
+    different_runtime = TorchrunRuntimeConfig.from_parameters(
+        _parameters(source, max_nodes=4, **common),
+        environment={},
+    )
+
+    assert first.agent_environment_digest != different_workload.agent_environment_digest
+    assert first.agent_environment_digest != different_runtime.agent_environment_digest
+
+
 def test_runtime_config_rendezvous_overrides_change_resolved_policy(tmp_path: Path):
     source = _write_policy(tmp_path / "rendezvous.toml")
     context_path = tmp_path / "restart-context.json"
@@ -251,6 +350,13 @@ def test_runtime_config_rejects_fifo_policy_without_blocking(tmp_path: Path):
     ("parameter_name", "environment_name", "parameter_value", "environment_value"),
     [
         ("node_id", "LM_RESILIENCY_NODE_ID", "node-a", "node-b"),
+        ("local_world_size", "LM_RESILIENCY_LOCAL_WORLD_SIZE", "2", "4"),
+        (
+            "environment_digest",
+            "LM_RESILIENCY_ENVIRONMENT_DIGEST",
+            "environment-v1",
+            "environment-v2",
+        ),
         (
             "restart_context_path",
             "LM_RESILIENCY_RESTART_CONTEXT",
@@ -303,6 +409,46 @@ def test_runtime_config_requires_node_inputs(
         )
 
 
+@pytest.mark.parametrize(
+    ("config", "environment", "match"),
+    [
+        (
+            {"local_world_size": None},
+            {},
+            "LM_RESILIENCY_LOCAL_WORLD_SIZE",
+        ),
+        (
+            {"environment_digest": None},
+            {},
+            "LM_RESILIENCY_ENVIRONMENT_DIGEST",
+        ),
+        (
+            {"local_world_size": "0"},
+            {},
+            "local_world_size must be positive",
+        ),
+    ],
+)
+def test_runtime_config_requires_agent_identity_inputs(
+    tmp_path: Path,
+    config: dict[str, object],
+    environment: dict[str, str],
+    match: str,
+):
+    source = _write_policy(tmp_path / "rendezvous.toml")
+    runtime_config: Any = {
+        "node_id": "node-a",
+        "restart_context_path": "/run/context.json",
+        **config,
+    }
+
+    with pytest.raises(TorchrunRuntimeConfigError, match=match):
+        TorchrunRuntimeConfig.from_parameters(
+            _parameters(source, **runtime_config),
+            environment=environment,
+        )
+
+
 def test_runtime_config_respects_explicitly_empty_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -343,6 +489,8 @@ def test_runtime_config_requires_absolute_paths_and_standby_capacity(tmp_path: P
                 min_nodes=2,
                 max_nodes=2,
                 config=str(source),
+                local_world_size="2",
+                environment_digest="environment-v1",
             ),
             environment=_environment(tmp_path / "context.json"),
         )

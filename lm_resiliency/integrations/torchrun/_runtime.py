@@ -21,10 +21,12 @@ except ModuleNotFoundError:  # pragma: no cover - exercised by the Python 3.10 C
 
 from torch.distributed.elastic.rendezvous import RendezvousParameters
 
-from lm_resiliency.integrations.torchrun._protocol import RestartContext
+from lm_resiliency.integrations.torchrun._protocol import AgentIdentity, RestartContext
 
 _BACKEND = "lm_resiliency"
 _NODE_ID_ENV = "LM_RESILIENCY_NODE_ID"
+_LOCAL_WORLD_SIZE_ENV = "LM_RESILIENCY_LOCAL_WORLD_SIZE"
+_ENVIRONMENT_DIGEST_ENV = "LM_RESILIENCY_ENVIRONMENT_DIGEST"
 _RESTART_CONTEXT_ENV = "LM_RESILIENCY_RESTART_CONTEXT"
 _MAX_CONTEXT_BYTES = 64 * 1024
 _MAX_POLICY_BYTES = 64 * 1024
@@ -38,6 +40,8 @@ _SHARED_FIELDS = {
 }
 _RUNTIME_FIELDS = _SHARED_FIELDS | {
     "config",
+    "environment_digest",
+    "local_world_size",
     "node_id",
     "restart_context_path",
 }
@@ -116,7 +120,9 @@ class TorchrunRuntimeConfig:
     endpoint: str
     min_nodes: int
     max_nodes: int
+    local_world_size: int
     node_id: str
+    environment_digest: str
     restart_context_path: Path
     local_addr: str | None
     source_path: Path
@@ -132,7 +138,9 @@ class TorchrunRuntimeConfig:
             raise TorchrunRuntimeConfigError(
                 "max_nodes must exceed min_nodes to provide standby capacity"
             )
+        _positive_integer(self.local_world_size, "local_world_size")
         _nonempty_string(self.node_id, "node_id")
+        _nonempty_string(self.environment_digest, "environment_digest")
         if not isinstance(self.restart_context_path, Path):
             raise TypeError("restart_context_path must be pathlib.Path")
         if not self.restart_context_path.is_absolute():
@@ -153,7 +161,37 @@ class TorchrunRuntimeConfig:
                 "endpoint": self.endpoint,
                 "min_nodes": self.min_nodes,
                 "max_nodes": self.max_nodes,
+                "local_world_size": self.local_world_size,
             }
+        )
+
+    @property
+    def agent_environment_digest(self) -> str:
+        """Return the workload and runtime identity recorded for this agent."""
+
+        return _canonical_digest(
+            {
+                "runtime": self.registration_digest,
+                "workload_environment": self.environment_digest,
+            }
+        )
+
+    def build_agent_identity(
+        self,
+        *,
+        agent_id: str,
+        hostname: str,
+    ) -> AgentIdentity:
+        """Build the immutable agent identity for this handler incarnation."""
+
+        return AgentIdentity(
+            run_id=self.run_id,
+            node_id=self.node_id,
+            agent_id=_nonempty_string(agent_id, "agent_id"),
+            hostname=_nonempty_string(hostname, "hostname"),
+            local_world_size=self.local_world_size,
+            resource_ids=(),
+            environment_digest=self.agent_environment_digest,
         )
 
     @classmethod
@@ -194,6 +232,18 @@ class TorchrunRuntimeConfig:
             "node_id",
             _NODE_ID_ENV,
         )
+        local_world_size = _node_integer_value(
+            params.get("local_world_size"),
+            resolved_environment.get(_LOCAL_WORLD_SIZE_ENV),
+            "local_world_size",
+            _LOCAL_WORLD_SIZE_ENV,
+        )
+        environment_digest = _node_value(
+            params.get("environment_digest"),
+            resolved_environment.get(_ENVIRONMENT_DIGEST_ENV),
+            "environment_digest",
+            _ENVIRONMENT_DIGEST_ENV,
+        )
         restart_context_path = Path(
             _node_value(
                 params.get("restart_context_path"),
@@ -208,7 +258,9 @@ class TorchrunRuntimeConfig:
             endpoint=params.endpoint,
             min_nodes=params.min_nodes,
             max_nodes=params.max_nodes,
+            local_world_size=local_world_size,
             node_id=node_id,
+            environment_digest=environment_digest,
             restart_context_path=restart_context_path,
             local_addr=params.local_addr,
             source_path=source_path,
@@ -567,6 +619,28 @@ def _node_value(
     ):
         raise TorchrunRuntimeConfigError(f"{parameter_name} conflicts with {environment_name}")
     value = parameter_value or environment_value
+    if value is None:
+        raise TorchrunRuntimeConfigError(f"{parameter_name} or {environment_name} must be provided")
+    return value
+
+
+def _node_integer_value(
+    parameter: object,
+    environment: object,
+    parameter_name: str,
+    environment_name: str,
+) -> int:
+    parameter_value = None if parameter is None else _positive_integer(parameter, parameter_name)
+    environment_value = (
+        None if environment is None else _positive_integer(environment, environment_name)
+    )
+    if (
+        parameter_value is not None
+        and environment_value is not None
+        and parameter_value != environment_value
+    ):
+        raise TorchrunRuntimeConfigError(f"{parameter_name} conflicts with {environment_name}")
+    value = parameter_value if parameter_value is not None else environment_value
     if value is None:
         raise TorchrunRuntimeConfigError(f"{parameter_name} or {environment_name} must be provided")
     return value
