@@ -949,6 +949,31 @@ def test_restart_context_file_preserves_previous_value_when_replace_fails(
     assert list(path.parent.glob(f".{path.name}.*.tmp")) == []
 
 
+def test_restart_context_file_removes_orphaned_metadata_durably(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    path = tmp_path / "private" / "restart-context.json"
+    context_file = RestartContextFile(path)
+    context_file.write(_context())
+    path.unlink()
+    metadata_path = path.parent / context_file._metadata_name()
+    assert metadata_path.exists()
+    sync_count = 0
+    original_fsync = RestartContextFile._fsync_directory
+
+    def record_fsync(descriptor: int) -> None:
+        nonlocal sync_count
+        sync_count += 1
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(RestartContextFile, "_fsync_directory", staticmethod(record_fsync))
+
+    assert context_file.clear_stale_for_run(RUN_ID) is True
+    assert not metadata_path.exists()
+    assert sync_count == 1
+
+
 def test_restart_context_file_rejects_oversized_value_before_replace(tmp_path: Path):
     path = tmp_path / "private" / "restart-context.json"
     context_file = RestartContextFile(path)

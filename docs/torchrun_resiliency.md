@@ -1604,6 +1604,8 @@ admission requires the exact token published by that handler incarnation. A
 normal heartbeat renewal may advance the registration fencing token, but
 admission accepts it only when retained authority history proves uninterrupted
 ownership by the same immutable registration and agent incarnation. Context
+cleanup also removes and directory-syncs an orphaned sidecar when a crash
+leaves metadata without its root context. Context
 publication and cleanup acquire the parent
 directory lock nonblocking under the admission or bounded-cleanup deadline, so
 a stale process cannot strand replacement admission. The replacement deadline

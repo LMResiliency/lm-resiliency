@@ -3870,7 +3870,22 @@ class RestartContextFile:
             self._reject_existing_symlink(parent_descriptor)
             encoded = self._read_encoded(parent_descriptor, missing_ok=True)
             if encoded is None:
-                return False
+                metadata = self._read_encoded(
+                    parent_descriptor,
+                    missing_ok=True,
+                    name=self._metadata_name(),
+                    maximum_bytes=_MAX_CONTEXT_METADATA_BYTES,
+                )
+                if metadata is None:
+                    return False
+                try:
+                    os.unlink(self._metadata_name(), dir_fd=parent_descriptor)
+                    self._fsync_directory(parent_descriptor)
+                except OSError as error:
+                    raise RestartContextFileError(
+                        f"failed to remove orphaned restart-context metadata at {self.path}"
+                    ) from error
+                return True
             context = self._decode_context(encoded)
             if context.run_id == run_id:
                 raise RestartContextFileError(
