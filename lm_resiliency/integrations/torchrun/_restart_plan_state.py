@@ -6,6 +6,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from lm_resiliency.integrations.torchrun._agent_registration_history_reader import (
+    AgentRegistrationHistory,
+)
 from lm_resiliency.integrations.torchrun._generation_reader import (
     StoredGenerationSnapshot,
 )
@@ -670,6 +673,153 @@ class RestartPlanRecoveryEvidenceState:
         return self.copy_state.manifest
 
 
+@dataclass(frozen=True, slots=True)
+class RestartPlanPlacementState:
+    """One successor placement backed by exact live agent registrations."""
+
+    generation_state: RestartPlanGenerationState
+    registration_histories: Mapping[str, AgentRegistrationHistory]
+    observed_at_unix_ms: int
+    environment_digest: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.generation_state, RestartPlanGenerationState):
+            raise TypeError(
+                "RestartPlanPlacementState.generation_state must be RestartPlanGenerationState"
+            )
+        if not isinstance(self.registration_histories, Mapping):
+            raise TypeError("RestartPlanPlacementState.registration_histories must be a mapping")
+        if (
+            isinstance(self.observed_at_unix_ms, bool)
+            or not isinstance(self.observed_at_unix_ms, int)
+            or self.observed_at_unix_ms < 1
+        ):
+            raise ValueError(
+                "RestartPlanPlacementState.observed_at_unix_ms must be a positive integer"
+            )
+        if not isinstance(self.environment_digest, str) or not self.environment_digest.strip():
+            raise ValueError(
+                "RestartPlanPlacementState.environment_digest must be a non-empty string"
+            )
+        self._validate_topology()
+        histories = self._validate_registrations()
+        object.__setattr__(
+            self,
+            "registration_histories",
+            MappingProxyType(histories),
+        )
+
+    @property
+    def plan(self) -> RestartPlan:
+        return self.generation_state.plan
+
+    def _validate_topology(self) -> None:
+        plan = self.plan
+        intent = self.generation_state.intent_record.intent
+        current_slots = {
+            node_id: slot
+            for slot, node_id in self.generation_state.from_assignment.slot_to_node_id.items()
+        }
+        planned_slots = {
+            assignment.node_id: assignment.logical_node_slot for assignment in plan.slot_assignments
+        }
+        current_nodes = set(current_slots)
+        planned_nodes = set(planned_slots)
+        suspected_nodes = set(intent.suspected_node_ids)
+        unknown_suspects = sorted(suspected_nodes - current_nodes)
+        if unknown_suspects:
+            raise ValueError(
+                "RestartPlanPlacementState suspected nodes are not active in "
+                f"the source generation: {unknown_suspects!r}"
+            )
+        retained_suspects = sorted(suspected_nodes & planned_nodes)
+        if retained_suspects:
+            raise ValueError(
+                f"RestartPlanPlacementState suspected nodes remain assigned: {retained_suspects!r}"
+            )
+        moved_survivors = sorted(
+            node_id
+            for node_id in current_nodes & planned_nodes
+            if current_slots[node_id] != planned_slots[node_id]
+        )
+        if moved_survivors:
+            raise ValueError(
+                "RestartPlanPlacementState surviving nodes changed logical slots: "
+                f"{moved_survivors!r}"
+            )
+        if planned_nodes == current_nodes:
+            raise ValueError(
+                "RestartPlanPlacementState version 1 requires at least one replacement node"
+            )
+        removed_nodes = current_nodes - planned_nodes
+        quarantined_nodes = set(plan.quarantined_node_ids)
+        unsupported_quarantine = sorted(quarantined_nodes - suspected_nodes)
+        if unsupported_quarantine:
+            raise ValueError(
+                "RestartPlanPlacementState quarantines nodes outside the intent scope: "
+                f"{unsupported_quarantine!r}"
+            )
+        unremoved_quarantine = sorted(quarantined_nodes - removed_nodes)
+        if unremoved_quarantine:
+            raise ValueError(
+                "RestartPlanPlacementState quarantined nodes remain in the successor "
+                f"assignment: {unremoved_quarantine!r}"
+            )
+
+    def _validate_registrations(self) -> dict[str, AgentRegistrationHistory]:
+        plan = self.plan
+        assignments = {assignment.node_id: assignment for assignment in plan.slot_assignments}
+        histories: dict[str, AgentRegistrationHistory] = {}
+        for node_id, history in self.registration_histories.items():
+            if not isinstance(node_id, str) or not node_id.strip():
+                raise ValueError(
+                    "RestartPlanPlacementState.registration_histories keys "
+                    "must be non-empty node IDs"
+                )
+            if not isinstance(history, AgentRegistrationHistory):
+                raise TypeError(
+                    "RestartPlanPlacementState.registration_histories values "
+                    "must be AgentRegistrationHistory"
+                )
+            histories[node_id] = history
+        if set(histories) != set(assignments):
+            raise ValueError(
+                "RestartPlanPlacementState registration histories must exactly "
+                "cover the successor assignment"
+            )
+        for node_id, assignment in assignments.items():
+            registration = histories[node_id].current
+            if registration is None:
+                raise ValueError(
+                    f"RestartPlanPlacementState node {node_id!r} has no current registration"
+                )
+            identity = registration.record.agent_identity
+            if identity.run_id != plan.run_id or identity.node_id != node_id:
+                raise ValueError(
+                    f"RestartPlanPlacementState node {node_id!r} registration "
+                    "has the wrong identity"
+                )
+            if registration.granted_at_unix_ms > self.observed_at_unix_ms:
+                raise ValueError(
+                    f"RestartPlanPlacementState node {node_id!r} registration "
+                    "was granted after the observation"
+                )
+            if registration.expires_at_unix_ms <= self.observed_at_unix_ms:
+                raise ValueError(
+                    f"RestartPlanPlacementState node {node_id!r} registration is not live"
+                )
+            if identity.local_world_size != assignment.local_world_size:
+                raise ValueError(
+                    f"RestartPlanPlacementState node {node_id!r} local world size "
+                    "does not match its slot"
+                )
+            if identity.environment_digest != self.environment_digest:
+                raise ValueError(
+                    f"RestartPlanPlacementState node {node_id!r} environment is incompatible"
+                )
+        return dict(sorted(histories.items()))
+
+
 __all__ = [
     "ResolvedRecoveryManifest",
     "RestartPlanCertificationState",
@@ -678,6 +828,7 @@ __all__ = [
     "RestartPlanInventoryState",
     "RestartPlanLatestEvidenceState",
     "RestartPlanManifestState",
+    "RestartPlanPlacementState",
     "RestartPlanQuarantineState",
     "RestartPlanRecoveryEvidenceState",
 ]

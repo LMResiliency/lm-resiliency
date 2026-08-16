@@ -6,6 +6,16 @@ from dataclasses import replace
 
 import pytest
 
+from lm_resiliency.integrations.torchrun._agent_registration_history import (
+    AgentRegistrationAuthority,
+)
+from lm_resiliency.integrations.torchrun._agent_registration_history_reader import (
+    AgentRegistrationHistory,
+)
+from lm_resiliency.integrations.torchrun._agent_registration_records import (
+    AgentRegistrationRecord,
+    HeldAgentRegistration,
+)
 from lm_resiliency.integrations.torchrun._generation_reader import (
     StoredGenerationSnapshot,
 )
@@ -13,6 +23,7 @@ from lm_resiliency.integrations.torchrun._generation_records import (
     GenerationSnapshotRecord,
 )
 from lm_resiliency.integrations.torchrun._protocol import (
+    AgentIdentity,
     CheckpointCertification,
     CheckpointCopy,
     CheckpointInventoryEvent,
@@ -44,6 +55,7 @@ from lm_resiliency.integrations.torchrun._restart_plan_state import (
     RestartPlanGenerationState,
     RestartPlanInventoryState,
     RestartPlanManifestState,
+    RestartPlanPlacementState,
     RestartPlanQuarantineState,
     RestartPlanRecoveryEvidenceState,
 )
@@ -361,6 +373,300 @@ def _generation_state() -> RestartPlanGenerationState:
         from_snapshot=from_snapshot,
         to_snapshot=to_snapshot,
     )
+
+
+def _registration_history(
+    node_id: str,
+    *,
+    local_world_size: int = 2,
+    environment_digest: str = "environment-v1",
+    granted_at_unix_ms: int = 1_100,
+    lease_duration_ms: int = 500,
+    current: bool = True,
+) -> AgentRegistrationHistory:
+    record = AgentRegistrationRecord(
+        agent_identity=AgentIdentity(
+            run_id=RUN_ID,
+            node_id=node_id,
+            agent_id=f"agent-{node_id}",
+            hostname=f"host-{node_id}",
+            local_world_size=local_world_size,
+            resource_ids=(f"{node_id}-gpu-0", f"{node_id}-gpu-1"),
+            environment_digest=environment_digest,
+        ),
+        registration_id=f"registration-{node_id}",
+        lease_duration_ms=lease_duration_ms,
+    )
+    held = HeldAgentRegistration(
+        record=record,
+        fencing_token=11,
+        granted_at_unix_ms=granted_at_unix_ms,
+    )
+    authority = AgentRegistrationAuthority(
+        registration=held,
+        transaction_sequence=11,
+        mutation_sequence=1,
+        value_sequence=1,
+        lifetime_sequence=1,
+    )
+    return AgentRegistrationHistory(
+        authorities=(authority,),
+        current=held if current else None,
+    )
+
+
+def _placement_state(
+    *,
+    generation_state: RestartPlanGenerationState | None = None,
+    registration_histories: dict[str, AgentRegistrationHistory] | None = None,
+    observed_at_unix_ms: int = 1_200,
+    environment_digest: str = "environment-v1",
+) -> RestartPlanPlacementState:
+    return RestartPlanPlacementState(
+        generation_state=generation_state or _generation_state(),
+        registration_histories=registration_histories
+        or {
+            "node-a": _registration_history("node-a"),
+            "node-c": _registration_history("node-c"),
+        },
+        observed_at_unix_ms=observed_at_unix_ms,
+        environment_digest=environment_digest,
+    )
+
+
+def _replace_generation_intent(
+    state: RestartPlanGenerationState,
+    intent: RestartIntent,
+) -> RestartPlanGenerationState:
+    intent_record = replace(state.intent_record, intent=intent)
+    lifecycle = replace(
+        state.lifecycle_record,
+        closed_intent=replace(
+            state.lifecycle_record.closed_intent,
+            intent_digest=intent_record.digest,
+        ),
+    )
+    return replace(
+        state,
+        intent_record=intent_record,
+        lifecycle_record=lifecycle,
+        record=replace(
+            state.record,
+            intent_lifecycle_record_digest=lifecycle.digest,
+        ),
+    )
+
+
+def _replace_generation_plan(
+    state: RestartPlanGenerationState,
+    plan: RestartPlan,
+) -> RestartPlanGenerationState:
+    assignment = RankAssignment.from_assignments(
+        run_id=plan.run_id,
+        generation=plan.to_generation,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    to_snapshot = replace(state.to_snapshot, assignment=assignment)
+    return replace(
+        state,
+        to_snapshot=to_snapshot,
+        record=replace(
+            state.record,
+            plan=plan,
+            to_generation_snapshot_digest=to_snapshot.digest,
+            quarantine_record_digests={node_id: "0" * 64 for node_id in plan.quarantined_node_ids},
+        ),
+    )
+
+
+def test_restart_plan_placement_state_binds_live_compatible_registrations():
+    state = _placement_state()
+
+    assert state.plan == state.generation_state.plan
+    assert tuple(state.registration_histories) == ("node-a", "node-c")
+    assert state.registration_histories["node-c"].current is not None
+
+
+def test_restart_plan_placement_state_requires_exact_types():
+    state = _placement_state()
+
+    with pytest.raises(TypeError, match="generation_state must be RestartPlanGenerationState"):
+        replace(state, generation_state=state.generation_state.record)
+    with pytest.raises(TypeError, match="registration_histories must be a mapping"):
+        replace(state, registration_histories=())
+    with pytest.raises(TypeError, match="values must be AgentRegistrationHistory"):
+        replace(
+            state,
+            registration_histories={
+                "node-a": _registration_history("node-a"),
+                "node-c": _registration_history("node-c").current,
+            },
+        )
+
+
+@pytest.mark.parametrize("observed_at_unix_ms", [0, True])
+def test_restart_plan_placement_state_rejects_invalid_observation_time(
+    observed_at_unix_ms,
+):
+    with pytest.raises(ValueError, match="observed_at_unix_ms"):
+        _placement_state(observed_at_unix_ms=observed_at_unix_ms)
+
+
+def test_restart_plan_placement_state_rejects_invalid_environment_digest():
+    with pytest.raises(ValueError, match="environment_digest"):
+        _placement_state(environment_digest=" ")
+
+
+@pytest.mark.parametrize(
+    ("suspected_node_ids", "message"),
+    [
+        (("node-z",), "not active"),
+        (("node-a",), "remain assigned"),
+    ],
+)
+def test_restart_plan_placement_state_rejects_invalid_suspect_scope(
+    suspected_node_ids,
+    message,
+):
+    state = _generation_state()
+    changed = _replace_generation_intent(
+        state,
+        replace(
+            state.intent_record.intent,
+            suspected_node_ids=suspected_node_ids,
+        ),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        _placement_state(generation_state=changed)
+
+
+def test_restart_plan_placement_state_rejects_moved_survivor():
+    state = _generation_state()
+    changed = _replace_generation_plan(
+        state,
+        replace(
+            state.plan,
+            slot_assignments=(
+                SlotAssignment(
+                    logical_node_slot=0,
+                    node_id="node-c",
+                    first_global_rank=0,
+                    local_world_size=2,
+                ),
+                SlotAssignment(
+                    logical_node_slot=1,
+                    node_id="node-a",
+                    first_global_rank=2,
+                    local_world_size=2,
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="changed logical slots"):
+        _placement_state(generation_state=changed)
+
+
+def test_restart_plan_placement_state_requires_replacement():
+    state = _replace_generation_intent(
+        _generation_state(),
+        replace(_intent_record().intent, suspected_node_ids=()),
+    )
+    changed = _replace_generation_plan(
+        state,
+        replace(
+            state.plan,
+            slot_assignments=tuple(
+                SlotAssignment(
+                    logical_node_slot=slot,
+                    node_id=node_id,
+                    first_global_rank=slot * 2,
+                    local_world_size=2,
+                )
+                for slot, node_id in state.from_assignment.slot_to_node_id.items()
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="requires at least one replacement"):
+        _placement_state(
+            generation_state=changed,
+            registration_histories={
+                "node-a": _registration_history("node-a"),
+                "node-b": _registration_history("node-b"),
+            },
+        )
+
+
+def test_restart_plan_placement_state_rejects_quarantine_outside_intent_scope():
+    state = _generation_state()
+    changed = _replace_generation_plan(
+        state,
+        replace(state.plan, quarantined_node_ids=("node-z",)),
+    )
+
+    with pytest.raises(ValueError, match="outside the intent scope"):
+        _placement_state(generation_state=changed)
+
+
+@pytest.mark.parametrize(
+    "registration_histories",
+    [
+        {"node-a": _registration_history("node-a")},
+        {
+            "node-a": _registration_history("node-a"),
+            "node-c": _registration_history("node-c"),
+            "node-d": _registration_history("node-d"),
+        },
+    ],
+)
+def test_restart_plan_placement_state_requires_exact_registration_coverage(
+    registration_histories,
+):
+    with pytest.raises(ValueError, match="exactly cover"):
+        _placement_state(registration_histories=registration_histories)
+
+
+@pytest.mark.parametrize(
+    ("history", "message"),
+    [
+        (_registration_history("node-c", current=False), "no current registration"),
+        (
+            _registration_history("node-c", granted_at_unix_ms=1_201),
+            "granted after",
+        ),
+        (
+            _registration_history(
+                "node-c",
+                granted_at_unix_ms=1_100,
+                lease_duration_ms=100,
+            ),
+            "not live",
+        ),
+        (
+            _registration_history("node-c", local_world_size=1),
+            "local world size",
+        ),
+        (
+            _registration_history("node-c", environment_digest="environment-v2"),
+            "environment is incompatible",
+        ),
+        (_registration_history("node-z"), "wrong identity"),
+    ],
+)
+def test_restart_plan_placement_state_rejects_ineligible_registration(
+    history,
+    message,
+):
+    with pytest.raises(ValueError, match=message):
+        _placement_state(
+            registration_histories={
+                "node-a": _registration_history("node-a"),
+                "node-c": history,
+            },
+        )
 
 
 def test_restart_plan_generation_state_binds_exact_records():
