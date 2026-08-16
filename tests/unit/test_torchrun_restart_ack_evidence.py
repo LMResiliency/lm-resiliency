@@ -15,13 +15,20 @@ from lm_resiliency.integrations.torchrun._control_store import InMemoryControlSt
 from lm_resiliency.integrations.torchrun._coordinator_lease import (
     CoordinatorLeaseManager,
 )
+from lm_resiliency.integrations.torchrun._generation_records import (
+    GenerationSnapshotRecord,
+)
 from lm_resiliency.integrations.torchrun._generation_state import GenerationStateManager
 from lm_resiliency.integrations.torchrun._protocol import (
     AgentIdentity,
+    CheckpointCopy,
     CheckpointInventoryEvent,
     RankAssignment,
+    RankCheckpointCopies,
+    RecoveryManifest,
     RestartAck,
     RestartIntent,
+    RestartPlan,
     SlotAssignment,
     WorkerIdentity,
     checkpoint_inventory_digest,
@@ -48,6 +55,22 @@ from lm_resiliency.integrations.torchrun._restart_intent_open import (
 from lm_resiliency.integrations.torchrun._restart_intent_open_execution import (
     RestartIntentOpenExecutor,
 )
+from lm_resiliency.integrations.torchrun._restart_intent_records import (
+    RestartIntentHeadRecord,
+    RestartIntentLifecycleRecord,
+)
+from lm_resiliency.integrations.torchrun._restart_plan_records import (
+    RecoveryManifestRecord,
+    RestartPlanRecord,
+)
+from lm_resiliency.integrations.torchrun._restart_plan_state import (
+    ResolvedRecoveryManifest,
+    RestartPlanGenerationState,
+    RestartPlanInventoryState,
+    RestartPlanLatestEvidenceState,
+    RestartPlanManifestState,
+    RestartPlanQuarantineState,
+)
 
 RUN_ID = "training-run"
 
@@ -73,6 +96,7 @@ def _event(
     step: int = 40,
     trust: str = "latest",
     event_id: str = "inventory-a",
+    copies: tuple[CheckpointCopy, ...] = (),
 ) -> CheckpointInventoryEvent:
     return CheckpointInventoryEvent(
         event_id=event_id,
@@ -94,13 +118,16 @@ def _event(
         step=step,
         trust=trust,
         topology_digest="topology-v1",
-        copies=(),
+        copies=copies,
     )
 
 
 def _evidence(
     *,
     acknowledgement_success: bool | None = True,
+    event: CheckpointInventoryEvent | None = None,
+    intent_id: str = "intent-a",
+    generation: int = 0,
 ) -> tuple[RestartAckEvidence, CheckpointInventoryEvent]:
     clock = ManualClock()
     store = InMemoryControlStore(clock=clock)
@@ -113,7 +140,7 @@ def _evidence(
     ).acquire()
     assignment = RankAssignment.from_assignments(
         run_id=RUN_ID,
-        generation=0,
+        generation=generation,
         assignments=(
             SlotAssignment(0, "node-a", 0, 2),
             SlotAssignment(1, "node-b", 2, 2),
@@ -125,12 +152,12 @@ def _evidence(
         assignment,
     )
     intent = RestartIntent(
-        intent_id="intent-a",
+        intent_id=intent_id,
         run_id=RUN_ID,
-        generation=0,
+        generation=generation,
         incident_ids=("incident-a",),
         reason_code="attributed_sdc",
-        minimum_recovery_mode="recovery_verified",
+        minimum_recovery_mode="latest",
         suspected_node_ids=("node-b",),
         prepare_deadline_unix_ms=1_500,
     )
@@ -141,7 +168,7 @@ def _evidence(
             clock=clock,
         ).prepare_initial_open(lease, current, intent)
     )
-    event = _event()
+    event = event or _event(generation=generation)
     persisted = None
     if acknowledgement_success is not None:
         registration = AgentRegistrationManager(
@@ -164,7 +191,7 @@ def _evidence(
                 run_id=RUN_ID,
                 node_id="node-a",
                 agent_id="agent-node-a",
-                generation=0,
+                generation=generation,
                 flushed_step=40 if acknowledgement_success else -1,
                 inventory_event_digests={event.event_id: checkpoint_inventory_digest(event)},
                 transferred_owner_ranks=(0, 1) if acknowledgement_success else (),
@@ -198,6 +225,136 @@ def _evidence(
         },
     )
     return RestartAckEvidence(collection), event
+
+
+def _latest_event(*, complete: bool = True) -> CheckpointInventoryEvent:
+    copies = tuple(
+        CheckpointCopy(
+            owner_global_rank=rank,
+            checkpoint_step=40,
+            inventory_event_id="inventory-a",
+            checkpoint_id=None,
+            holder_node_id="node-a" if rank < 2 else "node-b",
+            holder_kind="owner",
+            storage_kind="shared",
+            location_token=f"shared-copy-{rank}",
+            complete=complete,
+            checksums_available=True,
+        )
+        for rank in range(4)
+    )
+    return _event(copies=copies)
+
+
+def _latest_inventory_state(
+    evidence: RestartAckEvidence,
+    event: CheckpointInventoryEvent,
+) -> RestartPlanInventoryState:
+    opened = evidence.collection.opened
+    intent_record = opened.prepared.record
+    intent = intent_record.intent
+    from_snapshot = opened.prepared.current.snapshot.record
+    lifecycle = RestartIntentLifecycleRecord(
+        closed_intent=RestartIntentHeadRecord(
+            run_id=intent.run_id,
+            generation=intent.generation,
+            intent_id=intent.intent_id,
+            intent_digest=intent_record.digest,
+        ),
+        coordinator_id="coordinator-close",
+        lease_id="lease-close",
+        coordinator_lease_duration_ms=500,
+        coordinator_fencing_token=3,
+    )
+    slot_assignments = (
+        SlotAssignment(0, "node-a", 0, 2),
+        SlotAssignment(1, "node-c", 2, 2),
+    )
+    plan = RestartPlan(
+        plan_id="plan-1",
+        intent_id=intent.intent_id,
+        run_id=intent.run_id,
+        from_generation=intent.generation,
+        to_generation=intent.generation + 1,
+        incident_ids=intent.incident_ids,
+        reason_code=intent.reason_code,
+        recovery_mode="latest",
+        checkpoint_source="gemini",
+        checkpoint_step=event.step,
+        checkpoint_id=None,
+        checkpoint_manifest_id="manifest-40",
+        slot_assignments=slot_assignments,
+        quarantined_node_ids=(),
+        expected_world_size=4,
+        topology_digest=event.topology_digest,
+        restart_deadline_unix_ms=2_000,
+    )
+    manifest = RecoveryManifest(
+        manifest_id=plan.checkpoint_manifest_id,
+        run_id=plan.run_id,
+        source_generation=plan.from_generation,
+        step=plan.checkpoint_step,
+        trust="latest",
+        topology_digest=plan.topology_digest,
+        rank_copies=tuple(
+            RankCheckpointCopies(
+                owner_global_rank=rank,
+                copies=tuple(copy for copy in event.copies if copy.owner_global_rank == rank),
+            )
+            for rank in range(plan.expected_world_size)
+        ),
+    )
+    manifest_record = RecoveryManifestRecord(
+        manifest=manifest,
+        source_generation_snapshot_digest=from_snapshot.digest,
+    )
+    to_assignment = RankAssignment.from_assignments(
+        run_id=plan.run_id,
+        generation=plan.to_generation,
+        assignments=slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    to_snapshot = GenerationSnapshotRecord(
+        assignment=to_assignment,
+        previous_snapshot_digest=from_snapshot.digest,
+        coordinator_id="coordinator-plan",
+        lease_id="lease-plan",
+        coordinator_lease_duration_ms=500,
+        coordinator_fencing_token=9,
+    )
+    plan_record = RestartPlanRecord(
+        plan=plan,
+        recovery_manifest_record_digest=manifest_record.digest,
+        intent_lifecycle_record_digest=lifecycle.digest,
+        from_generation_snapshot_digest=from_snapshot.digest,
+        to_generation_snapshot_digest=to_snapshot.digest,
+        quarantine_record_digests={},
+        coordinator_id=to_snapshot.coordinator_id,
+        lease_id=to_snapshot.lease_id,
+        coordinator_lease_duration_ms=to_snapshot.coordinator_lease_duration_ms,
+        coordinator_fencing_token=to_snapshot.coordinator_fencing_token,
+    )
+    generation_state = RestartPlanGenerationState(
+        record=plan_record,
+        intent_record=intent_record,
+        lifecycle_record=lifecycle,
+        from_snapshot=from_snapshot,
+        to_snapshot=to_snapshot,
+    )
+    manifest_state = RestartPlanManifestState(
+        generation_state=generation_state,
+        resolved_manifest=ResolvedRecoveryManifest(
+            record=manifest_record,
+            source_snapshot=opened.prepared.current.snapshot,
+        ),
+    )
+    return RestartPlanInventoryState(
+        quarantine_state=RestartPlanQuarantineState(
+            manifest_state=manifest_state,
+            quarantine_records={},
+        ),
+        inventory_events={event.event_id: event},
+    )
 
 
 def test_restart_ack_evidence_authorizes_exact_latest_inventory():
@@ -261,3 +418,241 @@ def test_restart_ack_evidence_validates_types():
         evidence.authorizes_latest_inventory(cast(Any, object()))
     with pytest.raises(TypeError, match="RestartAckCollection"):
         RestartAckEvidence(cast(Any, object()))
+
+
+def _inventory_state_with_trust(
+    state: RestartPlanInventoryState,
+    *,
+    trust: str,
+) -> RestartPlanInventoryState:
+    manifest_state = state.quarantine_state.manifest_state
+    manifest = replace(manifest_state.manifest, trust=trust)
+    manifest_record = replace(
+        manifest_state.resolved_manifest.record,
+        manifest=manifest,
+    )
+    plan = replace(
+        manifest_state.plan,
+        recovery_mode="recovery_verified" if trust == "recovery_verified" else "latest",
+    )
+    generation_state = replace(
+        manifest_state.generation_state,
+        record=replace(
+            manifest_state.generation_state.record,
+            plan=plan,
+            recovery_manifest_record_digest=manifest_record.digest,
+        ),
+    )
+    updated_manifest_state = RestartPlanManifestState(
+        generation_state=generation_state,
+        resolved_manifest=ResolvedRecoveryManifest(
+            record=manifest_record,
+            source_snapshot=manifest_state.resolved_manifest.source_snapshot,
+        ),
+    )
+    event = next(iter(state.inventory_events.values()))
+    return RestartPlanInventoryState(
+        quarantine_state=RestartPlanQuarantineState(
+            manifest_state=updated_manifest_state,
+            quarantine_records={},
+        ),
+        inventory_events={
+            event.event_id: replace(
+                event,
+                trust=trust,
+            )
+        },
+    )
+
+
+def test_restart_plan_latest_evidence_state_binds_exact_acknowledgements():
+    event = _latest_event()
+    evidence, _ = _evidence(event=event)
+    inventory_state = _latest_inventory_state(evidence, event)
+
+    state = RestartPlanLatestEvidenceState(
+        inventory_state=inventory_state,
+        acknowledgement_evidence=evidence,
+    )
+
+    assert state.plan == inventory_state.plan
+    assert state.manifest == inventory_state.manifest
+    assert state.acknowledgement_evidence.authorizes_latest_inventory(event)
+
+
+def test_restart_plan_latest_evidence_state_requires_exact_types():
+    event = _latest_event()
+    evidence, _ = _evidence(event=event)
+    state = RestartPlanLatestEvidenceState(
+        inventory_state=_latest_inventory_state(evidence, event),
+        acknowledgement_evidence=evidence,
+    )
+
+    with pytest.raises(TypeError, match="inventory_state must be"):
+        replace(
+            state,
+            inventory_state=state.inventory_state.quarantine_state,
+        )
+    with pytest.raises(TypeError, match="acknowledgement_evidence must be"):
+        replace(
+            state,
+            acknowledgement_evidence=state.acknowledgement_evidence.collection,
+        )
+
+
+def test_restart_plan_latest_evidence_state_requires_latest_manifest():
+    event = _latest_event()
+    evidence, _ = _evidence(event=event)
+    inventory_state = _inventory_state_with_trust(
+        _latest_inventory_state(evidence, event),
+        trust="recovery_verified",
+    )
+
+    with pytest.raises(ValueError, match="requires a latest manifest"):
+        RestartPlanLatestEvidenceState(
+            inventory_state=inventory_state,
+            acknowledgement_evidence=evidence,
+        )
+
+
+def test_restart_plan_latest_evidence_state_rejects_another_intent():
+    event = _latest_event()
+    evidence, _ = _evidence(event=event)
+    other_evidence, _ = _evidence(
+        event=event,
+        intent_id="intent-other",
+    )
+
+    with pytest.raises(ValueError, match="another restart intent"):
+        RestartPlanLatestEvidenceState(
+            inventory_state=_latest_inventory_state(evidence, event),
+            acknowledgement_evidence=other_evidence,
+        )
+
+
+def test_restart_plan_latest_evidence_state_requires_exact_source_snapshot():
+    event = _latest_event()
+    evidence, _ = _evidence(event=event)
+    inventory_state = _latest_inventory_state(evidence, event)
+    manifest_state = inventory_state.quarantine_state.manifest_state
+    alternate_source_snapshot = replace(
+        manifest_state.resolved_manifest.source_snapshot,
+        record=replace(
+            manifest_state.resolved_manifest.source_snapshot.record,
+            coordinator_id="coordinator-other",
+        ),
+    )
+    manifest_record = replace(
+        manifest_state.resolved_manifest.record,
+        source_generation_snapshot_digest=alternate_source_snapshot.record.digest,
+    )
+    alternate_manifest_state = RestartPlanManifestState(
+        generation_state=replace(
+            manifest_state.generation_state,
+            record=replace(
+                manifest_state.generation_state.record,
+                recovery_manifest_record_digest=manifest_record.digest,
+            ),
+        ),
+        resolved_manifest=ResolvedRecoveryManifest(
+            record=manifest_record,
+            source_snapshot=alternate_source_snapshot,
+        ),
+    )
+    alternate_inventory_state = RestartPlanInventoryState(
+        quarantine_state=RestartPlanQuarantineState(
+            manifest_state=alternate_manifest_state,
+            quarantine_records={},
+        ),
+        inventory_events=inventory_state.inventory_events,
+    )
+
+    with pytest.raises(ValueError, match="exact current generation snapshot"):
+        RestartPlanLatestEvidenceState(
+            inventory_state=alternate_inventory_state,
+            acknowledgement_evidence=evidence,
+        )
+
+
+@pytest.mark.parametrize("acknowledgement_success", [None, False])
+def test_restart_plan_latest_evidence_state_rejects_missing_or_failed_preparation(
+    acknowledgement_success,
+):
+    event = _latest_event()
+    evidence, _ = _evidence(event=event)
+    persisted = evidence.collection.receipts_by_node_id["node-a"]
+    assert persisted is not None
+    if acknowledgement_success is None:
+        unavailable_receipt = None
+    else:
+        failed_acknowledgement = replace(
+            persisted.receipt.acknowledgement,
+            flushed_step=-1,
+            inventory_event_digests={},
+            transferred_owner_ranks=(),
+            transferred_peer_ranks=(),
+            success=False,
+            reason="preparation failed",
+        )
+        failed_receipt = replace(
+            persisted.receipt,
+            acknowledgement=failed_acknowledgement,
+        )
+        unavailable_receipt = replace(
+            persisted,
+            receipt=failed_receipt,
+            receipt_entry=replace(
+                persisted.receipt_entry,
+                value=failed_receipt.to_json(),
+            ),
+        )
+    unavailable_evidence = RestartAckEvidence(
+        RestartAckCollection(
+            opened=evidence.collection.opened,
+            receipts_by_node_id={
+                "node-a": unavailable_receipt,
+                "node-b": None,
+            },
+        )
+    )
+
+    with pytest.raises(ValueError, match="not authorized"):
+        RestartPlanLatestEvidenceState(
+            inventory_state=_latest_inventory_state(evidence, event),
+            acknowledgement_evidence=unavailable_evidence,
+        )
+
+
+def test_restart_plan_latest_evidence_state_rejects_reused_event_id():
+    event = _latest_event()
+    evidence, _ = _evidence(event=event)
+    inventory_state = _latest_inventory_state(evidence, event)
+    substituted_event = replace(
+        event,
+        reporter=replace(
+            event.reporter,
+            hostname="host-substituted",
+        ),
+    )
+    substituted_inventory_state = replace(
+        inventory_state,
+        inventory_events={substituted_event.event_id: substituted_event},
+    )
+
+    with pytest.raises(ValueError, match="not authorized"):
+        RestartPlanLatestEvidenceState(
+            inventory_state=substituted_inventory_state,
+            acknowledgement_evidence=evidence,
+        )
+
+
+def test_restart_plan_latest_evidence_state_does_not_claim_copy_eligibility():
+    event = _latest_event(complete=False)
+    evidence, _ = _evidence(event=event)
+
+    state = RestartPlanLatestEvidenceState(
+        inventory_state=_latest_inventory_state(evidence, event),
+        acknowledgement_evidence=evidence,
+    )
+
+    assert not state.manifest.rank_copies[0].copies[0].complete

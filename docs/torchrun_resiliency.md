@@ -790,6 +790,12 @@ For `recovery_verified` manifests, `RestartPlanCertificationState` requires
 matching trusted catalog records whose canonical event digests cover every
 referenced inventory event. It still does not prove copy completeness or
 holder availability.
+For `latest` manifests, `RestartPlanLatestEvidenceState` requires the stable
+restart-acknowledgement collection to answer the exact closed intent and
+current generation, and every referenced inventory event must be authorized by
+the reporting agent's successful acknowledgement, flushed step, and canonical
+event digest. It still does not prove per-rank copy completeness, holder
+availability, or fallback eligibility.
 
 Before commit, the coordinator validates:
 
