@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import replace
+from typing import Any, cast
 
 import pytest
 
@@ -28,6 +29,7 @@ from lm_resiliency.integrations.torchrun._restart_intent_close_records import (
 from lm_resiliency.integrations.torchrun._restart_intent_lifecycle_reader import (
     InitialRestartIntentLifecycleReader,
     RestartIntentLifecycleReadCorrupt,
+    RestartIntentLifecycleReadError,
 )
 from lm_resiliency.integrations.torchrun._restart_intent_open import (
     RestartIntentOpenPreparer,
@@ -41,6 +43,11 @@ from lm_resiliency.integrations.torchrun._restart_intent_records import (
     RestartIntentHeadRecord,
     RestartIntentLifecycleHeadRecord,
     RestartIntentLifecycleRecord,
+)
+from lm_resiliency.integrations.torchrun._restart_plan_publication_lifecycle_reader import (
+    RestartPlanPublicationLifecycleConflict,
+    RestartPlanPublicationLifecycleCorrupt,
+    RestartPlanPublicationLifecycleReader,
 )
 
 RUN_ID = "training-run"
@@ -58,6 +65,14 @@ class ManualClock:
     def set(self, now_unix_ms: int) -> None:
         with self._lock:
             self.now_unix_ms = now_unix_ms
+
+
+class FailingLifecycleReader:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def read(self):
+        raise self._error
 
 
 def _manager(
@@ -216,6 +231,87 @@ def test_lifecycle_reader_returns_none_before_closure():
 
     _, _, _, _, _, _, open_reader = _open_state()
     assert open_reader.read() is None
+
+
+def test_publication_lifecycle_reader_returns_exact_fence():
+    clock, store, _, _, lease, opened, _ = _open_state()
+    records = _commit_closure(clock, store, opened, lease)
+
+    fence = RestartPlanPublicationLifecycleReader(
+        store,
+        run_id=RUN_ID,
+    ).read()
+
+    intent_entry = store.get(records.intent_key)
+    intent_head_entry = store.get(records.intent_head_key)
+    closure_entry = store.get(records.closure_key)
+    lifecycle_head_entry = store.get(records.lifecycle_head_key)
+    assert intent_entry is not None
+    assert intent_head_entry is not None
+    assert closure_entry is not None
+    assert lifecycle_head_entry is not None
+    assert fence.conditions == {
+        records.intent_key: intent_entry.revision,
+        records.intent_head_key: intent_head_entry.revision,
+        records.closure_key: closure_entry.revision,
+        records.lifecycle_head_key: lifecycle_head_entry.revision,
+    }
+
+
+def test_publication_lifecycle_reader_rejects_missing_or_open_intent():
+    store = InMemoryControlStore(clock=ManualClock())
+    reader = RestartPlanPublicationLifecycleReader(store, run_id=RUN_ID)
+
+    with pytest.raises(RestartPlanPublicationLifecycleConflict, match="not closed"):
+        reader.read()
+
+    _, store, _, _, _, _, _ = _open_state()
+    with pytest.raises(RestartPlanPublicationLifecycleConflict, match="not closed"):
+        RestartPlanPublicationLifecycleReader(store, run_id=RUN_ID).read()
+
+
+def test_publication_lifecycle_reader_rejects_existing_successor():
+    clock, store, _, generation_manager, lease, opened, _ = _open_state()
+    _commit_closure(clock, store, opened, lease)
+    current = generation_manager.current()
+    assert current is not None
+    clock.set(1_020)
+    generation_manager.commit_successor(
+        lease,
+        current,
+        _assignment(generation=1, node_id="node-c"),
+    )
+
+    with pytest.raises(RestartPlanPublicationLifecycleConflict, match="already committed"):
+        RestartPlanPublicationLifecycleReader(store, run_id=RUN_ID).read()
+
+
+def test_publication_lifecycle_reader_translates_corruption():
+    clock, store, _, _, lease, opened, _ = _open_state()
+    records = _commit_closure(clock, store, opened, lease)
+    closure_entry = store.get(records.closure_key)
+    assert closure_entry is not None
+    store.compare_set(
+        records.closure_key,
+        expected_revision=closure_entry.revision,
+        value=b"{}",
+    )
+
+    with pytest.raises(RestartPlanPublicationLifecycleCorrupt, match="lifecycle is corrupt"):
+        RestartPlanPublicationLifecycleReader(store, run_id=RUN_ID).read()
+
+
+def test_publication_lifecycle_reader_translates_contention():
+    reader = RestartPlanPublicationLifecycleReader(
+        InMemoryControlStore(clock=ManualClock()),
+        run_id=RUN_ID,
+    )
+    cast(Any, reader)._lifecycle_reader = FailingLifecycleReader(
+        RestartIntentLifecycleReadError("changed repeatedly")
+    )
+
+    with pytest.raises(RestartPlanPublicationLifecycleConflict, match="changed repeatedly"):
+        reader.read()
 
 
 def test_lifecycle_reader_rejects_closed_head_without_lifecycle():
