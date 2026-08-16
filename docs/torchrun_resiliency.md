@@ -1000,6 +1000,14 @@ membership, causal transaction order, and a commit inside all three authority
 windows. It performs no store reads; a following stable reader supplies the
 durable dependencies before acknowledgement collection or quorum logic.
 
+The per-node receipt reader double-collects the current open intent, the
+create-once acknowledgement key, complete agent-registration history, and
+complete coordinator-lease history. A never-created receipt key returns no
+acknowledgement. Deleted, rewritten, malformed, or orphaned receipts fail
+closed. Renewed registrations and coordinator leases do not invalidate an
+already committed receipt because the reader resolves the exact historical
+authorities stamped into that receipt.
+
 For a crashed or unreachable node, no preparation is assumed.
 
 ## API: lm-resiliency to the Framework
