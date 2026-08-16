@@ -1015,6 +1015,13 @@ match its node key, and the mapping is frozen in active-slot order. The value
 separately exposes received, missing, successful, and explicitly failed node
 sets without making a quorum or restart-policy decision.
 
+A read-only collector obtains two identical full active-node observations while
+the durable restart-intent opening remains unchanged. Because acknowledgement
+keys are immutable create-once records, this double collect yields one stable
+receipt-or-absence snapshot without requiring a store-wide read transaction.
+Repeated changes are retryable conflicts; contradictory per-node state fails
+closed as corruption. The collector still makes no quorum or restart decision.
+
 For a crashed or unreachable node, no preparation is assumed.
 
 ## API: lm-resiliency to the Framework
