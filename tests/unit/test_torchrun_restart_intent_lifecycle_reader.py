@@ -314,6 +314,29 @@ def test_publication_lifecycle_reader_translates_contention():
         reader.read()
 
 
+@pytest.mark.parametrize(
+    "dependency_error",
+    [
+        CoordinatorLeaseHistoryError("lease history changed"),
+        GenerationStateError("generation changed"),
+    ],
+)
+def test_publication_lifecycle_reader_translates_dependency_contention(
+    dependency_error: RuntimeError,
+):
+    reader = RestartPlanPublicationLifecycleReader(
+        InMemoryControlStore(clock=ManualClock()),
+        run_id=RUN_ID,
+    )
+    cast(Any, reader)._lifecycle_reader = FailingLifecycleReader(dependency_error)
+
+    with pytest.raises(
+        RestartPlanPublicationLifecycleConflict,
+        match="dependencies changed repeatedly",
+    ):
+        reader.read()
+
+
 def test_lifecycle_reader_rejects_closed_head_without_lifecycle():
     _, store, _, _, lease, opened, reader = _open_state()
     records = _records(opened, lease)

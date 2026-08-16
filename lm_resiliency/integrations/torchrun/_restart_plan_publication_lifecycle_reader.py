@@ -3,6 +3,14 @@
 from __future__ import annotations
 
 from lm_resiliency.integrations.torchrun._control_store import ControlStore
+from lm_resiliency.integrations.torchrun._coordinator_lease_history import (
+    CoordinatorLeaseHistoryCorrupt,
+    CoordinatorLeaseHistoryError,
+)
+from lm_resiliency.integrations.torchrun._generation_reader import (
+    GenerationStateCorrupt,
+    GenerationStateError,
+)
 from lm_resiliency.integrations.torchrun._restart_intent_lifecycle_reader import (
     InitialRestartIntentLifecycleReader,
     RestartIntentLifecycleReadCorrupt,
@@ -43,9 +51,17 @@ class RestartPlanPublicationLifecycleReader:
             raise RestartPlanPublicationLifecycleCorrupt(
                 "persisted restart-intent lifecycle is corrupt"
             ) from error
+        except (CoordinatorLeaseHistoryCorrupt, GenerationStateCorrupt) as error:
+            raise RestartPlanPublicationLifecycleCorrupt(
+                "persisted restart-intent lifecycle dependencies are corrupt"
+            ) from error
         except RestartIntentLifecycleReadError as error:
             raise RestartPlanPublicationLifecycleConflict(
                 "restart-intent lifecycle changed repeatedly during read"
+            ) from error
+        except (CoordinatorLeaseHistoryError, GenerationStateError) as error:
+            raise RestartPlanPublicationLifecycleConflict(
+                "restart-intent lifecycle dependencies changed repeatedly during read"
             ) from error
         if closure is None:
             raise RestartPlanPublicationLifecycleConflict(
