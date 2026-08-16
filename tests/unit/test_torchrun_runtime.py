@@ -10,6 +10,7 @@ import time
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, cast
 
 import pytest
@@ -38,6 +39,7 @@ from lm_resiliency.integrations.torchrun._protocol import (
     HardwareFaultReport,
     RankAssignment,
     RestartContext,
+    RestartPlan,
     SlotAssignment,
     WorkerIdentity,
     validate_event_reporter,
@@ -131,6 +133,40 @@ def _context(*, plan_id: str = "plan-1") -> RestartContext:
         checkpoint_id=None,
         checkpoint_manifest_id="manifest-40",
         reason_code="attributed_sdc",
+    )
+
+
+class StaticRecoveryStateReader:
+    def __init__(self, state: object) -> None:
+        self._state = state
+
+    def read_recovery_state(self) -> object:
+        return self._state
+
+
+def _replacement_plan(
+    *,
+    node_id: str = "node-b",
+    restart_deadline_unix_ms: int = 5_000,
+) -> RestartPlan:
+    return RestartPlan(
+        plan_id="plan-1",
+        intent_id="intent-1",
+        run_id=RUN_ID,
+        from_generation=0,
+        to_generation=1,
+        incident_ids=("incident-1",),
+        reason_code="attributed_sdc",
+        recovery_mode="latest",
+        checkpoint_source="gemini",
+        checkpoint_step=40,
+        checkpoint_id=None,
+        checkpoint_manifest_id="manifest-40",
+        slot_assignments=(SlotAssignment(0, node_id, 0, 2),),
+        quarantined_node_ids=("node-a",),
+        expected_world_size=2,
+        topology_digest="topology-v1",
+        restart_deadline_unix_ms=restart_deadline_unix_ms,
     )
 
 
@@ -2558,7 +2594,12 @@ def test_slot_aware_handler_rejects_job_wide_environment_drift(tmp_path: Path):
     first._ensure_registered(time.monotonic() + 1)
     current = first._read_generation()
     assert current is not None
-    assert first._initial_slot(current) == 0
+    slot, recovery_state, _ = first._generation_admission(
+        current,
+        time.monotonic() + 1,
+    )
+    assert slot == 0
+    assert recovery_state is None
     with pytest.raises(RendezvousStateError, match="committed workload environment"):
         second.next_rendezvous()
 
@@ -2784,7 +2825,7 @@ def test_slot_aware_handler_cleans_up_registration_on_cancellation(
     assert handler.shutdown() is True
 
 
-def test_slot_aware_handler_rejects_generation_after_initial_assignment(
+def test_slot_aware_handler_rejects_successor_without_restart_plan_publication(
     tmp_path: Path,
 ):
     clock = ManualClock()
@@ -2809,9 +2850,192 @@ def test_slot_aware_handler_rejects_generation_after_initial_assignment(
         agent_id="agent-b",
     )
 
-    with pytest.raises(RendezvousStateError, match="replacement generations"):
+    with pytest.raises(RendezvousStateError, match="restart-plan publication"):
         handler.next_rendezvous()
 
+    assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_admits_replacement_and_writes_restart_context(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    manager, lease, current = _initialize_generation(store, clock, ("node-a",))
+    plan = _replacement_plan()
+    successor = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    manager.commit_successor(lease, current, successor)
+    config = _handler_config(
+        tmp_path,
+        node_id="node-b",
+        min_nodes=1,
+        max_nodes=2,
+    )
+    handler = _handler(
+        config,
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+    )
+    state = SimpleNamespace(plan=plan)
+    handler._publication_reader = cast(Any, StaticRecoveryStateReader(state))
+
+    rendezvous = handler.next_rendezvous()
+
+    assert rendezvous.rank == 0
+    assert rendezvous.world_size == 1
+    assert RestartContextFile(config.restart_context_path).read() == RestartContext.from_plan(
+        plan,
+        "node-b",
+    )
+    assert handler.num_nodes_waiting() == 0
+    assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_gives_selected_standby_a_fresh_formation_deadline(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    manager, lease, current = _initialize_generation(store, clock, ("node-a",))
+    plan = _replacement_plan()
+    config = _handler_config(
+        tmp_path,
+        node_id="node-b",
+        min_nodes=1,
+        max_nodes=2,
+        join_timeout_ms=50,
+    )
+    handler = _handler(
+        config,
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+    )
+    handler._publication_reader = cast(
+        Any,
+        StaticRecoveryStateReader(SimpleNamespace(plan=plan)),
+    )
+    thread, outcome = _start_rendezvous(handler)
+    _wait_until(
+        lambda: (
+            AgentRegistrationReader(
+                store,
+                run_id=RUN_ID,
+                clock=clock,
+            ).get("node-b")
+            is not None
+        )
+    )
+    time.sleep(0.08)
+    successor = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    manager.commit_successor(lease, current, successor)
+
+    result = outcome.get(timeout=2)
+    thread.join(timeout=2)
+
+    assert isinstance(result, RendezvousInfo)
+    assert result.rank == 0
+    assert RestartContextFile(config.restart_context_path).read() == RestartContext.from_plan(
+        plan,
+        "node-b",
+    )
+    assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_rejects_expired_replacement_without_leaving_context(
+    tmp_path: Path,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    manager, lease, current = _initialize_generation(store, clock, ("node-a",))
+    plan = _replacement_plan(restart_deadline_unix_ms=clock())
+    successor = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    manager.commit_successor(lease, current, successor)
+    config = _handler_config(
+        tmp_path,
+        node_id="node-b",
+        min_nodes=1,
+        max_nodes=2,
+    )
+    handler = _handler(
+        config,
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+    )
+    handler._publication_reader = cast(
+        Any,
+        StaticRecoveryStateReader(SimpleNamespace(plan=plan)),
+    )
+
+    with pytest.raises(RendezvousTimeoutError):
+        handler.next_rendezvous()
+
+    assert not config.restart_context_path.exists()
+    assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_clears_replacement_context_after_admission_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    store = InMemoryControlStore(clock=clock)
+    manager, lease, current = _initialize_generation(store, clock, ("node-a",))
+    plan = _replacement_plan()
+    successor = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    manager.commit_successor(lease, current, successor)
+    config = _handler_config(
+        tmp_path,
+        node_id="node-b",
+        min_nodes=1,
+        max_nodes=2,
+    )
+    handler = _handler(
+        config,
+        store=store,
+        clock=clock,
+        agent_id="agent-b",
+    )
+    handler._publication_reader = cast(
+        Any,
+        StaticRecoveryStateReader(SimpleNamespace(plan=plan)),
+    )
+
+    def fail_after_context(*_args: object) -> object:
+        assert RestartContextFile(config.restart_context_path).read() == RestartContext.from_plan(
+            plan,
+            "node-b",
+        )
+        raise RendezvousConnectionError("injected arrival failure")
+
+    monkeypatch.setattr(handler, "_wait_for_assigned_arrivals", fail_after_context)
+
+    with pytest.raises(RendezvousConnectionError, match="injected arrival failure"):
+        handler.next_rendezvous()
+
+    assert not config.restart_context_path.exists()
     assert handler.shutdown() is True
 
 

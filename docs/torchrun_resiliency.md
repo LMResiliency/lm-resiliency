@@ -1548,9 +1548,17 @@ backend remains unavailable, cleanup returns without waiting indefinitely and
 the registration expires under its existing lease. Global closure publication
 also runs through a bounded daemon operation; local heartbeat and registration
 cleanup still proceeds when the control store is unavailable.
-Replacement generation admission, restart-context publication, and the positive
-`num_nodes_waiting()` restart edge are enabled only after authoritative
-restart-plan readback is integrated in the following slice.
+
+For a replacement generation, the handler reads and reauthorizes the exact
+persisted restart-plan publication before admitting any assigned node. It
+requires the plan assignment to equal the committed generation, enforces the
+replacement budget and exclusive restart deadline, and writes the exact
+node-local `RestartContext` before the assigned node participates in the shared
+arrival barrier. The plan, generation, deadline, and persisted context are
+revalidated immediately before `next_rendezvous()` returns. A failed admission
+clears any context written by that attempt. Passive standbys and removed nodes
+remain parked. The positive `num_nodes_waiting()` restart edge remains disabled
+until the following signaling slice.
 
 All handler incarnations use one immutable generation-scoped `PrefixStore` for
 PyTorch's worker bootstrap keys. Slot zero publishes one address/port pair and
@@ -1564,11 +1572,12 @@ creates the worker-side TCP store. After bounded bootstrap reads complete, every
 returned store is restored to the shared configured join timeout so later stock
 agent coordination does not inherit rank-specific remaining-deadline values.
 
-Passive standbys are not reported by `num_nodes_waiting()`. After a plan
-commits, the selected replacement becomes the only newly waiting node visible
-to active agents. This is the restart edge: a random late node must not trigger
-scale-up. This mechanism is used only when the next plan admits at least one
-standby; it is not a generic restart signal for unchanged membership.
+Passive standbys are not reported by `num_nodes_waiting()`. In the following
+signaling slice, after a plan commits, the selected replacement becomes the only
+newly waiting node visible to active agents. This is the restart edge: a random
+late node must not trigger scale-up. The mechanism is used only when the next
+plan admits at least one standby; it is not a generic restart signal for
+unchanged membership.
 
 Before returning an admitted node from `next_rendezvous()`, the handler:
 

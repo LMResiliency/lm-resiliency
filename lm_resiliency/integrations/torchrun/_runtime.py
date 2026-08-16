@@ -65,8 +65,18 @@ from lm_resiliency.integrations.torchrun._generation_reader import (
 )
 from lm_resiliency.integrations.torchrun._protocol import (
     AgentIdentity,
+    ProtocolValidationError,
     RankAssignment,
     RestartContext,
+    RestartPlan,
+)
+from lm_resiliency.integrations.torchrun._restart_plan_publication import (
+    RestartPlanPublicationReadConflict,
+    RestartPlanPublicationReadCorrupt,
+    RestartPlanPublicationReader,
+)
+from lm_resiliency.integrations.torchrun._restart_plan_state import (
+    RestartPlanPersistedRecoveryState,
 )
 
 _BACKEND = "lm_resiliency"
@@ -382,6 +392,10 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             control_store,
             run_id=config.run_id,
         )
+        self._publication_reader = RestartPlanPublicationReader(
+            control_store,
+            run_id=config.run_id,
+        )
         self._restart_context = RestartContextFile(config.restart_context_path)
         run_digest = hashlib.sha256(config.run_id.encode("utf-8")).hexdigest()
         self._run_digest = run_digest
@@ -454,33 +468,40 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         return self._config.run_id
 
     def next_rendezvous(self) -> RendezvousInfo:
-        """Block passive standbys and admit only the initial committed assignment."""
+        """Admit one authoritative fixed-size generation and park passive standbys."""
 
         formation_deadline = self._monotonic_clock() + self._config.policy.join_timeout_ms / 1_000
+        context_written = False
         try:
             if self._is_closed_bounded(formation_deadline):
                 raise RendezvousClosedError
             self._ensure_registered(formation_deadline)
             while True:
                 current = self._read_generation()
-                slot = None if current is None else self._initial_slot(current)
+                if current is None:
+                    slot = None
+                    recovery_state = None
+                    admission_deadline = formation_deadline
+                else:
+                    slot, recovery_state, admission_deadline = self._generation_admission(
+                        current,
+                        formation_deadline,
+                    )
                 if self._is_closed_bounded(
-                    formation_deadline if current is None or slot is not None else None
+                    admission_deadline if current is None or slot is not None else None
                 ):
                     raise RendezvousClosedError
                 self._raise_heartbeat_error()
                 if current is not None:
                     if slot is not None:
-                        try:
-                            self._restart_context.clear()
-                        except (OSError, RestartContextFileError) as error:
-                            raise RendezvousStateError(
-                                "failed to clear stale initial restart context"
-                            ) from error
+                        context_written = self._prepare_restart_context(
+                            current,
+                            recovery_state,
+                        )
                         attempt, completion = self._wait_for_assigned_arrivals(
                             current,
                             slot,
-                            formation_deadline,
+                            admission_deadline,
                         )
                         bootstrap_store = self._bootstrap_store(
                             current.snapshot.record.assignment.generation,
@@ -488,7 +509,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                         bootstrap = self._build_bootstrap(
                             slot,
                             bootstrap_store,
-                            formation_deadline,
+                            admission_deadline,
                         )
                         if self.is_closed():
                             raise RendezvousClosedError
@@ -501,9 +522,12 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                             attempt,
                             slot,
                             completion,
-                            formation_deadline,
+                            admission_deadline,
                         )
-                        self._validate_final_admission_state(current)
+                        self._validate_final_admission_state(
+                            current,
+                            recovery_state,
+                        )
                         return RendezvousInfo(
                             bootstrap_store,
                             slot,
@@ -515,7 +539,16 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                     wait_deadline = formation_deadline
                 if not self._wait_for_change(wait_deadline):
                     raise RendezvousTimeoutError
+                if current is not None and slot is None:
+                    formation_deadline = (
+                        self._monotonic_clock() + self._config.policy.join_timeout_ms / 1_000
+                    )
         except BaseException:
+            if context_written:
+                try:
+                    self._restart_context.clear()
+                except (OSError, RestartContextFileError):
+                    pass
             self._cleanup_local_resources()
             raise
 
@@ -1532,11 +1565,31 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
     def _validate_final_admission_state(
         self,
         current: CurrentGeneration,
+        recovery_state: RestartPlanPersistedRecoveryState | None = None,
     ) -> None:
         if self._is_closed_bounded(None):
             raise RendezvousClosedError
         if self._read_generation() != current:
             raise RendezvousConnectionError("generation changed before rendezvous admission")
+        if recovery_state is None:
+            return
+        refreshed = self._read_recovery_state()
+        if refreshed != recovery_state:
+            raise RendezvousConnectionError(
+                "restart-plan recovery state changed before rendezvous admission"
+            )
+        self._replacement_deadline(refreshed.plan, None)
+        expected_context = self._restart_context_for_plan(refreshed.plan)
+        try:
+            persisted_context = self._restart_context.read()
+        except (OSError, RestartContextFileError) as error:
+            raise RendezvousStateError(
+                "failed to validate the replacement restart context"
+            ) from error
+        if persisted_context != expected_context:
+            raise RendezvousStateError(
+                "replacement restart context changed before rendezvous admission"
+            )
 
     def _try_complete_arrival_attempt(
         self,
@@ -2109,26 +2162,121 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         ):
             raise RendezvousStateError("rendezvous consumption has invalid store provenance")
 
-    def _initial_slot(self, current: CurrentGeneration) -> int | None:
+    def _generation_admission(
+        self,
+        current: CurrentGeneration,
+        formation_deadline: float,
+    ) -> tuple[int | None, RestartPlanPersistedRecoveryState | None, float]:
         assignment = current.snapshot.record.assignment
-        if assignment.generation != 0:
-            raise RendezvousStateError(
-                "replacement generations are not supported by this handler revision"
-            )
         if assignment.active_nodes != self._config.min_nodes:
             raise RendezvousStateError(
-                "initial assignment active node count does not match min_nodes"
+                "generation assignment active node count does not match min_nodes"
             )
         if assignment.local_world_size != self._config.local_world_size:
             raise RendezvousStateError(
-                "initial assignment local world size does not match runtime configuration"
+                "generation assignment local world size does not match runtime configuration"
+            )
+        recovery_state: RestartPlanPersistedRecoveryState | None = None
+        admission_deadline = formation_deadline
+        if assignment.generation > 0:
+            if assignment.generation > self._config.policy.max_replacement_generations:
+                raise RendezvousStateError(
+                    "replacement generation exceeds the configured replacement budget"
+                )
+            recovery_state = self._read_recovery_state()
+            if recovery_state is None:
+                raise RendezvousStateError(
+                    "replacement generation lacks an authoritative restart-plan publication"
+                )
+            plan = recovery_state.plan
+            expected_assignment = RankAssignment.from_assignments(
+                run_id=plan.run_id,
+                generation=plan.to_generation,
+                assignments=plan.slot_assignments,
+                topology_digest=plan.topology_digest,
+            )
+            if (
+                plan.run_id != self._config.run_id
+                or plan.to_generation != assignment.generation
+                or expected_assignment != assignment
+                or plan.expected_world_size
+                != self._config.min_nodes * self._config.local_world_size
+            ):
+                raise RendezvousStateError(
+                    "replacement plan does not match the committed generation assignment"
+                )
+            admission_deadline = self._replacement_deadline(
+                plan,
+                formation_deadline,
             )
         for slot, node_id in assignment.slot_to_node_id.items():
             if node_id == self._config.node_id:
                 self._ensure_job_compatibility()
                 self._validate_assigned_registration_history()
-                return slot
-        return None
+                return slot, recovery_state, admission_deadline
+        return None, recovery_state, admission_deadline
+
+    def _read_recovery_state(self) -> RestartPlanPersistedRecoveryState | None:
+        try:
+            return self._publication_reader.read_recovery_state()
+        except RestartPlanPublicationReadCorrupt as error:
+            raise RendezvousStateError(
+                "restart-plan publication is corrupt during replacement rendezvous"
+            ) from error
+        except RestartPlanPublicationReadConflict as error:
+            raise RendezvousConnectionError(
+                "restart-plan publication changed during replacement rendezvous"
+            ) from error
+        except Exception as error:
+            raise RendezvousConnectionError(
+                "failed to read restart-plan publication during replacement rendezvous"
+            ) from error
+
+    def _replacement_deadline(
+        self,
+        plan: RestartPlan,
+        formation_deadline: float | None,
+    ) -> float:
+        now_unix_ms = self._clock()
+        if isinstance(now_unix_ms, bool) or not isinstance(now_unix_ms, int) or now_unix_ms < 1:
+            raise RendezvousConnectionError("replacement rendezvous clock returned an invalid time")
+        remaining_seconds = (plan.restart_deadline_unix_ms - now_unix_ms) / 1_000
+        if remaining_seconds <= 0:
+            raise RendezvousTimeoutError
+        deadline = self._monotonic_clock() + remaining_seconds
+        return deadline if formation_deadline is None else min(deadline, formation_deadline)
+
+    def _prepare_restart_context(
+        self,
+        current: CurrentGeneration,
+        recovery_state: RestartPlanPersistedRecoveryState | None,
+    ) -> bool:
+        if current.snapshot.record.assignment.generation == 0:
+            try:
+                self._restart_context.clear()
+            except (OSError, RestartContextFileError) as error:
+                raise RendezvousStateError(
+                    "failed to clear stale initial restart context"
+                ) from error
+            return False
+        if recovery_state is None:
+            raise RendezvousStateError("replacement generation lacks an authoritative restart plan")
+        context = self._restart_context_for_plan(recovery_state.plan)
+        try:
+            self._restart_context.write(context)
+        except (OSError, RestartContextFileError) as error:
+            raise RendezvousStateError(
+                "failed to publish the replacement restart context"
+            ) from error
+        return True
+
+    def _restart_context_for_plan(self, plan: RestartPlan) -> RestartContext:
+        try:
+            return RestartContext.from_plan(plan, self._config.node_id)
+        except ProtocolValidationError as error:
+            raise RendezvousStateError(
+                "replacement plan cannot produce this node's restart context"
+            ) from error
 
     def _ensure_job_compatibility(self) -> None:
         try:
