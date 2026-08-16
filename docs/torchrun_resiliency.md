@@ -889,6 +889,13 @@ This transaction decoder does not by itself resolve the source generation,
 closed lifecycle, lease history, inventory evidence, or currently committed
 generation; the stable publication reader performs those checks before
 rendezvous may expose the plan.
+`RestartPlanPublicationReader` double-collects the current generation and
+every atomic publication entry, decodes the stable bundle through
+`PersistedRestartPlanPublication`, and requires the successor snapshot and
+generation-head revisions plus store metadata to equal the authoritative
+current generation. Missing, malformed, mixed, or substituted state fails
+closed; repeated head movement remains a retryable read conflict. This first
+readback boundary still does not reauthorize lifecycle or checkpoint evidence.
 
 Before commit, the coordinator validates:
 

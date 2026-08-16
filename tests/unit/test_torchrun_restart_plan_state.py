@@ -40,6 +40,8 @@ from lm_resiliency.integrations.torchrun._coordinator_lease_history import (
 )
 from lm_resiliency.integrations.torchrun._generation_reader import (
     CurrentGeneration,
+    GenerationStateCorrupt,
+    GenerationStateError,
     StoredGenerationSnapshot,
 )
 from lm_resiliency.integrations.torchrun._generation_records import (
@@ -63,6 +65,7 @@ from lm_resiliency.integrations.torchrun._protocol import (
 from lm_resiliency.integrations.torchrun._quarantine_records import (
     NodeQuarantineRecord,
 )
+from lm_resiliency.integrations.torchrun._quarantine_store import node_quarantine_key
 from lm_resiliency.integrations.torchrun._restart_intent_records import (
     RestartIntentHeadRecord,
     RestartIntentLifecycleRecord,
@@ -74,10 +77,15 @@ from lm_resiliency.integrations.torchrun._restart_plan_publication import (
     RestartPlanPublicationPreparationConflict,
     RestartPlanPublicationPreparationCorrupt,
     RestartPlanPublicationPreparationLeaseLost,
+    RestartPlanPublicationReadConflict,
+    RestartPlanPublicationReadCorrupt,
+    RestartPlanPublicationReader,
 )
 from lm_resiliency.integrations.torchrun._restart_plan_publication_records import (
     RestartPlanPublicationAuthority,
     RestartPlanPublicationRecords,
+    recovery_manifest_key,
+    restart_plan_key,
 )
 from lm_resiliency.integrations.torchrun._restart_plan_records import (
     RecoveryManifestRecord,
@@ -120,6 +128,39 @@ class FailingLeaseHistoryReader:
 
     def read(self):
         raise self._error
+
+
+class StaticPublicationStore:
+    def __init__(self, entries: dict[str, ControlStoreEntry]) -> None:
+        self.entries = entries
+
+    def get(self, key: str) -> ControlStoreEntry | None:
+        return self.entries.get(key)
+
+
+class SequenceGenerationReader:
+    def __init__(
+        self,
+        values: list[CurrentGeneration | None | Exception],
+        *,
+        snapshot_key: str,
+        head_key: str,
+    ) -> None:
+        self._values = list(values)
+        self._snapshot_key = snapshot_key
+        self.head_key = head_key
+
+    def current(self) -> CurrentGeneration | None:
+        if len(self._values) > 1:
+            value = self._values.pop(0)
+        else:
+            value = self._values[0]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    def snapshot_key(self, generation: int) -> str:
+        return self._snapshot_key
 
 
 def _assignment(
@@ -2105,6 +2146,189 @@ def test_persisted_restart_plan_publication_decodes_atomic_records():
     assert set(state.quarantine_records) == set(state.plan.quarantined_node_ids)
     with pytest.raises(TypeError):
         state.quarantine_entries["other"] = state.plan_entry
+
+
+def _publication_reader(
+    *,
+    current_values=None,
+) -> tuple[
+    RestartPlanPublicationReader,
+    StaticPublicationStore,
+    PersistedRestartPlanPublication,
+    CurrentGeneration,
+]:
+    publication = _persisted_publication()
+    current = CurrentGeneration(
+        snapshot=StoredGenerationSnapshot(
+            record=publication.successor_snapshot,
+            revision=publication.successor_snapshot_entry.revision,
+            committed_at_unix_ms=publication.committed_at_unix_ms,
+            transaction_sequence=publication.transaction_sequence,
+            guard_mutation_sequence=cast(
+                int,
+                publication.successor_snapshot_entry.guard_mutation_sequence,
+            ),
+            guard_value_sequence=cast(
+                int,
+                publication.successor_snapshot_entry.guard_value_sequence,
+            ),
+            guard_lifetime_sequence=cast(
+                int,
+                publication.successor_snapshot_entry.guard_lifetime_sequence,
+            ),
+            guard_committed_at_unix_ms=cast(
+                int,
+                publication.successor_snapshot_entry.guard_committed_at_unix_ms,
+            ),
+        ),
+        head_revision=publication.generation_head_entry.revision,
+    )
+    store = StaticPublicationStore({})
+    reader = RestartPlanPublicationReader(cast(Any, store), run_id=RUN_ID)
+    snapshot_key = reader._generation_reader.snapshot_key(publication.plan.to_generation)
+    head_key = reader._generation_reader.head_key
+    store.entries.update(
+        {
+            restart_plan_key(RUN_ID, publication.plan.to_generation): publication.plan_entry,
+            recovery_manifest_key(
+                RUN_ID,
+                publication.plan.to_generation,
+            ): publication.manifest_entry,
+            snapshot_key: publication.successor_snapshot_entry,
+            head_key: publication.generation_head_entry,
+            **{
+                node_quarantine_key(RUN_ID, node_id): entry
+                for node_id, entry in publication.quarantine_entries.items()
+            },
+        }
+    )
+    reader._generation_reader = cast(
+        Any,
+        SequenceGenerationReader(
+            current_values if current_values is not None else [current],
+            snapshot_key=snapshot_key,
+            head_key=head_key,
+        ),
+    )
+    return reader, store, publication, current
+
+
+def test_restart_plan_publication_reader_returns_stable_latest_publication():
+    reader, _, publication, _ = _publication_reader()
+
+    assert reader.read() == publication
+
+
+def test_restart_plan_publication_reader_returns_none_without_generation():
+    reader, _, _, _ = _publication_reader(current_values=[None])
+
+    assert reader.read() is None
+
+
+@pytest.mark.parametrize("path", ["plan", "manifest", "snapshot", "head", "quarantine"])
+def test_restart_plan_publication_reader_rejects_missing_atomic_entry(path: str):
+    reader, store, publication, _ = _publication_reader()
+    keys = {
+        "plan": restart_plan_key(RUN_ID, publication.plan.to_generation),
+        "manifest": recovery_manifest_key(RUN_ID, publication.plan.to_generation),
+        "snapshot": reader._generation_reader.snapshot_key(publication.plan.to_generation),
+        "head": reader._generation_reader.head_key,
+        "quarantine": node_quarantine_key(
+            RUN_ID,
+            publication.plan.quarantined_node_ids[0],
+        ),
+    }
+    del store.entries[keys[path]]
+
+    with pytest.raises(RestartPlanPublicationReadCorrupt, match="missing"):
+        reader.read()
+
+
+def test_restart_plan_publication_reader_rejects_malformed_plan():
+    reader, store, publication, _ = _publication_reader()
+    key = restart_plan_key(RUN_ID, publication.plan.to_generation)
+    store.entries[key] = replace(store.entries[key], value=b"not-json")
+
+    with pytest.raises(RestartPlanPublicationReadCorrupt, match="malformed plan"):
+        reader.read()
+
+
+def test_restart_plan_publication_reader_retries_one_generation_change():
+    reader, _, publication, current = _publication_reader()
+    stale = replace(current, head_revision=current.head_revision - 1)
+    reader._generation_reader = cast(
+        Any,
+        SequenceGenerationReader(
+            [stale, current, current, current, current],
+            snapshot_key=reader._generation_reader.snapshot_key(publication.plan.to_generation),
+            head_key=reader._generation_reader.head_key,
+        ),
+    )
+
+    assert reader.read() == publication
+
+
+def test_restart_plan_publication_reader_rejects_repeated_generation_changes():
+    reader, _, publication, current = _publication_reader()
+    stale = replace(current, head_revision=current.head_revision - 1)
+    reader._generation_reader = cast(
+        Any,
+        SequenceGenerationReader(
+            [stale, current] * 9,
+            snapshot_key=reader._generation_reader.snapshot_key(publication.plan.to_generation),
+            head_key=reader._generation_reader.head_key,
+        ),
+    )
+
+    with pytest.raises(RestartPlanPublicationReadConflict, match="changed repeatedly"):
+        reader.read()
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (GenerationStateError("busy"), RestartPlanPublicationReadConflict),
+        (GenerationStateCorrupt("bad"), RestartPlanPublicationReadCorrupt),
+    ],
+)
+def test_restart_plan_publication_reader_translates_generation_errors(
+    error: Exception,
+    expected: type[Exception],
+):
+    reader, _, publication, _ = _publication_reader()
+    reader._generation_reader = cast(
+        Any,
+        SequenceGenerationReader(
+            [error],
+            snapshot_key=reader._generation_reader.snapshot_key(publication.plan.to_generation),
+            head_key=reader._generation_reader.head_key,
+        ),
+    )
+
+    with pytest.raises(expected):
+        reader.read()
+
+
+def test_restart_plan_publication_reader_requires_exact_current_snapshot():
+    reader, _, publication, current = _publication_reader()
+    mismatched = replace(
+        current,
+        snapshot=replace(
+            current.snapshot,
+            revision=current.snapshot.revision + 1,
+        ),
+    )
+    reader._generation_reader = cast(
+        Any,
+        SequenceGenerationReader(
+            [mismatched],
+            snapshot_key=reader._generation_reader.snapshot_key(publication.plan.to_generation),
+            head_key=reader._generation_reader.head_key,
+        ),
+    )
+
+    with pytest.raises(RestartPlanPublicationReadCorrupt, match="current generation"):
+        reader.read()
 
 
 def test_persisted_restart_plan_publication_rejects_malformed_records():
