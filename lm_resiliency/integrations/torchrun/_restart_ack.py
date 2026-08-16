@@ -5,6 +5,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from lm_resiliency.integrations.torchrun._agent_registration_history import (
+    AgentRegistrationAuthority,
+)
+from lm_resiliency.integrations.torchrun._agent_registration_records import (
+    HeldAgentRegistration,
+)
 from lm_resiliency.integrations.torchrun._control_store import ControlStoreWrite
 from lm_resiliency.integrations.torchrun._coordinator_lease import HeldCoordinatorLease
 from lm_resiliency.integrations.torchrun._coordinator_lease_history import (
@@ -20,6 +26,7 @@ class PreparedRestartAckWrite:
     """One immutable acknowledgement write with coordinator authority."""
 
     records: RestartAckWriteRecords
+    registration_authority: AgentRegistrationAuthority
     coordinator_authority: CoordinatorLeaseAuthority
     not_before_unix_ms: int
     deadline_unix_ms: int
@@ -27,6 +34,10 @@ class PreparedRestartAckWrite:
     def __post_init__(self) -> None:
         if not isinstance(self.records, RestartAckWriteRecords):
             raise TypeError("PreparedRestartAckWrite.records must be RestartAckWriteRecords")
+        if not isinstance(self.registration_authority, AgentRegistrationAuthority):
+            raise TypeError(
+                "PreparedRestartAckWrite.registration_authority must be AgentRegistrationAuthority"
+            )
         if not isinstance(self.coordinator_authority, CoordinatorLeaseAuthority):
             raise TypeError(
                 "PreparedRestartAckWrite.coordinator_authority must be CoordinatorLeaseAuthority"
@@ -40,6 +51,17 @@ class PreparedRestartAckWrite:
             "PreparedRestartAckWrite.deadline_unix_ms",
         )
         receipt = self.records.receipt
+        if self.registration != receipt.authenticated_registration:
+            raise ValueError(
+                "PreparedRestartAckWrite receipt does not match its registration authority"
+            )
+        expected_registration_revision = self.records.conditions[
+            self.records.agent_registration_key
+        ]
+        if expected_registration_revision != self.registration.fencing_token:
+            raise ValueError(
+                "PreparedRestartAckWrite registration condition does not match its authority"
+            )
         lease = self.coordinator_authority.lease
         if lease.record.run_id != receipt.acknowledgement.run_id:
             raise ValueError("PreparedRestartAckWrite coordinator lease belongs to another run")
@@ -59,6 +81,10 @@ class PreparedRestartAckWrite:
     @property
     def lease(self) -> HeldCoordinatorLease:
         return self.coordinator_authority.lease
+
+    @property
+    def registration(self) -> HeldAgentRegistration:
+        return self.registration_authority.registration
 
     @property
     def coordinator_lease_key(self) -> str:

@@ -12,6 +12,9 @@ from lm_resiliency.integrations.torchrun._agent_registration import (
     AgentRegistrationManager,
     agent_registration_key,
 )
+from lm_resiliency.integrations.torchrun._agent_registration_history import (
+    AgentRegistrationAuthority,
+)
 from lm_resiliency.integrations.torchrun._control_store import InMemoryControlStore
 from lm_resiliency.integrations.torchrun._coordinator_lease import (
     CoordinatorLeaseManager,
@@ -106,7 +109,7 @@ def _prepared() -> tuple[
             clock=clock,
         ).prepare_initial_open(lease, current, intent)
     )
-    registration = AgentRegistrationManager(
+    registration_manager = AgentRegistrationManager(
         store,
         agent_identity=AgentIdentity(
             run_id=RUN_ID,
@@ -119,7 +122,8 @@ def _prepared() -> tuple[
         ),
         lease_duration_ms=400,
         clock=clock,
-    ).register()
+    )
+    registration = registration_manager.register()
     receipt = RestartAckReceiptRecord(
         acknowledgement=RestartAck(
             intent_id="intent-a",
@@ -148,7 +152,9 @@ def _prepared() -> tuple[
         agent_registration_key=agent_registration_key(RUN_ID, "node-a"),
     )
     lease_entry = store.get(lease_manager.lease_key)
+    registration_entry = store.get(registration_manager.registration_key)
     assert lease_entry is not None
+    assert registration_entry is not None
     authority = CoordinatorLeaseAuthority.from_entry(
         lease_entry,
         run_id=RUN_ID,
@@ -159,6 +165,11 @@ def _prepared() -> tuple[
         lease_manager,
         PreparedRestartAckWrite(
             records=records,
+            registration_authority=AgentRegistrationAuthority.from_entry(
+                registration_entry,
+                run_id=RUN_ID,
+                node_id="node-a",
+            ),
             coordinator_authority=authority,
             not_before_unix_ms=1_000,
             deadline_unix_ms=1_400,
@@ -170,6 +181,11 @@ def test_prepared_restart_ack_delegates_immutable_transaction_inputs():
     _, _, _, prepared = _prepared()
 
     assert prepared.lease == prepared.coordinator_authority.lease
+    assert prepared.registration == prepared.records.receipt.authenticated_registration
+    assert (
+        prepared.conditions[prepared.records.agent_registration_key]
+        == prepared.registration_authority.registration.fencing_token
+    )
     assert prepared.coordinator_lease_key == prepared.records.opened.prepared.coordinator_lease_key
     assert prepared.expected_guard_revision == prepared.lease.fencing_token
     assert prepared.writes == prepared.records.writes
@@ -222,6 +238,20 @@ def test_prepared_restart_ack_rejects_cross_run_authority():
 
     with pytest.raises(ValueError, match="another run"):
         replace(prepared, coordinator_authority=authority)
+
+
+def test_prepared_restart_ack_rejects_different_registration_authority():
+    _, _, _, prepared = _prepared()
+    authority = replace(
+        prepared.registration_authority,
+        registration=replace(
+            prepared.registration,
+            fencing_token=prepared.registration.fencing_token + 1,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="registration authority"):
+        replace(prepared, registration_authority=authority)
 
 
 @pytest.mark.parametrize(
@@ -313,5 +343,7 @@ def test_prepared_restart_ack_requires_expected_types():
 
     with pytest.raises(TypeError, match="RestartAckWriteRecords"):
         replace(prepared, records={})
+    with pytest.raises(TypeError, match="AgentRegistrationAuthority"):
+        replace(prepared, registration_authority={})
     with pytest.raises(TypeError, match="CoordinatorLeaseAuthority"):
         replace(prepared, coordinator_authority={})

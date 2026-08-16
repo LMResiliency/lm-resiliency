@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from lm_resiliency.integrations.torchrun._agent_registration_history import (
+    AgentRegistrationAuthority,
+)
 from lm_resiliency.integrations.torchrun._agent_registration_records import (
     HeldAgentRegistration,
 )
@@ -24,7 +27,7 @@ class AuthenticatedRestartAckState:
 
     receipt: RestartAckReceiptRecord
     opened: CommittedInitialRestartIntentOpen
-    registration: HeldAgentRegistration
+    registration_authority: AgentRegistrationAuthority
     coordinator_authority: CoordinatorLeaseAuthority
 
     def __post_init__(self) -> None:
@@ -34,9 +37,10 @@ class AuthenticatedRestartAckState:
             raise TypeError(
                 "AuthenticatedRestartAckState.opened must be CommittedInitialRestartIntentOpen"
             )
-        if not isinstance(self.registration, HeldAgentRegistration):
+        if not isinstance(self.registration_authority, AgentRegistrationAuthority):
             raise TypeError(
-                "AuthenticatedRestartAckState.registration must be HeldAgentRegistration"
+                "AuthenticatedRestartAckState.registration_authority must be "
+                "AgentRegistrationAuthority"
             )
         if not isinstance(self.coordinator_authority, CoordinatorLeaseAuthority):
             raise TypeError(
@@ -63,6 +67,12 @@ class AuthenticatedRestartAckState:
         )
         if self.receipt.acknowledgement.node_id not in active_node_ids:
             raise ValueError("AuthenticatedRestartAckState acknowledgement node is not active")
+
+    @property
+    def registration(self) -> HeldAgentRegistration:
+        """Return the authenticated held registration."""
+
+        return self.registration_authority.registration
 
 
 __all__ = ["AuthenticatedRestartAckState"]

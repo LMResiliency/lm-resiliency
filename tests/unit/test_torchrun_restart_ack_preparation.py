@@ -192,6 +192,8 @@ def test_restart_ack_preparer_adds_window_without_mutating_store():
 
     assert prepared.records.receipt == receipt
     assert prepared.records.opened == opened
+    assert prepared.registration == receipt.authenticated_registration
+    assert prepared.registration_authority.transaction_sequence > 0
     assert prepared.lease == lease
     assert prepared.not_before_unix_ms == 1_000
     assert prepared.deadline_unix_ms == 1_400

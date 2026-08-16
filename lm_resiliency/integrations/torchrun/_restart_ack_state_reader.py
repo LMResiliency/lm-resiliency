@@ -124,13 +124,14 @@ class RestartAckStateReader:
             raise RestartAckStateRegistrationLost(
                 "authenticated agent registration is no longer current"
             )
+        registration_authority = registration_history.authorities[-1]
         if not lease_history or lease_history[-1].lease != lease:
             raise RestartAckStateLeaseLost("coordinator lease is not the live durable authority")
         try:
             return AuthenticatedRestartAckState(
                 receipt=receipt,
                 opened=opened,
-                registration=registration,
+                registration_authority=registration_authority,
                 coordinator_authority=lease_history[-1],
             )
         except (TypeError, ValueError) as error:
