@@ -40,6 +40,7 @@ from lm_resiliency.integrations.torchrun._restart_plan_records import (
 from lm_resiliency.integrations.torchrun._restart_plan_state import (
     ResolvedRecoveryManifest,
     RestartPlanCertificationState,
+    RestartPlanCopyEligibilityState,
     RestartPlanGenerationState,
     RestartPlanInventoryState,
     RestartPlanManifestState,
@@ -952,7 +953,7 @@ def _inventory_event(
         step=manifest.step,
         trust=trust or manifest.trust,
         topology_digest=manifest.topology_digest,
-        copies=(copy,),
+        copies=rank_copies.copies,
     )
 
 
@@ -1224,6 +1225,241 @@ def test_restart_plan_inventory_state_does_not_claim_copy_eligibility():
     state = _inventory_state(quarantine_state=quarantine_state)
 
     assert not state.manifest.rank_copies[0].copies[0].complete
+
+
+def _shared_manifest() -> RecoveryManifest:
+    manifest = _manifest()
+    return replace(
+        manifest,
+        rank_copies=tuple(
+            replace(
+                entry,
+                copies=tuple(
+                    replace(
+                        copy,
+                        storage_kind="shared",
+                    )
+                    for copy in entry.copies
+                ),
+            )
+            for entry in manifest.rank_copies
+        ),
+    )
+
+
+def _inventory_state_for_manifest(
+    manifest: RecoveryManifest,
+    *,
+    plan: RestartPlan | None = None,
+) -> RestartPlanInventoryState:
+    return _inventory_state(
+        quarantine_state=_quarantine_state(
+            manifest_state=_manifest_state(
+                manifest=manifest,
+                plan=plan,
+            )
+        )
+    )
+
+
+def _copy_eligibility_state() -> RestartPlanCopyEligibilityState:
+    return RestartPlanCopyEligibilityState(
+        inventory_state=_inventory_state_for_manifest(_shared_manifest())
+    )
+
+
+def test_restart_plan_copy_eligibility_state_accepts_shared_gemini_copies():
+    state = _copy_eligibility_state()
+
+    assert state.plan == state.inventory_state.plan
+    assert state.manifest == state.inventory_state.manifest
+
+
+def test_restart_plan_copy_eligibility_state_requires_exact_type():
+    state = _copy_eligibility_state()
+
+    with pytest.raises(TypeError, match="inventory_state must be"):
+        replace(
+            state,
+            inventory_state=state.inventory_state.quarantine_state,
+        )
+
+
+def test_restart_plan_copy_eligibility_state_requires_exact_rank_coverage():
+    manifest = replace(
+        _shared_manifest(),
+        rank_copies=_shared_manifest().rank_copies[:-1],
+    )
+    quarantine_state = _quarantine_state(manifest_state=_manifest_state(manifest=manifest))
+    inventory_state = _inventory_state(
+        quarantine_state=quarantine_state,
+        inventory_events={
+            event.event_id: event
+            for event in (
+                _inventory_event(quarantine_state, rank)
+                for rank in range(manifest.rank_copies[-1].owner_global_rank + 1)
+            )
+        },
+    )
+
+    with pytest.raises(ValueError, match="rank coverage mismatch"):
+        RestartPlanCopyEligibilityState(inventory_state)
+
+
+def test_restart_plan_copy_eligibility_state_requires_one_copy_per_rank():
+    manifest = _shared_manifest()
+    manifest = replace(
+        manifest,
+        rank_copies=(
+            replace(manifest.rank_copies[0], copies=()),
+            *manifest.rank_copies[1:],
+        ),
+    )
+    quarantine_state = _quarantine_state(manifest_state=_manifest_state(manifest=manifest))
+    inventory_state = _inventory_state(
+        quarantine_state=quarantine_state,
+        inventory_events={
+            event.event_id: event
+            for event in (
+                _inventory_event(quarantine_state, rank)
+                for rank in range(1, manifest.rank_copies[-1].owner_global_rank + 1)
+            )
+        },
+    )
+
+    with pytest.raises(ValueError, match="has no eligible copy"):
+        RestartPlanCopyEligibilityState(inventory_state)
+
+
+@pytest.mark.parametrize(
+    "copy",
+    [
+        replace(
+            _shared_manifest().rank_copies[0].copies[0],
+            complete=False,
+        ),
+        replace(
+            _shared_manifest().rank_copies[0].copies[0],
+            storage_kind="memory",
+        ),
+        replace(
+            _shared_manifest().rank_copies[0].copies[0],
+            holder_node_id="node-b",
+        ),
+        replace(
+            _shared_manifest().rank_copies[0].copies[0],
+            holder_kind="peer",
+        ),
+    ],
+)
+def test_restart_plan_copy_eligibility_state_rejects_ineligible_gemini_copy(copy):
+    manifest = _shared_manifest()
+    manifest = replace(
+        manifest,
+        rank_copies=(
+            replace(manifest.rank_copies[0], copies=(copy,)),
+            *manifest.rank_copies[1:],
+        ),
+    )
+
+    with pytest.raises(ValueError, match="contains an ineligible copy"):
+        RestartPlanCopyEligibilityState(_inventory_state_for_manifest(manifest))
+
+
+def test_restart_plan_copy_eligibility_state_rejects_departing_node_local_holder():
+    with pytest.raises(ValueError, match="contains an ineligible copy"):
+        RestartPlanCopyEligibilityState(_inventory_state())
+
+
+def test_restart_plan_copy_eligibility_state_rejects_ineligible_alternative_copy():
+    manifest = _shared_manifest()
+    eligible_copy = manifest.rank_copies[0].copies[0]
+    ineligible_copy = replace(
+        eligible_copy,
+        storage_kind="memory",
+        location_token="memory-copy-0",
+    )
+    manifest = replace(
+        manifest,
+        rank_copies=(
+            replace(
+                manifest.rank_copies[0],
+                copies=(eligible_copy, ineligible_copy),
+            ),
+            *manifest.rank_copies[1:],
+        ),
+    )
+
+    with pytest.raises(ValueError, match="contains an ineligible copy"):
+        RestartPlanCopyEligibilityState(_inventory_state_for_manifest(manifest))
+
+
+def _durable_manifest(
+    *,
+    checkpoint_id: str = "durable-40",
+) -> RecoveryManifest:
+    manifest = replace(_manifest(), trust="recovery_verified")
+    return replace(
+        manifest,
+        rank_copies=tuple(
+            replace(
+                entry,
+                copies=tuple(
+                    replace(
+                        copy,
+                        checkpoint_id=checkpoint_id,
+                        holder_node_id="durable-store",
+                        holder_kind="durable",
+                        storage_kind="remote",
+                    )
+                    for copy in entry.copies
+                ),
+            )
+            for entry in manifest.rank_copies
+        ),
+    )
+
+
+def _durable_plan() -> RestartPlan:
+    return replace(
+        _plan(),
+        recovery_mode="recovery_verified",
+        checkpoint_source="durable",
+        checkpoint_id="durable-40",
+    )
+
+
+def test_restart_plan_copy_eligibility_state_accepts_remote_durable_copies():
+    state = RestartPlanCopyEligibilityState(
+        _inventory_state_for_manifest(
+            _durable_manifest(),
+            plan=_durable_plan(),
+        )
+    )
+
+    assert state.plan.checkpoint_source == "durable"
+
+
+def test_restart_plan_copy_eligibility_state_rejects_wrong_source_kind():
+    verified_manifest = replace(_shared_manifest(), trust="recovery_verified")
+
+    with pytest.raises(ValueError, match="contains an ineligible copy"):
+        RestartPlanCopyEligibilityState(
+            _inventory_state_for_manifest(
+                verified_manifest,
+                plan=_durable_plan(),
+            )
+        )
+
+
+def test_restart_plan_copy_eligibility_state_rejects_wrong_checkpoint_id():
+    with pytest.raises(ValueError, match="contains an ineligible copy"):
+        RestartPlanCopyEligibilityState(
+            _inventory_state_for_manifest(
+                _durable_manifest(checkpoint_id="durable-other"),
+                plan=_durable_plan(),
+            )
+        )
 
 
 def _verified_inventory_state(
