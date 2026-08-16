@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from lm_resiliency.integrations.torchrun._generation_reader import (
     StoredGenerationSnapshot,
@@ -14,6 +16,9 @@ from lm_resiliency.integrations.torchrun._protocol import (
     RankAssignment,
     RecoveryManifest,
     RestartPlan,
+)
+from lm_resiliency.integrations.torchrun._quarantine_records import (
+    NodeQuarantineRecord,
 )
 from lm_resiliency.integrations.torchrun._restart_intent_records import (
     RestartIntentLifecycleRecord,
@@ -249,8 +254,85 @@ class RestartPlanManifestState:
         return self.resolved_manifest.manifest
 
 
+@dataclass(frozen=True, slots=True)
+class RestartPlanQuarantineState:
+    """One manifest-bound plan linked to its exact quarantine records."""
+
+    manifest_state: RestartPlanManifestState
+    quarantine_records: Mapping[str, NodeQuarantineRecord]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.manifest_state, RestartPlanManifestState):
+            raise TypeError(
+                "RestartPlanQuarantineState.manifest_state must be RestartPlanManifestState"
+            )
+        if not isinstance(self.quarantine_records, Mapping):
+            raise TypeError("RestartPlanQuarantineState.quarantine_records must be a mapping")
+        records: dict[str, NodeQuarantineRecord] = {}
+        for node_id, record in self.quarantine_records.items():
+            if not isinstance(node_id, str) or not node_id.strip():
+                raise ValueError(
+                    "RestartPlanQuarantineState.quarantine_records keys must be non-empty node IDs"
+                )
+            if not isinstance(record, NodeQuarantineRecord):
+                raise TypeError(
+                    "RestartPlanQuarantineState.quarantine_records values "
+                    "must be NodeQuarantineRecord"
+                )
+            if record.node_id != node_id:
+                raise ValueError(
+                    "RestartPlanQuarantineState quarantine record node does not match its key"
+                )
+            records[node_id] = record
+        records = dict(sorted(records.items()))
+        plan_record = self.manifest_state.generation_state.record
+        expected_digests = plan_record.quarantine_record_digests
+        if set(records) != set(expected_digests):
+            raise ValueError(
+                "RestartPlanQuarantineState records must exactly cover the plan's quarantined nodes"
+            )
+        plan = plan_record.plan
+        for node_id, record in records.items():
+            if record.digest != expected_digests[node_id]:
+                raise ValueError(
+                    "RestartPlanQuarantineState quarantine record digest does not match its plan"
+                )
+            if (
+                record.run_id != plan.run_id
+                or record.plan_id != plan.plan_id
+                or record.intent_id != plan.intent_id
+                or record.from_generation != plan.from_generation
+                or record.effective_generation != plan.to_generation
+                or record.incident_ids != plan.incident_ids
+                or record.reason_code != plan.reason_code
+            ):
+                raise ValueError(
+                    "RestartPlanQuarantineState quarantine record does not match its plan"
+                )
+            if (
+                record.coordinator_id != plan_record.coordinator_id
+                or record.lease_id != plan_record.lease_id
+                or record.coordinator_lease_duration_ms != plan_record.coordinator_lease_duration_ms
+                or record.coordinator_fencing_token != plan_record.coordinator_fencing_token
+            ):
+                raise ValueError(
+                    "RestartPlanQuarantineState quarantine record uses different "
+                    "publication authority"
+                )
+        object.__setattr__(
+            self,
+            "quarantine_records",
+            MappingProxyType(records),
+        )
+
+    @property
+    def plan(self) -> RestartPlan:
+        return self.manifest_state.plan
+
+
 __all__ = [
     "ResolvedRecoveryManifest",
     "RestartPlanGenerationState",
     "RestartPlanManifestState",
+    "RestartPlanQuarantineState",
 ]

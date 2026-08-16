@@ -778,6 +778,10 @@ separate cross-record checks.
 checks plan/manifest metadata, source world size, exact current-generation
 assignment when applicable, and trust compatibility. It still does not prove
 per-rank copy completeness or inventory certification.
+`RestartPlanQuarantineState` binds the exact node quarantine records and
+requires their digests, plan metadata, and coordinator authority to match the
+manifest-bound plan. It does not validate resource evidence or prove atomic
+publication.
 
 Before commit, the coordinator validates:
 
