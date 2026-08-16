@@ -224,6 +224,13 @@ class RestartPlanManifestState:
         source_world_size = source_assignment.active_nodes * source_assignment.local_world_size
         if source_world_size != plan.expected_world_size:
             raise ValueError("RestartPlanManifestState source world size does not match its plan")
+        if (
+            source_assignment.generation == plan.from_generation
+            and source_assignment != self.generation_state.from_assignment
+        ):
+            raise ValueError(
+                "RestartPlanManifestState source assignment conflicts with its current generation"
+            )
         if plan.recovery_mode == "recovery_verified" and manifest.trust != "recovery_verified":
             raise ValueError(
                 "RestartPlanManifestState verified recovery requires a verified manifest"

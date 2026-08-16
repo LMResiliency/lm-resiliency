@@ -622,6 +622,50 @@ def test_restart_plan_manifest_state_rejects_source_world_size_mismatch():
         )
 
 
+def test_restart_plan_manifest_state_rejects_conflicting_current_source_assignment():
+    state = _manifest_state()
+    conflicting_assignment = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=4,
+        assignments=(
+            SlotAssignment(
+                logical_node_slot=0,
+                node_id="node-b",
+                first_global_rank=0,
+                local_world_size=2,
+            ),
+            SlotAssignment(
+                logical_node_slot=1,
+                node_id="node-a",
+                first_global_rank=2,
+                local_world_size=2,
+            ),
+        ),
+        topology_digest="topology-v1",
+    )
+    source_snapshot = _snapshot(assignment=conflicting_assignment)
+    manifest_record = replace(
+        state.resolved_manifest.record,
+        source_generation_snapshot_digest=source_snapshot.record.digest,
+    )
+
+    with pytest.raises(ValueError, match="source assignment conflicts"):
+        replace(
+            state,
+            generation_state=replace(
+                state.generation_state,
+                record=replace(
+                    state.generation_state.record,
+                    recovery_manifest_record_digest=manifest_record.digest,
+                ),
+            ),
+            resolved_manifest=ResolvedRecoveryManifest(
+                record=manifest_record,
+                source_snapshot=source_snapshot,
+            ),
+        )
+
+
 def test_restart_plan_manifest_state_requires_verified_manifest_for_verified_mode():
     plan = replace(_plan(), recovery_mode="recovery_verified")
 
