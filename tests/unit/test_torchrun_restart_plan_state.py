@@ -21,6 +21,13 @@ from lm_resiliency.integrations.torchrun._agent_registration_records import (
     HeldAgentRegistration,
 )
 from lm_resiliency.integrations.torchrun._control_store import ControlStoreWrite
+from lm_resiliency.integrations.torchrun._coordinator_lease import (
+    CoordinatorLeaseRecord,
+    HeldCoordinatorLease,
+)
+from lm_resiliency.integrations.torchrun._coordinator_lease_history import (
+    CoordinatorLeaseAuthority,
+)
 from lm_resiliency.integrations.torchrun._generation_reader import (
     CurrentGeneration,
     StoredGenerationSnapshot,
@@ -50,6 +57,9 @@ from lm_resiliency.integrations.torchrun._restart_intent_records import (
     RestartIntentHeadRecord,
     RestartIntentLifecycleRecord,
     RestartIntentRecord,
+)
+from lm_resiliency.integrations.torchrun._restart_plan_publication_authority import (
+    RestartPlanPublicationAuthority,
 )
 from lm_resiliency.integrations.torchrun._restart_plan_publication_records import (
     RestartPlanPublicationRecords,
@@ -2149,6 +2159,134 @@ def test_restart_plan_publication_records_use_earliest_registration_expiry():
     )
 
     assert updated.deadline_unix_ms == 1_300
+
+
+def _publication_authority() -> RestartPlanPublicationAuthority:
+    records = _publication_records()
+    plan_record = records.candidate.placement_state.generation_state.record
+    return RestartPlanPublicationAuthority(
+        records=records,
+        coordinator_authority=CoordinatorLeaseAuthority(
+            lease=HeldCoordinatorLease(
+                record=CoordinatorLeaseRecord(
+                    run_id=RUN_ID,
+                    coordinator_id=plan_record.coordinator_id,
+                    lease_id=plan_record.lease_id,
+                    lease_duration_ms=plan_record.coordinator_lease_duration_ms,
+                ),
+                fencing_token=plan_record.coordinator_fencing_token,
+                granted_at_unix_ms=900,
+            ),
+            transaction_sequence=9,
+            mutation_sequence=9,
+            value_sequence=5,
+            lifetime_sequence=1,
+        ),
+        observed_at_unix_ms=1_200,
+    )
+
+
+def test_restart_plan_publication_authority_binds_exact_lease_window():
+    authority = _publication_authority()
+
+    assert authority.not_before_unix_ms == 1_200
+    assert authority.deadline_unix_ms == 1_400
+
+
+def test_restart_plan_publication_authority_is_immutable():
+    authority = _publication_authority()
+
+    with pytest.raises(AttributeError):
+        authority.observed_at_unix_ms = 1_201
+
+
+def test_restart_plan_publication_authority_requires_exact_types():
+    authority = _publication_authority()
+
+    with pytest.raises(TypeError, match="records must be"):
+        replace(authority, records=authority.records.candidate)
+    with pytest.raises(TypeError, match="coordinator_authority must be"):
+        replace(
+            authority,
+            coordinator_authority=authority.coordinator_authority.lease,
+        )
+
+
+@pytest.mark.parametrize("observed_at_unix_ms", [0, True])
+def test_restart_plan_publication_authority_requires_positive_observation(
+    observed_at_unix_ms,
+):
+    authority = _publication_authority()
+
+    with pytest.raises(ValueError, match="observed_at_unix_ms"):
+        replace(authority, observed_at_unix_ms=observed_at_unix_ms)
+
+
+@pytest.mark.parametrize(
+    "lease",
+    [
+        lambda authority: replace(
+            authority.coordinator_authority.lease,
+            record=replace(
+                authority.coordinator_authority.lease.record,
+                run_id="other-run",
+            ),
+        ),
+        lambda authority: replace(
+            authority.coordinator_authority.lease,
+            record=replace(
+                authority.coordinator_authority.lease.record,
+                coordinator_id="other-coordinator",
+            ),
+        ),
+        lambda authority: replace(
+            authority.coordinator_authority.lease,
+            record=replace(
+                authority.coordinator_authority.lease.record,
+                lease_id="other-lease",
+            ),
+        ),
+        lambda authority: replace(
+            authority.coordinator_authority.lease,
+            record=replace(
+                authority.coordinator_authority.lease.record,
+                lease_duration_ms=501,
+            ),
+        ),
+        lambda authority: replace(
+            authority.coordinator_authority.lease,
+            fencing_token=10,
+        ),
+    ],
+)
+def test_restart_plan_publication_authority_rejects_wrong_lease(lease):
+    authority = _publication_authority()
+
+    with pytest.raises(ValueError, match="does not authorize"):
+        replace(
+            authority,
+            coordinator_authority=replace(
+                authority.coordinator_authority,
+                lease=lease(authority),
+            ),
+        )
+
+
+@pytest.mark.parametrize("observed_at_unix_ms", [899, 999, 1_199])
+def test_restart_plan_publication_authority_rejects_early_observation(
+    observed_at_unix_ms,
+):
+    authority = _publication_authority()
+
+    with pytest.raises(ValueError, match="precedes one of its inputs"):
+        replace(authority, observed_at_unix_ms=observed_at_unix_ms)
+
+
+def test_restart_plan_publication_authority_rejects_elapsed_window():
+    authority = _publication_authority()
+
+    with pytest.raises(ValueError, match="window has elapsed"):
+        replace(authority, observed_at_unix_ms=authority.deadline_unix_ms)
 
 
 @pytest.mark.parametrize(

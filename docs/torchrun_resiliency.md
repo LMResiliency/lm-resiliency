@@ -831,6 +831,12 @@ match. Its exclusive deadline is the earliest selected registration expiry or
 plan restart deadline. It performs no store access and does not authenticate
 the live coordinator lease, lifecycle revision, quarantine resource evidence,
 transaction result, or prior committed quarantine state.
+`RestartPlanPublicationAuthority` binds that bundle to the exact coordinator
+lease identity already embedded in its plan, successor, and quarantine
+records. Its observation must follow the candidate's generation,
+manifest-source, placement, and lease inputs, and its exclusive deadline is
+additionally capped by coordinator-lease expiry. This pure value performs no
+store access and does not prove that the supplied authority is still live.
 
 Before commit, the coordinator validates:
 
