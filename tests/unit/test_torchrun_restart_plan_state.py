@@ -2079,6 +2079,7 @@ def _persisted_publication() -> PersistedRestartPlanPublication:
     }
     return PersistedRestartPlanPublication.from_entries(
         run_id=RUN_ID,
+        to_generation=publication.candidate.plan.to_generation,
         plan_entry=immutable_entry(plan_record.to_json(), 21),
         manifest_entry=immutable_entry(manifest_record.to_json(), 22),
         successor_snapshot_entry=immutable_entry(
@@ -2112,6 +2113,7 @@ def test_persisted_restart_plan_publication_rejects_malformed_records():
     with pytest.raises(ValueError, match="malformed records"):
         PersistedRestartPlanPublication.from_entries(
             run_id=RUN_ID,
+            to_generation=state.plan.to_generation,
             plan_entry=replace(state.plan_entry, value=b"{}"),
             manifest_entry=state.manifest_entry,
             successor_snapshot_entry=state.successor_snapshot_entry,
@@ -2126,6 +2128,7 @@ def test_persisted_restart_plan_publication_binds_the_requested_run():
     with pytest.raises(ValueError, match="another run"):
         PersistedRestartPlanPublication.from_entries(
             run_id="other-run",
+            to_generation=state.plan.to_generation,
             plan_entry=state.plan_entry,
             manifest_entry=state.manifest_entry,
             successor_snapshot_entry=state.successor_snapshot_entry,
@@ -2135,6 +2138,27 @@ def test_persisted_restart_plan_publication_binds_the_requested_run():
     with pytest.raises(ValueError, match="non-empty"):
         PersistedRestartPlanPublication.from_entries(
             run_id="",
+            to_generation=state.plan.to_generation,
+            plan_entry=state.plan_entry,
+            manifest_entry=state.manifest_entry,
+            successor_snapshot_entry=state.successor_snapshot_entry,
+            generation_head_entry=state.generation_head_entry,
+            quarantine_entries=state.quarantine_entries,
+        )
+    with pytest.raises(ValueError, match="another generation"):
+        PersistedRestartPlanPublication.from_entries(
+            run_id=RUN_ID,
+            to_generation=state.plan.to_generation + 1,
+            plan_entry=state.plan_entry,
+            manifest_entry=state.manifest_entry,
+            successor_snapshot_entry=state.successor_snapshot_entry,
+            generation_head_entry=state.generation_head_entry,
+            quarantine_entries=state.quarantine_entries,
+        )
+    with pytest.raises(ValueError, match="positive integer"):
+        PersistedRestartPlanPublication.from_entries(
+            run_id=RUN_ID,
+            to_generation=0,
             plan_entry=state.plan_entry,
             manifest_entry=state.manifest_entry,
             successor_snapshot_entry=state.successor_snapshot_entry,
@@ -2347,6 +2371,29 @@ def test_persisted_restart_plan_publication_rejects_entry_substitution(
         replace(
             state,
             **cast(Any, {entry_name: change(getattr(state, entry_name))}),
+        )
+
+
+def test_persisted_restart_plan_publication_rejects_transaction_that_predates_mutations():
+    state = _persisted_publication()
+
+    with pytest.raises(ValueError, match="transaction sequence predates"):
+        replace(
+            state,
+            plan_entry=replace(state.plan_entry, transaction_sequence=1),
+            manifest_entry=replace(state.manifest_entry, transaction_sequence=1),
+            successor_snapshot_entry=replace(
+                state.successor_snapshot_entry,
+                transaction_sequence=1,
+            ),
+            generation_head_entry=replace(
+                state.generation_head_entry,
+                transaction_sequence=1,
+            ),
+            quarantine_entries={
+                node_id: replace(entry, transaction_sequence=1)
+                for node_id, entry in state.quarantine_entries.items()
+            },
         )
 
 

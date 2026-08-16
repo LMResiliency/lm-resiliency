@@ -99,6 +99,7 @@ class PersistedRestartPlanPublication:
         cls,
         *,
         run_id: str,
+        to_generation: int,
         plan_entry: ControlStoreEntry,
         manifest_entry: ControlStoreEntry,
         successor_snapshot_entry: ControlStoreEntry,
@@ -109,6 +110,12 @@ class PersistedRestartPlanPublication:
 
         if not isinstance(run_id, str) or not run_id.strip():
             raise ValueError("run_id must be a non-empty string")
+        if (
+            isinstance(to_generation, bool)
+            or not isinstance(to_generation, int)
+            or to_generation < 1
+        ):
+            raise ValueError("to_generation must be a positive integer")
         entries = (
             ("plan_entry", plan_entry),
             ("manifest_entry", manifest_entry),
@@ -135,6 +142,8 @@ class PersistedRestartPlanPublication:
             raise ValueError("restart-plan publication contains malformed records") from error
         if record.plan.run_id != run_id:
             raise ValueError("restart-plan publication belongs to another run")
+        if record.plan.to_generation != to_generation:
+            raise ValueError("restart-plan publication belongs to another generation")
         return cls(
             record=record,
             manifest_record=manifest_record,
@@ -287,7 +296,19 @@ class PersistedRestartPlanPublication:
             raise ValueError(
                 "PersistedRestartPlanPublication entries do not share guard provenance"
             )
-        self._validate_guard(next(iter(guard_provenance)))
+        provenance = next(iter(guard_provenance))
+        self._validate_guard(provenance)
+        transaction_sequence = next(iter(transaction_sequences))
+        guard_mutation_sequence = provenance[3]
+        if not isinstance(guard_mutation_sequence, int):
+            raise AssertionError("validated guard provenance lost its mutation sequence")
+        if transaction_sequence <= max(
+            self.generation_head_entry.mutation_sequence,
+            guard_mutation_sequence,
+        ):
+            raise ValueError(
+                "PersistedRestartPlanPublication transaction sequence predates its mutations"
+            )
         committed_at_unix_ms = next(iter(commit_times))
         if committed_at_unix_ms is None:
             raise AssertionError("validated publication lost its commit time")
