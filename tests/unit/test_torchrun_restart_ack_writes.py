@@ -27,8 +27,6 @@ from lm_resiliency.integrations.torchrun._protocol import (
 )
 from lm_resiliency.integrations.torchrun._restart_ack_records import (
     RestartAckReceiptRecord,
-)
-from lm_resiliency.integrations.torchrun._restart_ack_writes import (
     RestartAckWriteRecords,
 )
 from lm_resiliency.integrations.torchrun._restart_intent_open import (

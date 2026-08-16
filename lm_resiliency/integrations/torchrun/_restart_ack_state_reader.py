@@ -21,10 +21,8 @@ from lm_resiliency.integrations.torchrun._generation_reader import (
     GenerationStateError,
 )
 from lm_resiliency.integrations.torchrun._restart_ack_records import (
-    RestartAckReceiptRecord,
-)
-from lm_resiliency.integrations.torchrun._restart_ack_state import (
     AuthenticatedRestartAckState,
+    RestartAckReceiptRecord,
 )
 from lm_resiliency.integrations.torchrun._restart_intent_open_execution import (
     CommittedInitialRestartIntentOpen,

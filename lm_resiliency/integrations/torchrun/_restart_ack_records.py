@@ -6,16 +6,31 @@ import hashlib
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import ClassVar, TypeVar
 
+from lm_resiliency.integrations.torchrun._agent_registration import (
+    agent_registration_key,
+)
+from lm_resiliency.integrations.torchrun._agent_registration_history import (
+    AgentRegistrationAuthority,
+)
 from lm_resiliency.integrations.torchrun._agent_registration_records import (
     AgentRegistrationRecord,
     HeldAgentRegistration,
+)
+from lm_resiliency.integrations.torchrun._control_store import ControlStoreWrite
+from lm_resiliency.integrations.torchrun._coordinator_lease import HeldCoordinatorLease
+from lm_resiliency.integrations.torchrun._coordinator_lease_history import (
+    CoordinatorLeaseAuthority,
 )
 from lm_resiliency.integrations.torchrun._protocol import (
     AgentIdentity,
     ProtocolValidationError,
     RestartAck,
+)
+from lm_resiliency.integrations.torchrun._restart_intent_open_execution import (
+    CommittedInitialRestartIntentOpen,
 )
 from lm_resiliency.integrations.torchrun._restart_intent_records import (
     RestartIntentRecord,
@@ -197,6 +212,216 @@ class RestartAckReceiptRecord:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class RestartAckWriteRecords:
+    """Immutable receipt write and read conditions for one active node."""
+
+    receipt: RestartAckReceiptRecord
+    opened: CommittedInitialRestartIntentOpen
+    acknowledgement_key: str
+    agent_registration_key: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.receipt, RestartAckReceiptRecord):
+            raise TypeError("RestartAckWriteRecords.receipt must be RestartAckReceiptRecord")
+        if not isinstance(self.opened, CommittedInitialRestartIntentOpen):
+            raise TypeError(
+                "RestartAckWriteRecords.opened must be CommittedInitialRestartIntentOpen"
+            )
+        if self.receipt.intent_record != self.opened.prepared.record:
+            raise ValueError(
+                "RestartAckWriteRecords receipt does not answer its committed restart intent"
+            )
+        if self.receipt.received_at_unix_ms < self.opened.committed_at_unix_ms:
+            raise ValueError("RestartAckWriteRecords receipt predates its committed restart intent")
+        acknowledgement = self.receipt.acknowledgement
+        active_nodes = set(
+            self.opened.prepared.current.snapshot.record.assignment.slot_to_node_id.values()
+        )
+        if acknowledgement.node_id not in active_nodes:
+            raise ValueError(
+                "RestartAckWriteRecords acknowledgement node is not active in its generation"
+            )
+        expected_registration_key = agent_registration_key(
+            acknowledgement.run_id,
+            acknowledgement.node_id,
+        )
+        if self.agent_registration_key != expected_registration_key:
+            raise ValueError("RestartAckWriteRecords.agent_registration_key is not canonical")
+        node_digest = hashlib.sha256(acknowledgement.node_id.encode("utf-8")).hexdigest()
+        expected_acknowledgement_key = (
+            f"{self.opened.prepared.intent_key}/acknowledgements/{node_digest}"
+        )
+        if self.acknowledgement_key != expected_acknowledgement_key:
+            raise ValueError("RestartAckWriteRecords.acknowledgement_key is not canonical")
+        keys = {
+            self.acknowledgement_key,
+            self.agent_registration_key,
+            self.opened.prepared.intent_key,
+            self.opened.prepared.intent_head_key,
+        }
+        if len(keys) != 4:
+            raise ValueError("RestartAckWriteRecords transaction key roles must be distinct")
+
+    @property
+    def writes(self) -> Mapping[str, ControlStoreWrite]:
+        return MappingProxyType(
+            {
+                self.acknowledgement_key: ControlStoreWrite(
+                    expected_revision=None,
+                    value=self.receipt.to_json(),
+                    require_never_created=True,
+                )
+            }
+        )
+
+    @property
+    def conditions(self) -> Mapping[str, int]:
+        return MappingProxyType(
+            {
+                self.opened.prepared.intent_key: self.opened.intent_entry.revision,
+                self.opened.prepared.intent_head_key: self.opened.head_entry.revision,
+                self.agent_registration_key: self.receipt.registration_fencing_token,
+            }
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticatedRestartAckState:
+    """One receipt bound to current intent, registration, and lease state."""
+
+    receipt: RestartAckReceiptRecord
+    opened: CommittedInitialRestartIntentOpen
+    registration_authority: AgentRegistrationAuthority
+    coordinator_authority: CoordinatorLeaseAuthority
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.receipt, RestartAckReceiptRecord):
+            raise TypeError("AuthenticatedRestartAckState.receipt must be RestartAckReceiptRecord")
+        if not isinstance(self.opened, CommittedInitialRestartIntentOpen):
+            raise TypeError(
+                "AuthenticatedRestartAckState.opened must be CommittedInitialRestartIntentOpen"
+            )
+        if not isinstance(self.registration_authority, AgentRegistrationAuthority):
+            raise TypeError(
+                "AuthenticatedRestartAckState.registration_authority must be "
+                "AgentRegistrationAuthority"
+            )
+        if not isinstance(self.coordinator_authority, CoordinatorLeaseAuthority):
+            raise TypeError(
+                "AuthenticatedRestartAckState.coordinator_authority must be "
+                "CoordinatorLeaseAuthority"
+            )
+        if self.receipt.intent_record != self.opened.prepared.record:
+            raise ValueError(
+                "AuthenticatedRestartAckState receipt does not answer its current intent"
+            )
+        if self.receipt.received_at_unix_ms < self.opened.committed_at_unix_ms:
+            raise ValueError("AuthenticatedRestartAckState receipt predates its current intent")
+        if self.registration != self.receipt.authenticated_registration:
+            raise ValueError(
+                "AuthenticatedRestartAckState receipt does not match its current registration"
+            )
+        run_id = self.receipt.acknowledgement.run_id
+        if self.coordinator_authority.lease.record.run_id != run_id:
+            raise ValueError(
+                "AuthenticatedRestartAckState coordinator lease belongs to another run"
+            )
+        active_node_ids = set(
+            self.opened.prepared.current.snapshot.record.assignment.slot_to_node_id.values()
+        )
+        if self.receipt.acknowledgement.node_id not in active_node_ids:
+            raise ValueError("AuthenticatedRestartAckState acknowledgement node is not active")
+
+    @property
+    def registration(self) -> HeldAgentRegistration:
+        """Return the authenticated held registration."""
+
+        return self.registration_authority.registration
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedRestartAckWrite:
+    """One immutable acknowledgement write with coordinator authority."""
+
+    records: RestartAckWriteRecords
+    registration_authority: AgentRegistrationAuthority
+    coordinator_authority: CoordinatorLeaseAuthority
+    not_before_unix_ms: int
+    deadline_unix_ms: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.records, RestartAckWriteRecords):
+            raise TypeError("PreparedRestartAckWrite.records must be RestartAckWriteRecords")
+        if not isinstance(self.registration_authority, AgentRegistrationAuthority):
+            raise TypeError(
+                "PreparedRestartAckWrite.registration_authority must be AgentRegistrationAuthority"
+            )
+        if not isinstance(self.coordinator_authority, CoordinatorLeaseAuthority):
+            raise TypeError(
+                "PreparedRestartAckWrite.coordinator_authority must be CoordinatorLeaseAuthority"
+            )
+        _positive_integer(
+            self.not_before_unix_ms,
+            "PreparedRestartAckWrite.not_before_unix_ms",
+        )
+        _positive_integer(
+            self.deadline_unix_ms,
+            "PreparedRestartAckWrite.deadline_unix_ms",
+        )
+        receipt = self.records.receipt
+        if self.registration != receipt.authenticated_registration:
+            raise ValueError(
+                "PreparedRestartAckWrite receipt does not match its registration authority"
+            )
+        expected_registration_revision = self.records.conditions[
+            self.records.agent_registration_key
+        ]
+        if expected_registration_revision != self.registration.fencing_token:
+            raise ValueError(
+                "PreparedRestartAckWrite registration condition does not match its authority"
+            )
+        lease = self.coordinator_authority.lease
+        if lease.record.run_id != receipt.acknowledgement.run_id:
+            raise ValueError("PreparedRestartAckWrite coordinator lease belongs to another run")
+        if self.not_before_unix_ms < receipt.received_at_unix_ms:
+            raise ValueError("PreparedRestartAckWrite cannot precede acknowledgement receipt")
+        if self.not_before_unix_ms < lease.granted_at_unix_ms:
+            raise ValueError("PreparedRestartAckWrite cannot precede coordinator lease grant")
+        if self.not_before_unix_ms >= self.deadline_unix_ms:
+            raise ValueError("PreparedRestartAckWrite.not_before_unix_ms must precede its deadline")
+        if self.deadline_unix_ms > lease.expires_at_unix_ms:
+            raise ValueError("PreparedRestartAckWrite deadline exceeds coordinator lease")
+        if self.deadline_unix_ms > receipt.intent_record.intent.prepare_deadline_unix_ms:
+            raise ValueError("PreparedRestartAckWrite deadline exceeds restart intent")
+        if self.deadline_unix_ms > receipt.registration_expires_at_unix_ms:
+            raise ValueError("PreparedRestartAckWrite deadline exceeds agent registration")
+
+    @property
+    def lease(self) -> HeldCoordinatorLease:
+        return self.coordinator_authority.lease
+
+    @property
+    def registration(self) -> HeldAgentRegistration:
+        return self.registration_authority.registration
+
+    @property
+    def coordinator_lease_key(self) -> str:
+        return self.records.opened.prepared.coordinator_lease_key
+
+    @property
+    def expected_guard_revision(self) -> int:
+        return self.lease.fencing_token
+
+    @property
+    def writes(self) -> Mapping[str, ControlStoreWrite]:
+        return self.records.writes
+
+    @property
+    def conditions(self) -> Mapping[str, int]:
+        return self.records.conditions
+
+
 def _decode_nested_record(
     value: object,
     *,
@@ -281,4 +506,9 @@ def _reject_duplicate_object_fields(
     return value
 
 
-__all__ = ["RestartAckReceiptRecord"]
+__all__ = [
+    "AuthenticatedRestartAckState",
+    "PreparedRestartAckWrite",
+    "RestartAckReceiptRecord",
+    "RestartAckWriteRecords",
+]

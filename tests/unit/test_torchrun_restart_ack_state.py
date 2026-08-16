@@ -29,10 +29,8 @@ from lm_resiliency.integrations.torchrun._protocol import (
     SlotAssignment,
 )
 from lm_resiliency.integrations.torchrun._restart_ack_records import (
-    RestartAckReceiptRecord,
-)
-from lm_resiliency.integrations.torchrun._restart_ack_state import (
     AuthenticatedRestartAckState,
+    RestartAckReceiptRecord,
 )
 from lm_resiliency.integrations.torchrun._restart_intent_open import (
     RestartIntentOpenPreparer,
@@ -153,7 +151,7 @@ def _state(
     )
 
 
-def test_authenticated_restart_ack_state_binds_inputs_without_mutation():
+def test_authenticated_restart_ack_records_binds_inputs_without_mutation():
     store, state = _state()
     histories_before = {
         key: store.get_history(key)
@@ -173,7 +171,7 @@ def test_authenticated_restart_ack_state_binds_inputs_without_mutation():
         state.registration_authority = state.registration_authority
 
 
-def test_authenticated_restart_ack_state_rejects_different_intent():
+def test_authenticated_restart_ack_records_rejects_different_intent():
     _, state = _state()
     changed_receipt = replace(
         state.receipt,
@@ -194,7 +192,7 @@ def test_authenticated_restart_ack_state_rejects_different_intent():
         replace(state, receipt=changed_receipt)
 
 
-def test_authenticated_restart_ack_state_rejects_receipt_before_intent():
+def test_authenticated_restart_ack_records_rejects_receipt_before_intent():
     _, state = _state()
     backdated_receipt = replace(
         state.receipt,
@@ -206,7 +204,7 @@ def test_authenticated_restart_ack_state_rejects_receipt_before_intent():
         replace(state, receipt=backdated_receipt)
 
 
-def test_authenticated_restart_ack_state_rejects_different_registration():
+def test_authenticated_restart_ack_records_rejects_different_registration():
     _, state = _state()
 
     with pytest.raises(ValueError, match="current registration"):
@@ -222,7 +220,7 @@ def test_authenticated_restart_ack_state_rejects_different_registration():
         )
 
 
-def test_authenticated_restart_ack_state_rejects_cross_run_authority():
+def test_authenticated_restart_ack_records_rejects_cross_run_authority():
     _, state = _state()
     authority = replace(
         state.coordinator_authority,
@@ -239,12 +237,12 @@ def test_authenticated_restart_ack_state_rejects_cross_run_authority():
         replace(state, coordinator_authority=authority)
 
 
-def test_authenticated_restart_ack_state_rejects_inactive_sender():
+def test_authenticated_restart_ack_records_rejects_inactive_sender():
     with pytest.raises(ValueError, match="not active"):
         _state(node_id="node-c", agent_id="agent-c")
 
 
-def test_authenticated_restart_ack_state_requires_expected_types():
+def test_authenticated_restart_ack_records_requires_expected_types():
     _, state = _state()
 
     with pytest.raises(TypeError, match="receipt"):

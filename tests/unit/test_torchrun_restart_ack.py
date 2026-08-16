@@ -32,11 +32,9 @@ from lm_resiliency.integrations.torchrun._protocol import (
     RestartIntent,
     SlotAssignment,
 )
-from lm_resiliency.integrations.torchrun._restart_ack import PreparedRestartAckWrite
 from lm_resiliency.integrations.torchrun._restart_ack_records import (
+    PreparedRestartAckWrite,
     RestartAckReceiptRecord,
-)
-from lm_resiliency.integrations.torchrun._restart_ack_writes import (
     RestartAckWriteRecords,
 )
 from lm_resiliency.integrations.torchrun._restart_intent_open import (
