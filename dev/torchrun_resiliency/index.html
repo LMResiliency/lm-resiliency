@@ -1962,7 +1962,28 @@ framework durable checkpoint.</p>
 <h3 id="proposed-command">Proposed command<a class="headerlink" href="#proposed-command" title="Permanent link">&para;</a></h3>
 <p>The custom rendezvous backend makes replacement-only semantics explicit without
 changing torchrun's default behavior:</p>
-<pre><code class="language-bash">export LM_RESILIENCY_RESTART_CONTEXT=&quot;/run/lm-resiliency/${JOB_ID}/restart-context.json&quot;
+<pre><code class="language-toml"># /shared/lm-resiliency/torchrun.toml
+schema_version = 1
+control_endpoint = &quot;control.internal:443&quot;
+replacement_only = true
+max_replacement_generations = 2
+registration_lease_duration_ms = 30000
+poll_interval_ms = 1000
+join_timeout_ms = 300000
+</code></pre>
+<p>The shared policy file contains no node identity or credentials. Every agent
+loads the file, applies any explicitly supplied shared <code>--rdzv-conf</code>
+overrides, and registers the canonical runtime digest over the resolved policy,
+run ID, rendezvous endpoint, and <code>min_nodes</code>/<code>max_nodes</code> range. Drift in
+whitespace or node-local settings does not matter, while drift in effective
+shared settings or fleet-size semantics fails closed.
+Node-specific <code>node_id</code> and <code>restart_context_path</code> values come from
+<code>--rdzv-conf</code> or <code>LM_RESILIENCY_NODE_ID</code> and
+<code>LM_RESILIENCY_RESTART_CONTEXT</code>; conflicting sources are rejected. Credentials
+and other secrets remain in deployment-provided environment or credential
+providers and are not included in the policy file or digest.</p>
+<pre><code class="language-bash">export LM_RESILIENCY_NODE_ID=&quot;${SCHEDULER_NODE_ID}&quot;
+export LM_RESILIENCY_RESTART_CONTEXT=&quot;/run/lm-resiliency/${JOB_ID}/restart-context.json&quot;
 
 torchrun \
   --nnodes=8:10 \
@@ -1970,7 +1991,7 @@ torchrun \
   --rdzv-backend=lm_resiliency \
   --rdzv-endpoint=&quot;${RDZV_ENDPOINT}&quot; \
   --rdzv-id=&quot;${JOB_ID}&quot; \
-  --rdzv-conf=&quot;control_endpoint=${CONTROL_ENDPOINT},replacement_only=true,max_replacement_generations=2&quot; \
+  --rdzv-conf=&quot;config=/shared/lm-resiliency/torchrun.toml&quot; \
   --module torchtitan.train ...
 </code></pre>
 <p>The command runs on all <code>max_nodes</code> machines. The backend interprets
