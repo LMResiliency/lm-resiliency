@@ -824,10 +824,11 @@ prior quarantine and the atomic store transaction remain separate gates.
 `RestartPlanPublicationRecords` derives the canonical immutable plan, manifest,
 quarantine, successor-generation, and generation-head writes from one admitted
 candidate. It CAS-updates the generation head and conditions on the exact
-current and manifest-source snapshot revisions, but performs no store access
-and does not authenticate the live coordinator lease, lifecycle revision,
-quarantine resource evidence, deadline, transaction result, or prior committed
-quarantine state.
+current and manifest-source snapshot revisions plus every exact successor
+registration fencing revision, but performs no store access and does not
+authenticate the live coordinator lease, lifecycle revision, quarantine
+resource evidence, deadline, transaction result, or prior committed quarantine
+state.
 
 Before commit, the coordinator validates:
 

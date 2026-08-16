@@ -7,6 +7,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from lm_resiliency.integrations.torchrun._agent_registration import (
+    agent_registration_key,
+)
 from lm_resiliency.integrations.torchrun._control_store import ControlStoreWrite
 from lm_resiliency.integrations.torchrun._generation_reader import CurrentGeneration
 from lm_resiliency.integrations.torchrun._generation_records import GenerationHeadRecord
@@ -97,6 +100,15 @@ class RestartPlanPublicationRecords:
         )
 
     @property
+    def registration_keys(self) -> Mapping[str, str]:
+        return MappingProxyType(
+            {
+                node_id: agent_registration_key(self.candidate.plan.run_id, node_id)
+                for node_id in self.candidate.placement_state.registration_histories
+            }
+        )
+
+    @property
     def generation_head(self) -> GenerationHeadRecord:
         generation_state = self.candidate.placement_state.generation_state
         return GenerationHeadRecord(
@@ -148,12 +160,16 @@ class RestartPlanPublicationRecords:
     @property
     def conditions(self) -> Mapping[str, int]:
         manifest_source = self.candidate.recovery_state.copy_state.inventory_state.quarantine_state.manifest_state.resolved_manifest.source_snapshot
-        return MappingProxyType(
-            {
-                self.source_generation_snapshot_key: self.current.snapshot.revision,
-                self.manifest_source_generation_snapshot_key: manifest_source.revision,
-            }
-        )
+        conditions = {
+            self.source_generation_snapshot_key: self.current.snapshot.revision,
+            self.manifest_source_generation_snapshot_key: manifest_source.revision,
+        }
+        for node_id, history in self.candidate.placement_state.registration_histories.items():
+            registration = history.current
+            if registration is None:
+                raise AssertionError("validated placement lost its current registration")
+            conditions[self.registration_keys[node_id]] = registration.fencing_token
+        return MappingProxyType(conditions)
 
 
 def _positive_integer(value: object, path: str) -> int:

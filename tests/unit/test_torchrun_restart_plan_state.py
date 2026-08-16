@@ -7,6 +7,9 @@ from dataclasses import replace
 
 import pytest
 
+from lm_resiliency.integrations.torchrun._agent_registration import (
+    agent_registration_key,
+)
 from lm_resiliency.integrations.torchrun._agent_registration_history import (
     AgentRegistrationAuthority,
 )
@@ -1986,6 +1989,8 @@ def test_restart_plan_publication_records_build_canonical_atomic_inputs():
     )
     assert records.conditions == {
         records.source_generation_snapshot_key: 8,
+        records.registration_keys["node-a"]: 11,
+        records.registration_keys["node-c"]: 11,
     }
 
 
@@ -2000,6 +2005,10 @@ def test_restart_plan_publication_records_derive_run_scoped_keys():
     assert records.source_generation_snapshot_key.endswith("/generations/4")
     assert records.manifest_source_generation_snapshot_key.endswith("/generations/4")
     assert records.successor_generation_snapshot_key.endswith("/generations/5")
+    assert records.registration_keys == {
+        "node-a": agent_registration_key(RUN_ID, "node-a"),
+        "node-c": agent_registration_key(RUN_ID, "node-c"),
+    }
     assert RUN_ID not in records.plan_key
 
 
@@ -2012,6 +2021,8 @@ def test_restart_plan_publication_records_freeze_mappings():
         records.conditions["other"] = 1
     with pytest.raises(TypeError):
         records.quarantine_keys["node-b"] = "other"
+    with pytest.raises(TypeError):
+        records.registration_keys["node-a"] = "other"
 
 
 def test_restart_plan_publication_records_require_exact_types():
