@@ -763,6 +763,14 @@ class RestartPlan(TypedDict):
     restart_deadline_unix_ms: int
 ```
 
+The persisted `RestartPlanRecord` contains the canonical plan; digests for the
+selected recovery-manifest record, closed-intent lifecycle record, source
+generation, and successor generation; the exact node-to-quarantine-record
+digest map; and the coordinator lease identity that authorized publication.
+Its quarantine keys must exactly match `quarantined_node_ids`. The envelope is
+strict and immutable, but it is not a substitute for `validate_restart_plan()`
+or for the later atomic publication transaction.
+
 Before commit, the coordinator validates:
 
 - the plan is fenced to the same intent ID, run, generation, incidents, and
