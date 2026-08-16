@@ -141,7 +141,7 @@ Catalog discovery is offline and bound to one GPU, software stack, model configu
 <p>The scalar catalog domain is <code>n_exec</code>, the physical row count received by one expert GEMM after dispatch, capacity handling, token dropping, padding, and alignment.
 Local and global expert counts are environment metadata unless the production kernel physically executes several expert problems together.
 Changing the number of jointly executed experts can change regime boundaries and requires a separately qualified catalog.</p>
-<p>The implementation is in <a href="https://github.com/LMResiliency/lm-resiliency/blob/33519d22535be7e3f7d226e6faa76dc2a23c30d2/lm_resiliency/detection/moe_regimes.py"><code>lm_resiliency/detection/moe_regimes.py</code></a>.</p>
+<p>The implementation is in <a href="https://github.com/LMResiliency/lm-resiliency/blob/0f2dc51cf22987fcae56f96452dedc0c9fd7cf93/lm_resiliency/detection/moe_regimes.py"><code>lm_resiliency/detection/moe_regimes.py</code></a>.</p>
 <h2 id="coverage-contract">Coverage Contract<a class="headerlink" href="#coverage-contract" title="Permanent link">&para;</a></h2>
 <p>Every observation records:</p>
 <ul>
