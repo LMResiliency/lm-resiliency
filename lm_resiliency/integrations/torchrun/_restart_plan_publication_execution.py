@@ -16,7 +16,7 @@ from lm_resiliency.integrations.torchrun._control_store import (
     ControlStoreHistoryConflict,
     ControlStoreTooEarly,
 )
-from lm_resiliency.integrations.torchrun._restart_plan_publication_state import (
+from lm_resiliency.integrations.torchrun._restart_plan_publication_records import (
     PreparedRestartPlanPublication,
 )
 

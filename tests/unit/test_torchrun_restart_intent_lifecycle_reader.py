@@ -44,7 +44,7 @@ from lm_resiliency.integrations.torchrun._restart_intent_records import (
     RestartIntentLifecycleHeadRecord,
     RestartIntentLifecycleRecord,
 )
-from lm_resiliency.integrations.torchrun._restart_plan_publication_lifecycle_reader import (
+from lm_resiliency.integrations.torchrun._restart_plan_publication_lifecycle import (
     RestartPlanPublicationLifecycleConflict,
     RestartPlanPublicationLifecycleCorrupt,
     RestartPlanPublicationLifecycleReader,
