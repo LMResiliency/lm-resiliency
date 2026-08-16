@@ -1588,8 +1588,14 @@ unreadable; every outstanding token has its own fixed-length, digest-named
 durable invalidation marker, so delayed cleanup from an older handler cannot
 revalidate a newer failed context, long valid context basenames cannot overflow
 the filesystem component limit, and a later replacement context with a
-different token remains valid. Context
-publication and cleanup acquire the parent
+different token remains valid. The worker-visible file remains canonical root
+`RestartContext` JSON. The cleanup token and the context digest are stored in a
+hidden owner-only sidecar under the same directory lock, and final admission
+requires the exact token published by that handler incarnation. A normal
+heartbeat renewal may advance the registration fencing token, but admission
+accepts it only when retained authority history proves uninterrupted ownership
+by the same immutable registration and agent incarnation. Context publication
+and cleanup acquire the parent
 directory lock nonblocking under the admission or bounded-cleanup deadline, so
 a stale process cannot strand replacement admission. The replacement deadline
 is derived and revalidated from authoritative, nondecreasing control-store time

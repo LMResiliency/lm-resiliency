@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import queue
 import stat
@@ -782,9 +783,11 @@ def test_restart_context_file_writes_reads_replaces_and_clears(tmp_path: Path):
     path = tmp_path / "private" / "restart-context.json"
     context_file = RestartContextFile(path)
 
-    context_file.write(_context())
+    cleanup_token = context_file.write(_context())
 
     assert context_file.read() == _context()
+    assert context_file.read_with_token() == (cleanup_token, _context())
+    assert json.loads(path.read_text(encoding="utf-8")) == _context().to_dict()
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
@@ -824,9 +827,6 @@ def test_restart_context_file_invalidates_context_while_directory_lock_is_held(
     fcntl.flock(directory, fcntl.LOCK_EX)
     try:
         context_file.invalidate(cleanup_token)
-
-        with pytest.raises(RestartContextFileError, match="invalidated"):
-            context_file.read()
         with pytest.raises(RestartContextFileError, match="timed out locking"):
             context_file.clear_if_token(
                 cleanup_token,
@@ -835,6 +835,9 @@ def test_restart_context_file_invalidates_context_while_directory_lock_is_held(
     finally:
         fcntl.flock(directory, fcntl.LOCK_UN)
         os.close(directory)
+
+    with pytest.raises(RestartContextFileError, match="invalidated"):
+        context_file.read()
 
 
 def test_restart_context_file_preserves_every_invalidated_token(
@@ -947,6 +950,19 @@ def test_restart_context_file_rejects_duplicate_json_fields(tmp_path: Path):
     path.chmod(0o600)
 
     with pytest.raises(RestartContextFileError, match="duplicate field"):
+        context_file.read()
+
+
+def test_restart_context_file_rejects_context_changed_without_metadata(
+    tmp_path: Path,
+):
+    path = tmp_path / "private" / "restart-context.json"
+    context_file = RestartContextFile(path)
+    context_file.write(_context())
+    path.write_text(_context(plan_id="substituted").to_json() + "\n", encoding="utf-8")
+    path.chmod(0o600)
+
+    with pytest.raises(RestartContextFileError, match="metadata does not match"):
         context_file.read()
 
 
@@ -3285,11 +3301,15 @@ def test_slot_aware_handler_never_partially_admits_replacement_after_deadline(
     )
     completion = store.get(handlers[0]._arrival_completion_key(1, attempt))
     assert completion is not None
+    context_tokens = []
     for handler in handlers:
+        context_tokens.append(handler._restart_context.read_with_token()[0])
+    for handler, context_token in zip(handlers, context_tokens, strict=True):
         handler._validate_final_admission_state(
             generation,
             recovery_state,
             deadline,
+            expected_context_token=context_token,
         )
     handlers[0]._publish_arrival_consumption(
         generation,
@@ -3828,6 +3848,7 @@ def test_slot_aware_handler_rechecks_deadline_before_returning_admission(
             cast(Any, admission),
             cast(Any, recovery_state),
             deadline,
+            "a" * 64,
         )
     assert handler.shutdown() is True
 
@@ -3888,9 +3909,109 @@ def test_slot_aware_handler_binds_admission_to_returning_registration(
             cast(Any, object()),
             cast(Any, _static_recovery_state(plan)),
             time.monotonic() + 1,
+            "a" * 64,
         )
 
     assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_accepts_heartbeat_renewal_before_return(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=InMemoryControlStore(clock=clock),
+        clock=clock,
+        agent_id="agent-b",
+    )
+    handler._ensure_registered(time.monotonic() + 1)
+    with handler._registration_lock:
+        original = handler._registration
+    assert original is not None
+    completion, admission = _stub_replacement_return_evidence(
+        handler,
+        monkeypatch,
+    )
+    renewed = handler._registration_manager.renew(original)
+    with handler._registration_lock:
+        handler._registration = renewed
+    plan = _replacement_plan()
+    assignment = RankAssignment.from_assignments(
+        run_id=RUN_ID,
+        generation=1,
+        assignments=plan.slot_assignments,
+        topology_digest=plan.topology_digest,
+    )
+    monkeypatch.setattr(
+        handler,
+        "_validate_final_admission_state",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(handler, "_validate_current_arrival_attempt", lambda *_args: None)
+    monkeypatch.setattr(
+        handler,
+        "_publish_replacement_return_acknowledgement",
+        lambda *_args, **_kwargs: None,
+    )
+
+    handler._validate_replacement_return(
+        cast(Any, object()),
+        assignment,
+        1,
+        0,
+        cast(Any, completion),
+        cast(Any, admission),
+        cast(Any, _static_recovery_state(plan)),
+        time.monotonic() + 1,
+        "a" * 64,
+    )
+
+    assert handler.shutdown() is True
+
+
+def test_slot_aware_handler_rejects_replaced_restart_context_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    clock = ManualClock()
+    handler = _handler(
+        _handler_config(
+            tmp_path,
+            node_id="node-b",
+            min_nodes=1,
+            max_nodes=2,
+        ),
+        store=InMemoryControlStore(clock=clock),
+        clock=clock,
+        agent_id="agent-b",
+    )
+    plan = _replacement_plan()
+    recovery_state = _static_recovery_state(plan)
+    current = object()
+    expected_context = handler._restart_context_for_plan(plan)
+    original_token = handler._restart_context.write(expected_context)
+    replacement_token = handler._restart_context.write(expected_context)
+    assert replacement_token != original_token
+    monkeypatch.setattr(handler, "_read_generation", lambda: current)
+    monkeypatch.setattr(handler, "_read_recovery_state", lambda: recovery_state)
+
+    with pytest.raises(RendezvousStateError, match="context changed"):
+        handler._validate_final_admission_state(
+            cast(Any, current),
+            cast(Any, recovery_state),
+            time.monotonic() + 1,
+            validate_deadline=False,
+            expected_context_token=original_token,
+        )
+
+    handler._restart_context.clear()
 
 
 def test_slot_aware_handler_treats_missing_peer_registration_as_not_ready(
@@ -3996,6 +4117,7 @@ def test_slot_aware_handler_requires_live_registration_before_returning_admissio
             cast(Any, admission),
             cast(Any, _static_recovery_state(plan)),
             deadline,
+            "a" * 64,
         )
 
 
@@ -4047,6 +4169,7 @@ def test_slot_aware_handler_uses_authoritative_time_for_final_registration_expir
             cast(Any, admission),
             cast(Any, _static_recovery_state(plan)),
             time.monotonic() + 1,
+            "a" * 64,
         )
     handler.shutdown()
 
@@ -4107,6 +4230,7 @@ def test_slot_aware_handler_rejects_advanced_attempt_before_returning_admission(
             cast(Any, admission),
             cast(Any, _static_recovery_state(plan)),
             time.monotonic() + 1,
+            "a" * 64,
         )
 
     assert handler.shutdown() is True

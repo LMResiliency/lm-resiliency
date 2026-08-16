@@ -47,6 +47,7 @@ from lm_resiliency.integrations.torchrun._agent_registration import (
     agent_registration_key,
 )
 from lm_resiliency.integrations.torchrun._agent_registration_history_reader import (
+    AgentRegistrationHistory,
     AgentRegistrationHistoryCorrupt,
     AgentRegistrationHistoryError,
     AgentRegistrationHistoryReader,
@@ -90,9 +91,10 @@ _ENVIRONMENT_DIGEST_ENV = "LM_RESILIENCY_ENVIRONMENT_DIGEST"
 _RESOURCE_IDS_ENV = "LM_RESILIENCY_RESOURCE_IDS"
 _RESTART_CONTEXT_ENV = "LM_RESILIENCY_RESTART_CONTEXT"
 _MAX_CONTEXT_BYTES = 64 * 1024
+_MAX_CONTEXT_METADATA_BYTES = 1_024
 _MAX_CONTEXT_INVALIDATION_BYTES = 1_024
 _MAX_POLICY_BYTES = 64 * 1024
-_CONTEXT_FILE_SCHEMA_VERSION = 1
+_CONTEXT_METADATA_SCHEMA_VERSION = 1
 _CONTEXT_INVALIDATION_SCHEMA_VERSION = 1
 _CONTEXT_LOCK_TIMEOUT_SECONDS = 1.0
 _CONTEXT_LOCK_POLL_SECONDS = 0.01
@@ -554,6 +556,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                             current,
                             recovery_state,
                             admission_deadline,
+                            expected_context_token=context_token,
                         )
                         self._publish_arrival_consumption(
                             current,
@@ -573,6 +576,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                                 completion,
                                 recovery_state,
                                 admission_deadline,
+                                context_token,
                             )
                         return RendezvousInfo(
                             bootstrap_store,
@@ -1693,13 +1697,20 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         admission_deadline: float | None = None,
         *,
         validate_deadline: bool = True,
+        expected_context_token: _RestartContextCleanupToken | None = None,
     ) -> None:
         if self._is_closed_bounded(admission_deadline):
             raise RendezvousClosedError
         if self._read_generation() != current:
             raise RendezvousConnectionError("generation changed before rendezvous admission")
         if recovery_state is None:
+            if expected_context_token is not None:
+                raise RendezvousStateError(
+                    "initial rendezvous unexpectedly carries restart-context ownership"
+                )
             return
+        if expected_context_token is None:
+            raise RendezvousStateError("replacement rendezvous lacks restart-context ownership")
         refreshed = self._read_recovery_state()
         if refreshed != recovery_state:
             raise RendezvousConnectionError(
@@ -1713,12 +1724,12 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             self._validate_replacement_deadline(refreshed, admission_deadline)
         expected_context = self._restart_context_for_plan(refreshed.plan)
         try:
-            persisted_context = self._restart_context.read()
+            persisted_token, persisted_context = self._restart_context.read_with_token()
         except (OSError, RestartContextFileError) as error:
             raise RendezvousStateError(
                 "failed to validate the replacement restart context"
             ) from error
-        if persisted_context != expected_context:
+        if persisted_context != expected_context or persisted_token != expected_context_token:
             raise RendezvousStateError(
                 "replacement restart context changed before rendezvous admission"
             )
@@ -2373,7 +2384,10 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         completion: ControlStoreEntry,
         recovery_state: RestartPlanPersistedRecoveryState,
         deadline: float,
+        context_token: _RestartContextCleanupToken | None,
     ) -> ControlStoreEntry:
+        if context_token is None:
+            raise RendezvousStateError("replacement rendezvous lacks restart-context ownership")
         while True:
             admission = self._read_replacement_admission(
                 assignment,
@@ -2391,6 +2405,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                     admission,
                     recovery_state,
                     deadline,
+                    context_token,
                 )
                 return admission
             if slot == 0:
@@ -2418,6 +2433,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                         admission,
                         recovery_state,
                         deadline,
+                        context_token,
                     )
                     return admission
             if not self._wait_for_change(deadline):
@@ -2437,6 +2453,7 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
                         admission,
                         recovery_state,
                         deadline,
+                        context_token,
                     )
                     return admission
                 raise RendezvousTimeoutError
@@ -2451,19 +2468,26 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
         admission: ControlStoreEntry,
         recovery_state: RestartPlanPersistedRecoveryState,
         deadline: float,
+        context_token: _RestartContextCleanupToken,
     ) -> None:
         self._validate_final_admission_state(
             current,
             recovery_state,
             deadline,
             validate_deadline=False,
+            expected_context_token=context_token,
         )
         self._raise_heartbeat_error()
         with self._registration_lock:
             registration = self._registration
         if registration is None:
             raise RendezvousConnectionError("replacement agent no longer owns its registration")
-        current_registration = self._read_current_assigned_registration(self._config.node_id)
+        registration_history = self._read_assigned_registration_history(self._config.node_id)
+        current_registration = registration_history.current
+        if current_registration is None:
+            raise RendezvousConnectionError(
+                "replacement agent no longer has a current registration"
+            )
         if current_registration.record != registration.record:
             raise RendezvousConnectionError(
                 "replacement agent registration changed before admission"
@@ -2476,10 +2500,19 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             recovery_state=recovery_state,
         )
         metadata = consumptions[str(slot)]
+        admission_registration = next(
+            (
+                authority.registration
+                for authority in registration_history.authorities
+                if authority.registration.fencing_token == metadata["registration_revision"]
+            ),
+            None,
+        )
         if (
             metadata["registration_id"] != current_registration.record.registration_id
             or metadata["agent_id"] != current_registration.record.agent_identity.agent_id
-            or metadata["registration_revision"] != current_registration.fencing_token
+            or admission_registration is None
+            or admission_registration.record != current_registration.record
         ):
             raise RendezvousConnectionError(
                 "replacement admission does not include this agent registration"
@@ -2520,6 +2553,27 @@ class SlotAwareRendezvousHandler(RendezvousHandler):
             recovery_state,
             now_unix_ms=now_unix_ms,
         )
+
+    def _read_assigned_registration_history(
+        self,
+        node_id: str,
+    ) -> AgentRegistrationHistory:
+        try:
+            return AgentRegistrationHistoryReader(
+                self._control_store,
+                run_id=self._config.run_id,
+                node_id=node_id,
+            ).read()
+        except AgentRegistrationHistoryCorrupt as error:
+            raise RendezvousStateError("arrived agent registration history is corrupt") from error
+        except AgentRegistrationHistoryError as error:
+            raise RendezvousConnectionError(
+                "arrived agent registration history changed repeatedly"
+            ) from error
+        except Exception as error:
+            raise RendezvousConnectionError(
+                "failed to read arrived agent registration history"
+            ) from error
 
     def _publish_replacement_return_acknowledgement(
         self,
@@ -3433,56 +3487,70 @@ class RestartContextFile:
         if not isinstance(context, RestartContext):
             raise TypeError("context must be RestartContext")
         cleanup_token = secrets.token_hex(32)
-        encoded = (
-            json.dumps(
-                {
-                    "schema_version": _CONTEXT_FILE_SCHEMA_VERSION,
-                    "cleanup_token": cleanup_token,
-                    "context": context.to_dict(),
-                },
-                allow_nan=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-            + "\n"
-        ).encode("utf-8")
+        encoded = (context.to_json() + "\n").encode("utf-8")
+        metadata = self._encode_metadata(cleanup_token, encoded)
         if len(encoded) > _MAX_CONTEXT_BYTES:
             raise RestartContextFileError("restart context is too large")
         parent_descriptor = self._open_parent(create=True)
         assert parent_descriptor is not None
-        descriptor = -1
-        temporary = ""
+        context_descriptor = -1
+        context_temporary = ""
+        metadata_descriptor = -1
+        metadata_temporary = ""
+        metadata_published = False
         try:
             self._acquire_parent_lock(parent_descriptor, deadline=deadline)
             self._reject_existing_symlink(parent_descriptor)
-            descriptor, temporary = self._create_temporary_file(parent_descriptor)
-            os.fchmod(descriptor, 0o600)
-            with os.fdopen(descriptor, "wb") as stream:
-                descriptor = -1
+            context_descriptor, context_temporary = self._create_temporary_file(parent_descriptor)
+            metadata_descriptor, metadata_temporary = self._create_temporary_file(
+                parent_descriptor,
+                target_name=self._metadata_name(),
+            )
+            os.fchmod(context_descriptor, 0o600)
+            os.fchmod(metadata_descriptor, 0o600)
+            with os.fdopen(context_descriptor, "wb") as stream:
+                context_descriptor = -1
                 stream.write(encoded)
                 stream.flush()
                 os.fsync(stream.fileno())
+            with os.fdopen(metadata_descriptor, "wb") as stream:
+                metadata_descriptor = -1
+                stream.write(metadata)
+                stream.flush()
+                os.fsync(stream.fileno())
             os.replace(
-                temporary,
+                metadata_temporary,
+                self._metadata_name(),
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+            )
+            metadata_temporary = ""
+            metadata_published = True
+            os.replace(
+                context_temporary,
                 self.path.name,
                 src_dir_fd=parent_descriptor,
                 dst_dir_fd=parent_descriptor,
             )
-            temporary = ""
+            context_temporary = ""
             self._fsync_directory(parent_descriptor)
             return cleanup_token
         except OSError as error:
             raise RestartContextFileError(
                 f"failed to publish restart context at {self.path}",
-                published_token=cleanup_token if not temporary else None,
+                published_token=cleanup_token if metadata_published else None,
             ) from error
         finally:
-            if descriptor >= 0:
+            for descriptor in (context_descriptor, metadata_descriptor):
+                if descriptor < 0:
+                    continue
                 try:
                     os.close(descriptor)
                 except OSError:
                     pass
-            if temporary:
+            for temporary in (context_temporary, metadata_temporary):
+                if not temporary:
+                    continue
                 try:
                     os.unlink(temporary, dir_fd=parent_descriptor)
                 except OSError:
@@ -3490,18 +3558,31 @@ class RestartContextFile:
             os.close(parent_descriptor)
 
     def read(self) -> RestartContext:
+        return self.read_with_token()[1]
+
+    def read_with_token(
+        self,
+    ) -> tuple[_RestartContextCleanupToken, RestartContext]:
         parent_descriptor = self._open_parent(create=False)
         if parent_descriptor is None:
             raise RestartContextFileError(
                 f"restart-context directory does not exist for {self.path}"
             )
         try:
+            self._acquire_parent_lock(parent_descriptor, deadline=None)
             encoded = self._read_encoded(parent_descriptor)
             assert encoded is not None
-            cleanup_token, context = self._decode_envelope(encoded)
+            metadata = self._read_encoded(
+                parent_descriptor,
+                name=self._metadata_name(),
+                maximum_bytes=_MAX_CONTEXT_METADATA_BYTES,
+            )
+            assert metadata is not None
+            context = self._decode_context(encoded)
+            cleanup_token = self._decode_metadata(metadata, encoded)
             if self._is_invalidated(parent_descriptor, cleanup_token):
                 raise RestartContextFileError("restart context has been invalidated")
-            return context
+            return cleanup_token, context
         finally:
             os.close(parent_descriptor)
 
@@ -3571,15 +3652,7 @@ class RestartContextFile:
         try:
             self._acquire_parent_lock(parent_descriptor, deadline=deadline)
             self._reject_existing_symlink(parent_descriptor)
-            try:
-                os.unlink(self.path.name, dir_fd=parent_descriptor)
-            except FileNotFoundError:
-                self._fsync_directory(parent_descriptor)
-                return
-            except OSError as error:
-                raise RestartContextFileError(
-                    f"failed to remove restart context at {self.path}"
-                ) from error
+            self._unlink_context_pair(parent_descriptor)
             self._fsync_directory(parent_descriptor)
         finally:
             os.close(parent_descriptor)
@@ -3601,19 +3674,12 @@ class RestartContextFile:
             encoded = self._read_encoded(parent_descriptor, missing_ok=True)
             if encoded is None:
                 return False
-            _, context = self._decode_envelope(encoded)
+            context = self._decode_context(encoded)
             if context.run_id == run_id:
                 raise RestartContextFileError(
                     "refusing to remove a restart context for the current run"
                 )
-            try:
-                os.unlink(self.path.name, dir_fd=parent_descriptor)
-            except FileNotFoundError:
-                return False
-            except OSError as error:
-                raise RestartContextFileError(
-                    f"failed to remove restart context at {self.path}"
-                ) from error
+            self._unlink_context_pair(parent_descriptor)
             self._fsync_directory(parent_descriptor)
             return True
         finally:
@@ -3632,20 +3698,18 @@ class RestartContextFile:
         try:
             self._acquire_parent_lock(parent_descriptor, deadline=deadline)
             self._reject_existing_symlink(parent_descriptor)
-            encoded = self._read_encoded(parent_descriptor, missing_ok=True)
-            if encoded is None:
+            metadata = self._read_encoded(
+                parent_descriptor,
+                missing_ok=True,
+                name=self._metadata_name(),
+                maximum_bytes=_MAX_CONTEXT_METADATA_BYTES,
+            )
+            if metadata is None:
                 return False
-            current_token, _ = self._decode_envelope(encoded)
+            current_token, _ = self._decode_metadata_record(metadata)
             if current_token != cleanup_token:
                 return False
-            try:
-                os.unlink(self.path.name, dir_fd=parent_descriptor)
-            except FileNotFoundError:
-                return False
-            except OSError as error:
-                raise RestartContextFileError(
-                    f"failed to remove restart context at {self.path}"
-                ) from error
+            self._unlink_context_pair(parent_descriptor)
             try:
                 os.unlink(
                     self._invalidation_name(cleanup_token),
@@ -3661,6 +3725,17 @@ class RestartContextFile:
             return True
         finally:
             os.close(parent_descriptor)
+
+    def _unlink_context_pair(self, parent_descriptor: int) -> None:
+        for name in (self.path.name, self._metadata_name()):
+            try:
+                os.unlink(name, dir_fd=parent_descriptor)
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise RestartContextFileError(
+                    f"failed to remove restart context at {self.path}"
+                ) from error
 
     def _acquire_parent_lock(
         self,
@@ -3790,11 +3865,8 @@ class RestartContextFile:
                 "restart-context invalidation marker is malformed"
             ) from error
 
-    @classmethod
-    def _decode_envelope(
-        cls,
-        encoded: bytes,
-    ) -> tuple[_RestartContextCleanupToken, RestartContext]:
+    @staticmethod
+    def _decode_context(encoded: bytes) -> RestartContext:
         try:
             value = json.loads(
                 encoded,
@@ -3802,27 +3874,95 @@ class RestartContextFile:
             )
             if not isinstance(value, Mapping):
                 raise RestartContextFileError("restart-context JSON must contain an object")
-            expected = {"schema_version", "cleanup_token", "context"}
-            if set(value) != expected:
-                raise RestartContextFileError("restart-context envelope fields are invalid")
-            if (
-                type(value["schema_version"]) is not int
-                or value["schema_version"] != _CONTEXT_FILE_SCHEMA_VERSION
-            ):
-                raise RestartContextFileError("restart-context envelope schema version is invalid")
-            cleanup_token = cls._validate_cleanup_token(value["cleanup_token"])
-            context_value = value["context"]
-            if not isinstance(context_value, Mapping):
-                raise RestartContextFileError(
-                    "restart-context envelope context must contain an object"
-                )
-            return cleanup_token, RestartContext.from_dict(context_value)
+            return RestartContext.from_dict(value)
         except _DuplicateJsonFieldError as error:
             raise RestartContextFileError(str(error)) from error
         except RestartContextFileError:
             raise
         except (TypeError, ValueError, UnicodeDecodeError) as error:
             raise RestartContextFileError("restart-context file is malformed") from error
+
+    @classmethod
+    def _encode_metadata(
+        cls,
+        cleanup_token: _RestartContextCleanupToken,
+        context: bytes,
+    ) -> bytes:
+        cls._validate_cleanup_token(cleanup_token)
+        encoded = (
+            json.dumps(
+                {
+                    "schema_version": _CONTEXT_METADATA_SCHEMA_VERSION,
+                    "cleanup_token": cleanup_token,
+                    "context_sha256": hashlib.sha256(context).hexdigest(),
+                },
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+        if len(encoded) > _MAX_CONTEXT_METADATA_BYTES:
+            raise RestartContextFileError("restart-context metadata is too large")
+        return encoded
+
+    @classmethod
+    def _decode_metadata(
+        cls,
+        encoded: bytes,
+        context: bytes,
+    ) -> _RestartContextCleanupToken:
+        cleanup_token, context_digest = cls._decode_metadata_record(encoded)
+        if not secrets.compare_digest(
+            context_digest,
+            hashlib.sha256(context).hexdigest(),
+        ):
+            raise RestartContextFileError("restart-context metadata does not match the context")
+        return cleanup_token
+
+    @classmethod
+    def _decode_metadata_record(
+        cls,
+        encoded: bytes,
+    ) -> tuple[_RestartContextCleanupToken, str]:
+        try:
+            value = json.loads(
+                encoded,
+                object_pairs_hook=_strict_object,
+            )
+            if not isinstance(value, Mapping):
+                raise RestartContextFileError(
+                    "restart-context metadata JSON must contain an object"
+                )
+            expected = {"schema_version", "cleanup_token", "context_sha256"}
+            if set(value) != expected:
+                raise RestartContextFileError("restart-context metadata fields are invalid")
+            if (
+                type(value["schema_version"]) is not int
+                or value["schema_version"] != _CONTEXT_METADATA_SCHEMA_VERSION
+            ):
+                raise RestartContextFileError("restart-context metadata schema version is invalid")
+            cleanup_token = cls._validate_cleanup_token(value["cleanup_token"])
+            context_digest = value["context_sha256"]
+            if (
+                not isinstance(context_digest, str)
+                or len(context_digest) != 64
+                or context_digest != context_digest.lower()
+            ):
+                raise RestartContextFileError("restart-context metadata digest is invalid")
+            try:
+                int(context_digest, 16)
+            except ValueError as error:
+                raise RestartContextFileError(
+                    "restart-context metadata digest is invalid"
+                ) from error
+            return cleanup_token, context_digest
+        except _DuplicateJsonFieldError as error:
+            raise RestartContextFileError(str(error)) from error
+        except RestartContextFileError:
+            raise
+        except (TypeError, ValueError, UnicodeDecodeError) as error:
+            raise RestartContextFileError("restart-context metadata is malformed") from error
 
     @staticmethod
     def _validate_cleanup_token(value: object) -> _RestartContextCleanupToken:
@@ -3958,6 +4098,10 @@ class RestartContextFile:
         identity = f"{self.path.name}\0{cleanup_token}".encode("utf-8")
         digest = hashlib.sha256(identity).hexdigest()
         return f".restart-context-invalidated-{digest}"
+
+    def _metadata_name(self) -> str:
+        digest = hashlib.sha256(self.path.name.encode("utf-8")).hexdigest()
+        return f".restart-context-metadata-{digest}"
 
     @staticmethod
     def _validate_owned_private_file(metadata: os.stat_result) -> None:
