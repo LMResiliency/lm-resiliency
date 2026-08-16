@@ -862,6 +862,12 @@ the publication authority to be at or after the closing authority in the same
 durable lease history; and merges the lifecycle and candidate revision
 conditions into immutable transaction inputs. It still performs no store
 access, quarantine-resource authorization, execution, or result verification.
+`RestartPlanPublicationPreparer` sequences the existing live-authority
+preparer before the stable lifecycle reader and returns that composed value
+without mutating the store. It exposes one error boundary for retryable
+authority/lifecycle contention, lost coordinator authority, unsafe clocks, and
+durable corruption. A closure committed after the authority observation or
+other cross-read mismatch remains retryable contention.
 
 Before commit, the coordinator validates:
 

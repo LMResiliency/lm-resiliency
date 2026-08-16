@@ -17,17 +17,57 @@ from lm_resiliency.integrations.torchrun._coordinator_lease import (
 from lm_resiliency.integrations.torchrun._coordinator_lease_history import (
     CoordinatorLeaseAuthority,
 )
+from lm_resiliency.integrations.torchrun._restart_plan_publication import (
+    RestartPlanPublicationClockError,
+    RestartPlanPublicationConflict,
+    RestartPlanPublicationCorrupt,
+    RestartPlanPublicationError,
+    RestartPlanPublicationLeaseLost,
+    RestartPlanPublicationPreparer,
+)
 from lm_resiliency.integrations.torchrun._restart_plan_publication_authority import (
     RestartPlanPublicationAuthority,
 )
 from lm_resiliency.integrations.torchrun._restart_plan_publication_lifecycle import (
     RestartPlanPublicationLifecycleFence,
 )
+from lm_resiliency.integrations.torchrun._restart_plan_publication_lifecycle_reader import (
+    RestartPlanPublicationLifecycleConflict,
+    RestartPlanPublicationLifecycleCorrupt,
+)
+from lm_resiliency.integrations.torchrun._restart_plan_publication_preparation import (
+    RestartPlanPublicationPreparationClockError,
+    RestartPlanPublicationPreparationConflict,
+    RestartPlanPublicationPreparationCorrupt,
+    RestartPlanPublicationPreparationLeaseLost,
+)
 from lm_resiliency.integrations.torchrun._restart_plan_publication_state import (
     PreparedRestartPlanPublication,
 )
 
 RUN_ID = "training-run"
+
+
+class FailingReader:
+    def __init__(self, value=None, error: Exception | None = None) -> None:
+        self._value = value
+        self._error = error
+
+    def read(self):
+        if self._error is not None:
+            raise self._error
+        return self._value
+
+
+class FailingPreparer:
+    def __init__(self, value=None, error: Exception | None = None) -> None:
+        self._value = value
+        self._error = error
+
+    def prepare(self, records):
+        if self._error is not None:
+            raise self._error
+        return self._value
 
 
 def _lease_authority(
@@ -273,4 +313,112 @@ def test_prepared_publication_rejects_guard_key_reuse(location: str):
         PreparedRestartPlanPublication(
             authority=prepared.authority,
             lifecycle_fence=prepared.lifecycle_fence,
+        )
+
+
+def _preparer_for(prepared: PreparedRestartPlanPublication) -> RestartPlanPublicationPreparer:
+    preparer = RestartPlanPublicationPreparer(
+        cast(Any, object()),
+        run_id=RUN_ID,
+        clock=lambda: 1_100,
+    )
+    preparer._authority_preparer = cast(
+        Any,
+        FailingPreparer(value=prepared.authority),
+    )
+    preparer._lifecycle_reader = cast(
+        Any,
+        FailingReader(value=prepared.lifecycle_fence),
+    )
+    return preparer
+
+
+def test_publication_preparer_composes_authenticated_inputs_without_mutation():
+    expected = _prepared()
+    preparer = _preparer_for(expected)
+
+    prepared = preparer.prepare(expected.authority.records)
+
+    assert prepared == expected
+
+
+@pytest.mark.parametrize(
+    ("dependency_error", "expected_error"),
+    [
+        (
+            RestartPlanPublicationPreparationConflict("authority changed"),
+            RestartPlanPublicationConflict,
+        ),
+        (
+            RestartPlanPublicationPreparationLeaseLost("lease lost"),
+            RestartPlanPublicationLeaseLost,
+        ),
+        (
+            RestartPlanPublicationPreparationClockError("clock moved"),
+            RestartPlanPublicationClockError,
+        ),
+        (
+            RestartPlanPublicationPreparationCorrupt("lease corrupt"),
+            RestartPlanPublicationCorrupt,
+        ),
+    ],
+)
+def test_publication_preparer_translates_authority_failures(
+    dependency_error: RuntimeError,
+    expected_error: type[RestartPlanPublicationError],
+):
+    expected = _prepared()
+    preparer = _preparer_for(expected)
+    preparer._authority_preparer = cast(Any, FailingPreparer(error=dependency_error))
+
+    with pytest.raises(expected_error):
+        preparer.prepare(expected.authority.records)
+
+
+@pytest.mark.parametrize(
+    ("dependency_error", "expected_error"),
+    [
+        (
+            RestartPlanPublicationLifecycleConflict("lifecycle changed"),
+            RestartPlanPublicationConflict,
+        ),
+        (
+            RestartPlanPublicationLifecycleCorrupt("lifecycle corrupt"),
+            RestartPlanPublicationCorrupt,
+        ),
+    ],
+)
+def test_publication_preparer_translates_lifecycle_failures(
+    dependency_error: RuntimeError,
+    expected_error: type[RestartPlanPublicationError],
+):
+    expected = _prepared()
+    preparer = _preparer_for(expected)
+    preparer._lifecycle_reader = cast(Any, FailingReader(error=dependency_error))
+
+    with pytest.raises(expected_error):
+        preparer.prepare(expected.authority.records)
+
+
+def test_publication_preparer_classifies_cross_read_mismatch_as_conflict():
+    expected = _prepared()
+    preparer = _preparer_for(expected)
+    expected.authority.observed_at_unix_ms = 1_049
+
+    with pytest.raises(RestartPlanPublicationConflict, match="changed during preparation"):
+        preparer.prepare(expected.authority.records)
+
+
+def test_publication_preparer_requires_valid_constructor_inputs():
+    with pytest.raises(ValueError, match="non-empty"):
+        RestartPlanPublicationPreparer(
+            cast(Any, object()),
+            run_id="",
+            clock=lambda: 1,
+        )
+    with pytest.raises(TypeError, match="callable"):
+        RestartPlanPublicationPreparer(
+            cast(Any, object()),
+            run_id=RUN_ID,
+            clock=cast(Any, None),
         )
