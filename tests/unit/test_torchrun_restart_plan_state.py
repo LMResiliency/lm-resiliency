@@ -6,6 +6,7 @@ import hashlib
 import threading
 from collections.abc import Callable
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -66,6 +67,10 @@ from lm_resiliency.integrations.torchrun._quarantine_records import (
     NodeQuarantineRecord,
 )
 from lm_resiliency.integrations.torchrun._quarantine_store import node_quarantine_key
+from lm_resiliency.integrations.torchrun._restart_intent_lifecycle_reader import (
+    RestartIntentLifecycleReadCorrupt,
+    RestartIntentLifecycleReadError,
+)
 from lm_resiliency.integrations.torchrun._restart_intent_records import (
     RestartIntentHeadRecord,
     RestartIntentLifecycleRecord,
@@ -148,9 +153,11 @@ class SequenceGenerationReader:
         *,
         snapshot_key: str,
         head_key: str,
+        snapshots: dict[int, StoredGenerationSnapshot | None | Exception] | None = None,
     ) -> None:
         self._values = list(values)
         self._snapshot_key = snapshot_key
+        self._snapshots = snapshots or {}
         self.head_key = head_key
 
     def current(self) -> CurrentGeneration | None:
@@ -164,6 +171,39 @@ class SequenceGenerationReader:
 
     def snapshot_key(self, generation: int) -> str:
         return self._snapshot_key
+
+    def get(self, generation: int) -> StoredGenerationSnapshot | None:
+        value = self._snapshots.get(generation)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+
+class SequenceLifecycleReader:
+    def __init__(self, values: list[object | Exception]) -> None:
+        self._values = list(values)
+
+    def read(self):
+        if len(self._values) > 1:
+            value = self._values.pop(0)
+        else:
+            value = self._values[0]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+
+class ChangingLifecycleReader:
+    def __init__(self, lifecycle: object) -> None:
+        self._lifecycle = lifecycle
+        self._sequence = 0
+
+    def read(self):
+        self._sequence += 1
+        return SimpleNamespace(
+            **vars(self._lifecycle),
+            observation=self._sequence,
+        )
 
 
 def _assignment(
@@ -2413,6 +2453,172 @@ def test_restart_plan_publication_reader_requires_exact_current_snapshot():
 
     with pytest.raises(RestartPlanPublicationReadCorrupt, match="current generation"):
         reader.read()
+
+
+def _recovery_reader() -> tuple[
+    RestartPlanPublicationReader,
+    PersistedRestartPlanPublication,
+    object,
+    StoredGenerationSnapshot,
+]:
+    reader, _, publication, current = _publication_reader()
+    records = _publication_records()
+    source_snapshot = records.candidate.recovery_state.copy_state.inventory_state.quarantine_state.manifest_state.resolved_manifest.source_snapshot
+    lifecycle = SimpleNamespace(
+        intent=_intent_record(),
+        lifecycle=_lifecycle_record(),
+        generation_snapshot=records.current.snapshot,
+        immediate_successor=current.snapshot,
+    )
+    reader._lifecycle_reader = cast(Any, SequenceLifecycleReader([lifecycle]))
+    reader._generation_reader = cast(
+        Any,
+        SequenceGenerationReader(
+            [current],
+            snapshot_key=reader._generation_reader.snapshot_key(publication.plan.to_generation),
+            head_key=reader._generation_reader.head_key,
+            snapshots={source_snapshot.record.assignment.generation: source_snapshot},
+        ),
+    )
+    return reader, publication, lifecycle, source_snapshot
+
+
+def test_restart_plan_publication_reader_reauthorizes_verified_recovery():
+    reader, publication, _, source_snapshot = _recovery_reader()
+
+    state = reader.read_recovery_state()
+
+    assert state is not None
+    assert state.publication == publication
+    assert state.manifest_source_snapshot == source_snapshot
+    assert state.plan == publication.plan
+
+
+def test_restart_plan_publication_reader_recovery_returns_none_without_publication():
+    reader, _, _, _ = _recovery_reader()
+    reader._generation_reader = cast(
+        Any,
+        SequenceGenerationReader(
+            [None],
+            snapshot_key="unused",
+            head_key="unused",
+        ),
+    )
+
+    assert reader.read_recovery_state() is None
+
+
+def test_restart_plan_publication_reader_recovery_requires_exact_lifecycle():
+    reader, _, lifecycle, _ = _recovery_reader()
+    reader._lifecycle_reader = cast(
+        Any,
+        SequenceLifecycleReader(
+            [
+                SimpleNamespace(
+                    **{
+                        **vars(lifecycle),
+                        "lifecycle": replace(
+                            lifecycle.lifecycle,
+                            lease_id="lease-other",
+                        ),
+                    }
+                )
+            ]
+        ),
+    )
+
+    with pytest.raises(RestartPlanPublicationReadCorrupt, match="closed lifecycle"):
+        reader.read_recovery_state()
+
+
+def test_restart_plan_publication_reader_recovery_requires_exact_successor():
+    reader, _, lifecycle, _ = _recovery_reader()
+    reader._lifecycle_reader = cast(
+        Any,
+        SequenceLifecycleReader(
+            [
+                SimpleNamespace(
+                    **{
+                        **vars(lifecycle),
+                        "immediate_successor": None,
+                    }
+                )
+            ]
+        ),
+    )
+
+    with pytest.raises(RestartPlanPublicationReadCorrupt, match="closed lifecycle"):
+        reader.read_recovery_state()
+
+
+def test_restart_plan_publication_reader_recovery_retries_lifecycle_change():
+    reader, publication, lifecycle, _ = _recovery_reader()
+    changed = SimpleNamespace(**vars(lifecycle), observation=1)
+    reader._lifecycle_reader = cast(
+        Any,
+        SequenceLifecycleReader([lifecycle, changed, changed, changed]),
+    )
+
+    state = reader.read_recovery_state()
+
+    assert state is not None
+    assert state.publication == publication
+
+
+def test_restart_plan_publication_reader_recovery_rejects_repeated_lifecycle_changes():
+    reader, _, lifecycle, _ = _recovery_reader()
+    reader._lifecycle_reader = cast(Any, ChangingLifecycleReader(lifecycle))
+
+    with pytest.raises(RestartPlanPublicationReadConflict, match="changed repeatedly"):
+        reader.read_recovery_state()
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            RestartIntentLifecycleReadError("busy"),
+            RestartPlanPublicationReadConflict,
+        ),
+        (
+            RestartIntentLifecycleReadCorrupt("bad"),
+            RestartPlanPublicationReadCorrupt,
+        ),
+    ],
+)
+def test_restart_plan_publication_reader_recovery_translates_lifecycle_errors(
+    error: Exception,
+    expected: type[Exception],
+):
+    reader, _, _, _ = _recovery_reader()
+    reader._lifecycle_reader = cast(Any, SequenceLifecycleReader([error]))
+
+    with pytest.raises(expected):
+        reader.read_recovery_state()
+
+
+def test_restart_plan_publication_reader_recovery_requires_manifest_source():
+    reader, publication, _, _ = _recovery_reader()
+    current = reader._generation_reader.current()
+    assert current is not None
+    reader._generation_reader = cast(
+        Any,
+        SequenceGenerationReader(
+            [current],
+            snapshot_key=reader._generation_reader.snapshot_key(publication.plan.to_generation),
+            head_key=reader._generation_reader.head_key,
+        ),
+    )
+
+    with pytest.raises(RestartPlanPublicationReadCorrupt, match="missing manifest source"):
+        reader.read_recovery_state()
+
+
+def test_restart_plan_publication_reader_recovery_requires_acknowledgement_type():
+    reader, _, _, _ = _recovery_reader()
+
+    with pytest.raises(TypeError, match="acknowledgement_evidence"):
+        reader.read_recovery_state(acknowledgement_evidence=cast(Any, object()))
 
 
 def test_persisted_restart_plan_publication_rejects_malformed_records():
