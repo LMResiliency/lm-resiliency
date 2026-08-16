@@ -21,6 +21,9 @@ from lm_resiliency.integrations.torchrun._protocol import (
     RestartPlan,
     SlotAssignment,
 )
+from lm_resiliency.integrations.torchrun._quarantine_records import (
+    NodeQuarantineRecord,
+)
 from lm_resiliency.integrations.torchrun._restart_intent_records import (
     RestartIntentHeadRecord,
     RestartIntentLifecycleRecord,
@@ -34,6 +37,7 @@ from lm_resiliency.integrations.torchrun._restart_plan_state import (
     ResolvedRecoveryManifest,
     RestartPlanGenerationState,
     RestartPlanManifestState,
+    RestartPlanQuarantineState,
 )
 
 RUN_ID = "training-run"
@@ -706,3 +710,203 @@ def test_restart_plan_manifest_state_does_not_claim_copy_completeness():
     state = _manifest_state(manifest=incomplete)
 
     assert len(state.manifest.rank_copies) == 3
+
+
+def _quarantine_state() -> RestartPlanQuarantineState:
+    manifest_state = _manifest_state()
+    plan = replace(
+        manifest_state.plan,
+        quarantined_node_ids=("node-b",),
+    )
+    plan_record = manifest_state.generation_state.record
+    quarantine_record = NodeQuarantineRecord(
+        run_id=plan.run_id,
+        node_id="node-b",
+        plan_id=plan.plan_id,
+        intent_id=plan.intent_id,
+        from_generation=plan.from_generation,
+        effective_generation=plan.to_generation,
+        incident_ids=plan.incident_ids,
+        reason_code=plan.reason_code,
+        resource_ids=("gpu-b0",),
+        coordinator_id=plan_record.coordinator_id,
+        lease_id=plan_record.lease_id,
+        coordinator_lease_duration_ms=plan_record.coordinator_lease_duration_ms,
+        coordinator_fencing_token=plan_record.coordinator_fencing_token,
+    )
+    generation_state = replace(
+        manifest_state.generation_state,
+        record=replace(
+            plan_record,
+            plan=plan,
+            quarantine_record_digests={"node-b": quarantine_record.digest},
+        ),
+    )
+    return RestartPlanQuarantineState(
+        manifest_state=replace(
+            manifest_state,
+            generation_state=generation_state,
+        ),
+        quarantine_records={"node-b": quarantine_record},
+    )
+
+
+def test_restart_plan_quarantine_state_binds_exact_records():
+    state = _quarantine_state()
+
+    assert state.plan == state.manifest_state.plan
+    assert state.quarantine_records["node-b"].node_id == "node-b"
+
+    with pytest.raises(TypeError):
+        state.quarantine_records["node-b"] = state.quarantine_records["node-b"]
+
+
+def test_restart_plan_quarantine_state_allows_no_quarantine_records():
+    state = RestartPlanQuarantineState(
+        manifest_state=_manifest_state(),
+        quarantine_records={},
+    )
+
+    assert not state.quarantine_records
+
+
+def test_restart_plan_quarantine_state_requires_exact_types():
+    state = _quarantine_state()
+
+    with pytest.raises(TypeError, match="manifest_state must be"):
+        replace(state, manifest_state=state.manifest_state.generation_state)
+
+    with pytest.raises(TypeError, match="must be a mapping"):
+        replace(state, quarantine_records=())
+
+    with pytest.raises(TypeError, match="must be NodeQuarantineRecord"):
+        replace(state, quarantine_records={"node-b": state.quarantine_records["node-b"].to_dict()})
+
+
+@pytest.mark.parametrize(
+    "quarantine_records",
+    [
+        {},
+        {
+            "node-b": _quarantine_state().quarantine_records["node-b"],
+            "node-c": replace(
+                _quarantine_state().quarantine_records["node-b"],
+                node_id="node-c",
+            ),
+        },
+    ],
+)
+def test_restart_plan_quarantine_state_requires_exact_node_coverage(quarantine_records):
+    with pytest.raises(ValueError, match="exactly cover"):
+        replace(
+            _quarantine_state(),
+            quarantine_records=quarantine_records,
+        )
+
+
+def test_restart_plan_quarantine_state_rejects_record_node_key_mismatch():
+    state = _quarantine_state()
+
+    with pytest.raises(ValueError, match="node does not match"):
+        replace(
+            state,
+            quarantine_records={
+                "node-b": replace(
+                    state.quarantine_records["node-b"],
+                    node_id="node-c",
+                )
+            },
+        )
+
+
+def test_restart_plan_quarantine_state_rejects_wrong_record_digest():
+    state = _quarantine_state()
+
+    with pytest.raises(ValueError, match="record digest"):
+        replace(
+            state,
+            quarantine_records={
+                "node-b": replace(
+                    state.quarantine_records["node-b"],
+                    resource_ids=("gpu-b1",),
+                )
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        replace(_quarantine_state().quarantine_records["node-b"], run_id="other-run"),
+        replace(_quarantine_state().quarantine_records["node-b"], plan_id="other-plan"),
+        replace(_quarantine_state().quarantine_records["node-b"], intent_id="other-intent"),
+        replace(
+            _quarantine_state().quarantine_records["node-b"],
+            from_generation=3,
+            effective_generation=4,
+        ),
+        replace(
+            _quarantine_state().quarantine_records["node-b"],
+            incident_ids=("other-incident",),
+        ),
+        replace(_quarantine_state().quarantine_records["node-b"], reason_code="other-reason"),
+    ],
+)
+def test_restart_plan_quarantine_state_rejects_plan_metadata_mismatch(record):
+    state = _quarantine_state()
+    plan_record = replace(
+        state.manifest_state.generation_state.record,
+        quarantine_record_digests={"node-b": record.digest},
+    )
+
+    with pytest.raises(ValueError, match="does not match its plan"):
+        replace(
+            state,
+            manifest_state=replace(
+                state.manifest_state,
+                generation_state=replace(
+                    state.manifest_state.generation_state,
+                    record=plan_record,
+                ),
+            ),
+            quarantine_records={"node-b": record},
+        )
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        replace(
+            _quarantine_state().quarantine_records["node-b"],
+            coordinator_id="other-coordinator",
+        ),
+        replace(_quarantine_state().quarantine_records["node-b"], lease_id="other-lease"),
+        replace(
+            _quarantine_state().quarantine_records["node-b"],
+            coordinator_lease_duration_ms=1_000,
+        ),
+        replace(
+            _quarantine_state().quarantine_records["node-b"],
+            coordinator_fencing_token=10,
+        ),
+    ],
+)
+def test_restart_plan_quarantine_state_rejects_publication_authority_mismatch(record):
+    state = _quarantine_state()
+    plan_record = replace(
+        state.manifest_state.generation_state.record,
+        quarantine_record_digests={"node-b": record.digest},
+    )
+
+    with pytest.raises(ValueError, match="publication authority"):
+        replace(
+            state,
+            manifest_state=replace(
+                state.manifest_state,
+                generation_state=replace(
+                    state.manifest_state.generation_state,
+                    record=plan_record,
+                ),
+            ),
+            quarantine_records={"node-b": record},
+        )
