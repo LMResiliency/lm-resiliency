@@ -977,6 +977,10 @@ intent, verified agent-registration history, and durable coordinator-lease
 history. It binds a receipt to the exact current registration and live
 coordinator authority without sampling a clock or mutating the store. Durable
 contradictions fail closed, while repeated-read contention remains retryable.
+The following non-mutating preparer samples a monotonic coordinator clock only
+after authentication, rejects an elapsed registration, coordinator lease, or
+intent window, and chooses the earliest exclusive deadline for the guarded
+receipt transaction.
 
 For a crashed or unreachable node, no preparation is assumed.
 
