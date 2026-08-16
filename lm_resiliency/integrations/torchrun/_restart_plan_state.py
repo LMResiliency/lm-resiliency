@@ -40,6 +40,7 @@ from lm_resiliency.integrations.torchrun._restart_intent_records import (
 )
 from lm_resiliency.integrations.torchrun._restart_plan_records import (
     RecoveryManifestRecord,
+    RestartPlanEvidenceRecord,
     RestartPlanRecord,
 )
 
@@ -52,11 +53,13 @@ class PersistedRestartPlanPublication:
 
     record: RestartPlanRecord
     manifest_record: RecoveryManifestRecord
+    evidence_record: RestartPlanEvidenceRecord
     successor_snapshot: GenerationSnapshotRecord
     generation_head: GenerationHeadRecord
     quarantine_records: Mapping[str, NodeQuarantineRecord]
     plan_entry: ControlStoreEntry
     manifest_entry: ControlStoreEntry
+    evidence_entry: ControlStoreEntry
     successor_snapshot_entry: ControlStoreEntry
     generation_head_entry: ControlStoreEntry
     quarantine_entries: Mapping[str, ControlStoreEntry]
@@ -65,10 +68,12 @@ class PersistedRestartPlanPublication:
         expected_types = (
             ("record", self.record, RestartPlanRecord),
             ("manifest_record", self.manifest_record, RecoveryManifestRecord),
+            ("evidence_record", self.evidence_record, RestartPlanEvidenceRecord),
             ("successor_snapshot", self.successor_snapshot, GenerationSnapshotRecord),
             ("generation_head", self.generation_head, GenerationHeadRecord),
             ("plan_entry", self.plan_entry, ControlStoreEntry),
             ("manifest_entry", self.manifest_entry, ControlStoreEntry),
+            ("evidence_entry", self.evidence_entry, ControlStoreEntry),
             (
                 "successor_snapshot_entry",
                 self.successor_snapshot_entry,
@@ -102,6 +107,7 @@ class PersistedRestartPlanPublication:
         to_generation: int,
         plan_entry: ControlStoreEntry,
         manifest_entry: ControlStoreEntry,
+        evidence_entry: ControlStoreEntry,
         successor_snapshot_entry: ControlStoreEntry,
         generation_head_entry: ControlStoreEntry,
         quarantine_entries: Mapping[str, ControlStoreEntry],
@@ -119,6 +125,7 @@ class PersistedRestartPlanPublication:
         entries = (
             ("plan_entry", plan_entry),
             ("manifest_entry", manifest_entry),
+            ("evidence_entry", evidence_entry),
             ("successor_snapshot_entry", successor_snapshot_entry),
             ("generation_head_entry", generation_head_entry),
         )
@@ -132,6 +139,7 @@ class PersistedRestartPlanPublication:
         try:
             record = RestartPlanRecord.from_json(plan_entry.value)
             manifest_record = RecoveryManifestRecord.from_json(manifest_entry.value)
+            evidence_record = RestartPlanEvidenceRecord.from_json(evidence_entry.value)
             successor_snapshot = GenerationSnapshotRecord.from_json(successor_snapshot_entry.value)
             generation_head = GenerationHeadRecord.from_json(generation_head_entry.value)
             quarantine_records = {
@@ -147,11 +155,13 @@ class PersistedRestartPlanPublication:
         return cls(
             record=record,
             manifest_record=manifest_record,
+            evidence_record=evidence_record,
             successor_snapshot=successor_snapshot,
             generation_head=generation_head,
             quarantine_records=quarantine_records,
             plan_entry=plan_entry,
             manifest_entry=manifest_entry,
+            evidence_entry=evidence_entry,
             successor_snapshot_entry=successor_snapshot_entry,
             generation_head_entry=generation_head_entry,
             quarantine_entries=normalized_quarantine_entries,
@@ -183,6 +193,19 @@ class PersistedRestartPlanPublication:
             self.manifest_record,
             path="PersistedRestartPlanPublication",
         )
+        if self.record.recovery_evidence_record_digest != self.evidence_record.digest:
+            raise ValueError(
+                "PersistedRestartPlanPublication recovery evidence digest does not match its plan"
+            )
+        if (
+            self.evidence_record.plan_id != plan.plan_id
+            or self.evidence_record.run_id != plan.run_id
+            or self.evidence_record.manifest_id != self.manifest_record.manifest.manifest_id
+        ):
+            raise ValueError(
+                "PersistedRestartPlanPublication recovery evidence "
+                "does not match its plan and manifest"
+            )
         if self.record.to_generation_snapshot_digest != self.successor_snapshot.digest:
             raise ValueError(
                 "PersistedRestartPlanPublication successor digest does not match its plan"
@@ -244,6 +267,7 @@ class PersistedRestartPlanPublication:
         entries = {
             "plan": self.plan_entry,
             "manifest": self.manifest_entry,
+            "evidence": self.evidence_entry,
             "successor": self.successor_snapshot_entry,
             "generation head": self.generation_head_entry,
             **{
@@ -254,6 +278,7 @@ class PersistedRestartPlanPublication:
         expected_values = {
             "plan": self.record.to_json(),
             "manifest": self.manifest_record.to_json(),
+            "evidence": self.evidence_record.to_json(),
             "successor": self.successor_snapshot.to_json(),
             "generation head": self.generation_head.to_json(),
             **{

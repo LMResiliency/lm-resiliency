@@ -34,6 +34,7 @@ from lm_resiliency.integrations.torchrun._restart_plan_publication_records impor
     PreparedRestartPlanPublication,
     RestartPlanPublicationAuthority,
     RestartPlanPublicationRecords,
+    recovery_evidence_key,
     recovery_manifest_key,
     restart_plan_key,
 )
@@ -229,6 +230,7 @@ class RestartPlanPublicationReadCorrupt(RestartPlanPublicationReadError):
 class _PublicationEntries:
     plan: ControlStoreEntry
     manifest: ControlStoreEntry
+    evidence: ControlStoreEntry
     successor_snapshot: ControlStoreEntry
     generation_head: ControlStoreEntry
     quarantines: tuple[tuple[str, ControlStoreEntry], ...]
@@ -310,6 +312,10 @@ class RestartPlanPublicationReader:
                 recovery_manifest_key(self._run_id, generation),
                 "recovery manifest",
             ),
+            evidence=self._require_entry(
+                recovery_evidence_key(self._run_id, generation),
+                "recovery evidence",
+            ),
             successor_snapshot=self._require_entry(
                 self._generation_reader.snapshot_key(generation),
                 "successor generation snapshot",
@@ -340,6 +346,7 @@ class RestartPlanPublicationReader:
                 to_generation=generation,
                 plan_entry=entries.plan,
                 manifest_entry=entries.manifest,
+                evidence_entry=entries.evidence,
                 successor_snapshot_entry=entries.successor_snapshot,
                 generation_head_entry=entries.generation_head,
                 quarantine_entries=dict(entries.quarantines),

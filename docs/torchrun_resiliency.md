@@ -777,6 +777,9 @@ one run, plan ID, and manifest ID and exposes its own digest for the plan
 envelope. Construction proves only canonical durable evidence identity; later
 state validation must still match the events and certifications to the plan,
 manifest, acknowledgements, source generation, and copy eligibility.
+The publication bundle writes that evidence record create-once beside the
+manifest, plan, quarantine records, successor snapshot, and generation-head
+update. Its digest must already match the signed plan envelope.
 `RestartPlanGenerationState` binds that envelope to the exact closed intent,
 current generation, successor generation, successor assignment, and shared
 coordinator publication authority. Manifest and quarantine resolution remain
@@ -883,15 +886,16 @@ provenance, input ordering, and commit window before the publication is
 accepted. Lifecycle, generation, or registration churn remains a classified
 conflict; substituted store responses fail closed as corruption.
 `PersistedRestartPlanPublication` reconstructs the publication transaction
-from canonical plan, manifest, quarantine, successor-snapshot, and
-generation-head entries for one requested run. It requires exact envelope
-digests, the requested successor generation, an exact plan-derived successor
-assignment and predecessor digest, immutable record lineage, one transaction
-and commit time, canonical coordinator-lease guard provenance, a transaction
-sequence after the generation-head and lease mutations, and a commit inside
-both the lease and restart-deadline windows. Decoding also rejects manifest
-metadata or trust that conflicts with the plan and quarantine records that
-conflict with the plan lifecycle or publication authority.
+from canonical plan, manifest, recovery-evidence, quarantine,
+successor-snapshot, and generation-head entries for one requested run. It
+requires exact envelope digests, the requested successor generation, an exact
+plan-derived successor assignment and predecessor digest, immutable record
+lineage, one transaction and commit time, canonical coordinator-lease guard
+provenance, a transaction sequence after the generation-head and lease
+mutations, and a commit inside both the lease and restart-deadline windows.
+Decoding also rejects manifest metadata or trust that conflicts with the plan,
+evidence metadata that conflicts with the plan or manifest, and quarantine
+records that conflict with the plan lifecycle or publication authority.
 This transaction decoder does not by itself resolve the source generation,
 closed lifecycle, lease history, inventory evidence, or currently committed
 generation; the stable publication reader performs those checks before

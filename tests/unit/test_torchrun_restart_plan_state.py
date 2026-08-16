@@ -84,11 +84,13 @@ from lm_resiliency.integrations.torchrun._restart_plan_publication import (
 from lm_resiliency.integrations.torchrun._restart_plan_publication_records import (
     RestartPlanPublicationAuthority,
     RestartPlanPublicationRecords,
+    recovery_evidence_key,
     recovery_manifest_key,
     restart_plan_key,
 )
 from lm_resiliency.integrations.torchrun._restart_plan_records import (
     RecoveryManifestRecord,
+    RestartPlanEvidenceRecord,
     RestartPlanRecord,
 )
 from lm_resiliency.integrations.torchrun._restart_plan_state import (
@@ -2023,6 +2025,8 @@ def test_restart_plan_candidate_state_rejects_elapsed_restart_deadline():
 def _publication_records() -> RestartPlanPublicationRecords:
     candidate = _candidate_state()
     inventory_state = candidate.recovery_state.copy_state.inventory_state
+    trust_state = candidate.recovery_state.trust_state
+    assert isinstance(trust_state, RestartPlanCertificationState)
     quarantine_state = inventory_state.quarantine_state
     manifest_state = quarantine_state.manifest_state
     source_snapshot = replace(
@@ -2033,11 +2037,19 @@ def _publication_records() -> RestartPlanPublicationRecords:
         manifest_state.resolved_manifest.record,
         source_generation_snapshot_digest=source_snapshot.record.digest,
     )
+    evidence_record = RestartPlanEvidenceRecord(
+        plan_id=candidate.plan.plan_id,
+        run_id=candidate.plan.run_id,
+        manifest_id=manifest_record.manifest.manifest_id,
+        inventory_events=inventory_state.inventory_events,
+        certifications=trust_state.certifications,
+    )
     generation_state = replace(
         manifest_state.generation_state,
         record=replace(
             manifest_state.generation_state.record,
             recovery_manifest_record_digest=manifest_record.digest,
+            recovery_evidence_record_digest=evidence_record.digest,
         ),
     )
     manifest_state = RestartPlanManifestState(
@@ -2056,8 +2068,6 @@ def _publication_records() -> RestartPlanPublicationRecords:
         inventory_events=inventory_state.inventory_events,
     )
     copy_state = RestartPlanCopyEligibilityState(inventory_state)
-    trust_state = candidate.recovery_state.trust_state
-    assert isinstance(trust_state, RestartPlanCertificationState)
     candidate = RestartPlanCandidateState(
         recovery_state=RestartPlanRecoveryEvidenceState(
             copy_state=copy_state,
@@ -2096,6 +2106,7 @@ def _persisted_publication() -> PersistedRestartPlanPublication:
         publication.candidate.recovery_state.copy_state.inventory_state.quarantine_state
     )
     manifest_record = quarantine_state.manifest_state.resolved_manifest.record
+    evidence_record = publication.recovery_evidence_record
     plan_record = generation_state.record
     run_digest = hashlib.sha256(RUN_ID.encode()).hexdigest()
     guard_key = f"lm_resiliency/torchrun/v1/runs/{run_digest}/coordinator-lease"
@@ -2124,9 +2135,10 @@ def _persisted_publication() -> PersistedRestartPlanPublication:
         to_generation=publication.candidate.plan.to_generation,
         plan_entry=immutable_entry(plan_record.to_json(), 21),
         manifest_entry=immutable_entry(manifest_record.to_json(), 22),
+        evidence_entry=immutable_entry(evidence_record.to_json(), 23),
         successor_snapshot_entry=immutable_entry(
             generation_state.to_snapshot.to_json(),
-            23,
+            24,
         ),
         generation_head_entry=replace(
             immutable_entry(publication.generation_head.to_json(), 29),
@@ -2141,6 +2153,7 @@ def test_persisted_restart_plan_publication_decodes_atomic_records():
     state = _persisted_publication()
 
     assert state.record.plan == state.plan
+    assert state.record.recovery_evidence_record_digest == state.evidence_record.digest
     assert state.generation_head.snapshot_digest == state.successor_snapshot.digest
     assert state.committed_at_unix_ms == 1_200
     assert state.transaction_sequence == 30
@@ -2195,6 +2208,10 @@ def _publication_reader(
                 RUN_ID,
                 publication.plan.to_generation,
             ): publication.manifest_entry,
+            recovery_evidence_key(
+                RUN_ID,
+                publication.plan.to_generation,
+            ): publication.evidence_entry,
             snapshot_key: publication.successor_snapshot_entry,
             head_key: publication.generation_head_entry,
             **{
@@ -2226,12 +2243,16 @@ def test_restart_plan_publication_reader_returns_none_without_generation():
     assert reader.read() is None
 
 
-@pytest.mark.parametrize("path", ["plan", "manifest", "snapshot", "head", "quarantine"])
+@pytest.mark.parametrize(
+    "path",
+    ["plan", "manifest", "evidence", "snapshot", "head", "quarantine"],
+)
 def test_restart_plan_publication_reader_rejects_missing_atomic_entry(path: str):
     reader, store, publication, _ = _publication_reader()
     keys = {
         "plan": restart_plan_key(RUN_ID, publication.plan.to_generation),
         "manifest": recovery_manifest_key(RUN_ID, publication.plan.to_generation),
+        "evidence": recovery_evidence_key(RUN_ID, publication.plan.to_generation),
         "snapshot": reader._generation_reader.snapshot_key(publication.plan.to_generation),
         "head": reader._generation_reader.head_key,
         "quarantine": node_quarantine_key(
@@ -2341,6 +2362,7 @@ def test_persisted_restart_plan_publication_rejects_malformed_records():
             to_generation=state.plan.to_generation,
             plan_entry=replace(state.plan_entry, value=b"{}"),
             manifest_entry=state.manifest_entry,
+            evidence_entry=state.evidence_entry,
             successor_snapshot_entry=state.successor_snapshot_entry,
             generation_head_entry=state.generation_head_entry,
             quarantine_entries=state.quarantine_entries,
@@ -2356,6 +2378,7 @@ def test_persisted_restart_plan_publication_binds_the_requested_run():
             to_generation=state.plan.to_generation,
             plan_entry=state.plan_entry,
             manifest_entry=state.manifest_entry,
+            evidence_entry=state.evidence_entry,
             successor_snapshot_entry=state.successor_snapshot_entry,
             generation_head_entry=state.generation_head_entry,
             quarantine_entries=state.quarantine_entries,
@@ -2366,6 +2389,7 @@ def test_persisted_restart_plan_publication_binds_the_requested_run():
             to_generation=state.plan.to_generation,
             plan_entry=state.plan_entry,
             manifest_entry=state.manifest_entry,
+            evidence_entry=state.evidence_entry,
             successor_snapshot_entry=state.successor_snapshot_entry,
             generation_head_entry=state.generation_head_entry,
             quarantine_entries=state.quarantine_entries,
@@ -2376,6 +2400,7 @@ def test_persisted_restart_plan_publication_binds_the_requested_run():
             to_generation=state.plan.to_generation + 1,
             plan_entry=state.plan_entry,
             manifest_entry=state.manifest_entry,
+            evidence_entry=state.evidence_entry,
             successor_snapshot_entry=state.successor_snapshot_entry,
             generation_head_entry=state.generation_head_entry,
             quarantine_entries=state.quarantine_entries,
@@ -2386,6 +2411,7 @@ def test_persisted_restart_plan_publication_binds_the_requested_run():
             to_generation=0,
             plan_entry=state.plan_entry,
             manifest_entry=state.manifest_entry,
+            evidence_entry=state.evidence_entry,
             successor_snapshot_entry=state.successor_snapshot_entry,
             generation_head_entry=state.generation_head_entry,
             quarantine_entries=state.quarantine_entries,
@@ -2401,6 +2427,14 @@ def test_persisted_restart_plan_publication_rejects_digest_substitution():
             manifest_record=replace(
                 state.manifest_record,
                 source_generation_snapshot_digest="f" * 64,
+            ),
+        )
+    with pytest.raises(ValueError, match="recovery evidence digest"):
+        replace(
+            state,
+            evidence_record=replace(
+                state.evidence_record,
+                plan_id="other-plan",
             ),
         )
     with pytest.raises(ValueError, match="successor digest"):
@@ -2438,6 +2472,30 @@ def test_persisted_restart_plan_publication_rejects_manifest_metadata_substituti
             manifest_entry=replace(
                 state.manifest_entry,
                 value=manifest_record.to_json(),
+            ),
+        )
+
+
+def test_persisted_restart_plan_publication_rejects_evidence_metadata_substitution():
+    state = _persisted_publication()
+    evidence_record = replace(
+        state.evidence_record,
+        manifest_id="other-manifest",
+    )
+    plan_record = replace(
+        state.record,
+        recovery_evidence_record_digest=evidence_record.digest,
+    )
+
+    with pytest.raises(ValueError, match="recovery evidence"):
+        replace(
+            state,
+            record=plan_record,
+            evidence_record=evidence_record,
+            plan_entry=replace(state.plan_entry, value=plan_record.to_json()),
+            evidence_entry=replace(
+                state.evidence_entry,
+                value=evidence_record.to_json(),
             ),
         )
 
@@ -2561,6 +2619,11 @@ def test_persisted_restart_plan_publication_requires_the_planned_successor():
             "share one commit time",
         ),
         (
+            "evidence_entry",
+            lambda entry: replace(entry, mutation_sequence=2),
+            "is not immutable",
+        ),
+        (
             "successor_snapshot_entry",
             lambda entry: replace(entry, guard_value_digest="0" * 64),
             "share guard provenance",
@@ -2607,6 +2670,7 @@ def test_persisted_restart_plan_publication_rejects_transaction_that_predates_mu
             state,
             plan_entry=replace(state.plan_entry, transaction_sequence=1),
             manifest_entry=replace(state.manifest_entry, transaction_sequence=1),
+            evidence_entry=replace(state.evidence_entry, transaction_sequence=1),
             successor_snapshot_entry=replace(
                 state.successor_snapshot_entry,
                 transaction_sequence=1,
@@ -2637,6 +2701,7 @@ def test_persisted_restart_plan_publication_rejects_guard_or_time_substitution()
             state,
             plan_entry=replace(state.plan_entry, guard_key=wrong_guard_key),
             manifest_entry=replace(state.manifest_entry, guard_key=wrong_guard_key),
+            evidence_entry=replace(state.evidence_entry, guard_key=wrong_guard_key),
             successor_snapshot_entry=replace(
                 state.successor_snapshot_entry,
                 guard_key=wrong_guard_key,
@@ -2655,6 +2720,7 @@ def test_persisted_restart_plan_publication_rejects_guard_or_time_substitution()
             state,
             plan_entry=replace(state.plan_entry, committed_at_unix_ms=1_400),
             manifest_entry=replace(state.manifest_entry, committed_at_unix_ms=1_400),
+            evidence_entry=replace(state.evidence_entry, committed_at_unix_ms=1_400),
             successor_snapshot_entry=replace(
                 state.successor_snapshot_entry,
                 committed_at_unix_ms=1_400,
@@ -2675,6 +2741,8 @@ def test_persisted_restart_plan_publication_requires_exact_types():
 
     with pytest.raises(TypeError, match="record must be"):
         replace(state, record=state.record.plan)
+    with pytest.raises(TypeError, match="evidence_record must be"):
+        replace(state, evidence_record=state.evidence_record.inventory_events)
     with pytest.raises(TypeError, match="quarantine_entries must be a mapping"):
         replace(state, quarantine_entries=())
 
@@ -2704,6 +2772,11 @@ def test_restart_plan_publication_records_build_canonical_atomic_inputs():
         value=manifest_record.to_json(),
         require_never_created=True,
     )
+    assert records.writes[records.recovery_evidence_key] == ControlStoreWrite(
+        expected_revision=None,
+        value=records.recovery_evidence_record.to_json(),
+        require_never_created=True,
+    )
     assert records.writes[records.plan_key] == ControlStoreWrite(
         expected_revision=None,
         value=generation_state.record.to_json(),
@@ -2730,6 +2803,7 @@ def test_restart_plan_publication_records_derive_run_scoped_keys():
     assert records.run_prefix == f"lm_resiliency/torchrun/v1/runs/{expected_run_digest}"
     assert records.plan_key.endswith("/restart-plans/5")
     assert records.recovery_manifest_key.endswith("/restart-plans/5/recovery-manifest")
+    assert records.recovery_evidence_key.endswith("/restart-plans/5/recovery-evidence")
     assert records.generation_head_key.endswith("/generation-head")
     assert records.source_generation_snapshot_key.endswith("/generations/4")
     assert records.manifest_source_generation_snapshot_key.endswith("/generations/4")
