@@ -1122,7 +1122,14 @@ conflict with the plan lifecycle or publication authority.
 This transaction decoder does not by itself resolve the source generation,
 closed lifecycle, lease history, inventory evidence, or currently committed
 generation; the stable publication reader performs those checks before
-rendezvous may expose the plan.</p>
+rendezvous may expose the plan.
+<code>RestartPlanPublicationReader</code> double-collects the current generation and
+every atomic publication entry, decodes the stable bundle through
+<code>PersistedRestartPlanPublication</code>, and requires the successor snapshot and
+generation-head revisions plus store metadata to equal the authoritative
+current generation. Missing, malformed, mixed, or substituted state fails
+closed; repeated head movement remains a retryable read conflict. This first
+readback boundary still does not reauthorize lifecycle or checkpoint evidence.</p>
 <p>Before commit, the coordinator validates:</p>
 <ul>
 <li>the plan is fenced to the same intent ID, run, generation, incidents, and
