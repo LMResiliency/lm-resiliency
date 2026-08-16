@@ -1169,6 +1169,12 @@ coordinator-lease authority. It also rejects a receipt that predates the
 authoritative intent-opening commit. This value performs no store reads or
 writes. A following read-only layer constructs it from stable durable state
 before the preparation layer selects a bounded commit window.</p>
+<p>Each retained agent-registration value is first decoded as one immutable
+authority. The strict decoder binds canonical registration bytes to the
+expected run and node, requires an authoritative commit time, rejects guarded
+registration writes, and preserves the store transaction, mutation, value, and
+lifetime sequences. It also rejects impossible per-entry sequence lineage. A
+following reader validates the complete registration history and current tail.</p>
 <p>For a crashed or unreachable node, no preparation is assumed.</p>
 <h2 id="api-lm-resiliency-to-the-framework">API: lm-resiliency to the Framework<a class="headerlink" href="#api-lm-resiliency-to-the-framework" title="Permanent link">&para;</a></h2>
 <p>The framework receives a platform-neutral recovery request. It does not receive
