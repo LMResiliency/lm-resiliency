@@ -27,6 +27,11 @@ from lm_resiliency.integrations.torchrun._quarantine_store import node_quarantin
 from lm_resiliency.integrations.torchrun._restart_ack_collection import (
     RestartAckEvidence,
 )
+from lm_resiliency.integrations.torchrun._restart_ack_reader import (
+    RestartAckCollectionReadConflict,
+    RestartAckCollectionReadCorrupt,
+    RestartAckCollector,
+)
 from lm_resiliency.integrations.torchrun._restart_intent_lifecycle_auth import (
     AuthenticatedInitialRestartIntentClosure,
 )
@@ -268,6 +273,10 @@ class RestartPlanPublicationReader:
             store,
             run_id=self._run_id,
         )
+        self._ack_collector = RestartAckCollector(
+            store,
+            run_id=self._run_id,
+        )
 
     def read(self) -> PersistedRestartPlanPublication | None:
         """Return the stable publication for the current generation, if any."""
@@ -308,6 +317,12 @@ class RestartPlanPublicationReader:
                 return None
             lifecycle = self._read_lifecycle()
             manifest_source = self._read_manifest_source(publication)
+            resolved_acknowledgement_evidence = acknowledgement_evidence
+            if (
+                publication.manifest_record.manifest.trust == "latest"
+                and resolved_acknowledgement_evidence is None
+            ):
+                resolved_acknowledgement_evidence = self._read_acknowledgement_evidence(lifecycle)
             if (
                 self.read() != publication
                 or self._read_lifecycle() != lifecycle
@@ -318,7 +333,7 @@ class RestartPlanPublicationReader:
                 publication,
                 lifecycle,
                 manifest_source,
-                acknowledgement_evidence,
+                resolved_acknowledgement_evidence,
             )
         raise RestartPlanPublicationReadConflict(
             "restart-plan recovery state changed repeatedly during read"
@@ -381,6 +396,28 @@ class RestartPlanPublicationReader:
                 "restart-plan publication references a missing manifest source generation"
             )
         return snapshot
+
+    def _read_acknowledgement_evidence(
+        self,
+        lifecycle: AuthenticatedInitialRestartIntentClosure,
+    ) -> RestartAckEvidence:
+        try:
+            collection = self._ack_collector.collect_for_closure(lifecycle)
+        except RestartAckCollectionReadCorrupt as error:
+            raise RestartPlanPublicationReadCorrupt(
+                "historical restart acknowledgements are corrupt while reauthorizing publication"
+            ) from error
+        except RestartAckCollectionReadConflict as error:
+            raise RestartPlanPublicationReadConflict(
+                "historical restart acknowledgements changed repeatedly while "
+                "reauthorizing publication"
+            ) from error
+        try:
+            return RestartAckEvidence(collection)
+        except (TypeError, ValueError) as error:
+            raise RestartPlanPublicationReadCorrupt(
+                "historical restart acknowledgements contradict the publication"
+            ) from error
 
     def _reauthorize(
         self,
