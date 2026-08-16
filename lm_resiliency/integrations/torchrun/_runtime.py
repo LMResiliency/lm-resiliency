@@ -6,8 +6,8 @@ import hashlib
 import importlib
 import json
 import os
+import secrets
 import stat
-import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +27,7 @@ _BACKEND = "lm_resiliency"
 _NODE_ID_ENV = "LM_RESILIENCY_NODE_ID"
 _RESTART_CONTEXT_ENV = "LM_RESILIENCY_RESTART_CONTEXT"
 _MAX_CONTEXT_BYTES = 64 * 1024
+_MAX_POLICY_BYTES = 64 * 1024
 _SHARED_FIELDS = {
     "control_endpoint",
     "replacement_only",
@@ -90,15 +91,9 @@ class TorchrunRendezvousPolicy:
 
     @property
     def digest(self) -> str:
-        """Return the canonical digest agents register for drift detection."""
+        """Return the canonical digest of the shared policy fields."""
 
-        encoded = json.dumps(
-            self.to_dict(),
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        return hashlib.sha256(encoded).hexdigest()
+        return _canonical_digest(self.to_dict())
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -146,6 +141,20 @@ class TorchrunRuntimeConfig:
             _nonempty_string(self.local_addr, "local_addr")
         if not isinstance(self.source_path, Path) or not self.source_path.is_absolute():
             raise TorchrunRuntimeConfigError("source_path must be an absolute pathlib.Path")
+
+    @property
+    def registration_digest(self) -> str:
+        """Return the shared runtime digest registered by every agent."""
+
+        return _canonical_digest(
+            {
+                "policy": self.policy.to_dict(),
+                "run_id": self.run_id,
+                "endpoint": self.endpoint,
+                "min_nodes": self.min_nodes,
+                "max_nodes": self.max_nodes,
+            }
+        )
 
     @classmethod
     def from_parameters(
@@ -217,29 +226,36 @@ class RestartContextFile:
             raise TypeError("path must be pathlib.Path")
         if not self.path.is_absolute():
             raise RestartContextFileError("restart-context path must be absolute")
+        if self.path.name in {"", ".", ".."}:
+            raise RestartContextFileError("restart-context path must name a file")
 
     def write(self, context: RestartContext) -> None:
         if not isinstance(context, RestartContext):
             raise TypeError("context must be RestartContext")
-        parent = self._prepare_parent()
-        self._reject_existing_symlink()
         encoded = (context.to_json() + "\n").encode("utf-8")
         if len(encoded) > _MAX_CONTEXT_BYTES:
             raise RestartContextFileError("restart context is too large")
-        descriptor, temporary = tempfile.mkstemp(
-            prefix=f".{self.path.name}.",
-            suffix=".tmp",
-            dir=parent,
-        )
+        parent_descriptor = self._open_parent(create=True)
+        assert parent_descriptor is not None
+        descriptor = -1
+        temporary = ""
         try:
+            self._reject_existing_symlink(parent_descriptor)
+            descriptor, temporary = self._create_temporary_file(parent_descriptor)
             os.fchmod(descriptor, 0o600)
             with os.fdopen(descriptor, "wb") as stream:
                 descriptor = -1
                 stream.write(encoded)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary, self.path)
-            self._fsync_directory(parent)
+            os.replace(
+                temporary,
+                self.path.name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+            )
+            temporary = ""
+            self._fsync_directory(parent_descriptor)
         except OSError as error:
             raise RestartContextFileError(
                 f"failed to publish restart context at {self.path}"
@@ -250,17 +266,33 @@ class RestartContextFile:
                     os.close(descriptor)
                 except OSError:
                     pass
-            try:
-                os.unlink(temporary)
-            except OSError:
-                pass
+            if temporary:
+                try:
+                    os.unlink(temporary, dir_fd=parent_descriptor)
+                except OSError:
+                    pass
+            os.close(parent_descriptor)
 
     def read(self) -> RestartContext:
-        self._validate_parent()
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        parent_descriptor = self._open_parent(create=False)
+        if parent_descriptor is None:
+            raise RestartContextFileError(
+                f"restart-context directory does not exist for {self.path}"
+            )
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
         try:
-            descriptor = os.open(self.path, flags)
+            descriptor = os.open(
+                self.path.name,
+                flags,
+                dir_fd=parent_descriptor,
+            )
         except OSError as error:
+            os.close(parent_descriptor)
             raise RestartContextFileError(
                 f"failed to open restart context at {self.path}"
             ) from error
@@ -273,6 +305,7 @@ class RestartContextFile:
                 raise RestartContextFileError("restart-context file is too large")
         finally:
             os.close(descriptor)
+            os.close(parent_descriptor)
         try:
             value = json.loads(
                 encoded,
@@ -287,40 +320,84 @@ class RestartContextFile:
             raise RestartContextFileError("restart-context file is malformed") from error
 
     def clear(self) -> None:
-        self._validate_parent()
-        self._reject_existing_symlink()
-        try:
-            self.path.unlink()
-        except FileNotFoundError:
-            self._fsync_directory(self.path.parent)
+        parent_descriptor = self._open_parent(create=False)
+        if parent_descriptor is None:
             return
-        except OSError as error:
-            raise RestartContextFileError(
-                f"failed to remove restart context at {self.path}"
-            ) from error
-        self._fsync_directory(self.path.parent)
-
-    def _prepare_parent(self) -> Path:
-        parent = self.path.parent
         try:
-            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        except OSError as error:
-            raise RestartContextFileError(
-                f"failed to create restart-context directory {parent}"
-            ) from error
-        self._validate_parent()
-        return parent
+            self._reject_existing_symlink(parent_descriptor)
+            try:
+                os.unlink(self.path.name, dir_fd=parent_descriptor)
+            except FileNotFoundError:
+                self._fsync_directory(parent_descriptor)
+                return
+            except OSError as error:
+                raise RestartContextFileError(
+                    f"failed to remove restart context at {self.path}"
+                ) from error
+            self._fsync_directory(parent_descriptor)
+        finally:
+            os.close(parent_descriptor)
 
-    def _validate_parent(self) -> None:
-        parent = self.path.parent
+    def _open_parent(self, *, create: bool) -> int | None:
+        directory_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
         try:
-            metadata = parent.lstat()
+            current = os.open(os.sep, directory_flags)
         except OSError as error:
             raise RestartContextFileError(
-                f"failed to inspect restart-context directory {parent}"
+                "failed to open the filesystem root for restart-context traversal"
             ) from error
-        if stat.S_ISLNK(metadata.st_mode):
-            raise RestartContextFileError("restart-context parent directory must not be a symlink")
+        try:
+            for component in self.path.parent.parts[1:]:
+                if component in {"", ".", ".."}:
+                    raise RestartContextFileError("restart-context parent path is not canonical")
+                try:
+                    following = os.open(
+                        component,
+                        directory_flags,
+                        dir_fd=current,
+                    )
+                except FileNotFoundError:
+                    if not create:
+                        return None
+                    try:
+                        os.mkdir(component, mode=0o700, dir_fd=current)
+                    except FileExistsError:
+                        pass
+                    except OSError as error:
+                        raise RestartContextFileError(
+                            f"failed to create restart-context directory component {component!r}"
+                        ) from error
+                    try:
+                        following = os.open(
+                            component,
+                            directory_flags,
+                            dir_fd=current,
+                        )
+                    except OSError as error:
+                        raise RestartContextFileError(
+                            "restart-context parent path must contain only real directories"
+                        ) from error
+                except OSError as error:
+                    raise RestartContextFileError(
+                        "restart-context parent path must contain only real directories"
+                    ) from error
+                os.close(current)
+                current = following
+            self._validate_owned_private_directory(os.fstat(current))
+            result = current
+            current = -1
+            return result
+        finally:
+            if current >= 0:
+                os.close(current)
+
+    @staticmethod
+    def _validate_owned_private_directory(metadata: os.stat_result) -> None:
         if not stat.S_ISDIR(metadata.st_mode):
             raise RestartContextFileError("restart-context parent is not a directory")
         if metadata.st_uid != os.geteuid():
@@ -330,9 +407,13 @@ class RestartContextFile:
                 "restart-context directory must not grant group or other permissions"
             )
 
-    def _reject_existing_symlink(self) -> None:
+    def _reject_existing_symlink(self, parent_descriptor: int) -> None:
         try:
-            metadata = self.path.lstat()
+            metadata = os.stat(
+                self.path.name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
         except FileNotFoundError:
             return
         except OSError as error:
@@ -341,6 +422,34 @@ class RestartContextFile:
             ) from error
         if stat.S_ISLNK(metadata.st_mode):
             raise RestartContextFileError("restart-context path must not be a symlink")
+
+    def _create_temporary_file(self, parent_descriptor: int) -> tuple[int, str]:
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        for _ in range(128):
+            name = f".{self.path.name}.{secrets.token_hex(16)}.tmp"
+            try:
+                descriptor = os.open(
+                    name,
+                    flags,
+                    0o600,
+                    dir_fd=parent_descriptor,
+                )
+            except FileExistsError:
+                continue
+            except OSError as error:
+                raise RestartContextFileError(
+                    f"failed to create temporary restart context for {self.path}"
+                ) from error
+            return descriptor, name
+        raise RestartContextFileError(
+            f"failed to allocate a temporary restart context for {self.path}"
+        )
 
     @staticmethod
     def _validate_owned_private_file(metadata: os.stat_result) -> None:
@@ -354,23 +463,36 @@ class RestartContextFile:
             )
 
     @staticmethod
-    def _fsync_directory(directory: Path) -> None:
-        descriptor = os.open(
-            directory,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-        )
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+    def _fsync_directory(descriptor: int) -> None:
+        os.fsync(descriptor)
 
 
 def _load_policy_values(path: Path) -> dict[str, object]:
+    descriptor = -1
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
     try:
-        with path.open("rb") as stream:
-            value = _toml.load(stream)
-    except (OSError, _toml.TOMLDecodeError) as error:
+        descriptor = os.open(path, flags)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise TorchrunRuntimeConfigError("rendezvous config path must be a regular file")
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = -1
+            encoded = stream.read(_MAX_POLICY_BYTES + 1)
+        if len(encoded) > _MAX_POLICY_BYTES:
+            raise TorchrunRuntimeConfigError("rendezvous config file is too large")
+        value = _toml.loads(encoded.decode("utf-8"))
+    except TorchrunRuntimeConfigError:
+        raise
+    except (OSError, UnicodeDecodeError, _toml.TOMLDecodeError) as error:
         raise TorchrunRuntimeConfigError(f"failed to load rendezvous config {path}") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
     if not isinstance(value, dict):
         raise TorchrunRuntimeConfigError("rendezvous config must contain a TOML table")
     actual_schema = value.get("schema_version")
@@ -416,6 +538,16 @@ def _policy_from_values(values: Mapping[str, object]) -> TorchrunRendezvousPolic
         raise
     except (TypeError, ValueError) as error:
         raise TorchrunRuntimeConfigError("rendezvous policy is invalid") from error
+
+
+def _canonical_digest(value: Mapping[str, object]) -> str:
+    encoded = json.dumps(
+        value,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _node_value(

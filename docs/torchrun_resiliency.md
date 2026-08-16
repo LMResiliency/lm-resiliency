@@ -1791,8 +1791,10 @@ join_timeout_ms = 300000
 
 The shared policy file contains no node identity or credentials. Every agent
 loads the file, applies any explicitly supplied shared `--rdzv-conf`
-overrides, and registers the canonical resolved-policy digest so drift in
-whitespace does not matter but drift in effective settings fails closed.
+overrides, and registers the canonical runtime digest over the resolved policy,
+run ID, rendezvous endpoint, and `min_nodes`/`max_nodes` range. Drift in
+whitespace or node-local settings does not matter, while drift in effective
+shared settings or fleet-size semantics fails closed.
 Node-specific `node_id` and `restart_context_path` values come from
 `--rdzv-conf` or `LM_RESILIENCY_NODE_ID` and
 `LM_RESILIENCY_RESTART_CONTEXT`; conflicting sources are rejected. Credentials

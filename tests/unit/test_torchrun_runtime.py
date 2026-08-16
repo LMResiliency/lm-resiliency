@@ -37,13 +37,19 @@ def _write_policy(path: Path, content: str = POLICY) -> Path:
     return path
 
 
-def _parameters(path: Path, **config: object) -> RendezvousParameters:
+def _parameters(
+    path: Path,
+    *,
+    min_nodes: int = 2,
+    max_nodes: int = 3,
+    **config: object,
+) -> RendezvousParameters:
     return RendezvousParameters(
         backend="lm_resiliency",
         endpoint="rdzv.example:29400",
         run_id=RUN_ID,
-        min_nodes=2,
-        max_nodes=3,
+        min_nodes=min_nodes,
+        max_nodes=max_nodes,
         local_addr="node-a.example",
         config=str(path),
         **config,
@@ -130,7 +136,27 @@ schema_version=1
 
     assert first_config.policy == second_config.policy
     assert first_config.policy.digest == second_config.policy.digest
+    assert first_config.registration_digest == second_config.registration_digest
     assert first_config.node_id != second_config.node_id
+
+
+def test_runtime_config_registration_digest_includes_node_range(tmp_path: Path):
+    source = _write_policy(tmp_path / "rendezvous.toml")
+    common: Any = {
+        "node_id": "node-a",
+        "restart_context_path": "/run/context.json",
+    }
+    first = TorchrunRuntimeConfig.from_parameters(
+        _parameters(source, max_nodes=3, **common),
+        environment={},
+    )
+    second = TorchrunRuntimeConfig.from_parameters(
+        _parameters(source, max_nodes=4, **common),
+        environment={},
+    )
+
+    assert first.policy.digest == second.policy.digest
+    assert first.registration_digest != second.registration_digest
 
 
 def test_runtime_config_rendezvous_overrides_change_resolved_policy(tmp_path: Path):
@@ -210,6 +236,17 @@ def test_runtime_config_rejects_unknown_rendezvous_option(tmp_path: Path):
         )
 
 
+def test_runtime_config_rejects_fifo_policy_without_blocking(tmp_path: Path):
+    source = tmp_path / "rendezvous.toml"
+    os.mkfifo(source, mode=0o600)
+
+    with pytest.raises(TorchrunRuntimeConfigError, match="regular file"):
+        TorchrunRuntimeConfig.from_parameters(
+            _parameters(source),
+            environment=_environment(tmp_path / "context.json"),
+        )
+
+
 @pytest.mark.parametrize(
     ("parameter_name", "environment_name", "parameter_value", "environment_value"),
     [
@@ -238,7 +275,10 @@ def test_runtime_config_rejects_conflicting_node_inputs(
 
     with pytest.raises(TorchrunRuntimeConfigError, match="conflicts"):
         TorchrunRuntimeConfig.from_parameters(
-            _parameters(source, **{parameter_name: parameter_value}),
+            _parameters(
+                source,
+                **cast(Any, {parameter_name: parameter_value}),
+            ),
             environment=environment,
         )
 
@@ -354,7 +394,11 @@ def test_restart_context_file_preserves_previous_value_when_replace_fails(
     context_file = RestartContextFile(path)
     context_file.write(_context())
 
-    def fail_replace(source: object, destination: object) -> None:
+    def fail_replace(
+        source: object,
+        destination: object,
+        **kwargs: object,
+    ) -> None:
         raise OSError("injected replace failure")
 
     monkeypatch.setattr(os, "replace", fail_replace)
@@ -387,8 +431,11 @@ def test_restart_context_file_closes_descriptor_when_permission_setup_fails(
     context_file = RestartContextFile(path)
     real_close = os.close
     closed: list[int] = []
+    failed_descriptor: int | None = None
 
     def fail_fchmod(descriptor: int, mode: int) -> None:
+        nonlocal failed_descriptor
+        failed_descriptor = descriptor
         raise OSError("injected permission failure")
 
     def record_close(descriptor: int) -> None:
@@ -401,7 +448,7 @@ def test_restart_context_file_closes_descriptor_when_permission_setup_fails(
     with pytest.raises(RestartContextFileError, match="failed to publish"):
         context_file.write(_context())
 
-    assert len(closed) == 1
+    assert failed_descriptor in closed
     assert list(path.parent.glob(f".{path.name}.*.tmp")) == []
 
 
@@ -467,7 +514,18 @@ def test_restart_context_file_rejects_symlink_parent(tmp_path: Path):
     linked.symlink_to(actual, target_is_directory=True)
     context_file = RestartContextFile(linked / "restart-context.json")
 
-    with pytest.raises(RestartContextFileError, match="parent directory.*symlink"):
+    with pytest.raises(RestartContextFileError, match="real directories"):
+        context_file.write(_context())
+
+
+def test_restart_context_file_rejects_symlinked_ancestor(tmp_path: Path):
+    actual = tmp_path / "actual"
+    actual.mkdir(mode=0o700)
+    linked = tmp_path / "linked"
+    linked.symlink_to(actual, target_is_directory=True)
+    context_file = RestartContextFile(linked / "private" / "restart-context.json")
+
+    with pytest.raises(RestartContextFileError, match="real directories"):
         context_file.write(_context())
 
 
@@ -491,12 +549,12 @@ def test_restart_context_file_retries_directory_sync_after_failed_clear(
     original_sync = RestartContextFile._fsync_directory
     calls = 0
 
-    def flaky_sync(directory: Path) -> None:
+    def flaky_sync(descriptor: int) -> None:
         nonlocal calls
         calls += 1
         if calls == 1:
             raise OSError("injected directory sync failure")
-        original_sync(directory)
+        original_sync(descriptor)
 
     monkeypatch.setattr(
         RestartContextFile,
@@ -510,6 +568,14 @@ def test_restart_context_file_retries_directory_sync_after_failed_clear(
     assert not path.exists()
     context_file.clear()
     assert calls == 2
+
+
+def test_restart_context_file_clear_accepts_missing_parent(tmp_path: Path):
+    path = tmp_path / "missing" / "restart-context.json"
+
+    RestartContextFile(path).clear()
+
+    assert not path.parent.exists()
 
 
 @pytest.mark.parametrize("path", [Path("relative.json"), cast(Any, "not-a-path")])
