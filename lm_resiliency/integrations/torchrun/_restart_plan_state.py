@@ -98,6 +98,7 @@ class PersistedRestartPlanPublication:
     def from_entries(
         cls,
         *,
+        run_id: str,
         plan_entry: ControlStoreEntry,
         manifest_entry: ControlStoreEntry,
         successor_snapshot_entry: ControlStoreEntry,
@@ -106,6 +107,8 @@ class PersistedRestartPlanPublication:
     ) -> PersistedRestartPlanPublication:
         """Decode and validate one atomic restart-plan publication."""
 
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise ValueError("run_id must be a non-empty string")
         entries = (
             ("plan_entry", plan_entry),
             ("manifest_entry", manifest_entry),
@@ -130,6 +133,8 @@ class PersistedRestartPlanPublication:
             }
         except (TypeError, ValueError) as error:
             raise ValueError("restart-plan publication contains malformed records") from error
+        if record.plan.run_id != run_id:
+            raise ValueError("restart-plan publication belongs to another run")
         return cls(
             record=record,
             manifest_record=manifest_record,
@@ -167,6 +172,20 @@ class PersistedRestartPlanPublication:
         if self.record.to_generation_snapshot_digest != self.successor_snapshot.digest:
             raise ValueError(
                 "PersistedRestartPlanPublication successor digest does not match its plan"
+            )
+        expected_assignment = RankAssignment.from_assignments(
+            run_id=plan.run_id,
+            generation=plan.to_generation,
+            assignments=plan.slot_assignments,
+            topology_digest=plan.topology_digest,
+        )
+        if (
+            self.successor_snapshot.assignment != expected_assignment
+            or self.successor_snapshot.previous_snapshot_digest
+            != self.record.from_generation_snapshot_digest
+        ):
+            raise ValueError(
+                "PersistedRestartPlanPublication successor does not implement its plan"
             )
         if (
             self.generation_head.run_id != plan.run_id

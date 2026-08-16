@@ -2078,6 +2078,7 @@ def _persisted_publication() -> PersistedRestartPlanPublication:
         for index, (node_id, record) in enumerate(quarantine_state.quarantine_records.items())
     }
     return PersistedRestartPlanPublication.from_entries(
+        run_id=RUN_ID,
         plan_entry=immutable_entry(plan_record.to_json(), 21),
         manifest_entry=immutable_entry(manifest_record.to_json(), 22),
         successor_snapshot_entry=immutable_entry(
@@ -2110,7 +2111,31 @@ def test_persisted_restart_plan_publication_rejects_malformed_records():
 
     with pytest.raises(ValueError, match="malformed records"):
         PersistedRestartPlanPublication.from_entries(
+            run_id=RUN_ID,
             plan_entry=replace(state.plan_entry, value=b"{}"),
+            manifest_entry=state.manifest_entry,
+            successor_snapshot_entry=state.successor_snapshot_entry,
+            generation_head_entry=state.generation_head_entry,
+            quarantine_entries=state.quarantine_entries,
+        )
+
+
+def test_persisted_restart_plan_publication_binds_the_requested_run():
+    state = _persisted_publication()
+
+    with pytest.raises(ValueError, match="another run"):
+        PersistedRestartPlanPublication.from_entries(
+            run_id="other-run",
+            plan_entry=state.plan_entry,
+            manifest_entry=state.manifest_entry,
+            successor_snapshot_entry=state.successor_snapshot_entry,
+            generation_head_entry=state.generation_head_entry,
+            quarantine_entries=state.quarantine_entries,
+        )
+    with pytest.raises(ValueError, match="non-empty"):
+        PersistedRestartPlanPublication.from_entries(
+            run_id="",
+            plan_entry=state.plan_entry,
             manifest_entry=state.manifest_entry,
             successor_snapshot_entry=state.successor_snapshot_entry,
             generation_head_entry=state.generation_head_entry,
@@ -2139,6 +2164,49 @@ def test_persisted_restart_plan_publication_rejects_digest_substitution():
         )
     with pytest.raises(ValueError, match="quarantine records"):
         replace(state, quarantine_records={})
+
+
+def test_persisted_restart_plan_publication_requires_the_planned_successor():
+    state = _persisted_publication()
+    slot_assignments = state.plan.slot_assignments
+    reversed_nodes = tuple(assignment.node_id for assignment in reversed(slot_assignments))
+    changed_assignment = RankAssignment.from_assignments(
+        run_id=state.plan.run_id,
+        generation=state.plan.to_generation,
+        assignments=tuple(
+            replace(assignment, node_id=node_id)
+            for assignment, node_id in zip(
+                slot_assignments,
+                reversed_nodes,
+                strict=True,
+            )
+        ),
+        topology_digest=state.plan.topology_digest,
+    )
+    assert changed_assignment != state.successor_snapshot.assignment
+
+    for successor in (
+        replace(state.successor_snapshot, assignment=changed_assignment),
+        replace(
+            state.successor_snapshot,
+            previous_snapshot_digest="e" * 64,
+        ),
+    ):
+        record = replace(
+            state.record,
+            to_generation_snapshot_digest=successor.digest,
+        )
+        with pytest.raises(ValueError, match="successor does not implement"):
+            replace(
+                state,
+                record=record,
+                successor_snapshot=successor,
+                plan_entry=replace(state.plan_entry, value=record.to_json()),
+                successor_snapshot_entry=replace(
+                    state.successor_snapshot_entry,
+                    value=successor.to_json(),
+                ),
+            )
 
 
 @pytest.mark.parametrize(
