@@ -1019,7 +1019,11 @@ publication.
 <code>RestartPlanInventoryState</code> then binds every manifest copy to its exact
 inventory event, source-generation reporter identity, local holder, and
 compatible trust state. It does not prove copy completeness, holder
-availability, acknowledgement authorization, or trusted certification.</p>
+availability, acknowledgement authorization, or trusted certification.
+For <code>recovery_verified</code> manifests, <code>RestartPlanCertificationState</code> requires
+matching trusted catalog records whose canonical event digests cover every
+referenced inventory event. It still does not prove copy completeness or
+holder availability.</p>
 <p>Before commit, the coordinator validates:</p>
 <ul>
 <li>the plan is fenced to the same intent ID, run, generation, incidents, and
