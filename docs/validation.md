@@ -1,6 +1,6 @@
 # Validation
 
-Date: 2026-08-13 UTC.
+Date: 2026-08-17 UTC.
 
 This report summarizes validation evidence for GEMINI and SCOUT.
 Focused integration programs use deterministic training workloads and fault injection to verify checkpoint equivalence, exact fault localization, candidate exclusion, and framework topology handling.
@@ -98,28 +98,36 @@ cover active localization, checkpoint rejection, and recovery behavior.
 
 ### Torchrun standby replacement
 
-On 2026-08-16, the native torchrun replacement campaign passed on two hosts
-using three A100 GPUs per host with PyTorch 2.13.0 and CUDA 13. The campaign
-used four active logical ranks and two parked standby agents over a TCP
-rendezvous, with shared GEMINI checkpoint storage.
+On 2026-08-17, the native torchrun replacement campaign passed on two hosts
+using eight A100 GPUs per host with PyTorch 2.13.0 and CUDA 13. The harness
+modeled every GPU as an independent node by launching one torchrun agent with
+one synthetic machine identity per GPU. It used eight active logical ranks and
+eight parked standby agents over a TCP rendezvous, with shared GEMINI
+checkpoint storage.
 
-SCOUT injected and exactly localized replay-only SDC on logical rank 3 at
-optimizer steps 3 and 6. The manager published one replacement plan per
-incident. GEMINI restored recovery-verified steps 2 and 5 bitwise on every
-rank; `node-e` and then `node-f` inherited logical slot 3 while the localized
-nodes remained excluded. All six torchrun agents exited cleanly after step 8.
+The campaign scheduled 24 incidents over 25 optimizer steps. Sixteen
+process-stall incidents restarted the same assigned GPU-nodes. Eight
+replay-only SDC incidents targeted logical ranks 0 through 7 at steps 3, 6, 9,
+12, 15, 18, 21, and 24. SCOUT localized every injected rank exactly, and the
+manager quarantined one original GPU-node and admitted one standby after each
+SDC. By generation 24, all eight initial active nodes had been replaced.
 
-The resilient run matched the uninterrupted baseline exactly for losses, RNG,
-and caller-owned step state. The maximum final absolute difference was
-`2.91e-11` for model tensors and `2.33e-10` for AdamW tensors, below the fixed
-`1e-10` and `1e-9` bounds used by the example. Checkpoint restoration itself
-remained bitwise exact; the final tolerance accounts only for NCCL reduction
-order after physical-rank replacement.
+The run produced 128 restart reports, 64 SDC reports, and 192 recovery reports.
+Every rank restored the manager-selected GEMINI step bitwise after all 24
+incidents. Caller-owned state and CPU/CUDA RNG also remained bitwise exact, and
+all 16 torchrun agents exited cleanly after final step 25.
 
-The campaign also exposed and corrected two cross-host checkpoint-filesystem
-issues: local PID checks no longer reap another host's live temporary shard,
-and status readers tolerate only bounded transient remote-client visibility of
-partially replaced JSON.
+Relative to the uninterrupted BF16 baseline, losses matched exactly. Maximum
+absolute differences were `5.960464477539063e-8` for model tensors and
+`9.313225746154785e-10` for AdamW tensors, below the campaign's fixed `2e-3`
+and `5e-5` bounds.
+
+The pressure run exposed and corrected two restart-only edge cases. A fresh
+worker can already have the selected recovery-verified checkpoint on disk, in
+which case `flush_for_restart()` correctly returns `-1` because there is no new
+in-memory slot. SCOUT's default torchrun OOB port is now scoped by run ID and
+manager generation so successor and back-to-back daemons do not race a
+predecessor listener during shutdown.
 
 ## Native PyTorch
 

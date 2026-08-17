@@ -29,23 +29,34 @@ The primary combination also passes the distributed framework campaign.
 Production Megatron grouped-expert validation used PyTorch 2.10.0 and Transformer Engine 2.10.0.
 The native `torchrun.handlers` rendezvous integration uses the supported
 PyTorch 2.10-2.13 entry-point contract. Its complete standby-replacement
-campaign was validated with PyTorch 2.13.0 on one host and across two A100
-hosts; the supported-version CPU matrix covers handler construction and the
-manager-owned recovery-plan protocol on every declared PyTorch minor.
-Zero-import worker activation is additive. Built-in worker adapters are
-qualified against the same supported framework ranges as their explicit
-`enable_resiliency()` integrations:
+campaign was validated with PyTorch 2.13.0 on one host and across two eight-A100
+hosts. The two-host pressure campaign modeled each GPU as one node, with eight
+active agents and eight standbys. It completed 16 same-node restarts and eight
+SCOUT-localized node replacements. The supported-version CPU matrix covers
+handler construction and the manager-owned recovery-plan protocol on every
+declared PyTorch minor.
+Zero-import worker activation is additive and enabled by supplying a worker
+policy. Framework imports select the built-in adapter, which is qualified
+against the same supported framework ranges as the corresponding explicit
+`enable_resiliency()` integration:
 
-- `pytorch` (`pytorch_ddp` compatibility alias) observes one root module and
-  optimizer, then delegates topology discovery to the existing PyTorch
-  integration.
-- `torchtitan` attaches to `torchtitan.train.Trainer.train` and passes the
+- Native PyTorch observes one root module and optimizer, then delegates topology
+  discovery to the existing PyTorch integration.
+- TorchTitan attaches to `torchtitan.train.Trainer.train` and passes the
   initialized trainer unchanged.
-- `megatron` attaches to
+- Megatron Core attaches to
   `megatron.training.training.setup_model_and_optimizer` and passes its model
   chunks, optimizer, and scheduler unchanged.
-- `deepspeed` attaches to `deepspeed.initialize` and passes its returned engine
+- DeepSpeed attaches to `deepspeed.initialize` and passes its returned engine
   unchanged.
+
+PyTorch is tentative until attachment because all higher-level frameworks
+import it. Importing more than one higher-level supported framework before
+attachment fails closed. Worker width comes from torchrun's standard
+`LOCAL_WORLD_SIZE`; replacement contexts must agree with that value.
+Each rendezvous agent derives its physical identity from `/etc/machine-id`,
+publishes only a domain-separated hash, and participates in automatic
+generation-zero admission. Duplicate machine identities fail closed.
 
 Adapters do not expose a parallelism-strategy option. DDP, FSDP2/HSDP, TP, SP,
 CP, PP, EP, expert-TP, ZeRO, and framework-specific group discovery remain

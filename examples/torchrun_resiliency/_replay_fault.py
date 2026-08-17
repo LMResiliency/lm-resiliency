@@ -1,4 +1,4 @@
-"""Replay-fault controls for production validation campaigns."""
+"""Replay-only SDC controls for torchrun validation campaigns."""
 
 from __future__ import annotations
 

@@ -6,14 +6,12 @@ optimizer stepping, scheduling, and checkpoint loading.
 
 Run on one eight-GPU host:
 
-    export LM_RESILIENCY_RESTART_CONTEXT="${LM_RESILIENCY_RESTART_CONTEXT:-/tmp/lm-resiliency-torchtitan-context/context.json}"
     torchrun --rdzv-backend=lm_resiliency \
       --rdzv-endpoint=/tmp/lm-resiliency-torchtitan-rdzv \
       --rdzv-id=torchtitan-production \
-      --rdzv-conf="store_type=file,node_id=node-a,active_nodes=node-a,\
-local_world_size=8,\
-worker_adapter=torchtitan,\
-worker_config=$PWD/examples/production_loops/worker_resiliency.toml" \
+      --rdzv-conf="store_type=file,\
+lm_resiliency_restart_context_path=/tmp/lm-resiliency-torchtitan-context/context.json,\
+lm_resiliency_worker_config=$PWD/examples/production_loops/policies/resiliency.toml" \
       --nnodes=1:1 --nproc-per-node=8 --module \
       examples.production_loops.torchtitan \
       --artifact-dir /tmp/torchtitan-production-loop

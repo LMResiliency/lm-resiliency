@@ -124,6 +124,10 @@ Use `instrument_dataloader(...)` and `checkpoint_io(...)` for other boundaries.
 
 An explicit `hang_master_addr` or `hang_master_port` selects TCP rendezvous.
 `hang_state_dir` remains available for status files and is used for file rendezvous only when no TCP endpoint is configured.
+When torchrun supplies the default TCP endpoint, SCOUT derives its OOB port from
+the torchrun run ID and LM Resiliency manager generation. Successor generations
+and back-to-back jobs therefore do not reuse a predecessor daemon's listener
+while it is shutting down.
 Each training publisher and daemon reader share an opaque run-, restart-generation-, process-, peer-group-, and rank-scoped shared-memory name plus an ownership token.
 A live publisher never attaches to or unlinks another owner's segment; a dead owner using the same exact channel can be reclaimed safely.
 Harness construction waits for the daemon's bounded readiness signal, and a supervisor reports unexpected post-start daemon exit as `oob_daemon_failure` while foreground step boundaries also fail explicitly if protection is unavailable.

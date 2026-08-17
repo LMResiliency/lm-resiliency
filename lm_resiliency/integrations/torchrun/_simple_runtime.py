@@ -32,26 +32,24 @@ from lm_resiliency.integrations.torchrun._protocol import (
     ProtocolValidationError,
     RestartContext,
     RestartPlan,
-    SlotAssignment,
 )
 
 _BACKEND = "lm_resiliency"
 _PREFIX = "lm_resiliency/simple/v1"
 _MAX_CONTEXT_BYTES = 1 << 20
+_MAX_REGISTRATION_BYTES = 1 << 20
+_MACHINE_ID_PATH_ENV = "LM_RESILIENCY_MACHINE_ID_PATH"
+_DEFAULT_MACHINE_ID_PATH = Path("/etc/machine-id")
 _ALLOWED_CONFIG = {
-    "active_nodes",
-    "heartbeat_timeout_ms",
     "is_host",
-    "join_timeout_ms",
-    "local_world_size",
-    "node_id",
-    "poll_interval_ms",
+    "lm_resiliency_heartbeat_timeout_ms",
+    "lm_resiliency_join_timeout_ms",
+    "lm_resiliency_poll_interval_ms",
+    "lm_resiliency_restart_context_path",
+    "lm_resiliency_worker_config",
     "read_timeout",
-    "restart_context_path",
     "store_type",
     "timeout",
-    "worker_adapter",
-    "worker_config",
 }
 
 
@@ -156,25 +154,21 @@ class SimpleRuntimeConfig:
 
     run_id: str
     node_id: str
-    active_nodes: tuple[str, ...]
-    local_world_size: int
+    min_nodes: int
+    max_nodes: int
     restart_context_path: Path
     join_timeout_ms: int = 300_000
     poll_interval_ms: int = 250
     heartbeat_timeout_ms: int = 10_000
-    worker_adapter: str | None = None
     worker_config: Path | None = None
 
     def __post_init__(self) -> None:
         _nonempty(self.run_id, "run_id")
         _nonempty(self.node_id, "node_id")
-        if not self.active_nodes:
-            raise ValueError("active_nodes must not be empty")
-        if len(set(self.active_nodes)) != len(self.active_nodes):
-            raise ValueError("active_nodes must contain unique node IDs")
-        for node_id in self.active_nodes:
-            _nonempty(node_id, "active_nodes item")
-        _positive_int(self.local_world_size, "local_world_size")
+        _positive_int(self.min_nodes, "min_nodes")
+        _positive_int(self.max_nodes, "max_nodes")
+        if self.max_nodes < self.min_nodes:
+            raise ValueError("max_nodes must be greater than or equal to min_nodes")
         _positive_int(self.join_timeout_ms, "join_timeout_ms")
         _positive_int(self.poll_interval_ms, "poll_interval_ms")
         _positive_int(self.heartbeat_timeout_ms, "heartbeat_timeout_ms")
@@ -182,11 +176,7 @@ class SimpleRuntimeConfig:
             raise TypeError("restart_context_path must be pathlib.Path")
         if not self.restart_context_path.is_absolute():
             raise ValueError("restart_context_path must be absolute")
-        if self.worker_adapter is not None:
-            _nonempty(self.worker_adapter, "worker_adapter")
         if self.worker_config is not None:
-            if self.worker_adapter is None:
-                raise ValueError("worker_config requires worker_adapter")
             if not isinstance(self.worker_config, Path):
                 raise TypeError("worker_config must be pathlib.Path")
             if not self.worker_config.is_absolute():
@@ -207,73 +197,57 @@ class SimpleRuntimeConfig:
         if unknown:
             raise ValueError(f"unknown rendezvous configuration: {sorted(unknown)!r}")
         environ = os.environ if environment is None else environment
-        node_id = _configured(
-            params.get("node_id"),
-            environ.get("LM_RESILIENCY_NODE_ID"),
-            "node_id",
-        )
-        active_nodes = tuple(
-            item.strip()
-            for item in _configured(
-                params.get("active_nodes"),
-                environ.get("LM_RESILIENCY_ACTIVE_NODES"),
-                "active_nodes",
-            ).split(";")
-            if item.strip()
-        )
-        local_world_size = _configured_int(
-            params.get("local_world_size"),
-            environ.get("LM_RESILIENCY_LOCAL_WORLD_SIZE"),
-            "local_world_size",
-        )
-        restart_context_path = Path(
-            _configured(
-                params.get("restart_context_path"),
-                environ.get("LM_RESILIENCY_RESTART_CONTEXT"),
-                "restart_context_path",
-            )
+        machine_id_path = Path(
+            environ.get(_MACHINE_ID_PATH_ENV, str(_DEFAULT_MACHINE_ID_PATH))
         ).expanduser()
-        worker_adapter = _optional_configured(
-            params.get("worker_adapter"),
-            environ.get("LM_RESILIENCY_WORKER_ADAPTER"),
-            "worker_adapter",
+        if not machine_id_path.is_absolute():
+            raise ValueError(f"{_MACHINE_ID_PATH_ENV} must be an absolute path")
+        node_id = _machine_node_id(machine_id_path)
+        restart_context_path = Path(
+            _nonempty(
+                params.get("lm_resiliency_restart_context_path"),
+                "lm_resiliency_restart_context_path",
+            )
         )
-        worker_config_value = _optional_configured(
-            params.get("worker_config"),
-            environ.get("LM_RESILIENCY_WORKER_CONFIG"),
-            "worker_config",
+        restart_context_path = restart_context_path.expanduser()
+        worker_config_value = _optional_nonempty(
+            params.get("lm_resiliency_worker_config"),
+            "lm_resiliency_worker_config",
         )
         config = cls(
             run_id=params.run_id,
             node_id=node_id,
-            active_nodes=active_nodes,
-            local_world_size=local_world_size,
+            min_nodes=params.min_nodes,
+            max_nodes=params.max_nodes,
             restart_context_path=restart_context_path,
             join_timeout_ms=_optional_int(
-                params.get("join_timeout_ms"),
-                "join_timeout_ms",
+                params.get("lm_resiliency_join_timeout_ms"),
+                "lm_resiliency_join_timeout_ms",
                 300_000,
             ),
             poll_interval_ms=_optional_int(
-                params.get("poll_interval_ms"),
-                "poll_interval_ms",
+                params.get("lm_resiliency_poll_interval_ms"),
+                "lm_resiliency_poll_interval_ms",
                 250,
             ),
             heartbeat_timeout_ms=_optional_int(
-                params.get("heartbeat_timeout_ms"),
-                "heartbeat_timeout_ms",
+                params.get("lm_resiliency_heartbeat_timeout_ms"),
+                "lm_resiliency_heartbeat_timeout_ms",
                 10_000,
             ),
-            worker_adapter=worker_adapter,
             worker_config=(
                 None if worker_config_value is None else Path(worker_config_value).expanduser()
             ),
         )
-        if len(config.active_nodes) != params.min_nodes:
-            raise ValueError("active_nodes must contain exactly min_nodes node IDs")
-        if params.max_nodes < len(config.active_nodes):
-            raise ValueError("max_nodes cannot be smaller than active_nodes")
         return config
+
+
+@dataclass(frozen=True, slots=True)
+class _NodeAssignment:
+    """One logical node slot used only for rendezvous admission."""
+
+    logical_node_slot: int
+    node_id: str
 
 
 class SimpleRecoveryPlanStore:
@@ -287,6 +261,8 @@ class SimpleRecoveryPlanStore:
         digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()
         self._prefix = f"{_PREFIX}/runs/{digest}"
         self._generation_key = f"{self._prefix}/generation"
+        self._registrations_key = f"{self._prefix}/initial/registrations"
+        self._initial_nodes_key = f"{self._prefix}/initial/nodes"
         self._store.compare_set(self._generation_key, b"", b"0")
 
     @property
@@ -295,6 +271,56 @@ class SimpleRecoveryPlanStore:
 
     def current_generation(self) -> int:
         return _decode_generation(self._store.get(self._generation_key))
+
+    def register_node(self, node_id: str, agent_id: str, *, max_nodes: int) -> None:
+        node_id = _nonempty(node_id, "node_id")
+        agent_id = _nonempty(agent_id, "agent_id")
+        _positive_int(max_nodes, "max_nodes")
+        record = _canonical_json(
+            {
+                "agent_id": agent_id,
+                "node_id": node_id,
+                "schema_version": 1,
+            }
+        )
+        self._store.append(self._registrations_key, record + b"\n")
+        self._decode_registrations(max_nodes=max_nodes)
+
+    def ensure_initial_nodes(
+        self,
+        *,
+        min_nodes: int,
+        max_nodes: int,
+    ) -> tuple[str, ...] | None:
+        _positive_int(min_nodes, "min_nodes")
+        _positive_int(max_nodes, "max_nodes")
+        if max_nodes < min_nodes:
+            raise ValueError("max_nodes must be greater than or equal to min_nodes")
+        registrations = self._decode_registrations(max_nodes=max_nodes)
+        if len(registrations) < min_nodes:
+            return None
+        expected = tuple(node_id for node_id, _agent_id in registrations[:min_nodes])
+        encoded = _canonical_json(
+            {
+                "node_ids": list(expected),
+                "schema_version": 1,
+            }
+        )
+        stored = self._store.compare_set(self._initial_nodes_key, b"", encoded)
+        selected = self._decode_initial_nodes(stored, expected_count=min_nodes)
+        if selected != expected:
+            raise RecoveryPlanCorrupt("initial node assignment conflicts with registration order")
+        return selected
+
+    def read_initial_nodes(self) -> tuple[str, ...] | None:
+        if not self._store.check([self._initial_nodes_key]):
+            return None
+        return self._decode_initial_nodes(self._store.get(self._initial_nodes_key))
+
+    def registered_nodes(self, *, max_nodes: int) -> tuple[str, ...]:
+        return tuple(
+            node_id for node_id, _agent_id in self._decode_registrations(max_nodes=max_nodes)
+        )
 
     def read(self, generation: int) -> RestartPlan | None:
         if generation < 1:
@@ -335,6 +361,86 @@ class SimpleRecoveryPlanStore:
     def _plan_key(self, generation: int) -> str:
         return f"{self._prefix}/plans/{generation}"
 
+    def _decode_registrations(
+        self,
+        *,
+        max_nodes: int,
+    ) -> tuple[tuple[str, str], ...]:
+        encoded = self._store.get(self._registrations_key)
+        if len(encoded) > _MAX_REGISTRATION_BYTES:
+            raise RecoveryPlanCorrupt("initial node registrations are too large")
+        registrations: list[tuple[str, str]] = []
+        node_agents: dict[str, str] = {}
+        agent_nodes: dict[str, str] = {}
+        for line in encoded.splitlines():
+            try:
+                value = json.loads(line, object_pairs_hook=_reject_duplicate_fields)
+            except (TypeError, ValueError, UnicodeError) as error:
+                raise RecoveryPlanCorrupt("initial node registration is malformed") from error
+            if (
+                not isinstance(value, Mapping)
+                or set(value) != {"agent_id", "node_id", "schema_version"}
+                or type(value.get("schema_version")) is not int
+                or value.get("schema_version") != 1
+            ):
+                raise RecoveryPlanCorrupt("initial node registration has invalid fields")
+            try:
+                node_id = _nonempty(value.get("node_id"), "node_id")
+                agent_id = _nonempty(value.get("agent_id"), "agent_id")
+            except ValueError as error:
+                raise RecoveryPlanCorrupt(
+                    "initial node registration has invalid identities"
+                ) from error
+            if _canonical_json(dict(value)) != line:
+                raise RecoveryPlanCorrupt("initial node registration is not canonical JSON")
+            existing_agent = node_agents.get(node_id)
+            existing_node = agent_nodes.get(agent_id)
+            if existing_agent is not None and existing_agent != agent_id:
+                raise RecoveryPlanCorrupt(
+                    "multiple torchrun agents resolved to the same machine identity"
+                )
+            if existing_node is not None and existing_node != node_id:
+                raise RecoveryPlanCorrupt(
+                    "one torchrun agent registered multiple machine identities"
+                )
+            if existing_agent is None:
+                node_agents[node_id] = agent_id
+                agent_nodes[agent_id] = node_id
+                registrations.append((node_id, agent_id))
+        if len(registrations) > max_nodes:
+            raise RecoveryPlanCorrupt("registered nodes exceed torchrun max_nodes")
+        return tuple(registrations)
+
+    @staticmethod
+    def _decode_initial_nodes(
+        encoded: bytes,
+        *,
+        expected_count: int | None = None,
+    ) -> tuple[str, ...]:
+        try:
+            value = json.loads(encoded, object_pairs_hook=_reject_duplicate_fields)
+        except (TypeError, ValueError, UnicodeError) as error:
+            raise RecoveryPlanCorrupt("initial node assignment is malformed") from error
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != {"node_ids", "schema_version"}
+            or type(value.get("schema_version")) is not int
+            or value.get("schema_version") != 1
+            or not isinstance(value.get("node_ids"), list)
+        ):
+            raise RecoveryPlanCorrupt("initial node assignment has invalid fields")
+        try:
+            node_ids = tuple(_nonempty(item, "node_id") for item in value["node_ids"])
+        except ValueError as error:
+            raise RecoveryPlanCorrupt("initial node assignment has invalid identities") from error
+        if not node_ids or len(node_ids) != len(set(node_ids)):
+            raise RecoveryPlanCorrupt("initial node assignment must be non-empty and unique")
+        if expected_count is not None and len(node_ids) != expected_count:
+            raise RecoveryPlanCorrupt("initial node assignment has the wrong size")
+        if _canonical_json(dict(value)) != encoded:
+            raise RecoveryPlanCorrupt("initial node assignment is not canonical JSON")
+        return node_ids
+
     def _decode_plan(self, encoded: bytes, *, expected_generation: int) -> RestartPlan:
         try:
             value = json.loads(encoded, object_pairs_hook=_reject_duplicate_fields)
@@ -370,6 +476,11 @@ class SimpleRendezvousHandler(RendezvousHandler):
         self._plans = SimpleRecoveryPlanStore(store, run_id=config.run_id)
         self._context = SimpleRestartContextFile(config.restart_context_path)
         self._agent_id = secrets.token_hex(16)
+        self._plans.register_node(
+            config.node_id,
+            self._agent_id,
+            max_nodes=config.max_nodes,
+        )
         self._closed = threading.Event()
         self._heartbeat_error: Exception | None = None
         self._heartbeat = threading.Thread(
@@ -378,7 +489,7 @@ class SimpleRendezvousHandler(RendezvousHandler):
             daemon=True,
         )
         self._last_generation: int | None = None
-        self._last_assignment: tuple[SlotAssignment, ...] = ()
+        self._last_assignment: tuple[_NodeAssignment, ...] = ()
         self._heartbeat.start()
 
     @property
@@ -392,12 +503,18 @@ class SimpleRendezvousHandler(RendezvousHandler):
         return self._config.run_id
 
     def next_rendezvous(self) -> RendezvousInfo:
+        admission_deadline = self._monotonic_clock() + self._config.join_timeout_ms / 1_000
         while True:
             self._raise_if_closed()
             self._raise_heartbeat_error()
             generation = self._plans.current_generation()
             plan = self._plans.read(generation)
             assignment = self._assignment(generation, plan)
+            if assignment is None:
+                if self._monotonic_clock() >= admission_deadline:
+                    raise RendezvousTimeoutError("timed out waiting for initial node registrations")
+                self._closed.wait(self._config.poll_interval_ms / 1_000)
+                continue
             slot = next(
                 (
                     item.logical_node_slot
@@ -457,6 +574,8 @@ class SimpleRendezvousHandler(RendezvousHandler):
                 return 0
             previous = {item.node_id for item in self._last_assignment}
             selected = {item.node_id for item in plan.slot_assignments} - previous
+            if not selected:
+                return 1
             return sum(self._heartbeat_is_live(node_id) for node_id in selected)
         except (RecoveryPlanCorrupt, ValueError):
             raise RendezvousStateError("recovery-plan state is corrupt")
@@ -481,28 +600,35 @@ class SimpleRendezvousHandler(RendezvousHandler):
         self,
         generation: int,
         plan: RestartPlan | None,
-    ) -> tuple[SlotAssignment, ...]:
+    ) -> tuple[_NodeAssignment, ...] | None:
         if generation == 0:
+            node_ids = self._plans.ensure_initial_nodes(
+                min_nodes=self._config.min_nodes,
+                max_nodes=self._config.max_nodes,
+            )
+            if node_ids is None:
+                return None
             return tuple(
-                SlotAssignment(
+                _NodeAssignment(
                     logical_node_slot=slot,
                     node_id=node_id,
-                    first_global_rank=slot * self._config.local_world_size,
-                    local_world_size=self._config.local_world_size,
                 )
-                for slot, node_id in enumerate(self._config.active_nodes)
+                for slot, node_id in enumerate(node_ids)
             )
         if plan is None:
             raise RendezvousStateError("current generation has no recovery plan")
-        for item in plan.slot_assignments:
-            if item.local_world_size != self._config.local_world_size:
-                raise RendezvousStateError("recovery plan changes local_world_size")
-        return plan.slot_assignments
+        return tuple(
+            _NodeAssignment(
+                logical_node_slot=item.logical_node_slot,
+                node_id=item.node_id,
+            )
+            for item in plan.slot_assignments
+        )
 
     def _wait_for_group(
         self,
         generation: int,
-        assignment: tuple[SlotAssignment, ...],
+        assignment: tuple[_NodeAssignment, ...],
         deadline: float,
     ) -> None:
         keys = [self._ready_key(generation, item.node_id) for item in assignment]
@@ -542,7 +668,6 @@ class SimpleRendezvousHandler(RendezvousHandler):
                 payload = json.dumps(
                     {
                         "agent_id": self._agent_id,
-                        "local_world_size": self._config.local_world_size,
                         "node_id": self._config.node_id,
                         "updated_at_unix_ms": self._clock(),
                     },
@@ -567,12 +692,10 @@ class SimpleRendezvousHandler(RendezvousHandler):
             if not isinstance(payload, Mapping):
                 return False
             updated = payload.get("updated_at_unix_ms")
-            local_world_size = payload.get("local_world_size")
             return (
                 isinstance(updated, int)
                 and not isinstance(updated, bool)
                 and self._clock() - updated < self._config.heartbeat_timeout_ms
-                and local_world_size == self._config.local_world_size
             )
         except (TypeError, ValueError, json.JSONDecodeError):
             return False
@@ -612,22 +735,15 @@ def _create_rendezvous_handler(params: RendezvousParameters) -> RendezvousHandle
             store=store,
             local_addr=params.local_addr,
         )
-        if config.worker_adapter is not None:
-            from .worker_adapter import (
-                TorchrunWorkerContext,
-                configure_worker_bootstrap_environment,
-            )
+        if config.worker_config is not None:
+            from .worker_adapter import configure_worker_bootstrap_environment
 
             try:
                 configure_worker_bootstrap_environment(
-                    adapter_spec=config.worker_adapter,
-                    context=TorchrunWorkerContext(
-                        run_id=config.run_id,
-                        node_id=config.node_id,
-                        local_world_size=config.local_world_size,
-                        restart_context_path=config.restart_context_path,
-                        config_path=config.worker_config,
-                    ),
+                    run_id=config.run_id,
+                    node_id=config.node_id,
+                    restart_context_path=config.restart_context_path,
+                    config_path=config.worker_config,
                 )
             except Exception as error:
                 handler.shutdown()
@@ -638,29 +754,10 @@ def _create_rendezvous_handler(params: RendezvousParameters) -> RendezvousHandle
         raise RendezvousConnectionError("failed to initialize lm_resiliency handler") from error
 
 
-def _configured(primary: object, fallback: object, name: str) -> str:
-    primary_value = None if primary is None else _nonempty(primary, name)
-    fallback_value = None if fallback is None else _nonempty(fallback, name)
-    if primary_value is not None and fallback_value is not None and primary_value != fallback_value:
-        raise ValueError(f"conflicting {name} values")
-    value = primary_value if primary_value is not None else fallback_value
+def _optional_nonempty(value: object, name: str) -> str | None:
     if value is None:
-        raise ValueError(f"{name} must be configured")
-    return value
-
-
-def _configured_int(primary: object, fallback: object, name: str) -> int:
-    return _positive_int(_configured(primary, fallback, name), name)
-
-
-def _optional_configured(
-    primary: object,
-    fallback: object,
-    name: str,
-) -> str | None:
-    if primary is None and fallback is None:
         return None
-    return _configured(primary, fallback, name)
+    return _nonempty(value, name)
 
 
 def _optional_int(value: object, name: str, default: int) -> int:
@@ -689,6 +786,45 @@ def _nonempty(value: object, name: str) -> str:
 
 def _key(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _machine_node_id(path: Path) -> str:
+    try:
+        metadata = path.stat()
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("machine identity path must be a regular file")
+        encoded = path.read_bytes()
+    except OSError as error:
+        raise ValueError(f"failed to read machine identity from {path}") from error
+    if len(encoded) > 128:
+        raise ValueError("machine identity file is too large")
+    try:
+        machine_id = encoded.decode("ascii").strip().lower()
+    except UnicodeDecodeError as error:
+        raise ValueError("machine identity must be ASCII") from error
+    return _node_id_from_machine_id(machine_id)
+
+
+def _node_id_from_machine_id(machine_id: str) -> str:
+    if (
+        len(machine_id) != 32
+        or any(character not in "0123456789abcdef" for character in machine_id)
+        or machine_id == "0" * 32
+    ):
+        raise ValueError("machine identity must be 32 nonzero hexadecimal characters")
+    digest = hashlib.sha256(
+        b"lm-resiliency/torchrun/node/v1\0" + machine_id.encode("ascii")
+    ).hexdigest()
+    return f"machine-{digest}"
+
+
+def _canonical_json(value: Mapping[str, Any]) -> bytes:
+    return json.dumps(
+        value,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
 
 
 def _decode_generation(encoded: bytes) -> int:

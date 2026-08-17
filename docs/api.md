@@ -52,42 +52,50 @@ Objects under `lm_resiliency.experimental` may change within the `0.x` release s
 
 ## Enable Through Torchrun
 
-The `lm_resiliency` rendezvous backend can install a framework-specific worker
-adapter before the user module starts. The user training module does not import
+The `lm_resiliency` rendezvous backend installs framework-import monitoring
+before the user module starts, then selects the corresponding worker adapter as
+the training stack is imported. The user training module does not import
 `lm_resiliency`:
 
 ```bash
-export LM_RESILIENCY_RESTART_CONTEXT="${LM_RESILIENCY_RESTART_CONTEXT:-/tmp/lm-resiliency-context/node-a.json}"
 torchrun \
   --nnodes=1:1 \
   --nproc-per-node=1 \
   --rdzv-backend=lm_resiliency \
   --rdzv-endpoint=/tmp/lm-resiliency-rdzv \
   --rdzv-id=my-run \
-  --rdzv-conf="store_type=file,node_id=node-a,active_nodes=node-a,\
-local_world_size=1,worker_adapter=pytorch,\
-worker_config=/absolute/path/worker.toml" \
-  --module examples.production_loops.torchrun_user_train \
+  --rdzv-conf="store_type=file,\
+lm_resiliency_restart_context_path=/tmp/lm-resiliency-context/context.json,\
+lm_resiliency_worker_config=/absolute/path/worker.toml" \
+  --module examples.torchrun_resiliency.smoke \
   --artifact-dir /tmp/lm-resiliency-user-loop
 ```
 
-Set the context path with the `restart_context_path` rendezvous option or the
-`LM_RESILIENCY_RESTART_CONTEXT` environment variable. The rendezvous option
-takes precedence. The runtime creates the parent with owner-only permissions
-when it first publishes a restart context. If the directory already exists with
-different ownership or group/other access, startup fails closed instead of
-changing administrator-provisioned permissions.
+Set the context path with the
+`lm_resiliency_restart_context_path` rendezvous option. The runtime creates the
+parent with owner-only permissions when it first publishes a restart context.
+If the directory already exists with different ownership or group/other access,
+startup fails closed instead of changing administrator-provisioned permissions.
 
-The built-in adapters are:
+The rendezvous handler derives a stable node identity from `/etc/machine-id`
+and commits the first `min_nodes` unique registrations as the initial training
+group. Additional registered nodes remain parked as standbys. Test harnesses
+and container deployments may point `LM_RESILIENCY_MACHINE_ID_PATH` at another
+absolute file containing a valid machine ID; duplicate identities fail closed.
 
-| `worker_adapter` | Objects passed to the existing framework integration |
+Built-in adapter selection is inferred from framework imports:
+
+| Imported framework | Objects passed to the existing framework integration |
 |---|---|
-| `pytorch` | One unambiguous root `torch.nn.Module` and optimizer |
-| `torchtitan` | The initialized `torchtitan.train.Trainer` |
-| `megatron` | The model chunks, optimizer, and scheduler returned by `setup_model_and_optimizer()` |
-| `deepspeed` | The engine returned by `deepspeed.initialize()` |
+| Native PyTorch | One unambiguous root `torch.nn.Module` and optimizer |
+| TorchTitan | The initialized `torchtitan.train.Trainer` |
+| Megatron Core | The model chunks, optimizer, and scheduler returned by `setup_model_and_optimizer()` |
+| DeepSpeed | The engine returned by `deepspeed.initialize()` |
 
-The compatibility alias `pytorch_ddp` selects the same adapter as `pytorch`.
+PyTorch is treated as tentative because every higher-level framework imports
+it. Importing TorchTitan, Megatron Core, or DeepSpeed before attachment selects
+that more specific adapter. Importing multiple higher-level supported
+frameworks fails closed instead of selecting one arbitrarily.
 
 Worker adapters do **not** accept a parallelism strategy. They pass the same
 framework objects to the existing `enable_resiliency()` API that explicit user
@@ -126,10 +134,13 @@ rotate_layers = true
 Unknown fields, missing or unsupported schema versions, and invalid values fail
 closed. Disabled feature sections are still validated. `replication_jump` must
 be valid for the deployed checkpoint group; it is not inferred from the
-launcher node count.
+launcher node count. Supplying `lm_resiliency_worker_config` enables automatic worker
+instrumentation; omitting it leaves explicit `enable_resiliency()` integrations
+unchanged. Workers obtain their local width from torchrun's standard
+`LOCAL_WORLD_SIZE` environment and verify replacement plans against it.
 
-Custom stacks select `worker_adapter="package.module:factory"`. The factory
-receives `TorchrunWorkerContext` and returns an object implementing
+Custom stacks set `adapter = "package.module:factory"` in the worker TOML. The
+factory receives `TorchrunWorkerContext` and returns an object implementing
 `install(context)`. A stack adapter owns framework-specific discovery and loop
 state. Torchrun itself cannot infer scheduler, dataloader position, or arbitrary
 caller-owned iteration state safely.

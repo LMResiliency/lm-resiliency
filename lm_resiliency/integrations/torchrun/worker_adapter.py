@@ -1,12 +1,14 @@
 """Worker adapters for zero-import torchrun activation.
 
 Torchrun owns process and rendezvous lifecycle, but it does not know which
-framework objects represent training state.  A worker adapter supplies that
-framework-specific attachment logic before the user module starts.
+framework objects represent training state. Bootstrap monitoring is installed
+before the user module starts and selects framework-specific attachment logic
+as the module imports its training stack.
 """
 
 from __future__ import annotations
 
+import builtins
 import importlib
 import importlib.util
 import inspect
@@ -14,7 +16,7 @@ import os
 import threading
 import types
 import weakref
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Protocol, Union, get_args, get_origin, get_type_hints
@@ -24,19 +26,19 @@ _toml = importlib.import_module(
 )
 
 _ACTIVATE_ENV = "LM_RESILIENCY_TORCHRUN_BOOTSTRAP"
-_ADAPTER_ENV = "LM_RESILIENCY_TORCHRUN_WORKER_ADAPTER"
 _CONFIG_ENV = "LM_RESILIENCY_TORCHRUN_WORKER_CONFIG"
 _RUN_ID_ENV = "LM_RESILIENCY_TORCHRUN_RUN_ID"
 _NODE_ID_ENV = "LM_RESILIENCY_TORCHRUN_NODE_ID"
-_LOCAL_WORLD_SIZE_ENV = "LM_RESILIENCY_TORCHRUN_LOCAL_WORLD_SIZE"
+_LOCAL_WORLD_SIZE_ENV = "LOCAL_WORLD_SIZE"
 _CONTEXT_PATH_ENV = "LM_RESILIENCY_TORCHRUN_RESTART_CONTEXT"
 _ATTACHED_ENV = "LM_RESILIENCY_TORCHRUN_ADAPTER_ATTACHED"
+_GENERATION_ENV = "LM_RESILIENCY_GENERATION"
 _BUILTIN_PYTORCH = "pytorch"
-_BUILTIN_PYTORCH_DDP = "pytorch_ddp"
 _BUILTIN_TORCHTITAN = "torchtitan"
 _BUILTIN_MEGATRON = "megatron"
 _BUILTIN_DEEPSPEED = "deepspeed"
 _ROOT_CONFIG_FIELDS = {
+    "adapter",
     "schema_version",
     "interval",
     "enable_checkpoint",
@@ -141,8 +143,16 @@ class TorchrunWorkerAdapter(Protocol):
 class _SingleAttachAdapter:
     """Common lifecycle for adapters that attach at one framework hook."""
 
-    def __init__(self, options: Mapping[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        options: Mapping[str, Any] | None = None,
+        *,
+        before_attach: Callable[[], None] | None = None,
+        on_attach: Callable[[], None] | None = None,
+    ) -> None:
         self._options = dict(options or {})
+        self._before_attach = before_attach
+        self._on_attach = on_attach
         self._lock = threading.RLock()
         self._installed = False
         self._context: TorchrunWorkerContext | None = None
@@ -204,6 +214,9 @@ class _SingleAttachAdapter:
         raise NotImplementedError
 
     def _attach(self, *objects: Any) -> Any:
+        if self._before_attach is not None:
+            self._before_attach()
+        attached_now = False
         with self._lock:
             if self._handle is None:
                 handle = self._enable(*objects)
@@ -220,7 +233,11 @@ class _SingleAttachAdapter:
                 self._handle = handle
                 os.environ[_ATTACHED_ENV] = "1"
                 self._restore_locked()
-            return self._handle
+                attached_now = True
+            result = self._handle
+        if attached_now and self._on_attach is not None:
+            self._on_attach()
+        return result
 
     def _validate_recovery(self, handle: Any) -> None:
         assert self._context is not None
@@ -256,8 +273,18 @@ class NativePyTorchAdapter(_SingleAttachAdapter):
     optimizer that would be passed to ``enable_resiliency()`` explicitly.
     """
 
-    def __init__(self, options: Mapping[str, Any] | None = None) -> None:
-        super().__init__(options)
+    def __init__(
+        self,
+        options: Mapping[str, Any] | None = None,
+        *,
+        before_attach: Callable[[], None] | None = None,
+        on_attach: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__(
+            options,
+            before_attach=before_attach,
+            on_attach=on_attach,
+        )
         self._optimizers: list[weakref.ReferenceType[Any]] = []
         self._attached_model: Any | None = None
         self._attached_optimizer: Any | None = None
@@ -510,6 +537,229 @@ class DeepSpeedWorkerAdapter(_SingleAttachAdapter):
         )
 
 
+class _AutoFrameworkAdapter:
+    """Infer one built-in adapter from framework imports in the worker."""
+
+    _SPECIALIZED = {
+        _BUILTIN_DEEPSPEED: DeepSpeedWorkerAdapter,
+        _BUILTIN_MEGATRON: MegatronWorkerAdapter,
+        _BUILTIN_TORCHTITAN: TorchTitanWorkerAdapter,
+    }
+
+    def __init__(self, options: Mapping[str, Any] | None = None) -> None:
+        self._options = dict(options or {})
+        self._lock = threading.RLock()
+        self._state = threading.local()
+        self._context: TorchrunWorkerContext | None = None
+        self._native: NativePyTorchAdapter | None = None
+        self._delegate: TorchrunWorkerAdapter | None = None
+        self._selected_framework: str | None = None
+        self._inference_error: TorchrunWorkerAdapterError | None = None
+        self._original_import: Callable[..., Any] | None = None
+        self._original_import_module: Callable[..., Any] | None = None
+        self._import_wrapper: Callable[..., Any] | None = None
+        self._import_module_wrapper: Callable[..., Any] | None = None
+
+    @property
+    def selected_framework(self) -> str | None:
+        """Framework selected from observed imports, if any."""
+
+        with self._lock:
+            return self._selected_framework
+
+    @property
+    def delegate(self) -> TorchrunWorkerAdapter | None:
+        """Concrete framework adapter installed by inference."""
+
+        with self._lock:
+            return self._delegate if self._delegate is not None else self._native
+
+    def install(self, context: TorchrunWorkerContext) -> None:
+        if not isinstance(context, TorchrunWorkerContext):
+            raise TypeError("context must be TorchrunWorkerContext")
+        if context.checkpoint_source == "durable":
+            raise TorchrunWorkerAdapterError(
+                "built-in worker adapters require GEMINI restart contexts; "
+                "durable recovery requires a custom worker adapter"
+            )
+        with self._lock:
+            if self._context is not None:
+                if self._context != context:
+                    raise TorchrunWorkerAdapterError(
+                        "automatic framework adapter is already installed for another context"
+                    )
+                return
+            self._context = context
+            self._original_import = builtins.__import__
+            self._original_import_module = importlib.import_module
+
+            def monitored_import(
+                name: str,
+                globals: Mapping[str, Any] | None = None,
+                locals: Mapping[str, Any] | None = None,
+                fromlist: tuple[str, ...] = (),
+                level: int = 0,
+            ) -> Any:
+                assert self._original_import is not None
+                return self._run_import(
+                    name,
+                    self._original_import,
+                    name,
+                    globals,
+                    locals,
+                    fromlist,
+                    level,
+                )
+
+            def monitored_import_module(name: str, package: str | None = None) -> Any:
+                assert self._original_import_module is not None
+                return self._run_import(
+                    name,
+                    self._original_import_module,
+                    name,
+                    package,
+                )
+
+            self._import_wrapper = monitored_import
+            self._import_module_wrapper = monitored_import_module
+            builtins.__import__ = monitored_import
+            importlib.import_module = monitored_import_module
+
+    def close(self) -> None:
+        with self._lock:
+            self._restore_imports_locked()
+            delegates = tuple(
+                adapter for adapter in (self._delegate, self._native) if adapter is not None
+            )
+            self._delegate = None
+            self._native = None
+            self._context = None
+        for adapter in delegates:
+            close = getattr(adapter, "close", None)
+            if callable(close):
+                close()
+
+    def _run_import(
+        self,
+        observed_name: str,
+        operation: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        depth = getattr(self._state, "depth", 0)
+        self._state.depth = depth + 1
+        try:
+            result = operation(*args, **kwargs)
+        finally:
+            self._state.depth = depth
+        if depth == 0 and not getattr(self._state, "suppress_observation", False):
+            self._observe_import(observed_name)
+        return result
+
+    def _observe_import(self, module_name: str) -> None:
+        if not isinstance(module_name, str) or not module_name or module_name.startswith("."):
+            return
+        root = module_name.split(".", 1)[0]
+        if root not in {*self._SPECIALIZED, "torch"}:
+            return
+        self._state.suppress_observation = True
+        try:
+            with self._lock:
+                if root == "torch":
+                    self._install_tentative_pytorch_locked()
+                else:
+                    self._select_specialized_locked(root)
+        finally:
+            self._state.suppress_observation = False
+
+    def _install_tentative_pytorch_locked(self) -> None:
+        if self._selected_framework is not None or self._native is not None:
+            return
+        assert self._context is not None
+        adapter = NativePyTorchAdapter(
+            self._options,
+            before_attach=self._raise_if_inference_failed,
+            on_attach=self._native_attached,
+        )
+        adapter.install(self._context)
+        self._native = adapter
+
+    def _select_specialized_locked(self, framework: str) -> None:
+        if self._selected_framework is not None:
+            if self._selected_framework != framework:
+                error = TorchrunWorkerAdapterError(
+                    "multiple supported training frameworks were imported: "
+                    f"{self._selected_framework!r} and {framework!r}"
+                )
+                self._inference_error = error
+                raise error
+            return
+        if self._native is not None:
+            if self._native.attached:
+                error = TorchrunWorkerAdapterError(
+                    f"{framework} was imported after the native PyTorch adapter attached"
+                )
+                self._inference_error = error
+                raise error
+            self._native.close()
+            self._native = None
+        assert self._context is not None
+        adapter_type = self._SPECIALIZED[framework]
+        self._selected_framework = framework
+        adapter = adapter_type(
+            self._options,
+            before_attach=self._raise_if_inference_failed,
+            on_attach=lambda: self._specialized_attached(framework),
+        )
+        self._delegate = adapter
+        try:
+            adapter.install(self._context)
+        except BaseException:
+            self._delegate = None
+            self._selected_framework = None
+            raise
+
+    def _native_attached(self) -> None:
+        with self._lock:
+            if self._native is None:
+                raise TorchrunWorkerAdapterError(
+                    "native PyTorch adapter attached after framework selection changed"
+                )
+            self._delegate = self._native
+            self._native = None
+            self._selected_framework = _BUILTIN_PYTORCH
+            self._restore_imports_locked()
+
+    def _specialized_attached(self, framework: str) -> None:
+        with self._lock:
+            if self._selected_framework != framework:
+                raise TorchrunWorkerAdapterError(
+                    "framework adapter attached after inference state changed"
+                )
+            self._restore_imports_locked()
+
+    def _raise_if_inference_failed(self) -> None:
+        with self._lock:
+            if self._inference_error is not None:
+                raise self._inference_error
+
+    def _restore_imports_locked(self) -> None:
+        if (
+            self._import_wrapper is not None
+            and builtins.__import__ is self._import_wrapper
+            and self._original_import is not None
+        ):
+            builtins.__import__ = self._original_import
+        if (
+            self._import_module_wrapper is not None
+            and importlib.import_module is self._import_module_wrapper
+            and self._original_import_module is not None
+        ):
+            importlib.import_module = self._original_import_module
+        self._import_wrapper = None
+        self._import_module_wrapper = None
+
+
 _bootstrap_lock = threading.Lock()
 _installed_adapter: TorchrunWorkerAdapter | None = None
 
@@ -517,7 +767,7 @@ _installed_adapter: TorchrunWorkerAdapter | None = None
 def bootstrap_worker_from_environment(
     environment: Mapping[str, str] | None = None,
 ) -> TorchrunWorkerAdapter | None:
-    """Install the configured adapter. Called automatically by worker bootstrap."""
+    """Install automatic inference or a configured custom worker adapter."""
 
     global _installed_adapter
     environ = os.environ if environment is None else environment
@@ -527,8 +777,14 @@ def bootstrap_worker_from_environment(
         if _installed_adapter is not None:
             return _installed_adapter
         context = _context_from_environment(environ)
-        spec = _required_environment(environ, _ADAPTER_ENV)
-        adapter = _load_adapter(spec, context)
+        generation_target = environ if isinstance(environ, MutableMapping) else os.environ
+        generation_target[_GENERATION_ENV] = str(context.generation)
+        options = _load_config(context.config_path)
+        adapter_spec = options.pop("adapter", None)
+        if adapter_spec is None:
+            adapter: TorchrunWorkerAdapter = _AutoFrameworkAdapter(options)
+        else:
+            adapter = _load_custom_adapter(adapter_spec, context)
         adapter.install(context)
         _installed_adapter = adapter
         return adapter
@@ -536,25 +792,32 @@ def bootstrap_worker_from_environment(
 
 def configure_worker_bootstrap_environment(
     *,
-    adapter_spec: str,
-    context: TorchrunWorkerContext,
+    run_id: str,
+    node_id: str,
+    restart_context_path: Path,
+    config_path: Path | None,
     environment: dict[str, str] | None = None,
 ) -> None:
     """Configure child-process environment for automatic worker bootstrap."""
 
-    if not isinstance(context, TorchrunWorkerContext):
-        raise TypeError("context must be TorchrunWorkerContext")
+    if not isinstance(restart_context_path, Path):
+        raise TypeError("restart_context_path must be pathlib.Path")
+    if not restart_context_path.is_absolute():
+        raise ValueError("restart_context_path must be absolute")
+    if config_path is not None:
+        if not isinstance(config_path, Path):
+            raise TypeError("config_path must be pathlib.Path")
+        if not config_path.is_absolute():
+            raise ValueError("config_path must be absolute")
     target = os.environ if environment is None else environment
     values = {
         _ACTIVATE_ENV: "1",
-        _ADAPTER_ENV: _nonempty(adapter_spec, "worker_adapter"),
-        _RUN_ID_ENV: context.run_id,
-        _NODE_ID_ENV: context.node_id,
-        _LOCAL_WORLD_SIZE_ENV: str(context.local_world_size),
-        _CONTEXT_PATH_ENV: str(context.restart_context_path),
+        _RUN_ID_ENV: _nonempty(run_id, "run_id"),
+        _NODE_ID_ENV: _nonempty(node_id, "node_id"),
+        _CONTEXT_PATH_ENV: str(restart_context_path),
     }
-    if context.config_path is not None:
-        values[_CONFIG_ENV] = str(context.config_path)
+    if config_path is not None:
+        values[_CONFIG_ENV] = str(config_path)
     elif _CONFIG_ENV in target:
         raise TorchrunWorkerAdapterError(f"conflicting worker environment {_CONFIG_ENV}")
     for name, value in values.items():
@@ -619,20 +882,12 @@ def _context_from_environment(environment: Mapping[str, str]) -> TorchrunWorkerC
     )
 
 
-def _load_adapter(
+def _load_custom_adapter(
     spec: str,
     context: TorchrunWorkerContext,
 ) -> TorchrunWorkerAdapter:
-    if spec in {_BUILTIN_PYTORCH, _BUILTIN_PYTORCH_DDP}:
-        return NativePyTorchAdapter(_load_config(context.config_path))
-    if spec == _BUILTIN_TORCHTITAN:
-        return TorchTitanWorkerAdapter(_load_config(context.config_path))
-    if spec == _BUILTIN_MEGATRON:
-        return MegatronWorkerAdapter(_load_config(context.config_path))
-    if spec == _BUILTIN_DEEPSPEED:
-        return DeepSpeedWorkerAdapter(_load_config(context.config_path))
     if spec.count(":") != 1:
-        raise TorchrunWorkerAdapterError("custom worker_adapter must use the 'module:factory' form")
+        raise TorchrunWorkerAdapterError("custom adapter must use the 'module:factory' form")
     module_name, attribute = spec.split(":", 1)
     module = importlib.import_module(_nonempty(module_name, "adapter module"))
     factory = getattr(module, _nonempty(attribute, "adapter factory"), None)
@@ -664,6 +919,19 @@ def _load_config(path: Path | None) -> dict[str, Any]:
     version = payload["schema_version"]
     if isinstance(version, bool) or not isinstance(version, int) or version != 1:
         raise TorchrunWorkerAdapterError("worker config schema_version must be integer 1")
+    adapter = payload.get("adapter")
+    if adapter is not None:
+        try:
+            normalized = _nonempty(adapter, "adapter")
+        except (TypeError, ValueError) as error:
+            raise TorchrunWorkerAdapterError(
+                "worker config adapter must be a non-empty string"
+            ) from error
+        if normalized.count(":") != 1:
+            raise TorchrunWorkerAdapterError(
+                "worker config adapter must use the 'module:factory' form"
+            )
+        payload["adapter"] = normalized
     return payload
 
 

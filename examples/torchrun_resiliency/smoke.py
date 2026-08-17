@@ -1,8 +1,9 @@
-"""Minimal user-owned DDP loop activated entirely through torchrun flags.
+"""Minimal DDP smoke worker activated entirely through torchrun flags.
 
 This module deliberately does not import ``lm_resiliency``. The
-``lm_resiliency`` rendezvous backend injects the configured worker adapter
-before this module starts.
+``lm_resiliency`` rendezvous backend installs import monitoring before this
+module starts and infers the native PyTorch adapter from this module's imports.
+This is a bootstrap validation fixture, not a production-loop example.
 """
 
 from __future__ import annotations

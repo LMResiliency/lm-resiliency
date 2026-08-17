@@ -4,7 +4,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from examples.production_loops._fault_campaign import ReplayFaultCampaign
+from examples.torchrun_resiliency._replay_fault import ReplayFaultCampaign
 
 
 class _CheckpointManager:

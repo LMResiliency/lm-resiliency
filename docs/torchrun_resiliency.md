@@ -2,7 +2,7 @@
 
 Status: implemented and validated
 
-Last updated: 2026-08-16
+Last updated: 2026-08-17
 
 ## Summary
 
@@ -88,12 +88,22 @@ configuration. They are not duplicated in every restart plan.
 
 ### Initial generation
 
-The shared `active_nodes` roster defines generation zero and logical slot order.
-Every agent heartbeats in the rendezvous store.
+Each agent reads `/etc/machine-id`, validates the standard 32-hexadecimal
+machine identity, and registers a domain-separated SHA-256 identifier in the
+rendezvous store. The raw machine ID is not published. The first `min_nodes`
+unique registrations are committed once as generation zero and logical slot
+order. Later registrations remain standbys. Every agent then heartbeats under
+its committed machine identity.
 
 - assigned nodes publish readiness and form the worker group;
 - unassigned nodes remain blocked in `next_rendezvous()`; and
 - parked standbys are hidden from `num_nodes_waiting()`.
+
+Two live agents resolving to the same machine identity fail closed. This
+prevents two torchrun agents on one physical node from claiming separate
+failure domains. The validation campaign intentionally simulates multiple
+nodes on one host by setting `LM_RESILIENCY_MACHINE_ID_PATH` to a different
+synthetic machine-ID file for each agent.
 
 ### Replacement
 
@@ -143,37 +153,27 @@ Required per-agent rendezvous configuration:
 
 | Key | Meaning |
 |---|---|
-| `node_id` | Stable scheduler-provided node identity |
-| `active_nodes` | Semicolon-delimited generation-zero roster in slot order |
-| `local_world_size` | Workers launched per admitted node |
-| `restart_context_path` | Absolute node-local context path |
+| `lm_resiliency_restart_context_path` | Absolute node-local context path |
 
 Optional settings:
 
 | Key | Default | Meaning |
 |---|---:|---|
-| `join_timeout_ms` | `300000` | Bounded formation/bootstrap window |
-| `poll_interval_ms` | `250` | Store polling interval |
-| `heartbeat_timeout_ms` | `10000` | Standby/agent liveness window |
-| `worker_adapter` | unset | Injected stack adapter: `pytorch`, `torchtitan`, `megatron`, `deepspeed`, or `module:factory` |
-| `worker_config` | unset | Absolute path to the adapter's strict TOML policy |
+| `lm_resiliency_join_timeout_ms` | `300000` | Bounded formation/bootstrap window |
+| `lm_resiliency_poll_interval_ms` | `250` | Store polling interval |
+| `lm_resiliency_heartbeat_timeout_ms` | `10000` | Standby/agent liveness window |
+| `lm_resiliency_worker_config` | unset | Absolute path to the strict worker policy; enables automatic framework instrumentation |
 
-The values can be supplied through `--rdzv-conf`. The corresponding environment
-fallbacks are:
+The values are supplied through `--rdzv-conf`. The `lm_resiliency_` namespace
+prevents collisions with c10d and future torchrun rendezvous options.
 
-```text
-LM_RESILIENCY_NODE_ID
-LM_RESILIENCY_ACTIVE_NODES
-LM_RESILIENCY_LOCAL_WORLD_SIZE
-LM_RESILIENCY_RESTART_CONTEXT
-LM_RESILIENCY_WORKER_ADAPTER
-LM_RESILIENCY_WORKER_CONFIG
-```
+Physical node identity and initial admission are automatic. Production agents
+read `/etc/machine-id`. `LM_RESILIENCY_MACHINE_ID_PATH` can select another
+absolute machine-ID file for containerized deployments or test harnesses.
 
 Example agent command for a user module with no LM Resiliency imports:
 
 ```bash
-export LM_RESILIENCY_RESTART_CONTEXT="$CONTEXT_PATH"
 torchrun \
   --nnodes=1:1 \
   --nproc-per-node=1 \
@@ -182,9 +182,9 @@ torchrun \
   --rdzv-endpoint="$STORE_ENDPOINT" \
   --rdzv-id="$RUN_ID" \
   --rdzv-conf="store_type=tcp,is_host=false,read_timeout=120,\
-node_id=$NODE_ID,active_nodes=node-a,local_world_size=1,\
-worker_adapter=pytorch,worker_config=/absolute/path/worker.toml" \
-  --module examples.production_loops.torchrun_user_train \
+lm_resiliency_restart_context_path=$CONTEXT_PATH,\
+lm_resiliency_worker_config=/absolute/path/worker.toml" \
+  --module examples.torchrun_resiliency.smoke \
   --artifact-dir /tmp/lm-resiliency-user-loop
 ```
 
@@ -192,10 +192,18 @@ For a file-backed single-host run, set `store_type=file` and use a private
 local rendezvous path. Multi-host validation uses an orchestrator-owned
 `TCPStore`.
 
-The rendezvous plugin injects the selected adapter before Python executes the
-user module. The user module still owns the ordinary framework training loop.
-The adapter supplies the framework-specific knowledge required to locate and
-restore training state.
+When `lm_resiliency_worker_config` is set, the rendezvous plugin installs framework-import
+monitoring before Python executes the user module. Native PyTorch is tentative;
+an import of TorchTitan, Megatron Core, or DeepSpeed selects the corresponding
+more specific adapter before attachment. Multiple higher-level supported
+frameworks fail closed. The user module still owns the ordinary framework
+training loop.
+
+Torchrun supplies `LOCAL_WORLD_SIZE` to every worker from
+`--nproc-per-node`. Replacement workers compare that value with the
+manager-selected rank range before framework initialization, so the same
+topology invariant is preserved without duplicating worker width in
+`--rdzv-conf`.
 
 Adapters select a framework, not a parallelism strategy. Each adapter passes the
 same objects accepted by that framework's existing `enable_resiliency()` API,
@@ -206,6 +214,8 @@ sharded optimizers, or caller-owned loop state provide a custom adapter rather
 than relying on process-wide object scanning.
 
 The worker policy is schema-versioned and strict even for disabled features.
+Custom stacks set `adapter = "package.module:factory"` in that policy; built-in
+frameworks omit `adapter` and use import inference.
 GEMINI topology settings remain deployment-owned: for example,
 `replication_jump` must divide the checkpoint world according to the pairing
 contract documented in [GEMINI](gemini.md#peer-replication).
@@ -230,6 +240,9 @@ manager flow.
 ## Safety Properties
 
 - active world size remains fixed;
+- generation-zero placement is immutable after the first `min_nodes`
+  registrations are committed;
+- duplicate physical machine identities fail closed;
 - logical slots and global-rank ranges remain stable;
 - a plan is immutable and generation-fenced;
 - only manager-selected replacements become visible to healthy agents;
@@ -243,34 +256,32 @@ manager flow.
 ## Validation
 
 The minimal zero-import user loop is
-[`examples/production_loops/torchrun_user_train.py`](../examples/production_loops/torchrun_user_train.py).
+[`examples/torchrun_resiliency/smoke.py`](../examples/torchrun_resiliency/smoke.py).
 Its
-[`torchrun_worker_smoke.toml`](../examples/production_loops/torchrun_worker_smoke.toml)
+[`smoke.toml`](../examples/torchrun_resiliency/policies/smoke.toml)
 policy disables GEMINI and SCOUT so a CPU run can validate only pre-module
 adapter activation. The framework production loops use
-[`worker_resiliency.toml`](../examples/production_loops/worker_resiliency.toml)
+[`resiliency.toml`](../examples/production_loops/policies/resiliency.toml)
 to exercise both mechanisms on the documented eight-GPU topology.
 
 The executable validation campaign remains
-[`examples/production_loops/torchrun.py`](../examples/production_loops/torchrun.py).
+[`examples/torchrun_resiliency/pressure.py`](../examples/torchrun_resiliency/pressure.py).
 It includes manager, fault-injection, baseline-comparison, and two-host
 orchestration logic that is not part of a normal user training module.
 It performs:
 
-1. an uninterrupted four-rank baseline;
-2. four active torchrun agents plus two parked standbys;
-3. SCOUT replay-fault localization at logical rank 3;
-4. GEMINI recovery-verified checkpoint selection and flush;
-5. manager plan publication;
-6. stable-slot replacement and exact fresh-process recovery;
-7. a second fault and second replacement; and
-8. final comparison against the uninterrupted baseline.
+1. an uninterrupted eight-rank baseline;
+2. eight active one-GPU agents plus eight parked one-GPU standbys;
+3. sixteen same-node restart-only incidents;
+4. eight replay-only SDC incidents targeting distinct logical ranks;
+5. exact SCOUT localization and recovery-verified checkpoint selection;
+6. manager plan publication for every incident;
+7. stable-slot replacement until every initial GPU-node is quarantined; and
+8. bounded numerical comparison against the uninterrupted baseline.
 
-The campaign passed locally on six A100 GPUs and across two hosts with three
-A100 GPUs per host. The two-host result localized both injected faults exactly,
-restored verified steps 2 and 5 bitwise, assigned both standbys to logical slot
-3 in sequence, and completed all eight optimizer steps with clean launcher
-exit.
+The `--fault-campaign-dir` bundle owns `campaign.json`, restart-stable state,
+artifacts, logs, checkpoints, and the final summary. It is a validation-only
+surface and is not required by normal torchrun training.
 
 See [Validation](validation.md#torchrun-standby-replacement) and
 [Examples](../examples/README.md#production-loops) for commands and numerical
@@ -281,6 +292,8 @@ acceptance bounds.
 - fixed-size replacement only; no scale-up or scale-down;
 - stable topology and local worker count across generations;
 - standbys must already be allocated and running;
+- one torchrun agent per unique `/etc/machine-id` is required outside the
+  synthetic validation harness;
 - the manager, not torchrun, owns evidence evaluation and quarantine policy;
 - one shared control-store endpoint is required;
 - built-in injected adapters support exact manager-selected GEMINI recovery;

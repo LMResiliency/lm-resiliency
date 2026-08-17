@@ -26,9 +26,9 @@ from lm_resiliency.integrations.torchrun.worker_adapter import (
     TorchrunWorkerAdapterError,
     TorchrunWorkerContext,
     TorchTitanWorkerAdapter,
+    _AutoFrameworkAdapter,
     _context_from_environment,
     _feature_options,
-    _load_adapter,
     _load_config,
     configure_worker_bootstrap_environment,
 )
@@ -69,7 +69,22 @@ def _clean_environment() -> dict[str, str]:
     for name in tuple(environment):
         if name.startswith("LM_RESILIENCY_TORCHRUN_"):
             environment.pop(name)
+    environment.pop("LM_RESILIENCY_GENERATION", None)
+    environment.pop("LOCAL_WORLD_SIZE", None)
     return environment
+
+
+def _configure_bootstrap(
+    context: TorchrunWorkerContext,
+    environment: dict[str, str],
+) -> None:
+    configure_worker_bootstrap_environment(
+        run_id=context.run_id,
+        node_id=context.node_id,
+        restart_context_path=context.restart_context_path,
+        config_path=context.config_path,
+        environment=environment,
+    )
 
 
 def test_custom_adapter_bootstraps_user_script_without_lm_imports(
@@ -94,6 +109,9 @@ def test_custom_adapter_bootstraps_user_script_without_lm_imports(
                                 "run_id": context.run_id,
                                 "node_id": context.node_id,
                                 "generation": context.generation,
+                                "runtime_generation": os.environ[
+                                    "LM_RESILIENCY_GENERATION"
+                                ],
                             },
                             sort_keys=True,
                         ),
@@ -121,14 +139,19 @@ def test_custom_adapter_bootstraps_user_script_without_lm_imports(
     )
     assert "lm_resiliency" not in user_source
     user_script.write_text(user_source, encoding="utf-8")
+    config = tmp_path / "worker.toml"
+    config.write_text(
+        'schema_version = 1\nadapter = "custom_adapter:create"\n',
+        encoding="utf-8",
+    )
     environment = _clean_environment()
+    environment["LOCAL_WORLD_SIZE"] = "1"
     environment["ADAPTER_MARKER"] = str(marker)
     environment["USER_SUCCESS"] = str(success)
     environment["PYTHONPATH"] = os.pathsep.join([str(tmp_path), str(Path(__file__).parents[2])])
-    configure_worker_bootstrap_environment(
-        adapter_spec="custom_adapter:create",
-        context=_context(tmp_path),
-        environment=environment,
+    _configure_bootstrap(
+        replace(_context(tmp_path), config_path=config.resolve()),
+        environment,
     )
 
     completed = subprocess.run(
@@ -147,6 +170,7 @@ def test_custom_adapter_bootstraps_user_script_without_lm_imports(
         "generation": 0,
         "node_id": "node-a",
         "run_id": "adapter-run",
+        "runtime_generation": "0",
     }
 
 
@@ -161,12 +185,17 @@ def test_worker_bootstrap_fails_closed_before_user_code(tmp_path: Path) -> None:
         "raise RuntimeError('user code must not execute')\n",
         encoding="utf-8",
     )
+    config = tmp_path / "worker.toml"
+    config.write_text(
+        'schema_version = 1\nadapter = "broken_adapter:create"\n',
+        encoding="utf-8",
+    )
     environment = _clean_environment()
+    environment["LOCAL_WORLD_SIZE"] = "1"
     environment["PYTHONPATH"] = os.pathsep.join([str(tmp_path), str(Path(__file__).parents[2])])
-    configure_worker_bootstrap_environment(
-        adapter_spec="broken_adapter:create",
-        context=_context(tmp_path),
-        environment=environment,
+    _configure_bootstrap(
+        replace(_context(tmp_path), config_path=config.resolve()),
+        environment,
     )
 
     completed = subprocess.run(
@@ -193,13 +222,81 @@ def test_worker_bootstrap_environment_conflict_is_transactional(tmp_path: Path) 
         TorchrunWorkerAdapterError,
         match="LM_RESILIENCY_TORCHRUN_NODE_ID",
     ):
-        configure_worker_bootstrap_environment(
-            adapter_spec="pytorch",
-            context=_context(tmp_path),
-            environment=environment,
-        )
+        _configure_bootstrap(_context(tmp_path), environment)
 
     assert environment == before
+
+
+def test_worker_context_uses_torchrun_local_world_size(tmp_path: Path) -> None:
+    context_path = (tmp_path / "restart-context.json").resolve()
+    environment = {
+        "LM_RESILIENCY_TORCHRUN_RUN_ID": "adapter-run",
+        "LM_RESILIENCY_TORCHRUN_NODE_ID": "node-a",
+        "LOCAL_WORLD_SIZE": "8",
+        "LM_RESILIENCY_TORCHRUN_RESTART_CONTEXT": str(context_path),
+    }
+
+    context = _context_from_environment(environment)
+
+    assert context.local_world_size == 8
+
+
+def test_framework_inference_replaces_tentative_pytorch_with_deepspeed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deepspeed = types.ModuleType("deepspeed")
+    deepspeed.initialize = lambda: (object(),)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "deepspeed", deepspeed)
+    adapter = _AutoFrameworkAdapter(
+        {
+            "enable_checkpoint": False,
+            "enable_detection": False,
+        }
+    )
+    adapter.install(_context(tmp_path))
+    try:
+        __import__("torch")
+        assert adapter.selected_framework is None
+        assert isinstance(adapter.delegate, NativePyTorchAdapter)
+
+        __import__("deepspeed")
+        assert adapter.selected_framework == "deepspeed"
+        assert isinstance(adapter.delegate, DeepSpeedWorkerAdapter)
+    finally:
+        adapter.close()
+
+
+def test_framework_inference_rejects_multiple_specialized_frameworks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deepspeed = types.ModuleType("deepspeed")
+    deepspeed.initialize = lambda: (object(),)  # type: ignore[attr-defined]
+    megatron = types.ModuleType("megatron")
+    monkeypatch.setitem(sys.modules, "deepspeed", deepspeed)
+    monkeypatch.setitem(sys.modules, "megatron", megatron)
+    adapter = _AutoFrameworkAdapter(
+        {
+            "enable_checkpoint": False,
+            "enable_detection": False,
+        }
+    )
+    adapter.install(_context(tmp_path))
+    try:
+        __import__("deepspeed")
+        with pytest.raises(
+            TorchrunWorkerAdapterError,
+            match="multiple supported training frameworks",
+        ):
+            __import__("megatron")
+        with pytest.raises(
+            TorchrunWorkerAdapterError,
+            match="multiple supported training frameworks",
+        ):
+            deepspeed.initialize()
+    finally:
+        adapter.close()
 
 
 @pytest.fixture
@@ -668,32 +765,16 @@ def test_deepspeed_adapter_delegates_exact_engine_without_parallelism(
         adapter.close()
 
 
-@pytest.mark.parametrize(
-    ("name", "expected_type"),
-    [
-        ("pytorch", NativePyTorchAdapter),
-        ("pytorch_ddp", NativePyTorchAdapter),
-        ("torchtitan", TorchTitanWorkerAdapter),
-        ("megatron", MegatronWorkerAdapter),
-        ("deepspeed", DeepSpeedWorkerAdapter),
-    ],
-)
-def test_builtin_adapter_names(
-    tmp_path: Path,
-    name: str,
-    expected_type: type[Any],
-) -> None:
-    assert isinstance(_load_adapter(name, _context(tmp_path)), expected_type)
-
-
-def test_builtin_adapter_construction_does_not_import_optional_frameworks(
-    tmp_path: Path,
-) -> None:
+def test_builtin_adapter_construction_does_not_import_optional_frameworks() -> None:
     optional_roots = {"torchtitan", "megatron", "deepspeed"}
     before = set(sys.modules)
 
-    for name in ("torchtitan", "megatron", "deepspeed"):
-        _load_adapter(name, _context(tmp_path))
+    for adapter_type in (
+        TorchTitanWorkerAdapter,
+        MegatronWorkerAdapter,
+        DeepSpeedWorkerAdapter,
+    ):
+        adapter_type()
 
     imported = {module_name.split(".", 1)[0] for module_name in set(sys.modules) - before}
     assert imported.isdisjoint(optional_roots)
@@ -783,6 +864,16 @@ def test_worker_config_is_strict(tmp_path: Path) -> None:
     ):
         _load_config(config)
 
+    config.write_text(
+        'schema_version = 1\nadapter = "pytorch"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        TorchrunWorkerAdapterError,
+        match="module:factory",
+    ):
+        _load_config(config)
+
 
 @pytest.mark.parametrize("section", ["checkpoint", "replay"])
 def test_disabled_worker_features_still_validate_their_sections(
@@ -839,11 +930,13 @@ def test_worker_context_rejects_stale_restart_handoff(
     environment = {
         "LM_RESILIENCY_TORCHRUN_RUN_ID": "adapter-run",
         "LM_RESILIENCY_TORCHRUN_NODE_ID": "node-a",
-        "LM_RESILIENCY_TORCHRUN_LOCAL_WORLD_SIZE": "1",
+        "LOCAL_WORLD_SIZE": "1",
         "LM_RESILIENCY_TORCHRUN_RESTART_CONTEXT": str(context_path),
     }
     if field == "generation":
         restart = replace(restart, generation=value)
+    elif field == "local_world_size":
+        environment["LOCAL_WORLD_SIZE"] = str(value)
     else:
         environment[f"LM_RESILIENCY_TORCHRUN_{field.upper()}"] = str(value)
     SimpleRestartContextFile(context_path).write(restart)
@@ -879,7 +972,6 @@ def test_torchrun_package_exports_stable_worker_adapter_api() -> None:
         "megatron.py",
         "pytorch.py",
         "torchtitan.py",
-        "torchrun_user_train.py",
     ],
 )
 def test_user_training_examples_have_no_lm_resiliency_imports(
@@ -906,9 +998,9 @@ def test_user_training_examples_have_no_lm_resiliency_imports(
 
 
 def test_checked_in_worker_policies_are_valid(tmp_path: Path) -> None:
-    root = Path(__file__).parents[2] / "examples" / "production_loops"
+    examples = Path(__file__).parents[2] / "examples"
 
-    production = _load_config(root / "worker_resiliency.toml")
+    production = _load_config(examples / "production_loops" / "policies" / "resiliency.toml")
     checkpoint, replay, options = _feature_options(production, _context(tmp_path))
     assert options == {
         "enable_checkpoint": True,
@@ -921,7 +1013,7 @@ def test_checked_in_worker_policies_are_valid(tmp_path: Path) -> None:
     assert replay is not None
     assert replay.rotate_layers is False
 
-    smoke = _load_config(root / "torchrun_worker_smoke.toml")
+    smoke = _load_config(examples / "torchrun_resiliency" / "policies" / "smoke.toml")
     checkpoint, replay, options = _feature_options(smoke, _context(tmp_path))
     assert options["enable_checkpoint"] is False
     assert options["enable_detection"] is False

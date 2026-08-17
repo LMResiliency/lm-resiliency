@@ -6,14 +6,12 @@ Only token generation and external logging/checkpoint services are synthetic.
 
 Run on one eight-GPU host:
 
-    export LM_RESILIENCY_RESTART_CONTEXT="${LM_RESILIENCY_RESTART_CONTEXT:-/tmp/lm-resiliency-megatron-context/context.json}"
     torchrun --rdzv-backend=lm_resiliency \
       --rdzv-endpoint=/tmp/lm-resiliency-megatron-rdzv \
       --rdzv-id=megatron-production \
-      --rdzv-conf="store_type=file,node_id=node-a,active_nodes=node-a,\
-local_world_size=8,\
-worker_adapter=megatron,\
-worker_config=$PWD/examples/production_loops/worker_resiliency.toml" \
+      --rdzv-conf="store_type=file,\
+lm_resiliency_restart_context_path=/tmp/lm-resiliency-megatron-context/context.json,\
+lm_resiliency_worker_config=$PWD/examples/production_loops/policies/resiliency.toml" \
       --nnodes=1:1 --nproc-per-node=8 --module \
       examples.production_loops.megatron \
       --artifact-dir /tmp/megatron-production-loop
