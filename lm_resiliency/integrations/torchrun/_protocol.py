@@ -431,11 +431,12 @@ class RestartContext(_WireRecord):
     checkpoint_id: str | None
     checkpoint_manifest_id: str
     reason_code: str
+    restart_deadline_unix_ms: int
 
     def __post_init__(self) -> None:
         _string(self.plan_id, "RestartContext.plan_id")
         _string(self.run_id, "RestartContext.run_id")
-        _integer(self.generation, "RestartContext.generation", minimum=0)
+        _integer(self.generation, "RestartContext.generation", minimum=1)
         _string(self.node_id, "RestartContext.node_id")
         _integer(
             self.logical_node_slot,
@@ -485,6 +486,11 @@ class RestartContext(_WireRecord):
             )
         _string(self.checkpoint_manifest_id, "RestartContext.checkpoint_manifest_id")
         _string(self.reason_code, "RestartContext.reason_code")
+        _integer(
+            self.restart_deadline_unix_ms,
+            "RestartContext.restart_deadline_unix_ms",
+            minimum=1,
+        )
 
     @classmethod
     def from_plan(cls, plan: RestartPlan, node_id: str) -> RestartContext:
@@ -512,6 +518,7 @@ class RestartContext(_WireRecord):
             checkpoint_id=plan.checkpoint_id,
             checkpoint_manifest_id=plan.checkpoint_manifest_id,
             reason_code=plan.reason_code,
+            restart_deadline_unix_ms=plan.restart_deadline_unix_ms,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -532,6 +539,7 @@ class RestartContext(_WireRecord):
             "checkpoint_id": self.checkpoint_id,
             "checkpoint_manifest_id": self.checkpoint_manifest_id,
             "reason_code": self.reason_code,
+            "restart_deadline_unix_ms": self.restart_deadline_unix_ms,
         }
 
     @classmethod
@@ -552,6 +560,7 @@ class RestartContext(_WireRecord):
             "checkpoint_id",
             "checkpoint_manifest_id",
             "reason_code",
+            "restart_deadline_unix_ms",
         }
         _record_fields(value, path=cls.__name__, required=required)
         return cls(
@@ -560,7 +569,7 @@ class RestartContext(_WireRecord):
             generation=_integer(
                 value["generation"],
                 "RestartContext.generation",
-                minimum=0,
+                minimum=1,
             ),
             node_id=_string(value["node_id"], "RestartContext.node_id"),
             logical_node_slot=_integer(
@@ -611,6 +620,11 @@ class RestartContext(_WireRecord):
                 "RestartContext.checkpoint_manifest_id",
             ),
             reason_code=_string(value["reason_code"], "RestartContext.reason_code"),
+            restart_deadline_unix_ms=_integer(
+                value["restart_deadline_unix_ms"],
+                "RestartContext.restart_deadline_unix_ms",
+                minimum=1,
+            ),
         )
 
 

@@ -117,6 +117,36 @@ class TorchrunRecoveryCoordinator:
             raise ValueError("quarantined_node_ids must be unique")
         if set(active) & set(quarantined):
             raise ValueError("active and quarantined node IDs must be disjoint")
+        current_generation = self._plans.current_generation()
+        if current_generation != generation:
+            raise RuntimeError(
+                f"manager generation {generation} is stale; "
+                f"committed generation is {current_generation}"
+            )
+        if generation == 0:
+            committed_active = self._plans.read_initial_nodes()
+            if committed_active is None:
+                raise RuntimeError("generation-zero placement is not committed")
+            committed_quarantined: tuple[str, ...] = ()
+        else:
+            committed_plan = self._plans.read(generation)
+            if committed_plan is None:
+                raise RuntimeError(f"generation {generation} has no committed recovery plan")
+            committed_active = tuple(
+                assignment.node_id for assignment in committed_plan.slot_assignments
+            )
+            committed_quarantined = committed_plan.quarantined_node_ids
+            committed_local_world_size = committed_plan.slot_assignments[0].local_world_size
+            if local_world_size != committed_local_world_size:
+                raise RuntimeError("local_world_size does not match the committed worker topology")
+            if request.topology_digest != committed_plan.topology_digest:
+                raise RuntimeError(
+                    "recovery request topology_digest does not match the committed topology"
+                )
+        if tuple(active) != committed_active:
+            raise RuntimeError("active_node_ids do not match the committed placement")
+        if tuple(quarantined) != committed_quarantined:
+            raise RuntimeError("quarantined_node_ids do not match the committed quarantine history")
         if replacement is not None:
             slot, replacement_node_id = replacement
             if isinstance(slot, bool) or not isinstance(slot, int):

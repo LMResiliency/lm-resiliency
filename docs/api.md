@@ -116,6 +116,11 @@ On a replacement generation, built-ins accept GEMINI restart contexts and
 verify that the framework recovered the exact manager-selected step before
 training begins. A durable-source restart requires a custom worker adapter that
 owns the framework's durable loader.
+After manager-selected GEMINI recovery, the built-in DeepSpeed adapter rejects
+a later `engine.load_checkpoint()` call because it could overwrite the selected
+model and optimizer state. DeepSpeed applications that also restore
+framework-owned client state must provide a custom worker adapter that
+coordinates both recovery mechanisms.
 
 Worker policy is a strict versioned TOML file:
 

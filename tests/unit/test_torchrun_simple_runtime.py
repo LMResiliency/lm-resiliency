@@ -36,6 +36,7 @@ from lm_resiliency.integrations.torchrun._simple_runtime import (
     _create_rendezvous_handler,
     _machine_node_id,
     _node_id_from_machine_id,
+    _NodeAssignment,
 )
 
 RUN_ID = "simple-run"
@@ -142,6 +143,18 @@ def _result(
     if isinstance(value, BaseException):
         raise value
     return value
+
+
+def _wait_for_nodes_waiting(
+    handler: SimpleRendezvousHandler,
+    expected: int,
+) -> None:
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        if handler.num_nodes_waiting() == expected:
+            return
+        time.sleep(0.02)
+    assert handler.num_nodes_waiting() == expected
 
 
 def test_config_resolves_torchrun_fields(tmp_path: Path) -> None:
@@ -320,6 +333,23 @@ def test_plan_store_is_create_once_and_advances_generation() -> None:
         plans.publish(replace(plan, plan_id="other-plan"))
 
 
+def test_plan_store_rejects_stale_publish_before_writing_plan() -> None:
+    store = HashStore()
+    plans = SimpleRecoveryPlanStore(store, run_id=RUN_ID)
+    stale = replace(
+        _plan(),
+        plan_id="future-plan",
+        intent_id="future-intent",
+        from_generation=1,
+        to_generation=2,
+    )
+
+    with pytest.raises(RecoveryPlanConflict, match="current generation is 0"):
+        plans.publish(stale)
+
+    assert plans.read(2) is None
+
+
 def test_initial_nodes_are_committed_once_in_registration_order() -> None:
     store = HashStore()
     plans = SimpleRecoveryPlanStore(store, run_id=RUN_ID)
@@ -401,6 +431,14 @@ def test_plan_decoder_rejects_duplicate_fields() -> None:
         RestartPlan.from_json(duplicated)
 
 
+def test_restart_context_rejects_generation_zero() -> None:
+    payload = RestartContext.from_plan(_plan(), "node-a").to_dict()
+    payload["generation"] = 0
+
+    with pytest.raises(ProtocolValidationError, match="expected a value >= 1"):
+        RestartContext.from_dict(payload)
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -439,7 +477,7 @@ def test_automatic_initial_nodes_and_selected_standby_replace_failed_node(
 
     plan = _plan()
     SimpleRecoveryPlanStore(store, run_id=RUN_ID).publish(plan)
-    assert active_a.num_nodes_waiting() == 1
+    _wait_for_nodes_waiting(active_a, 1)
 
     replacement_thread, replacement_result = _start(active_a)
     second_a = _result(replacement_thread, replacement_result)
@@ -460,7 +498,11 @@ def test_automatic_initial_nodes_and_selected_standby_replace_failed_node(
     assert standby.shutdown()
 
 
-def test_same_node_successor_plan_signals_job_restart(tmp_path: Path) -> None:
+def test_same_node_successor_plan_signals_job_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LM_RESILIENCY_TORCHRUN_EXPECTED_GENERATION", raising=False)
     store = HashStore()
     active_a = _handler(tmp_path, store, "node-a")
     active_b = _handler(tmp_path, store, "node-b")
@@ -468,6 +510,7 @@ def test_same_node_successor_plan_signals_job_restart(tmp_path: Path) -> None:
     first_b_thread, first_b_result = _start(active_b)
     _result(first_a_thread, first_a_result)
     _result(first_b_thread, first_b_result)
+    assert os.environ["LM_RESILIENCY_TORCHRUN_EXPECTED_GENERATION"] == "0"
 
     plan = replace(
         _plan(),
@@ -494,6 +537,116 @@ def test_same_node_successor_plan_signals_job_restart(tmp_path: Path) -> None:
     second_b = _result(second_b_thread, second_b_result)
 
     assert (second_a.rank, second_b.rank) == (0, 1)
+    assert os.environ["LM_RESILIENCY_TORCHRUN_EXPECTED_GENERATION"] == "1"
+    assert active_a.num_nodes_waiting() == 0
+    assert active_a.shutdown()
+    assert active_b.shutdown()
+
+
+def test_ready_record_requires_matching_live_agent(tmp_path: Path) -> None:
+    store = HashStore()
+    active_a = SimpleRendezvousHandler(
+        replace(_config(tmp_path, "node-a"), join_timeout_ms=50),
+        store=store,
+        local_addr="127.0.0.1",
+    )
+    inactive_b = _handler(tmp_path, store, "node-b")
+    assert inactive_b.shutdown()
+    store.set(active_a._ready_key(0, "node-b"), b"stale-agent")
+    store.set(
+        active_a._heartbeat_key("node-b"),
+        json.dumps(
+            {
+                "agent_id": "stale-agent",
+                "node_id": "node-b",
+                "sequence": 99,
+            }
+        ).encode("utf-8"),
+    )
+
+    with pytest.raises(RendezvousTimeoutError, match="assigned nodes"):
+        active_a.next_rendezvous()
+
+    assert active_a.shutdown()
+
+
+def test_wait_for_group_abandons_superseded_generation(tmp_path: Path) -> None:
+    store = HashStore()
+    handler = _handler(tmp_path, store, "node-a")
+    assignment = (
+        _NodeAssignment(logical_node_slot=0, node_id="node-a"),
+        _NodeAssignment(logical_node_slot=1, node_id="node-b"),
+    )
+    result: queue.Queue[bool] = queue.Queue()
+    thread = threading.Thread(
+        target=lambda: result.put(
+            handler._wait_for_group(
+                0,
+                assignment,
+                time.monotonic() + 5,
+            )
+        ),
+        daemon=True,
+    )
+    thread.start()
+
+    SimpleRecoveryPlanStore(store, run_id=RUN_ID).publish(_plan())
+
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert result.get_nowait() is False
+    assert handler.shutdown()
+
+
+def test_heartbeat_liveness_uses_locally_observed_sequence(tmp_path: Path) -> None:
+    store = HashStore()
+    handler = SimpleRendezvousHandler(
+        _config(tmp_path, "node-a"),
+        store=store,
+        local_addr="127.0.0.1",
+        monotonic_clock=iter((10.0, 10.1, 11.2)).__next__,
+    )
+    key = handler._heartbeat_key("node-b")
+
+    def publish(sequence: int) -> None:
+        store.set(
+            key,
+            json.dumps(
+                {
+                    "agent_id": "agent-b",
+                    "node_id": "node-b",
+                    "sequence": sequence,
+                }
+            ).encode("utf-8"),
+        )
+
+    publish(0)
+    assert not handler._heartbeat_is_live("node-b")
+    publish(1)
+    assert handler._heartbeat_is_live("node-b")
+    assert not handler._heartbeat_is_live("node-b")
+    assert handler.shutdown()
+
+
+def test_expired_plan_does_not_signal_job_restart(tmp_path: Path) -> None:
+    store = HashStore()
+    active_a = _handler(tmp_path, store, "node-a")
+    active_b = _handler(tmp_path, store, "node-b")
+    first_a_thread, first_a_result = _start(active_a)
+    first_b_thread, first_b_result = _start(active_b)
+    _result(first_a_thread, first_a_result)
+    _result(first_b_thread, first_b_result)
+    expired = replace(
+        _plan(),
+        slot_assignments=(
+            SlotAssignment(0, "node-a", 0, 1),
+            SlotAssignment(1, "node-b", 1, 1),
+        ),
+        quarantined_node_ids=(),
+        restart_deadline_unix_ms=1,
+    )
+    SimpleRecoveryPlanStore(store, run_id=RUN_ID).publish(expired)
+
     assert active_a.num_nodes_waiting() == 0
     assert active_a.shutdown()
     assert active_b.shutdown()

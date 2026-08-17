@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
+import pytest
 from torch.distributed import HashStore
 
 from lm_resiliency.integrations.torchrun import (
@@ -49,6 +51,11 @@ def test_coordinator_returns_committed_active_and_standby_nodes() -> None:
 
 def test_coordinator_publishes_same_node_and_replacement_generations() -> None:
     store = HashStore()
+    plans = SimpleRecoveryPlanStore(store, run_id="run")
+    plans.register_node("node-a", "agent-a", max_nodes=3)
+    plans.register_node("node-b", "agent-b", max_nodes=3)
+    plans.register_node("node-c", "agent-c", max_nodes=3)
+    assert plans.ensure_initial_nodes(min_nodes=2, max_nodes=3) == ("node-a", "node-b")
     coordinator = TorchrunRecoveryCoordinator(store, run_id="run")
 
     first = coordinator.publish_successor(
@@ -76,6 +83,67 @@ def test_coordinator_publishes_same_node_and_replacement_generations() -> None:
     assert plan is not None
     assert plan.expected_world_size == 4
     assert plan.slot_assignments[1].first_global_rank == 2
+
+
+def test_coordinator_rejects_stale_or_uncommitted_manager_state() -> None:
+    store = HashStore()
+    plans = SimpleRecoveryPlanStore(store, run_id="run")
+    plans.register_node("node-a", "agent-a", max_nodes=3)
+    plans.register_node("node-b", "agent-b", max_nodes=3)
+    plans.register_node("node-c", "agent-c", max_nodes=3)
+    assert plans.ensure_initial_nodes(min_nodes=2, max_nodes=3) == ("node-a", "node-b")
+    coordinator = TorchrunRecoveryCoordinator(store, run_id="run")
+
+    with pytest.raises(RuntimeError, match="active_node_ids"):
+        coordinator.publish_successor(
+            generation=0,
+            active_node_ids=("node-b", "node-a"),
+            quarantined_node_ids=(),
+            request=_request(generation=0),
+            local_world_size=1,
+        )
+
+    first = coordinator.publish_successor(
+        generation=0,
+        active_node_ids=("node-a", "node-b"),
+        quarantined_node_ids=(),
+        request=_request(generation=0),
+        local_world_size=1,
+        replacement=(1, "node-c"),
+    )
+
+    with pytest.raises(RuntimeError, match="stale"):
+        coordinator.publish_successor(
+            generation=0,
+            active_node_ids=("node-a", "node-b"),
+            quarantined_node_ids=(),
+            request=_request(generation=0),
+            local_world_size=1,
+        )
+    with pytest.raises(RuntimeError, match="quarantine history"):
+        coordinator.publish_successor(
+            generation=1,
+            active_node_ids=first.active_node_ids,
+            quarantined_node_ids=(),
+            request=_request(generation=1),
+            local_world_size=1,
+        )
+    with pytest.raises(RuntimeError, match="local_world_size"):
+        coordinator.publish_successor(
+            generation=1,
+            active_node_ids=first.active_node_ids,
+            quarantined_node_ids=first.quarantined_node_ids,
+            request=_request(generation=1),
+            local_world_size=2,
+        )
+    with pytest.raises(RuntimeError, match="topology_digest"):
+        coordinator.publish_successor(
+            generation=1,
+            active_node_ids=first.active_node_ids,
+            quarantined_node_ids=first.quarantined_node_ids,
+            request=replace(_request(generation=1), topology_digest="different-topology"),
+            local_world_size=1,
+        )
 
 
 def test_launch_config_builds_namespaced_framework_neutral_command(tmp_path: Path) -> None:

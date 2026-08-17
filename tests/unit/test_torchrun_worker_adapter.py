@@ -30,6 +30,7 @@ from lm_resiliency.integrations.torchrun.worker_adapter import (
     _feature_options,
     _load_config,
     configure_worker_bootstrap_environment,
+    configure_worker_generation_environment,
     get_torchrun_worker_context,
 )
 
@@ -61,6 +62,7 @@ def _recovery_context(
         checkpoint_id=("checkpoint-4" if checkpoint_source == "durable" else None),
         checkpoint_source=checkpoint_source,
         recovery_mode="recovery_verified",
+        restart_deadline_unix_ms=9_999_999_999_999,
     )
 
 
@@ -78,13 +80,29 @@ def _configure_bootstrap(
     context: TorchrunWorkerContext,
     environment: dict[str, str],
 ) -> None:
-    configure_worker_bootstrap_environment(
-        run_id=context.run_id,
-        node_id=context.node_id,
-        restart_context_path=context.restart_context_path,
-        config_path=context.config_path,
-        environment=environment,
+    before = dict(environment)
+    environment.update(
+        {
+            "GROUP_RANK": str(context.logical_node_slot or 0),
+            "LOCAL_RANK": "0",
+            "LOCAL_WORLD_SIZE": str(context.local_world_size),
+            "RANK": str(context.first_global_rank or 0),
+            "WORLD_SIZE": str(context.local_world_size),
+        }
     )
+    try:
+        configure_worker_bootstrap_environment(
+            run_id=context.run_id,
+            node_id=context.node_id,
+            restart_context_path=context.restart_context_path,
+            config_path=context.config_path,
+            environment=environment,
+        )
+        configure_worker_generation_environment(context.generation, environment)
+    except BaseException:
+        environment.clear()
+        environment.update(before)
+        raise
 
 
 def test_custom_adapter_bootstraps_user_script_without_lm_imports(
@@ -230,10 +248,15 @@ def test_worker_bootstrap_environment_conflict_is_transactional(tmp_path: Path) 
 def test_worker_context_uses_torchrun_local_world_size(tmp_path: Path) -> None:
     context_path = (tmp_path / "restart-context.json").resolve()
     environment = {
+        "GROUP_RANK": "0",
+        "LOCAL_RANK": "0",
         "LM_RESILIENCY_TORCHRUN_RUN_ID": "adapter-run",
         "LM_RESILIENCY_TORCHRUN_NODE_ID": "node-a",
         "LOCAL_WORLD_SIZE": "8",
         "LM_RESILIENCY_TORCHRUN_RESTART_CONTEXT": str(context_path),
+        "LM_RESILIENCY_TORCHRUN_EXPECTED_GENERATION": "0",
+        "RANK": "0",
+        "WORLD_SIZE": "8",
     }
 
     context = _context_from_environment(environment)
@@ -243,12 +266,17 @@ def test_worker_context_uses_torchrun_local_world_size(tmp_path: Path) -> None:
 
 def test_public_worker_context_sets_manager_generation(tmp_path: Path) -> None:
     environment = {
+        "GROUP_RANK": "0",
+        "LOCAL_RANK": "0",
         "LM_RESILIENCY_TORCHRUN_RUN_ID": "adapter-run",
         "LM_RESILIENCY_TORCHRUN_NODE_ID": "node-a",
         "LOCAL_WORLD_SIZE": "1",
         "LM_RESILIENCY_TORCHRUN_RESTART_CONTEXT": str(
             (tmp_path / "restart-context.json").resolve()
         ),
+        "LM_RESILIENCY_TORCHRUN_EXPECTED_GENERATION": "0",
+        "RANK": "0",
+        "WORLD_SIZE": "1",
     }
 
     context = get_torchrun_worker_context(environment)
@@ -279,6 +307,57 @@ def test_framework_inference_replaces_tentative_pytorch_with_deepspeed(
         __import__("deepspeed")
         assert adapter.selected_framework == "deepspeed"
         assert isinstance(adapter.delegate, DeepSpeedWorkerAdapter)
+    finally:
+        adapter.close()
+
+
+def test_framework_inference_observes_transitive_deepspeed_import(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deepspeed = types.ModuleType("deepspeed")
+    deepspeed.initialize = lambda: (object(),)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "deepspeed", deepspeed)
+    adapter = _AutoFrameworkAdapter(
+        {
+            "enable_checkpoint": False,
+            "enable_detection": False,
+        }
+    )
+    adapter.install(_context(tmp_path))
+    try:
+        adapter._run_import("user_helper", lambda: __import__("deepspeed"))
+
+        assert adapter.selected_framework == "deepspeed"
+        assert isinstance(adapter.delegate, DeepSpeedWorkerAdapter)
+    finally:
+        adapter.close()
+
+
+def test_failed_outer_import_does_not_select_transitive_framework(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deepspeed = types.ModuleType("deepspeed")
+    deepspeed.initialize = lambda: (object(),)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "deepspeed", deepspeed)
+    adapter = _AutoFrameworkAdapter(
+        {
+            "enable_checkpoint": False,
+            "enable_detection": False,
+        }
+    )
+    adapter.install(_context(tmp_path))
+
+    def failed_import() -> None:
+        __import__("deepspeed")
+        raise ImportError("helper failed")
+
+    try:
+        with pytest.raises(ImportError, match="helper failed"):
+            adapter._run_import("user_helper", failed_import)
+        assert adapter.selected_framework is None
+        assert adapter.delegate is None
     finally:
         adapter.close()
 
@@ -781,6 +860,46 @@ def test_deepspeed_adapter_delegates_exact_engine_without_parallelism(
         adapter.close()
 
 
+def test_deepspeed_adapter_rejects_framework_load_after_manager_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Engine:
+        def load_checkpoint(self) -> str:
+            return "framework checkpoint loaded"
+
+    deepspeed = types.ModuleType("deepspeed")
+    engine = Engine()
+    deepspeed.initialize = lambda: (engine, None, None, None)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "deepspeed", deepspeed)
+    handle = SimpleNamespace(
+        recovered_step=4,
+        close=lambda: None,
+    )
+    monkeypatch.setattr(
+        "lm_resiliency.integrations.deepspeed.training.enable_resiliency",
+        lambda *_args, **_kwargs: handle,
+    )
+    adapter = DeepSpeedWorkerAdapter(
+        {
+            "enable_checkpoint": False,
+            "enable_detection": False,
+        }
+    )
+    adapter.install(_recovery_context(tmp_path))
+    deepspeed.initialize()
+    try:
+        with pytest.raises(
+            TorchrunWorkerAdapterError,
+            match=r"load_checkpoint\(\) cannot run after manager-selected GEMINI recovery",
+        ):
+            engine.load_checkpoint()
+    finally:
+        adapter.close()
+
+    assert engine.load_checkpoint() == "framework checkpoint loaded"
+
+
 def test_builtin_adapter_construction_does_not_import_optional_frameworks() -> None:
     optional_roots = {"torchtitan", "megatron", "deepspeed"}
     before = set(sys.modules)
@@ -916,7 +1035,7 @@ def test_disabled_worker_features_still_validate_their_sections(
         ("run_id", "another-run", "another run"),
         ("node_id", "node-b", "another node"),
         ("local_world_size", 2, "changes local_world_size"),
-        ("generation", 0, "generation must be positive"),
+        ("generation", 2, "does not match rendezvous generation 1"),
     ],
 )
 def test_worker_context_rejects_stale_restart_handoff(
@@ -942,12 +1061,18 @@ def test_worker_context_rejects_stale_restart_handoff(
         checkpoint_id=None,
         checkpoint_manifest_id="manifest-4",
         reason_code="attributed_sdc",
+        restart_deadline_unix_ms=9_999_999_999_999,
     )
     environment = {
+        "GROUP_RANK": "0",
+        "LOCAL_RANK": "0",
         "LM_RESILIENCY_TORCHRUN_RUN_ID": "adapter-run",
         "LM_RESILIENCY_TORCHRUN_NODE_ID": "node-a",
         "LOCAL_WORLD_SIZE": "1",
         "LM_RESILIENCY_TORCHRUN_RESTART_CONTEXT": str(context_path),
+        "LM_RESILIENCY_TORCHRUN_EXPECTED_GENERATION": "1",
+        "RANK": "0",
+        "WORLD_SIZE": "1",
     }
     if field == "generation":
         restart = replace(restart, generation=value)
@@ -958,6 +1083,156 @@ def test_worker_context_rejects_stale_restart_handoff(
     SimpleRestartContextFile(context_path).write(restart)
 
     with pytest.raises(TorchrunWorkerAdapterError, match=message):
+        _context_from_environment(environment)
+
+
+def test_successor_worker_requires_exact_restart_context_generation(tmp_path: Path) -> None:
+    context_path = (tmp_path / "restart-context.json").resolve()
+    environment = {
+        "GROUP_RANK": "0",
+        "LOCAL_RANK": "0",
+        "LM_RESILIENCY_TORCHRUN_RUN_ID": "adapter-run",
+        "LM_RESILIENCY_TORCHRUN_NODE_ID": "node-a",
+        "LOCAL_WORLD_SIZE": "1",
+        "LM_RESILIENCY_TORCHRUN_RESTART_CONTEXT": str(context_path),
+        "LM_RESILIENCY_TORCHRUN_EXPECTED_GENERATION": "1",
+        "RANK": "0",
+        "WORLD_SIZE": "1",
+    }
+
+    with pytest.raises(TorchrunWorkerAdapterError, match="requires a restart context"):
+        _context_from_environment(environment)
+
+
+@pytest.mark.parametrize(
+    ("environment_changes", "context_changes", "message"),
+    [
+        ({"WORLD_SIZE": "2"}, {}, "changes WORLD_SIZE"),
+        (
+            {"GROUP_RANK": "1", "RANK": "1", "WORLD_SIZE": "2"},
+            {"expected_world_size": 2},
+            "changes GROUP_RANK",
+        ),
+    ],
+)
+def test_successor_worker_rejects_rank_topology_mismatch(
+    tmp_path: Path,
+    environment_changes: dict[str, str],
+    context_changes: dict[str, Any],
+    message: str,
+) -> None:
+    context_path = (tmp_path / "restart-context.json").resolve()
+    restart = RestartContext(
+        plan_id="plan-1",
+        run_id="adapter-run",
+        generation=1,
+        node_id="node-a",
+        logical_node_slot=0,
+        first_global_rank=0,
+        local_world_size=1,
+        expected_world_size=1,
+        topology_digest="topology",
+        recovery_mode="recovery_verified",
+        checkpoint_source="gemini",
+        checkpoint_step=4,
+        checkpoint_id=None,
+        checkpoint_manifest_id="manifest-4",
+        reason_code="attributed_sdc",
+        restart_deadline_unix_ms=9_999_999_999_999,
+    )
+    if context_changes:
+        restart = replace(restart, **context_changes)
+    SimpleRestartContextFile(context_path).write(restart)
+    environment = {
+        "GROUP_RANK": "0",
+        "LOCAL_RANK": "0",
+        "LM_RESILIENCY_TORCHRUN_RUN_ID": "adapter-run",
+        "LM_RESILIENCY_TORCHRUN_NODE_ID": "node-a",
+        "LOCAL_WORLD_SIZE": "1",
+        "LM_RESILIENCY_TORCHRUN_RESTART_CONTEXT": str(context_path),
+        "LM_RESILIENCY_TORCHRUN_EXPECTED_GENERATION": "1",
+        "RANK": "0",
+        "WORLD_SIZE": "1",
+    }
+    environment.update(environment_changes)
+
+    with pytest.raises(TorchrunWorkerAdapterError, match=message):
+        _context_from_environment(environment)
+
+
+def test_successor_worker_rejects_expired_restart_context(tmp_path: Path) -> None:
+    context_path = (tmp_path / "restart-context.json").resolve()
+    SimpleRestartContextFile(context_path).write(
+        RestartContext(
+            plan_id="plan-1",
+            run_id="adapter-run",
+            generation=1,
+            node_id="node-a",
+            logical_node_slot=0,
+            first_global_rank=0,
+            local_world_size=1,
+            expected_world_size=1,
+            topology_digest="topology",
+            recovery_mode="recovery_verified",
+            checkpoint_source="gemini",
+            checkpoint_step=4,
+            checkpoint_id=None,
+            checkpoint_manifest_id="manifest-4",
+            reason_code="attributed_sdc",
+            restart_deadline_unix_ms=1,
+        )
+    )
+    environment = {
+        "GROUP_RANK": "0",
+        "LOCAL_RANK": "0",
+        "LM_RESILIENCY_TORCHRUN_RUN_ID": "adapter-run",
+        "LM_RESILIENCY_TORCHRUN_NODE_ID": "node-a",
+        "LOCAL_WORLD_SIZE": "1",
+        "LM_RESILIENCY_TORCHRUN_RESTART_CONTEXT": str(context_path),
+        "LM_RESILIENCY_TORCHRUN_EXPECTED_GENERATION": "1",
+        "RANK": "0",
+        "WORLD_SIZE": "1",
+    }
+
+    with pytest.raises(TorchrunWorkerAdapterError, match="deadline elapsed"):
+        _context_from_environment(environment)
+
+
+def test_initial_worker_rejects_stale_restart_context(tmp_path: Path) -> None:
+    context_path = (tmp_path / "restart-context.json").resolve()
+    SimpleRestartContextFile(context_path).write(
+        RestartContext(
+            plan_id="plan-1",
+            run_id="adapter-run",
+            generation=1,
+            node_id="node-a",
+            logical_node_slot=0,
+            first_global_rank=0,
+            local_world_size=1,
+            expected_world_size=1,
+            topology_digest="topology",
+            recovery_mode="recovery_verified",
+            checkpoint_source="gemini",
+            checkpoint_step=4,
+            checkpoint_id=None,
+            checkpoint_manifest_id="manifest-4",
+            reason_code="attributed_sdc",
+            restart_deadline_unix_ms=9_999_999_999_999,
+        )
+    )
+    environment = {
+        "GROUP_RANK": "0",
+        "LOCAL_RANK": "0",
+        "LM_RESILIENCY_TORCHRUN_RUN_ID": "adapter-run",
+        "LM_RESILIENCY_TORCHRUN_NODE_ID": "node-a",
+        "LOCAL_WORLD_SIZE": "1",
+        "LM_RESILIENCY_TORCHRUN_RESTART_CONTEXT": str(context_path),
+        "LM_RESILIENCY_TORCHRUN_EXPECTED_GENERATION": "0",
+        "RANK": "0",
+        "WORLD_SIZE": "1",
+    }
+
+    with pytest.raises(TorchrunWorkerAdapterError, match="must not have a restart context"):
         _context_from_environment(environment)
 
 

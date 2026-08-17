@@ -271,6 +271,8 @@ implement scheduler policy.
 - an expired plan cannot admit a worker;
 - unselected and quarantined nodes are absent from the successor assignment;
 - restart context is written before replacement workers train;
+- worker generation, rank ranges, world size, and restart deadline must match
+  the rendezvous decision before framework initialization;
 - malformed plan/context state fails closed;
 - heartbeat loss suppresses restart signaling; and
 - transient control-store contention does not create a false restart edge.

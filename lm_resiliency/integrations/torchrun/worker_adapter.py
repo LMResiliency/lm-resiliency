@@ -14,6 +14,7 @@ import importlib.util
 import inspect
 import os
 import threading
+import time
 import types
 import weakref
 from collections.abc import Callable, Mapping, MutableMapping
@@ -31,6 +32,7 @@ _RUN_ID_ENV = "LM_RESILIENCY_TORCHRUN_RUN_ID"
 _NODE_ID_ENV = "LM_RESILIENCY_TORCHRUN_NODE_ID"
 _LOCAL_WORLD_SIZE_ENV = "LOCAL_WORLD_SIZE"
 _CONTEXT_PATH_ENV = "LM_RESILIENCY_TORCHRUN_RESTART_CONTEXT"
+_EXPECTED_GENERATION_ENV = "LM_RESILIENCY_TORCHRUN_EXPECTED_GENERATION"
 _ATTACHED_ENV = "LM_RESILIENCY_TORCHRUN_ADAPTER_ATTACHED"
 _GENERATION_ENV = "LM_RESILIENCY_GENERATION"
 _BUILTIN_PYTORCH = "pytorch"
@@ -68,6 +70,7 @@ class TorchrunWorkerContext:
     checkpoint_id: str | None = None
     checkpoint_source: str | None = None
     recovery_mode: str | None = None
+    restart_deadline_unix_ms: int | None = None
 
     def __post_init__(self) -> None:
         _nonempty(self.run_id, "run_id")
@@ -102,6 +105,12 @@ class TorchrunWorkerContext:
             or self.checkpoint_step < 1
         ):
             raise ValueError("checkpoint_step must be a positive integer")
+        if self.restart_deadline_unix_ms is not None and (
+            isinstance(self.restart_deadline_unix_ms, bool)
+            or not isinstance(self.restart_deadline_unix_ms, int)
+            or self.restart_deadline_unix_ms < 1
+        ):
+            raise ValueError("restart_deadline_unix_ms must be a positive integer")
         if self.checkpoint_id is not None:
             _nonempty(self.checkpoint_id, "checkpoint_id")
         if self.checkpoint_source not in {None, "gemini", "durable"}:
@@ -114,6 +123,7 @@ class TorchrunWorkerContext:
             self.checkpoint_step,
             self.checkpoint_source,
             self.recovery_mode,
+            self.restart_deadline_unix_ms,
         )
         if self.generation == 0 and (
             self.checkpoint_id is not None or any(value is not None for value in recovery_fields)
@@ -497,6 +507,21 @@ class MegatronWorkerAdapter(_SingleAttachAdapter):
 class DeepSpeedWorkerAdapter(_SingleAttachAdapter):
     """Attach to the engine returned by ``deepspeed.initialize``."""
 
+    def __init__(
+        self,
+        options: Mapping[str, Any] | None = None,
+        *,
+        before_attach: Callable[[], None] | None = None,
+        on_attach: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__(
+            options,
+            before_attach=before_attach,
+            on_attach=on_attach,
+        )
+        self._engine: Any | None = None
+        self._original_load_checkpoint: Callable[..., Any] | None = None
+
     def _install_hook(self) -> Callable[[], None]:
         try:
             module = importlib.import_module("deepspeed")
@@ -526,7 +551,7 @@ class DeepSpeedWorkerAdapter(_SingleAttachAdapter):
         from lm_resiliency.integrations.deepspeed.training import enable_resiliency
 
         checkpoint, replay, root = _feature_options(self._options, self._context)
-        return enable_resiliency(
+        handle = enable_resiliency(
             engine,
             interval=root["interval"],
             enable_checkpoint=root["enable_checkpoint"],
@@ -535,6 +560,37 @@ class DeepSpeedWorkerAdapter(_SingleAttachAdapter):
             detection_config=replay,
             recovery_mode=self._context.recovery_mode,
         )
+        self._engine = engine
+        return handle
+
+    def _validate_recovery(self, handle: Any) -> None:
+        super()._validate_recovery(handle)
+        assert self._context is not None
+        if self._context.checkpoint_step is None:
+            return
+        engine = self._engine
+        load_checkpoint = getattr(engine, "load_checkpoint", None)
+        if not callable(load_checkpoint):
+            return
+        self._original_load_checkpoint = load_checkpoint
+
+        def reject_framework_load(*_args: Any, **_kwargs: Any) -> Any:
+            raise TorchrunWorkerAdapterError(
+                "DeepSpeed load_checkpoint() cannot run after manager-selected "
+                "GEMINI recovery; use a custom worker adapter to coordinate "
+                "framework checkpoint client state"
+            )
+
+        engine.load_checkpoint = reject_framework_load
+
+    def close(self) -> None:
+        engine = self._engine
+        original_load_checkpoint = self._original_load_checkpoint
+        if engine is not None and original_load_checkpoint is not None:
+            engine.load_checkpoint = original_load_checkpoint
+        self._original_load_checkpoint = None
+        self._engine = None
+        super().close()
 
 
 class _AutoFrameworkAdapter:
@@ -647,21 +703,37 @@ class _AutoFrameworkAdapter:
         **kwargs: Any,
     ) -> Any:
         depth = getattr(self._state, "depth", 0)
+        if depth == 0:
+            self._state.observed_roots = []
         self._state.depth = depth + 1
+        completed = False
         try:
             result = operation(*args, **kwargs)
+            completed = True
+            return result
         finally:
             self._state.depth = depth
-        if depth == 0 and not getattr(self._state, "suppress_observation", False):
-            self._observe_import(observed_name)
-        return result
+            if completed and not getattr(self._state, "suppress_observation", False):
+                root = self._supported_root(observed_name)
+                observed_roots = self._state.observed_roots
+                if root is not None and root not in observed_roots:
+                    observed_roots.append(root)
+            if depth == 0:
+                observed_roots = tuple(self._state.observed_roots)
+                del self._state.observed_roots
+                if completed:
+                    for root in observed_roots:
+                        self._observe_root(root)
 
-    def _observe_import(self, module_name: str) -> None:
+    def _supported_root(self, module_name: str) -> str | None:
         if not isinstance(module_name, str) or not module_name or module_name.startswith("."):
-            return
+            return None
         root = module_name.split(".", 1)[0]
         if root not in {*self._SPECIALIZED, "torch"}:
-            return
+            return None
+        return root
+
+    def _observe_root(self, root: str) -> None:
         self._state.suppress_observation = True
         try:
             with self._lock:
@@ -826,6 +898,19 @@ def configure_worker_context_environment(
         if existing is not None and existing != value:
             raise TorchrunWorkerAdapterError(f"conflicting worker environment {name}")
     target.update(values)
+    target.pop(_EXPECTED_GENERATION_ENV, None)
+
+
+def configure_worker_generation_environment(
+    generation: int,
+    environment: dict[str, str] | None = None,
+) -> None:
+    """Publish the generation selected by the rendezvous handler."""
+
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
+        raise ValueError("generation must be a non-negative integer")
+    target = os.environ if environment is None else environment
+    target[_EXPECTED_GENERATION_ENV] = str(generation)
 
 
 def disable_worker_bootstrap_environment(
@@ -891,6 +976,30 @@ def _context_from_environment(environment: Mapping[str, str]) -> TorchrunWorkerC
         _required_environment(environment, _LOCAL_WORLD_SIZE_ENV),
         "local_world_size",
     )
+    local_rank = _nonnegative_int(
+        _required_environment(environment, "LOCAL_RANK"),
+        "local_rank",
+    )
+    global_rank = _nonnegative_int(
+        _required_environment(environment, "RANK"),
+        "global_rank",
+    )
+    group_rank = _nonnegative_int(
+        _required_environment(environment, "GROUP_RANK"),
+        "group_rank",
+    )
+    world_size = _positive_int(
+        _required_environment(environment, "WORLD_SIZE"),
+        "world_size",
+    )
+    if local_rank >= local_world_size:
+        raise TorchrunWorkerAdapterError("LOCAL_RANK must be smaller than LOCAL_WORLD_SIZE")
+    if global_rank >= world_size:
+        raise TorchrunWorkerAdapterError("RANK must be smaller than WORLD_SIZE")
+    if global_rank != group_rank * local_world_size + local_rank:
+        raise TorchrunWorkerAdapterError(
+            "torchrun rank does not match GROUP_RANK, LOCAL_RANK, and LOCAL_WORLD_SIZE"
+        )
     restart_context_path = Path(_required_environment(environment, _CONTEXT_PATH_ENV)).expanduser()
     if not restart_context_path.is_absolute():
         raise TorchrunWorkerAdapterError("restart context path must be absolute")
@@ -898,23 +1007,41 @@ def _context_from_environment(environment: Mapping[str, str]) -> TorchrunWorkerC
     config_path = Path(config_value).expanduser() if config_value else None
     if config_path is not None and not config_path.is_absolute():
         raise TorchrunWorkerAdapterError("worker config path must be absolute")
-    generation = 0
+    generation = _nonnegative_int(
+        _required_environment(environment, _EXPECTED_GENERATION_ENV),
+        "generation",
+    )
     context_fields: dict[str, Any] = {}
-    if restart_context_path.exists():
+    if generation == 0:
+        if restart_context_path.exists():
+            raise TorchrunWorkerAdapterError(
+                "initial worker generation must not have a restart context"
+            )
+    else:
         from ._simple_runtime import SimpleRestartContextFile
 
         restart = SimpleRestartContextFile(restart_context_path).read()
         if restart is None:
-            raise TorchrunWorkerAdapterError("restart context disappeared during bootstrap")
+            raise TorchrunWorkerAdapterError("successor worker requires a restart context")
         if restart.run_id != run_id:
             raise TorchrunWorkerAdapterError("restart context belongs to another run")
         if restart.node_id != node_id:
             raise TorchrunWorkerAdapterError("restart context belongs to another node")
         if restart.local_world_size != local_world_size:
             raise TorchrunWorkerAdapterError("restart context changes local_world_size")
-        if restart.generation < 1:
-            raise TorchrunWorkerAdapterError("restart context generation must be positive")
-        generation = restart.generation
+        if restart.generation != generation:
+            raise TorchrunWorkerAdapterError(
+                f"restart context generation {restart.generation} does not match "
+                f"rendezvous generation {generation}"
+            )
+        if restart.expected_world_size != world_size:
+            raise TorchrunWorkerAdapterError("restart context changes WORLD_SIZE")
+        if restart.logical_node_slot != group_rank:
+            raise TorchrunWorkerAdapterError("restart context changes GROUP_RANK")
+        if restart.first_global_rank + local_rank != global_rank:
+            raise TorchrunWorkerAdapterError("restart context changes RANK")
+        if time.time_ns() // 1_000_000 >= restart.restart_deadline_unix_ms:
+            raise TorchrunWorkerAdapterError("restart context deadline elapsed")
         context_fields = {
             "logical_node_slot": restart.logical_node_slot,
             "first_global_rank": restart.first_global_rank,
@@ -922,6 +1049,7 @@ def _context_from_environment(environment: Mapping[str, str]) -> TorchrunWorkerC
             "checkpoint_id": restart.checkpoint_id,
             "checkpoint_source": restart.checkpoint_source,
             "recovery_mode": restart.recovery_mode,
+            "restart_deadline_unix_ms": restart.restart_deadline_unix_ms,
         }
     return TorchrunWorkerContext(
         run_id=run_id,
@@ -1114,6 +1242,18 @@ def _positive_int(value: object, name: str) -> int:
     return normalized
 
 
+def _nonnegative_int(value: object, name: str) -> int:
+    if isinstance(value, bool):
+        raise TorchrunWorkerAdapterError(f"{name} must be a non-negative integer")
+    if isinstance(value, int):
+        normalized = value
+    elif isinstance(value, str) and value.isdecimal():
+        normalized = int(value)
+    else:
+        raise TorchrunWorkerAdapterError(f"{name} must be a non-negative integer")
+    return normalized
+
+
 def _config_positive_int(value: object, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise TorchrunWorkerAdapterError(f"{name} must be a positive integer")
@@ -1148,5 +1288,6 @@ __all__ = [
     "bootstrap_worker_from_environment",
     "configure_worker_context_environment",
     "configure_worker_bootstrap_environment",
+    "configure_worker_generation_environment",
     "get_torchrun_worker_context",
 ]

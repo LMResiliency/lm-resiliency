@@ -335,6 +335,16 @@ class SimpleRecoveryPlanStore:
             raise TypeError("plan must be RestartPlan")
         if plan.run_id != self._run_id:
             raise ValueError("plan belongs to another run")
+        current_generation = self.current_generation()
+        if current_generation == plan.to_generation:
+            if self.read(plan.to_generation) != plan:
+                raise RecoveryPlanConflict("another plan is committed for this generation")
+            return
+        if current_generation != plan.from_generation:
+            raise RecoveryPlanConflict(
+                f"cannot advance generation {plan.from_generation} to {plan.to_generation}; "
+                f"current generation is {current_generation}"
+            )
         encoded = plan.to_json().encode("utf-8")
         key = self._plan_key(plan.to_generation)
         stored = self._store.compare_set(key, b"", encoded)
@@ -490,6 +500,8 @@ class SimpleRendezvousHandler(RendezvousHandler):
         )
         self._last_generation: int | None = None
         self._last_assignment: tuple[_NodeAssignment, ...] = ()
+        self._heartbeat_observations: dict[str, tuple[str, int, float, bool]] = {}
+        self._heartbeat_observation_lock = threading.Lock()
         self._heartbeat.start()
 
     @property
@@ -543,7 +555,8 @@ class SimpleRendezvousHandler(RendezvousHandler):
                 self._ready_key(generation, self._config.node_id),
                 self._agent_id.encode("utf-8"),
             )
-            self._wait_for_group(generation, assignment, deadline)
+            if not self._wait_for_group(generation, assignment, deadline):
+                continue
             if self._plans.current_generation() != generation:
                 continue
             if plan is not None:
@@ -553,6 +566,9 @@ class SimpleRendezvousHandler(RendezvousHandler):
                 self._store,
             )
             bootstrap = self._build_bootstrap(slot, group_store, deadline)
+            from .worker_adapter import configure_worker_generation_environment
+
+            configure_worker_generation_environment(generation)
             self._last_generation = generation
             self._last_assignment = assignment
             return RendezvousInfo(
@@ -571,6 +587,10 @@ class SimpleRendezvousHandler(RendezvousHandler):
                 return 0
             plan = self._plans.read(generation)
             if plan is None:
+                return 0
+            try:
+                self._check_plan_deadline(plan)
+            except RendezvousTimeoutError:
                 return 0
             previous = {item.node_id for item in self._last_assignment}
             selected = {item.node_id for item in plan.slot_assignments} - previous
@@ -630,11 +650,17 @@ class SimpleRendezvousHandler(RendezvousHandler):
         generation: int,
         assignment: tuple[_NodeAssignment, ...],
         deadline: float,
-    ) -> None:
+    ) -> bool:
         keys = [self._ready_key(generation, item.node_id) for item in assignment]
-        while not self._store.check(keys):
+        while True:
             self._raise_if_closed()
             self._raise_heartbeat_error()
+            if self._plans.current_generation() != generation:
+                return False
+            if self._store.check(keys) and all(
+                self._ready_agent_is_live(generation, item.node_id) for item in assignment
+            ):
+                return True
             if self._monotonic_clock() >= deadline:
                 raise RendezvousTimeoutError("timed out waiting for assigned nodes")
             self._closed.wait(self._config.poll_interval_ms / 1_000)
@@ -663,24 +689,33 @@ class SimpleRendezvousHandler(RendezvousHandler):
 
     def _heartbeat_loop(self) -> None:
         interval = max(self._config.heartbeat_timeout_ms / 3_000, 0.1)
+        sequence = 0
         while not self._closed.is_set():
             try:
                 payload = json.dumps(
                     {
                         "agent_id": self._agent_id,
                         "node_id": self._config.node_id,
-                        "updated_at_unix_ms": self._clock(),
+                        "sequence": sequence,
                     },
                     separators=(",", ":"),
                     sort_keys=True,
                 ).encode("utf-8")
                 self._store.set(self._heartbeat_key(self._config.node_id), payload)
+                sequence += 1
             except Exception as error:
                 self._heartbeat_error = error
                 return
             self._closed.wait(interval)
 
-    def _heartbeat_is_live(self, node_id: str) -> bool:
+    def _ready_agent_is_live(self, generation: int, node_id: str) -> bool:
+        try:
+            agent_id = self._store.get(self._ready_key(generation, node_id)).decode("utf-8")
+        except (UnicodeError, ValueError):
+            return False
+        return bool(agent_id) and self._heartbeat_is_live(node_id, agent_id=agent_id)
+
+    def _heartbeat_is_live(self, node_id: str, *, agent_id: str | None = None) -> bool:
         key = self._heartbeat_key(node_id)
         if not self._store.check([key]):
             return False
@@ -691,13 +726,44 @@ class SimpleRendezvousHandler(RendezvousHandler):
             )
             if not isinstance(payload, Mapping):
                 return False
-            updated = payload.get("updated_at_unix_ms")
-            return (
-                isinstance(updated, int)
-                and not isinstance(updated, bool)
-                and self._clock() - updated < self._config.heartbeat_timeout_ms
-            )
-        except (TypeError, ValueError, json.JSONDecodeError):
+            observed_agent_id = payload.get("agent_id")
+            sequence = payload.get("sequence")
+            if (
+                set(payload) != {"agent_id", "node_id", "sequence"}
+                or payload.get("node_id") != node_id
+                or not isinstance(observed_agent_id, str)
+                or not observed_agent_id
+                or (agent_id is not None and observed_agent_id != agent_id)
+                or isinstance(sequence, bool)
+                or not isinstance(sequence, int)
+                or sequence < 0
+            ):
+                return False
+            now = self._monotonic_clock()
+            if isinstance(now, bool) or not isinstance(now, (int, float)) or now < 0:
+                return False
+            with self._heartbeat_observation_lock:
+                previous = self._heartbeat_observations.get(node_id)
+                if previous is None or previous[0] != observed_agent_id or sequence < previous[1]:
+                    self._heartbeat_observations[node_id] = (
+                        observed_agent_id,
+                        sequence,
+                        float(now),
+                        False,
+                    )
+                    return False
+                if sequence > previous[1]:
+                    self._heartbeat_observations[node_id] = (
+                        observed_agent_id,
+                        sequence,
+                        float(now),
+                        True,
+                    )
+                    return True
+                return previous[3] and (
+                    0 <= float(now) - previous[2] < self._config.heartbeat_timeout_ms / 1_000
+                )
+        except (ArithmeticError, TypeError, ValueError, json.JSONDecodeError):
             return False
 
     def _raise_if_closed(self) -> None:
