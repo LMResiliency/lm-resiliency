@@ -12,14 +12,13 @@ Run on one eight-GPU host:
       --rdzv-conf="store_type=file,\
 lm_resiliency_restart_context_path=/tmp/lm-resiliency-megatron-context/context.json,\
 lm_resiliency_worker_config=$PWD/examples/production_loops/policies/resiliency.toml" \
-      --nnodes=1:1 --nproc-per-node=8 --module \
+      --nnodes=1:1 --nproc-per-node=8 --max-restarts=4 --module \
       examples.production_loops.megatron \
       --validation-output-dir /tmp/megatron-production-loop
 """
 
 from __future__ import annotations
 
-import sys
 from functools import partial
 from types import SimpleNamespace
 from typing import Any, Iterator
@@ -215,8 +214,9 @@ def _tokens(rank: int, step: int, device: torch.device) -> tuple[torch.Tensor, .
 def _data_iterator(
     rank: int,
     device: torch.device,
+    args: _DefaultArgs,
 ) -> Iterator[tuple[torch.Tensor, ...]]:
-    step = 0
+    step = int(args.iteration)
     while True:
         yield _tokens(rank, step, device)
         step += 1
@@ -340,13 +340,14 @@ def main() -> None:
     _install_training_services(training, args)
     model, optimizer, scheduler, config = _build_model_optimizer_scheduler(device)
 
+    summary = None
     try:
         iteration, _ = training.train(
             _forward_step,
             [model],
             optimizer,
             scheduler,
-            _data_iterator(rank, device),
+            _data_iterator(rank, device, args),
             None,
             None,
             config,
@@ -364,19 +365,18 @@ def main() -> None:
             "steps": iteration,
             "consumed_train_samples": args.consumed_train_samples,
         }
-        write_validation_summary(
-            parsed.validation_output_dir,
-            summary,
-            writer=rank == 0,
-        )
     finally:
-        failed = sys.exc_info()[0] is not None
-        if not failed:
-            dist.barrier()
+        if dist.is_initialized():
             from megatron.core import parallel_state as mpu
 
             mpu.destroy_model_parallel()
             dist.destroy_process_group()
+    assert summary is not None
+    write_validation_summary(
+        parsed.validation_output_dir,
+        summary,
+        writer=rank == 0,
+    )
 
 
 if __name__ == "__main__":

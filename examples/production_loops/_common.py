@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,11 +19,32 @@ class RunArguments:
     steps: int
 
 
+_CHECKPOINT_STEP_ENV = "LM_RESILIENCY_TORCHRUN_CHECKPOINT_STEP"
+
+
 def _positive_steps(value: str) -> int:
     steps = int(value)
     if steps < 1:
         raise argparse.ArgumentTypeError("steps must be positive")
     return steps
+
+
+def torchrun_checkpoint_step() -> int:
+    """Return the manager-selected resume position published by bootstrap."""
+    value = os.environ.get(_CHECKPOINT_STEP_ENV, "0")
+    if not value.isdecimal():
+        raise RuntimeError(f"{_CHECKPOINT_STEP_ENV} must be a non-negative integer")
+    return int(value)
+
+
+def training_step_range(current_step: int, target_step: int) -> range:
+    """Return remaining deterministic training steps for one validation run."""
+    for value, name in ((current_step, "current_step"), (target_step, "target_step")):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{name} must be a non-negative integer")
+    if target_step <= current_step:
+        raise ValueError("target_step must exceed the recovered current_step")
+    return range(current_step, target_step)
 
 
 def parse_run_arguments(arguments: Sequence[str] | None = None) -> RunArguments:
