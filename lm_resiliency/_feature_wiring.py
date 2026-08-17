@@ -87,6 +87,7 @@ def _wire_features(
     load_fallback: Callable[[], None] | None = None,
     durable_checkpoint: DurableCheckpointConfig | None = None,
     recovery_mode: RecoveryMode | str | None = None,
+    step_hook_registrar: Callable[[Callable[[Any, Any, Any], None]], Any] | None = None,
 ) -> ResiliencyHandle:
     """Wire GEMINI checkpointing and/or SCOUT detection onto the optimizer.
 
@@ -148,7 +149,7 @@ def _wire_features(
     restored_temporal_state = None
 
     # Auto-discover peer group if not provided
-    if group is None and nccl_group is None:
+    if group is None and nccl_group is None and (checkpoint is not None or replay is not None):
         if dist.is_initialized():
             topology_model = model
             if replay is not None and replay.workload is not None:
@@ -291,7 +292,8 @@ def _wire_features(
         step = state._advance_step()
         certification.post_step(step, optimizer=opt)
 
-    hook = optimizer.register_step_post_hook(_unified_post_step_hook)
+    register_step_hook = step_hook_registrar or optimizer.register_step_post_hook
+    hook = register_step_hook(_unified_post_step_hook)
     state._register_hook(hook)
 
     return state

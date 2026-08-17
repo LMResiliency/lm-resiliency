@@ -164,6 +164,7 @@ class PyTorchFSDPResiliency(ResiliencyHandle):
         extra_state_fn: Callable[[], dict[str, Any]] | None = None,
         load_extra_state_fn: Callable[[dict[str, Any]], None] | None = None,
         durable_checkpoint: DurableCheckpointConfig | None = None,
+        step_hook_registrar: Callable[[Callable[[Any, Any, Any], None]], Any] | None = None,
     ) -> None:
         super().__init__()
         self._model = model
@@ -204,6 +205,18 @@ class PyTorchFSDPResiliency(ResiliencyHandle):
                 )
             if self._is_hsdp and group is not None and dist.is_initialized():
                 self._local_shard_c3 = C3(group=group)
+            peer_count = (
+                dist.get_world_size(group)
+                if group is not None and dist.is_initialized()
+                else _world_size()
+            )
+            self._compare_updated_weights = self._is_hsdp or (not self._has_fsdp and peer_count > 1)
+            effective_detection_config = _effective_replay_config(
+                detection_config,
+                has_fsdp=self._has_fsdp,
+                is_hsdp=self._is_hsdp,
+                compare_updated_weights=self._compare_updated_weights,
+            )
             try:
                 self.replay_harness = ModelReplayHarness(
                     model=model,
@@ -211,14 +224,7 @@ class PyTorchFSDPResiliency(ResiliencyHandle):
                     group=group,
                     nccl_group=nccl_group,
                     device=self._device,
-                    config=(
-                        replace(
-                            detection_config,
-                            compare_parameter_state=self._is_hsdp,
-                        )
-                        if self._has_fsdp
-                        else detection_config
-                    ),
+                    config=effective_detection_config,
                     callback=self._fault_callback,
                     oob_fault_callback=oob_fault_callback,
                     gradient_communication=(
@@ -232,14 +238,6 @@ class PyTorchFSDPResiliency(ResiliencyHandle):
                         if self._has_fsdp and not self._is_hsdp
                         else None
                     ),
-                )
-                peer_count = (
-                    dist.get_world_size(group)
-                    if group is not None and dist.is_initialized()
-                    else _world_size()
-                )
-                self._compare_updated_weights = self._is_hsdp or (
-                    not self._has_fsdp and peer_count > 1
                 )
                 if not self._compare_updated_weights and _is_log_rank():
                     logger.info(
@@ -282,7 +280,8 @@ class PyTorchFSDPResiliency(ResiliencyHandle):
         )
 
         # Post-step hook: save local shards and run replay at their configured intervals.
-        self._register_hook(optimizer.register_step_post_hook(self._post_step))
+        register_step_hook = step_hook_registrar or optimizer.register_step_post_hook
+        self._register_hook(register_step_hook(self._post_step))
 
     # ── the sharded tensor set (params + Adam moments, in a stable order) ────────
     def _collect(self) -> list[torch.Tensor]:
@@ -517,6 +516,7 @@ def enable_fsdp2_resiliency(
     load_extra_state_fn: Callable[[dict[str, Any]], None] | None = None,
     durable_checkpoint: DurableCheckpointConfig | None = None,
     recovery_mode: RecoveryMode | str | None = None,
+    step_hook_registrar: Callable[[Callable[[Any, Any, Any], None]], Any] | None = None,
 ) -> PyTorchFSDPResiliency:
     """Build the native FSDP2/HSDP runtime and recover its local shards."""
     fault_callback, oob_fault_callback = _resolve_orchestration_callbacks(
@@ -538,6 +538,7 @@ def enable_fsdp2_resiliency(
         extra_state_fn=extra_state_fn,
         load_extra_state_fn=load_extra_state_fn,
         durable_checkpoint=durable_checkpoint,
+        step_hook_registrar=step_hook_registrar,
     )
     _bind_orchestration(orchestration, res)
     recover_with_fallback(res, load_fallback, recovery_mode)
@@ -552,6 +553,23 @@ def _is_hsdp_model(model: torch.nn.Module, parallelism_info: Any | None) -> bool
 def _effective_dp_shard(parallelism_info: Any) -> int:
     """Return the FSDP degree, including TorchTitan's folded CP dimension."""
     return int(parallelism_info.dp_shard) * int(getattr(parallelism_info, "cp", 1))
+
+
+def _effective_replay_config(
+    config: ReplayHarnessConfig,
+    *,
+    has_fsdp: bool,
+    is_hsdp: bool,
+    compare_updated_weights: bool,
+) -> ReplayHarnessConfig:
+    """Disable replay surfaces that lack a corresponding live shard oracle."""
+    return replace(
+        config,
+        compare_parameter_state=is_hsdp if has_fsdp else config.compare_parameter_state,
+        optimizer_check_interval=(
+            config.optimizer_check_interval if compare_updated_weights else 0
+        ),
+    )
 
 
 def infer_parallelism_info(

@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 
 from lm_resiliency.api import enable_resiliency
+from lm_resiliency.checkpointing import disk as disk_module
 from lm_resiliency.checkpointing.config import InMemoryCkptConfig
 from lm_resiliency.checkpointing.disk import (
     CheckpointFormatError,
@@ -175,13 +176,26 @@ def test_disk_save_does_not_publish_partial_replacement(tmp_path):
 def test_disk_save_cleans_temp_file_from_dead_writer(tmp_path):
     step_dir = tmp_path / "step-3"
     step_dir.mkdir()
-    stale = step_dir / ".rank-0.pt.pid-999999999.stale.tmp"
+    path = step_dir / "rank-0.pt"
+    stale = step_dir / (f"{disk_module._temporary_prefix(path)}999999999.stale.tmp")
     stale.write_bytes(b"partial checkpoint")
     metadata, tensors = flatten({"w": torch.ones(2)})
 
     DiskSerializer(str(tmp_path), rank=0).save_sync(metadata, tensors, step=3)
 
     assert not stale.exists()
+
+
+def test_disk_save_preserves_temp_file_from_foreign_writer_scope(tmp_path):
+    step_dir = tmp_path / "step-3"
+    step_dir.mkdir()
+    stale = step_dir / ".rank-0.pt.scope-foreign.pid-999999999.stale.tmp"
+    stale.write_bytes(b"live remote checkpoint")
+    metadata, tensors = flatten({"w": torch.ones(2)})
+
+    DiskSerializer(str(tmp_path), rank=0).save_sync(metadata, tensors, step=3)
+
+    assert stale.read_bytes() == b"live remote checkpoint"
 
 
 def test_atomic_copy_does_not_publish_partial_replacement(tmp_path):

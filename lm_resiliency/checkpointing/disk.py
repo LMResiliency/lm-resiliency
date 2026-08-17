@@ -3,13 +3,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
 import shutil
+import socket
 import tempfile
 import threading
+import time
 import zlib
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -32,12 +35,30 @@ logger = logging.getLogger(__name__)
 _STEP_DIR_PATTERN = re.compile(r"step-(\d+)")
 _STATUS_FILE = "GEMINI_CHECKPOINT_STATUS"
 _STATUS_SCHEMA_VERSION = 2
+_STATUS_READ_RETRY_SECONDS = 2.0
+_STATUS_READ_RETRY_INTERVAL_SECONDS = 0.02
 
 # Chunk + thread the CRC so it stays sub-second on multi-GB shards. zlib.crc32
 # releases the GIL, so per-chunk tasks scale near-linearly with worker count
 # (measured ~25 GB/s at 8 workers → a 12 GB shard in ~0.5 s).
 _CRC_CHUNK = 64 * 1024 * 1024  # 64 MiB
 _CRC_WORKERS = min(8, os.cpu_count() or 1)
+
+
+def _writer_scope_id() -> str:
+    """Identify processes whose PIDs are visible to this process."""
+    try:
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+    except OSError:
+        boot_id = socket.gethostname()
+    try:
+        pid_namespace = str(os.stat("/proc/self/ns/pid").st_ino)
+    except OSError:
+        pid_namespace = "unknown"
+    return hashlib.sha256(f"{boot_id}:{pid_namespace}".encode()).hexdigest()[:16]
+
+
+_WRITER_SCOPE_ID = _writer_scope_id()
 
 
 class ChecksumMismatch(Exception):
@@ -58,7 +79,7 @@ def _fsync_directory(path: Path) -> None:
 
 def _cleanup_dead_process_temps(path: Path) -> None:
     """Remove abandoned temp files while leaving live writers untouched."""
-    prefix = f".{path.name}.pid-"
+    prefix = _temporary_prefix(path)
     for temporary in path.parent.glob(f"{prefix}*.tmp"):
         pid_text = temporary.name[len(prefix) :].split(".", 1)[0]
         try:
@@ -78,6 +99,10 @@ def _cleanup_dead_process_temps(path: Path) -> None:
             continue
 
 
+def _temporary_prefix(path: Path) -> str:
+    return f".{path.name}.scope-{_WRITER_SCOPE_ID}.pid-"
+
+
 def _atomic_torch_save(payload: object, path: Path) -> None:
     """Durably replace ``path`` without exposing a partially written archive."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -85,7 +110,7 @@ def _atomic_torch_save(payload: object, path: Path) -> None:
     _cleanup_dead_process_temps(path)
     descriptor, temporary = tempfile.mkstemp(
         dir=path.parent,
-        prefix=f".{path.name}.pid-{os.getpid()}.",
+        prefix=f"{_temporary_prefix(path)}{os.getpid()}.",
         suffix=".tmp",
     )
     try:
@@ -109,7 +134,7 @@ def atomic_copy_file(source: Path, destination: Path) -> None:
     _cleanup_dead_process_temps(destination)
     descriptor, temporary = tempfile.mkstemp(
         dir=destination.parent,
-        prefix=f".{destination.name}.pid-{os.getpid()}.",
+        prefix=f"{_temporary_prefix(destination)}{os.getpid()}.",
         suffix=".tmp",
     )
     os.close(descriptor)
@@ -247,9 +272,19 @@ class CheckpointStatusStore:
                 pass
 
     def _read_path(self, path: Path) -> CheckpointStatus:
-        with path.open("r", encoding="utf-8") as handle:
+        deadline = time.monotonic() + _STATUS_READ_RETRY_SECONDS
+        while True:
+            try:
+                value = json.loads(path.read_bytes().decode("utf-8"))
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(_STATUS_READ_RETRY_INTERVAL_SECONDS)
+                continue
+            if not isinstance(value, dict):
+                raise ValueError(f"GEMINI checkpoint status must be a JSON object: {path}")
             return CheckpointStatus.from_dict(
-                json.load(handle), run_id=self._run_id, topology_id=self._topology_id
+                value, run_id=self._run_id, topology_id=self._topology_id
             )
 
     def _read_eligible_path(self, path: Path) -> CheckpointStatus | None:

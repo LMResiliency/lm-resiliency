@@ -21,6 +21,10 @@ class _Stateful:
     def load_state_dict(self, state):
         self.state = dict(state)
 
+    def step(self, increment=1):
+        self.state["last_epoch"] = int(self.state.get("last_epoch", 0)) + increment
+        return self.state["last_epoch"]
+
 
 class _Checkpointer:
     def __init__(self):
@@ -92,6 +96,19 @@ def test_trainer_entry_point_binds_framework_objects_and_durable_load():
     assert enable_pytorch.call_args.kwargs["parallelism_info"] is trainer.parallel_dims
     assert callable(enable_pytorch.call_args.kwargs["extra_state_fn"])
     assert callable(enable_pytorch.call_args.kwargs["load_extra_state_fn"])
+    register_step_hook = enable_pytorch.call_args.kwargs["_step_hook_registrar"]
+    assert callable(register_step_hook)
+
+    observations = []
+    hook = register_step_hook(
+        lambda optimizer, _args, _kwargs: observations.append(
+            (optimizer, trainer.lr_schedulers.state["last_epoch"])
+        )
+    )
+    assert trainer.lr_schedulers.step(increment=3) == 5
+    assert observations == [(trainer.optimizers, 5)]
+    hook.remove()
+    assert trainer.lr_schedulers.step(increment=1) == 6
 
     trainer.step = 7
     trainer.checkpointer.load(step=-1)

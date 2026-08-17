@@ -9,6 +9,7 @@ import torch.distributed as dist
 from lm_resiliency.detection.oob_service import (
     OOBHangConfig,
     OOBHangService,
+    _group_port,
     _init_daemon_process_group,
     _rendezvous_method,
 )
@@ -80,6 +81,30 @@ def test_tracker_channel_is_namespaced_by_run_generation_process_and_rank(monkey
     assert rank_zero.tracker_name.startswith("scout_op_")
     assert "job-a" not in rank_zero.tracker_name
     assert rank_zero.tracker_token != rank_one.tracker_token
+
+
+def test_default_tcp_port_changes_with_manager_generation(monkeypatch):
+    monkeypatch.setenv("MASTER_PORT", "29500")
+    monkeypatch.setenv("TORCHELASTIC_RUN_ID", "job-a")
+    monkeypatch.setenv("LM_RESILIENCY_GENERATION", "13")
+    generation_thirteen = _group_port([0, 1, 2, 3])
+
+    monkeypatch.setenv("LM_RESILIENCY_GENERATION", "14")
+    generation_fourteen = _group_port([0, 1, 2, 3])
+
+    assert generation_thirteen != generation_fourteen
+
+
+def test_default_tcp_port_changes_with_torchrun_run_id(monkeypatch):
+    monkeypatch.setenv("MASTER_PORT", "29500")
+    monkeypatch.setenv("LM_RESILIENCY_GENERATION", "0")
+    monkeypatch.setenv("TORCHELASTIC_RUN_ID", "job-a")
+    job_a = _group_port([0, 1, 2, 3])
+
+    monkeypatch.setenv("TORCHELASTIC_RUN_ID", "job-b")
+    job_b = _group_port([0, 1, 2, 3])
+
+    assert job_a != job_b
 
 
 def test_tcp_rendezvous_owns_a_store_instead_of_reusing_torchrun_agent_store():

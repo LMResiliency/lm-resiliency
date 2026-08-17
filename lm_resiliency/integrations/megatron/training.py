@@ -139,6 +139,8 @@ class MegatronResiliency:
         self._closed = False
         self._recovery_decision_callback: RecoveryDecisionCallback | None = None
         self._last_recovery_decision: RecoveryDecision | None = None
+        self._pending_optimizer_step_tensors: OptimizerStepEvidence | None = None
+        self._optimizer_step_pending = False
 
         self._fault_callback = fault_callback
 
@@ -213,9 +215,20 @@ class MegatronResiliency:
         # Wrap optimizer step
         self._original_step = optimizer.step
         optimizer.step = self._wrapped_step
+        self._original_scheduler_step = None
+        if opt_param_scheduler is not None:
+            self._original_scheduler_step = opt_param_scheduler.step
+            opt_param_scheduler.step = self._wrapped_scheduler_step
 
     def _wrapped_step(self, *args, **kwargs) -> Any:
-        """Wraps optimizer.step() to inject post-step hooks."""
+        """Capture optimizer evidence and defer completion to Megatron's scheduler."""
+        if self._optimizer_step_pending:
+            logger.warning(
+                "Megatron scheduler did not advance after the previous optimizer step; "
+                "discarding incomplete SCOUT optimizer evidence"
+            )
+            self._pending_optimizer_step_tensors = None
+            self._optimizer_step_pending = False
         if self._optimizer_replay_due():
             for replay in self._optimizer_replays:
                 replay.arm()
@@ -226,7 +239,27 @@ class MegatronResiliency:
                 replay.cancel()
             raise
         optimizer_step_tensors = collect_optimizer_replays(self._optimizer_replays)
-        self._post_step(optimizer_step_tensors)
+        if self._original_scheduler_step is None:
+            self._post_step(optimizer_step_tensors)
+        else:
+            self._pending_optimizer_step_tensors = optimizer_step_tensors
+            self._optimizer_step_pending = True
+        return result
+
+    def _wrapped_scheduler_step(self, *args, **kwargs) -> Any:
+        """Complete one coherent Megatron step after scheduler state advances."""
+        assert self._original_scheduler_step is not None
+        try:
+            result = self._original_scheduler_step(*args, **kwargs)
+        except Exception:
+            self._pending_optimizer_step_tensors = None
+            self._optimizer_step_pending = False
+            raise
+        if self._optimizer_step_pending:
+            optimizer_step_tensors = self._pending_optimizer_step_tensors
+            self._pending_optimizer_step_tensors = None
+            self._optimizer_step_pending = False
+            self._post_step(optimizer_step_tensors)
         return result
 
     def _post_step(
@@ -428,6 +461,10 @@ class MegatronResiliency:
         self._closed = True
         unregister_automatic_cleanup(self)
         self._optimizer.step = self._original_step
+        if self._original_scheduler_step is not None:
+            self._opt_param_scheduler.step = self._original_scheduler_step
+        self._pending_optimizer_step_tensors = None
+        self._optimizer_step_pending = False
         for replay in self._optimizer_replays:
             replay.remove()
         if self._ckpt_manager is not None:
