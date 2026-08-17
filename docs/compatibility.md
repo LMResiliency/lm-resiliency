@@ -54,10 +54,15 @@ PyTorch is tentative until attachment because all higher-level frameworks
 import it. Importing more than one higher-level supported framework before
 attachment fails closed. Worker width comes from torchrun's standard
 `LOCAL_WORLD_SIZE`; replacement contexts must agree with that value.
+Automatic bootstrap publishes the manager-selected resume position through
+`LM_RESILIENCY_TORCHRUN_CHECKPOINT_STEP`, allowing zero-import applications to
+restore deterministic input position.
 After manager-selected GEMINI recovery, the built-in DeepSpeed adapter rejects
 a subsequent `engine.load_checkpoint()` call. A custom adapter is required when
 an application must coordinate DeepSpeed framework client state with GEMINI
 recovery.
+Built-in adapters close their resiliency handles before the corresponding
+framework or default process-group teardown.
 Each rendezvous agent derives its physical identity from `/etc/machine-id`,
 publishes only a domain-separated hash, and participates in automatic
 generation-zero admission. Duplicate machine identities fail closed.

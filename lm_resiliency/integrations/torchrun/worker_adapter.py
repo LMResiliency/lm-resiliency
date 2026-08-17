@@ -35,6 +35,7 @@ _CONTEXT_PATH_ENV = "LM_RESILIENCY_TORCHRUN_RESTART_CONTEXT"
 _EXPECTED_GENERATION_ENV = "LM_RESILIENCY_TORCHRUN_EXPECTED_GENERATION"
 _ATTACHED_ENV = "LM_RESILIENCY_TORCHRUN_ADAPTER_ATTACHED"
 _GENERATION_ENV = "LM_RESILIENCY_GENERATION"
+_CHECKPOINT_STEP_ENV = "LM_RESILIENCY_TORCHRUN_CHECKPOINT_STEP"
 _BUILTIN_PYTORCH = "pytorch"
 _BUILTIN_TORCHTITAN = "torchtitan"
 _BUILTIN_MEGATRON = "megatron"
@@ -168,6 +169,7 @@ class _SingleAttachAdapter:
         self._context: TorchrunWorkerContext | None = None
         self._handle: Any | None = None
         self._restore_hook: Callable[[], None] | None = None
+        self._restore_cleanup_hook: Callable[[], None] | None = None
 
     @property
     def attached(self) -> bool:
@@ -208,20 +210,48 @@ class _SingleAttachAdapter:
                 raise
 
     def close(self) -> None:
-        """Restore the patched lifecycle hook."""
+        """Close the resiliency handle before restoring framework hooks."""
 
         with self._lock:
             if not self._installed:
                 return
+            handle = self._handle
+            self._handle = None
             self._restore_locked()
+            self._restore_cleanup_locked()
             os.environ.pop(_ATTACHED_ENV, None)
             self._installed = False
+            self._context = None
+        close = getattr(handle, "close", None)
+        if callable(close):
+            close()
 
     def _install_hook(self) -> Callable[[], None]:
         raise NotImplementedError
 
     def _enable(self, *objects: Any) -> Any:
         raise NotImplementedError
+
+    def _install_cleanup_hook(self, *objects: Any) -> Callable[[], None]:
+        del objects
+        import torch.distributed as dist
+
+        original = dist.destroy_process_group
+        adapter = self
+
+        def destroy_process_group(group: Any | None = None) -> None:
+            world = getattr(dist.group, "WORLD", None)
+            if group is None or group is world:
+                adapter.close()
+            original(group)
+
+        dist.destroy_process_group = destroy_process_group
+
+        def restore() -> None:
+            if dist.destroy_process_group is destroy_process_group:
+                dist.destroy_process_group = original
+
+        return restore
 
     def _attach(self, *objects: Any) -> Any:
         if self._before_attach is not None:
@@ -232,6 +262,7 @@ class _SingleAttachAdapter:
                 handle = self._enable(*objects)
                 try:
                     self._validate_recovery(handle)
+                    self._restore_cleanup_hook = self._install_cleanup_hook(*objects)
                 except BaseException:
                     close = getattr(handle, "close", None)
                     if callable(close):
@@ -271,6 +302,12 @@ class _SingleAttachAdapter:
     def _restore_locked(self) -> None:
         restore = self._restore_hook
         self._restore_hook = None
+        if restore is not None:
+            restore()
+
+    def _restore_cleanup_locked(self) -> None:
+        restore = self._restore_cleanup_hook
+        self._restore_cleanup_hook = None
         if restore is not None:
             restore()
 
@@ -486,6 +523,58 @@ class MegatronWorkerAdapter(_SingleAttachAdapter):
         assert self._context is not None
         from lm_resiliency.integrations.megatron.training import enable_resiliency
 
+        module = importlib.import_module("megatron.training.training")
+        args = module.get_args()
+        holder: dict[str, Any] = {}
+
+        def capture_loop_state() -> dict[str, dict[str, int]]:
+            handle = holder.get("handle")
+            if handle is None:
+                raise TorchrunWorkerAdapterError(
+                    "Megatron loop state was captured before resiliency attachment completed"
+                )
+            return {
+                "torchrun_megatron_loop": {
+                    "iteration": _nonnegative_int(handle.step_count, "Megatron iteration"),
+                    "consumed_train_samples": _nonnegative_int(
+                        args.consumed_train_samples,
+                        "Megatron consumed_train_samples",
+                    ),
+                    "skipped_train_samples": _nonnegative_int(
+                        args.skipped_train_samples,
+                        "Megatron skipped_train_samples",
+                    ),
+                }
+            }
+
+        def restore_loop_state(state: dict[str, Any]) -> None:
+            loop_state = state.get("torchrun_megatron_loop")
+            if not isinstance(loop_state, Mapping):
+                raise TorchrunWorkerAdapterError(
+                    "Megatron checkpoint is missing torchrun loop state"
+                )
+            expected = {
+                "iteration",
+                "consumed_train_samples",
+                "skipped_train_samples",
+            }
+            if set(loop_state) != expected:
+                raise TorchrunWorkerAdapterError(
+                    "Megatron torchrun loop state has unexpected fields"
+                )
+            args.iteration = _nonnegative_int(
+                loop_state["iteration"],
+                "Megatron iteration",
+            )
+            args.consumed_train_samples = _nonnegative_int(
+                loop_state["consumed_train_samples"],
+                "Megatron consumed_train_samples",
+            )
+            args.skipped_train_samples = _nonnegative_int(
+                loop_state["skipped_train_samples"],
+                "Megatron skipped_train_samples",
+            )
+
         checkpoint, replay, root = _feature_options(self._options, self._context)
         handle = enable_resiliency(
             model,
@@ -497,11 +586,30 @@ class MegatronWorkerAdapter(_SingleAttachAdapter):
             ckpt_config=checkpoint,
             detection_config=replay,
             recovery_mode=self._context.recovery_mode,
+            extra_state_fn=capture_loop_state,
+            load_extra_state_fn=restore_loop_state,
         )
-        module = importlib.import_module("megatron.training.training")
-        args = module.get_args()
+        holder["handle"] = handle
         args.iteration = handle.step_count
         return handle
+
+    def _install_cleanup_hook(self, *objects: Any) -> Callable[[], None]:
+        del objects
+        module = importlib.import_module("megatron.core.parallel_state")
+        original = module.destroy_model_parallel
+        adapter = self
+
+        def destroy_model_parallel(*args: Any, **kwargs: Any) -> Any:
+            adapter.close()
+            return original(*args, **kwargs)
+
+        module.destroy_model_parallel = destroy_model_parallel
+
+        def restore() -> None:
+            if module.destroy_model_parallel is destroy_model_parallel:
+                module.destroy_model_parallel = original
+
+        return restore
 
 
 class DeepSpeedWorkerAdapter(_SingleAttachAdapter):
@@ -582,6 +690,24 @@ class DeepSpeedWorkerAdapter(_SingleAttachAdapter):
             )
 
         engine.load_checkpoint = reject_framework_load
+
+    def _install_cleanup_hook(self, engine: Any) -> Callable[[], None]:
+        original = getattr(engine, "destroy", None)
+        if not callable(original):
+            return super()._install_cleanup_hook(engine)
+        adapter = self
+
+        def destroy(*args: Any, **kwargs: Any) -> Any:
+            adapter.close()
+            return original(*args, **kwargs)
+
+        engine.destroy = destroy
+
+        def restore() -> None:
+            if engine.destroy is destroy:
+                engine.destroy = original
+
+        return restore
 
     def close(self) -> None:
         engine = self._engine
@@ -851,6 +977,7 @@ def bootstrap_worker_from_environment(
         context = _context_from_environment(environ)
         generation_target = environ if isinstance(environ, MutableMapping) else os.environ
         generation_target[_GENERATION_ENV] = str(context.generation)
+        generation_target[_CHECKPOINT_STEP_ENV] = str(context.checkpoint_step or 0)
         options = _load_config(context.config_path)
         adapter_spec = options.pop("adapter", None)
         if adapter_spec is None:
@@ -871,6 +998,7 @@ def get_torchrun_worker_context(
     context = _context_from_environment(environ)
     target = environ if isinstance(environ, MutableMapping) else os.environ
     target[_GENERATION_ENV] = str(context.generation)
+    target[_CHECKPOINT_STEP_ENV] = str(context.checkpoint_step or 0)
     return context
 
 
@@ -899,6 +1027,7 @@ def configure_worker_context_environment(
             raise TorchrunWorkerAdapterError(f"conflicting worker environment {name}")
     target.update(values)
     target.pop(_EXPECTED_GENERATION_ENV, None)
+    target.pop(_CHECKPOINT_STEP_ENV, None)
 
 
 def configure_worker_generation_environment(

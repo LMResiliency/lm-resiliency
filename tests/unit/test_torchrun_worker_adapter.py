@@ -283,6 +283,7 @@ def test_public_worker_context_sets_manager_generation(tmp_path: Path) -> None:
 
     assert context.generation == 0
     assert environment["LM_RESILIENCY_GENERATION"] == "0"
+    assert environment["LM_RESILIENCY_TORCHRUN_CHECKPOINT_STEP"] == "0"
 
 
 def test_framework_inference_replaces_tentative_pytorch_with_deepspeed(
@@ -586,6 +587,46 @@ def test_native_pytorch_disabled_policy_is_a_distributed_noop(
         adapter.close()
 
 
+def test_native_adapter_closes_handle_before_process_group_teardown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import torch
+    import torch.distributed as dist
+
+    events: list[str] = []
+
+    class Handle:
+        def close(self) -> None:
+            events.append("close")
+
+    monkeypatch.setattr(
+        "lm_resiliency.integrations.pytorch.enable_resiliency",
+        lambda *_args, **_kwargs: Handle(),
+    )
+    monkeypatch.setattr(
+        dist,
+        "destroy_process_group",
+        lambda _group=None: events.append("destroy"),
+    )
+    adapter = NativePyTorchAdapter(
+        {
+            "enable_checkpoint": False,
+            "enable_detection": False,
+        }
+    )
+    adapter.install(_context(tmp_path))
+    model = torch.nn.Linear(4, 2)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    model(torch.ones(1, 4))
+
+    dist.destroy_process_group()
+
+    assert optimizer.param_groups
+    assert events == ["close", "destroy"]
+    assert not adapter.attached
+
+
 def test_native_pytorch_adapter_requires_exact_manager_selected_step(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -692,10 +733,21 @@ def test_megatron_adapter_delegates_exact_setup_result_without_parallelism(
     training_package = types.ModuleType("megatron.training")
     training_package.__path__ = []
     training_module = types.ModuleType("megatron.training.training")
+    core_package = types.ModuleType("megatron.core")
+    core_package.__path__ = []
+    parallel_state = types.ModuleType("megatron.core.parallel_state")
+    teardown_events: list[str] = []
+    parallel_state.destroy_model_parallel = lambda: teardown_events.append(  # type: ignore[attr-defined]
+        "destroy"
+    )
     model = [object(), object()]
     optimizer = object()
     scheduler = object()
-    arguments = SimpleNamespace(iteration=0)
+    arguments = SimpleNamespace(
+        iteration=0,
+        consumed_train_samples=34,
+        skipped_train_samples=2,
+    )
     training_module.setup_model_and_optimizer = lambda: (  # type: ignore[attr-defined]
         model,
         optimizer,
@@ -706,8 +758,13 @@ def test_megatron_adapter_delegates_exact_setup_result_without_parallelism(
     monkeypatch.setitem(sys.modules, "megatron", package)
     monkeypatch.setitem(sys.modules, "megatron.training", training_package)
     monkeypatch.setitem(sys.modules, "megatron.training.training", training_module)
+    monkeypatch.setitem(sys.modules, "megatron.core", core_package)
+    monkeypatch.setitem(sys.modules, "megatron.core.parallel_state", parallel_state)
     calls: list[tuple[Any, Any, Any, dict[str, Any]]] = []
-    sentinel = SimpleNamespace(step_count=17)
+    sentinel = SimpleNamespace(
+        step_count=17,
+        close=lambda: teardown_events.append("close"),
+    )
 
     def fake_enable(
         passed_model: Any,
@@ -738,6 +795,31 @@ def test_megatron_adapter_delegates_exact_setup_result_without_parallelism(
         assert "parallelism_info" not in calls[0][3]
         assert arguments.iteration == 17
         assert adapter.handle is sentinel
+        capture = calls[0][3]["extra_state_fn"]
+        restore = calls[0][3]["load_extra_state_fn"]
+        assert capture() == {
+            "torchrun_megatron_loop": {
+                "iteration": 17,
+                "consumed_train_samples": 34,
+                "skipped_train_samples": 2,
+            }
+        }
+        restore(
+            {
+                "torchrun_megatron_loop": {
+                    "iteration": 11,
+                    "consumed_train_samples": 22,
+                    "skipped_train_samples": 1,
+                }
+            }
+        )
+        assert (
+            arguments.iteration,
+            arguments.consumed_train_samples,
+            arguments.skipped_train_samples,
+        ) == (11, 22, 1)
+        parallel_state.destroy_model_parallel()  # type: ignore[attr-defined]
+        assert teardown_events == ["close", "destroy"]
     finally:
         adapter.close()
 
@@ -751,10 +833,18 @@ def test_megatron_adapter_delegates_manual_train_objects_without_parallelism(
     training_package = types.ModuleType("megatron.training")
     training_package.__path__ = []
     training_module = types.ModuleType("megatron.training.training")
+    core_package = types.ModuleType("megatron.core")
+    core_package.__path__ = []
+    parallel_state = types.ModuleType("megatron.core.parallel_state")
+    parallel_state.destroy_model_parallel = lambda: None  # type: ignore[attr-defined]
     model = [object(), object()]
     optimizer = object()
     scheduler = object()
-    arguments = SimpleNamespace(iteration=0)
+    arguments = SimpleNamespace(
+        iteration=0,
+        consumed_train_samples=0,
+        skipped_train_samples=0,
+    )
     training_module.setup_model_and_optimizer = lambda: (  # type: ignore[attr-defined]
         model,
         optimizer,
@@ -774,6 +864,8 @@ def test_megatron_adapter_delegates_manual_train_objects_without_parallelism(
     monkeypatch.setitem(sys.modules, "megatron", package)
     monkeypatch.setitem(sys.modules, "megatron.training", training_package)
     monkeypatch.setitem(sys.modules, "megatron.training.training", training_module)
+    monkeypatch.setitem(sys.modules, "megatron.core", core_package)
+    monkeypatch.setitem(sys.modules, "megatron.core.parallel_state", parallel_state)
     calls: list[tuple[Any, Any, Any, dict[str, Any]]] = []
     sentinel = SimpleNamespace(step_count=19)
 
@@ -865,17 +957,25 @@ def test_deepspeed_adapter_rejects_framework_load_after_manager_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Engine:
+        closed = False
+
         def load_checkpoint(self) -> str:
             return "framework checkpoint loaded"
+
+        def destroy(self) -> None:
+            assert closed
 
     deepspeed = types.ModuleType("deepspeed")
     engine = Engine()
     deepspeed.initialize = lambda: (engine, None, None, None)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "deepspeed", deepspeed)
-    handle = SimpleNamespace(
-        recovered_step=4,
-        close=lambda: None,
-    )
+    closed = False
+
+    def close() -> None:
+        nonlocal closed
+        closed = True
+
+    handle = SimpleNamespace(recovered_step=4, close=close)
     monkeypatch.setattr(
         "lm_resiliency.integrations.deepspeed.training.enable_resiliency",
         lambda *_args, **_kwargs: handle,
@@ -895,8 +995,9 @@ def test_deepspeed_adapter_rejects_framework_load_after_manager_recovery(
         ):
             engine.load_checkpoint()
     finally:
-        adapter.close()
+        engine.destroy()
 
+    assert closed
     assert engine.load_checkpoint() == "framework checkpoint loaded"
 
 

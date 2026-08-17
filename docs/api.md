@@ -116,11 +116,20 @@ On a replacement generation, built-ins accept GEMINI restart contexts and
 verify that the framework recovered the exact manager-selected step before
 training begins. A durable-source restart requires a custom worker adapter that
 owns the framework's durable loader.
+Before the user module starts, bootstrap publishes the manager-selected resume
+position as `LM_RESILIENCY_TORCHRUN_CHECKPOINT_STEP` (`0` for generation zero).
+Zero-import applications can use that value to restore deterministic sampler or
+input position while the adapter independently verifies the recovered
+framework state.
 After manager-selected GEMINI recovery, the built-in DeepSpeed adapter rejects
 a later `engine.load_checkpoint()` call because it could overwrite the selected
 model and optimizer state. DeepSpeed applications that also restore
 framework-owned client state must provide a custom worker adapter that
 coordinates both recovery mechanisms.
+Built-in adapters also close their resiliency handle at the framework's normal
+distributed teardown boundary, before process groups are destroyed. This
+completes asynchronous checkpoint and replay work before user code reports a
+clean shutdown.
 
 Worker policy is a strict versioned TOML file:
 

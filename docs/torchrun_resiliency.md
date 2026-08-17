@@ -204,6 +204,10 @@ Torchrun supplies `LOCAL_WORLD_SIZE` to every worker from
 manager-selected rank range before framework initialization, so the same
 topology invariant is preserved without duplicating worker width in
 `--rdzv-conf`.
+Bootstrap exposes the manager-selected resume position as
+`LM_RESILIENCY_TORCHRUN_CHECKPOINT_STEP`; generation-zero workers receive `0`.
+Applications can use it for deterministic sampler or token positioning without
+importing LM Resiliency.
 
 Adapters select a framework, not a parallelism strategy. Each adapter passes the
 same objects accepted by that framework's existing `enable_resiliency()` API,
@@ -212,6 +216,11 @@ topology exactly as it does for explicit activation. Framework-object discovery
 is intentionally fail-closed; stacks with custom trainers, multiple optimizers,
 sharded optimizers, or caller-owned loop state provide a custom adapter rather
 than relying on process-wide object scanning.
+
+After attachment, built-in adapters bind cleanup to the framework's normal
+distributed teardown boundary. The resiliency handle closes before process
+groups are destroyed, so asynchronous checkpoint and replay work completes
+before the application reports a clean exit.
 
 The worker policy is schema-versioned and strict even for disabled features.
 Custom stacks set `adapter = "package.module:factory"` in that policy; built-in
