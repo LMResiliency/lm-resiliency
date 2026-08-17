@@ -127,6 +127,9 @@ The handler writes one owner-only JSON file per node. The file contains:
 
 Publication uses same-directory atomic replacement. Workers reject malformed,
 noncanonical, oversized, nonregular, or non-owner-only files.
+The handler creates a missing parent directory with owner-only permissions.
+An existing directory with different ownership or group/other access is
+rejected rather than modified.
 
 The framework consumes the context before training resumes. GEMINI then
 restores model, optimizer, caller-owned state, and RNG from the selected step.
@@ -152,6 +155,8 @@ Optional settings:
 | `join_timeout_ms` | `300000` | Bounded formation/bootstrap window |
 | `poll_interval_ms` | `250` | Store polling interval |
 | `heartbeat_timeout_ms` | `10000` | Standby/agent liveness window |
+| `worker_adapter` | unset | Injected stack adapter: `pytorch`, `torchtitan`, `megatron`, `deepspeed`, or `module:factory` |
+| `worker_config` | unset | Absolute path to the adapter's strict TOML policy |
 
 The values can be supplied through `--rdzv-conf`. The corresponding environment
 fallbacks are:
@@ -161,27 +166,49 @@ LM_RESILIENCY_NODE_ID
 LM_RESILIENCY_ACTIVE_NODES
 LM_RESILIENCY_LOCAL_WORLD_SIZE
 LM_RESILIENCY_RESTART_CONTEXT
+LM_RESILIENCY_WORKER_ADAPTER
+LM_RESILIENCY_WORKER_CONFIG
 ```
 
-Example agent command:
+Example agent command for a user module with no LM Resiliency imports:
 
 ```bash
+export LM_RESILIENCY_RESTART_CONTEXT="$CONTEXT_PATH"
 torchrun \
-  --nnodes=4:6 \
+  --nnodes=1:1 \
   --nproc-per-node=1 \
   --max-restarts=4 \
   --rdzv-backend=lm_resiliency \
   --rdzv-endpoint="$STORE_ENDPOINT" \
   --rdzv-id="$RUN_ID" \
   --rdzv-conf="store_type=tcp,is_host=false,read_timeout=120,\
-node_id=$NODE_ID,active_nodes=node-a;node-b;node-c;node-d,\
-local_world_size=1,restart_context_path=$CONTEXT_PATH" \
-  --module your_training_module
+node_id=$NODE_ID,active_nodes=node-a,local_world_size=1,\
+worker_adapter=pytorch,worker_config=/absolute/path/worker.toml" \
+  --module examples.production_loops.torchrun_user_train \
+  --artifact-dir /tmp/lm-resiliency-user-loop
 ```
 
 For a file-backed single-host run, set `store_type=file` and use a private
 local rendezvous path. Multi-host validation uses an orchestrator-owned
 `TCPStore`.
+
+The rendezvous plugin injects the selected adapter before Python executes the
+user module. The user module still owns the ordinary framework training loop.
+The adapter supplies the framework-specific knowledge required to locate and
+restore training state.
+
+Adapters select a framework, not a parallelism strategy. Each adapter passes the
+same objects accepted by that framework's existing `enable_resiliency()` API,
+and the existing integration discovers supported DDP/FSDP/HSDP/TP/PP/EP/ZeRO
+topology exactly as it does for explicit activation. Framework-object discovery
+is intentionally fail-closed; stacks with custom trainers, multiple optimizers,
+sharded optimizers, or caller-owned loop state provide a custom adapter rather
+than relying on process-wide object scanning.
+
+The worker policy is schema-versioned and strict even for disabled features.
+GEMINI topology settings remain deployment-owned: for example,
+`replication_jump` must divide the checkpoint world according to the pairing
+contract documented in [GEMINI](gemini.md#peer-replication).
 
 ## Manager Interface
 
@@ -215,8 +242,19 @@ manager flow.
 
 ## Validation
 
-The executable campaign is
+The minimal zero-import user loop is
+[`examples/production_loops/torchrun_user_train.py`](../examples/production_loops/torchrun_user_train.py).
+Its
+[`torchrun_worker_smoke.toml`](../examples/production_loops/torchrun_worker_smoke.toml)
+policy disables GEMINI and SCOUT so a CPU run can validate only pre-module
+adapter activation. The framework production loops use
+[`worker_resiliency.toml`](../examples/production_loops/worker_resiliency.toml)
+to exercise both mechanisms on the documented eight-GPU topology.
+
+The executable validation campaign remains
 [`examples/production_loops/torchrun.py`](../examples/production_loops/torchrun.py).
+It includes manager, fault-injection, baseline-comparison, and two-host
+orchestration logic that is not part of a normal user training module.
 It performs:
 
 1. an uninterrupted four-rank baseline;
@@ -245,6 +283,8 @@ acceptance bounds.
 - standbys must already be allocated and running;
 - the manager, not torchrun, owns evidence evaluation and quarantine policy;
 - one shared control-store endpoint is required;
+- built-in injected adapters support exact manager-selected GEMINI recovery;
+  durable-source replacement requires a custom adapter with a framework loader;
 - replacement does not repair hardware or allocate new hosts; and
 - the production campaign uses DDP and tiny deterministic workloads, not
   publication-scale convergence.

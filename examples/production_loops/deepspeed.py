@@ -6,19 +6,17 @@ Only the deterministic token source is synthetic.
 
 Run on one eight-GPU host:
 
-    torchrun --standalone --nproc-per-node=8 --module \
+    export LM_RESILIENCY_RESTART_CONTEXT="${LM_RESILIENCY_RESTART_CONTEXT:-/tmp/lm-resiliency-deepspeed-context/context.json}"
+    torchrun --rdzv-backend=lm_resiliency \
+      --rdzv-endpoint=/tmp/lm-resiliency-deepspeed-rdzv \
+      --rdzv-id=deepspeed-production \
+      --rdzv-conf="store_type=file,node_id=node-a,active_nodes=node-a,\
+local_world_size=8,\
+worker_adapter=deepspeed,\
+worker_config=$PWD/examples/production_loops/worker_resiliency.toml" \
+      --nnodes=1:1 --nproc-per-node=8 --module \
       examples.production_loops.deepspeed \
       --artifact-dir /tmp/deepspeed-production-loop
-
-Run the same program on two eight-GPU hosts:
-
-    torchrun --nnodes=2 --nproc-per-node=8 --module \
-      --node-rank=$NODE_RANK \
-      --master-addr=$MASTER_ADDR --master-port=29802 \
-      examples.production_loops.deepspeed \
-      --artifact-dir /tmp/deepspeed-production-loop
-
-Add ``--inject-fault`` to exercise localization and checkpoint rejection.
 """
 
 from __future__ import annotations
@@ -33,11 +31,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from examples.production_loops._common import (
-    ReplayFaultCampaign,
-    add_run_arguments,
-)
-from lm_resiliency import InMemoryCkptConfig, ReplayHarnessConfig, enable_resiliency
+from examples.production_loops._common import add_run_arguments, require_resiliency_adapter
 
 VOCABULARY_SIZE = 256
 SEQUENCE_LENGTH = 16
@@ -121,13 +115,10 @@ def _tokens(rank: int, step: int, device: torch.device) -> tuple[torch.Tensor, .
     return values[:, :-1], values[:, 1:]
 
 
-def main(*, inject_fault_by_default: bool = False) -> None:
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--artifact-dir", type=Path, required=True)
-    add_run_arguments(
-        parser,
-        inject_fault_by_default=inject_fault_by_default,
-    )
+    add_run_arguments(parser)
     args = parser.parse_args()
     args.artifact_dir.mkdir(parents=True, exist_ok=True)
 
@@ -136,12 +127,6 @@ def main(*, inject_fault_by_default: bool = False) -> None:
     deepspeed.init_distributed(dist_backend="nccl")
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    campaign = ReplayFaultCampaign.from_args(
-        args,
-        rank=rank,
-        world_size=world_size,
-    )
-
     torch.manual_seed(123)
     model = TinyCausalLM()
     optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4)
@@ -157,60 +142,22 @@ def main(*, inject_fault_by_default: bool = False) -> None:
             "steps_per_print": 1_000,
         },
     )
-    resiliency = enable_resiliency(
-        engine,
-        interval=1,
-        checkpoint=InMemoryCkptConfig(
-            enable=True,
-            interval=1,
-            disk_flush_interval=0,
-            disk_folder=str(args.artifact_dir / "gemini"),
-            skip_replication_if_hsdp=True,
-        ),
-        replay=ReplayHarnessConfig(
-            check_interval=1,
-            rotate_layers=False,
-            enable_temporal=False,
-            scale_factors=[],
-            straggler_min_slowdown_ratio=100.0,
-            straggler_min_slowdown_ms=10_000.0,
-        ),
-        fault_callback=campaign.record_fault,
-        orchestration=campaign.orchestration,
-    )
-    campaign.bind(resiliency)
-
     try:
         for step in range(args.steps):
-            campaign.start_step(step + 1)
             tokens, labels = _tokens(rank, step, engine.device)
             loss = engine(tokens, labels)
             engine.backward(loss)
             engine.step()
 
-        resiliency._ckpt_manager.maybe_wait()
-        result = resiliency._replay_harness.last_result
-        if engine.global_steps != args.steps or resiliency.step_count != args.steps:
-            raise AssertionError(
-                "DeepSpeed and lm-resiliency optimizer steps did not remain aligned"
-            )
-        campaign.validate(
-            resiliency,
-            result,
-            {"embedding", "hidden", "output", "optimizer"},
-        )
-
+        require_resiliency_adapter()
         summary = {
             "framework": "deepspeed",
             "framework_loop": "DeepSpeedEngine.backward/step",
             "model": "tiny causal language model",
             "world_size": world_size,
             "steps": engine.global_steps,
-            "resiliency_steps": resiliency.step_count,
-            "checkpoint_step": resiliency._ckpt_manager._last_saved_step,
-            "checked_recipes": sorted(result.checked_recipe_ids),
             "zero_stage": 2,
-            **campaign.summary(),
+            "resiliency_adapter_attached": True,
         }
         if rank == 0:
             (args.artifact_dir / "deepspeed-production-loop.json").write_text(
@@ -219,8 +166,6 @@ def main(*, inject_fault_by_default: bool = False) -> None:
             )
             print(json.dumps(summary, sort_keys=True), flush=True)
     finally:
-        campaign.close()
-        resiliency.close()
         engine.destroy()
         dist.destroy_process_group()
 

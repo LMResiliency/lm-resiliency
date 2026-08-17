@@ -33,7 +33,7 @@ import torch.distributed as dist
 from torch.distributed import FileStore, Store, TCPStore
 from torch.nn.parallel import DistributedDataParallel
 
-from examples.production_loops._common import ReplayFaultCampaign
+from examples.production_loops._fault_campaign import ReplayFaultCampaign
 from examples.production_loops.pytorch import TinyCausalLM, _tokens
 from lm_resiliency import (
     InMemoryCkptConfig,

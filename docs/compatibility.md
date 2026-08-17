@@ -32,6 +32,26 @@ PyTorch 2.10-2.13 entry-point contract. Its complete standby-replacement
 campaign was validated with PyTorch 2.13.0 on one host and across two A100
 hosts; the supported-version CPU matrix covers handler construction and the
 manager-owned recovery-plan protocol on every declared PyTorch minor.
+Zero-import worker activation is additive. Built-in worker adapters are
+qualified against the same supported framework ranges as their explicit
+`enable_resiliency()` integrations:
+
+- `pytorch` (`pytorch_ddp` compatibility alias) observes one root module and
+  optimizer, then delegates topology discovery to the existing PyTorch
+  integration.
+- `torchtitan` attaches to `torchtitan.train.Trainer.train` and passes the
+  initialized trainer unchanged.
+- `megatron` attaches to
+  `megatron.training.training.setup_model_and_optimizer` and passes its model
+  chunks, optimizer, and scheduler unchanged.
+- `deepspeed` attaches to `deepspeed.initialize` and passes its returned engine
+  unchanged.
+
+Adapters do not expose a parallelism-strategy option. DDP, FSDP2/HSDP, TP, SP,
+CP, PP, EP, expert-TP, ZeRO, and framework-specific group discovery remain
+owned by the existing framework integrations. Optional framework imports are
+lazy; importing `lm_resiliency` or constructing an unused adapter does not
+require TorchTitan, Megatron Core, or DeepSpeed.
 
 CUDA, NCCL, GPU, and topology details for distributed runs are recorded in [Validation](validation.md).
 
@@ -46,7 +66,9 @@ Contract tests require every declared Python and PyTorch minor series to appear 
 
 ## API Compatibility
 
-Stable exports from `lm_resiliency`, `lm_resiliency.manager_api`, and explicit framework integration entry points remain backward compatible across `0.1.x` patch releases.
+Stable exports from `lm_resiliency`, `lm_resiliency.manager_api`, explicit
+framework integration entry points, and `lm_resiliency.integrations.torchrun`
+remain backward compatible across `0.1.x` patch releases.
 The documented `lm-resiliency-quickstart` and `lm-resiliency-discover-moe-regimes` commands and their existing options follow the same patch-release compatibility policy.
 Removing or changing a stable interface requires a new minor release and migration notes.
 Objects under `lm_resiliency.experimental` and unlisted module paths may change in any `0.x` release.

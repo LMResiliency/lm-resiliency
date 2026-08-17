@@ -50,6 +50,8 @@ _ALLOWED_CONFIG = {
     "restart_context_path",
     "store_type",
     "timeout",
+    "worker_adapter",
+    "worker_config",
 }
 
 
@@ -160,6 +162,8 @@ class SimpleRuntimeConfig:
     join_timeout_ms: int = 300_000
     poll_interval_ms: int = 250
     heartbeat_timeout_ms: int = 10_000
+    worker_adapter: str | None = None
+    worker_config: Path | None = None
 
     def __post_init__(self) -> None:
         _nonempty(self.run_id, "run_id")
@@ -178,6 +182,15 @@ class SimpleRuntimeConfig:
             raise TypeError("restart_context_path must be pathlib.Path")
         if not self.restart_context_path.is_absolute():
             raise ValueError("restart_context_path must be absolute")
+        if self.worker_adapter is not None:
+            _nonempty(self.worker_adapter, "worker_adapter")
+        if self.worker_config is not None:
+            if self.worker_adapter is None:
+                raise ValueError("worker_config requires worker_adapter")
+            if not isinstance(self.worker_config, Path):
+                raise TypeError("worker_config must be pathlib.Path")
+            if not self.worker_config.is_absolute():
+                raise ValueError("worker_config must be absolute")
 
     @classmethod
     def from_parameters(
@@ -220,6 +233,16 @@ class SimpleRuntimeConfig:
                 "restart_context_path",
             )
         ).expanduser()
+        worker_adapter = _optional_configured(
+            params.get("worker_adapter"),
+            environ.get("LM_RESILIENCY_WORKER_ADAPTER"),
+            "worker_adapter",
+        )
+        worker_config_value = _optional_configured(
+            params.get("worker_config"),
+            environ.get("LM_RESILIENCY_WORKER_CONFIG"),
+            "worker_config",
+        )
         config = cls(
             run_id=params.run_id,
             node_id=node_id,
@@ -240,6 +263,10 @@ class SimpleRuntimeConfig:
                 params.get("heartbeat_timeout_ms"),
                 "heartbeat_timeout_ms",
                 10_000,
+            ),
+            worker_adapter=worker_adapter,
+            worker_config=(
+                None if worker_config_value is None else Path(worker_config_value).expanduser()
             ),
         )
         if len(config.active_nodes) != params.min_nodes:
@@ -585,6 +612,26 @@ def _create_rendezvous_handler(params: RendezvousParameters) -> RendezvousHandle
             store=store,
             local_addr=params.local_addr,
         )
+        if config.worker_adapter is not None:
+            from .worker_adapter import (
+                TorchrunWorkerContext,
+                configure_worker_bootstrap_environment,
+            )
+
+            try:
+                configure_worker_bootstrap_environment(
+                    adapter_spec=config.worker_adapter,
+                    context=TorchrunWorkerContext(
+                        run_id=config.run_id,
+                        node_id=config.node_id,
+                        local_world_size=config.local_world_size,
+                        restart_context_path=config.restart_context_path,
+                        config_path=config.worker_config,
+                    ),
+                )
+            except Exception as error:
+                handler.shutdown()
+                raise SimpleRuntimeError("failed to configure worker bootstrap") from error
         handler._backend_owner = backend  # Keep the backend alive with its store.
         return handler
     except (TypeError, ValueError, SimpleRuntimeError) as error:
@@ -604,6 +651,16 @@ def _configured(primary: object, fallback: object, name: str) -> str:
 
 def _configured_int(primary: object, fallback: object, name: str) -> int:
     return _positive_int(_configured(primary, fallback, name), name)
+
+
+def _optional_configured(
+    primary: object,
+    fallback: object,
+    name: str,
+) -> str | None:
+    if primary is None and fallback is None:
+        return None
+    return _configured(primary, fallback, name)
 
 
 def _optional_int(value: object, name: str, default: int) -> int:

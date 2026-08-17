@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import queue
+import stat
 import threading
 import time
 from dataclasses import replace
@@ -83,6 +84,17 @@ def _plan() -> RestartPlan:
     )
 
 
+def test_restart_context_write_creates_private_parent(tmp_path: Path) -> None:
+    path = tmp_path / "missing-context-directory" / "restart-context.json"
+    context = RestartContext.from_plan(_plan(), "node-a")
+    context_file = SimpleRestartContextFile(path)
+
+    context_file.write(context)
+
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert context_file.read() == context
+
+
 def _start(
     handler: SimpleRendezvousHandler,
 ) -> tuple[threading.Thread, queue.Queue[BaseException | RendezvousInfo]]:
@@ -112,6 +124,7 @@ def _result(
 
 
 def test_config_resolves_torchrun_fields(tmp_path: Path) -> None:
+    worker_config = (tmp_path / "worker.toml").resolve()
     params = RendezvousParameters(
         backend="lm_resiliency",
         endpoint=str(tmp_path / "rdzv"),
@@ -122,6 +135,8 @@ def test_config_resolves_torchrun_fields(tmp_path: Path) -> None:
         active_nodes="node-a;node-b",
         local_world_size="2",
         restart_context_path=str((tmp_path / "context.json").resolve()),
+        worker_adapter="pytorch_ddp",
+        worker_config=str(worker_config),
         store_type="file",
         timeout="60",
     )
@@ -131,6 +146,8 @@ def test_config_resolves_torchrun_fields(tmp_path: Path) -> None:
     assert config.node_id == "node-a"
     assert config.active_nodes == ("node-a", "node-b")
     assert config.local_world_size == 2
+    assert config.worker_adapter == "pytorch_ddp"
+    assert config.worker_config == worker_config
 
 
 @pytest.mark.parametrize(
@@ -139,6 +156,7 @@ def test_config_resolves_torchrun_fields(tmp_path: Path) -> None:
         ("active_nodes", "node-a", "exactly min_nodes"),
         ("local_world_size", "1.0", "positive integer"),
         ("restart_context_path", "relative.json", "must be absolute"),
+        ("worker_config", "relative.toml", "must be absolute"),
     ],
 )
 def test_config_rejects_invalid_fields(
@@ -153,6 +171,8 @@ def test_config_rejects_invalid_fields(
         "local_world_size": "1",
         "restart_context_path": str((tmp_path / "context.json").resolve()),
     }
+    if field == "worker_config":
+        config["worker_adapter"] = "pytorch_ddp"
     config[field] = value
     params = RendezvousParameters(
         backend="lm_resiliency",

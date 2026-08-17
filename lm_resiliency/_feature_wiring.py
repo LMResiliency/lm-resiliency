@@ -148,7 +148,7 @@ def _wire_features(
     restored_temporal_state = None
 
     # Auto-discover peer group if not provided
-    if group is None and nccl_group is None:
+    if group is None and nccl_group is None and (checkpoint is not None or replay is not None):
         if dist.is_initialized():
             topology_model = model
             if replay is not None and replay.workload is not None:

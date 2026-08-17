@@ -17,7 +17,9 @@ python -m pytest -q
 ```
 
 Distributed programs document their required `torchrun` command in the module docstring.
-Production-loop integration is exercised directly through `examples/production_loops/` with `--inject-fault`.
+The framework production loops exercise zero-import worker-adapter activation.
+The torchrun replacement campaign and fault-injection evaluation programs cover
+fault localization, checkpoint rejection, and recovery.
 The public fault injection evaluation kit is covered by `unit/test_fault_injection.py`.
 MoE validation is manual because it depends on specific GPU, Triton, Megatron Core, and Transformer Engine environments.
 Reproducible healthy-path performance commands and regression thresholds are documented in [benchmarks](../benchmarks/README.md).

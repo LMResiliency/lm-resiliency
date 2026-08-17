@@ -6,19 +6,17 @@ Only the deterministic token source is synthetic.
 
 Run on one eight-GPU host:
 
-    torchrun --standalone --nproc-per-node=8 --module \
+    export LM_RESILIENCY_RESTART_CONTEXT="${LM_RESILIENCY_RESTART_CONTEXT:-/tmp/lm-resiliency-pytorch-context/context.json}"
+    torchrun --rdzv-backend=lm_resiliency \
+      --rdzv-endpoint=/tmp/lm-resiliency-pytorch-rdzv \
+      --rdzv-id=pytorch-production \
+      --rdzv-conf="store_type=file,node_id=node-a,active_nodes=node-a,\
+local_world_size=8,\
+worker_adapter=pytorch,\
+worker_config=$PWD/examples/production_loops/worker_resiliency.toml" \
+      --nnodes=1:1 --nproc-per-node=8 --module \
       examples.production_loops.pytorch \
       --artifact-dir /tmp/pytorch-production-loop
-
-Run the same program on two eight-GPU hosts:
-
-    torchrun --nnodes=2 --nproc-per-node=8 --module \
-      --node-rank=$NODE_RANK \
-      --master-addr=$MASTER_ADDR --master-port=29803 \
-      examples.production_loops.pytorch \
-      --artifact-dir /tmp/pytorch-production-loop
-
-Add ``--inject-fault`` to exercise localization and checkpoint rejection.
 """
 
 from __future__ import annotations
@@ -33,11 +31,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel
 
-from examples.production_loops._common import (
-    ReplayFaultCampaign,
-    add_run_arguments,
-)
-from lm_resiliency import InMemoryCkptConfig, ReplayHarnessConfig, enable_resiliency
+from examples.production_loops._common import add_run_arguments, require_resiliency_adapter
 
 VOCABULARY_SIZE = 256
 SEQUENCE_LENGTH = 16
@@ -121,13 +115,10 @@ def _tokens(rank: int, step: int, device: torch.device) -> tuple[torch.Tensor, .
     return values[:, :-1], values[:, 1:]
 
 
-def main(*, inject_fault_by_default: bool = False) -> None:
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--artifact-dir", type=Path, required=True)
-    add_run_arguments(
-        parser,
-        inject_fault_by_default=inject_fault_by_default,
-    )
+    add_run_arguments(parser)
     args = parser.parse_args()
     args.artifact_dir.mkdir(parents=True, exist_ok=True)
 
@@ -137,48 +128,14 @@ def main(*, inject_fault_by_default: bool = False) -> None:
     dist.init_process_group(backend="cpu:gloo,cuda:nccl")
     rank = dist.get_rank()
     world_size = dist.get_world_size()
-    if world_size < 3:
-        raise RuntimeError("SCOUT localization requires at least three DDP replicas")
-    campaign = ReplayFaultCampaign.from_args(
-        args,
-        rank=rank,
-        world_size=world_size,
-    )
-
     torch.manual_seed(123)
     model = DistributedDataParallel(
         TinyCausalLM().to(device),
         device_ids=[local_rank],
     )
     optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4)
-    resiliency = enable_resiliency(
-        model,
-        optimizer,
-        interval=1,
-        checkpoint=InMemoryCkptConfig(
-            enable=True,
-            interval=1,
-            replication_jump=max(1, world_size // 2),
-            disk_flush_interval=0,
-            disk_folder=str(args.artifact_dir / "gemini"),
-        ),
-        replay=ReplayHarnessConfig(
-            check_interval=1,
-            rotate_layers=False,
-            enable_temporal=False,
-            scale_factors=[],
-            straggler_min_slowdown_ratio=100.0,
-            straggler_min_slowdown_ms=10_000.0,
-        ),
-        device=device,
-        fault_callback=campaign.record_fault,
-        orchestration=campaign.orchestration,
-    )
-    campaign.bind(resiliency)
-
     try:
         for step in range(args.steps):
-            campaign.start_step(step + 1)
             tokens, labels = _tokens(rank, step, device)
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -186,16 +143,7 @@ def main(*, inject_fault_by_default: bool = False) -> None:
             loss.backward()
             optimizer.step()
 
-        resiliency.ckpt_manager.maybe_wait()
-        result = resiliency.replay_harness.last_result
-        if resiliency.step_count != args.steps:
-            raise AssertionError("PyTorch and lm-resiliency optimizer steps did not remain aligned")
-        campaign.validate(
-            resiliency,
-            result,
-            {"embedding", "hidden", "output", "optimizer"},
-        )
-
+        require_resiliency_adapter()
         summary = {
             "framework": "pytorch",
             "framework_loop": "DDP forward/backward/AdamW.step",
@@ -203,10 +151,7 @@ def main(*, inject_fault_by_default: bool = False) -> None:
             "parallelism": "DDP",
             "world_size": world_size,
             "steps": args.steps,
-            "resiliency_steps": resiliency.step_count,
-            "checkpoint_step": resiliency.ckpt_manager._last_saved_step,
-            "checked_recipes": sorted(result.checked_recipe_ids),
-            **campaign.summary(),
+            "resiliency_adapter_attached": True,
         }
         if rank == 0:
             (args.artifact_dir / "pytorch-production-loop.json").write_text(
@@ -215,8 +160,6 @@ def main(*, inject_fault_by_default: bool = False) -> None:
             )
             print(json.dumps(summary, sort_keys=True), flush=True)
     finally:
-        campaign.close()
-        resiliency.close()
         dist.barrier()
         dist.destroy_process_group()
 

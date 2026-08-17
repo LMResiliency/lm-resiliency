@@ -12,6 +12,7 @@ The package separates supported interfaces from low-level research components:
 | `lm_resiliency` | Stable training integration API |
 | `lm_resiliency.manager_api` | Stable platform-neutral manager API |
 | `lm_resiliency.integrations.<framework>` | Stable explicit framework entry points |
+| `lm_resiliency.integrations.torchrun` | Stable torchrun worker-adapter API |
 | `lm_resiliency.experimental` | Unstable low-level components |
 
 The stable package-root exports are:
@@ -38,8 +39,100 @@ The stable manager API exports are:
 | Hardware health | `HealthConfig`, `HardwareHealthMonitor`, `HealthEvent`, `HealthReading`, `HealthSeverity`, `HealthSource`, `NvmlSource` |
 | Configuration drift | `local_fingerprint`, `find_drift`, `format_drift` |
 
+The stable torchrun integration exports are:
+
+| Area | Exports |
+|---|---|
+| Worker contract | `TorchrunWorkerAdapter`, `TorchrunWorkerContext`, `TorchrunWorkerAdapterError` |
+| Built-in adapters | `NativePyTorchAdapter`, `NativePyTorchDDPAdapter`, `TorchTitanWorkerAdapter`, `MegatronWorkerAdapter`, `DeepSpeedWorkerAdapter` |
+| Rendezvous registration | `get_rendezvous_handler_creator` |
+
 Other module paths are internal unless this guide identifies them as supported.
 Objects under `lm_resiliency.experimental` may change within the `0.x` release series.
+
+## Enable Through Torchrun
+
+The `lm_resiliency` rendezvous backend can install a framework-specific worker
+adapter before the user module starts. The user training module does not import
+`lm_resiliency`:
+
+```bash
+export LM_RESILIENCY_RESTART_CONTEXT="${LM_RESILIENCY_RESTART_CONTEXT:-/tmp/lm-resiliency-context/node-a.json}"
+torchrun \
+  --nnodes=1:1 \
+  --nproc-per-node=1 \
+  --rdzv-backend=lm_resiliency \
+  --rdzv-endpoint=/tmp/lm-resiliency-rdzv \
+  --rdzv-id=my-run \
+  --rdzv-conf="store_type=file,node_id=node-a,active_nodes=node-a,\
+local_world_size=1,worker_adapter=pytorch,\
+worker_config=/absolute/path/worker.toml" \
+  --module examples.production_loops.torchrun_user_train \
+  --artifact-dir /tmp/lm-resiliency-user-loop
+```
+
+Set the context path with the `restart_context_path` rendezvous option or the
+`LM_RESILIENCY_RESTART_CONTEXT` environment variable. The rendezvous option
+takes precedence. The runtime creates the parent with owner-only permissions
+when it first publishes a restart context. If the directory already exists with
+different ownership or group/other access, startup fails closed instead of
+changing administrator-provisioned permissions.
+
+The built-in adapters are:
+
+| `worker_adapter` | Objects passed to the existing framework integration |
+|---|---|
+| `pytorch` | One unambiguous root `torch.nn.Module` and optimizer |
+| `torchtitan` | The initialized `torchtitan.train.Trainer` |
+| `megatron` | The model chunks, optimizer, and scheduler returned by `setup_model_and_optimizer()` |
+| `deepspeed` | The engine returned by `deepspeed.initialize()` |
+
+The compatibility alias `pytorch_ddp` selects the same adapter as `pytorch`.
+
+Worker adapters do **not** accept a parallelism strategy. They pass the same
+framework objects to the existing `enable_resiliency()` API that explicit user
+code would pass. The existing framework integration remains the single owner of
+DDP, FSDP2/HSDP, TP, SP, CP, PP, EP, expert-TP, ZeRO, and framework-specific
+process-group discovery.
+
+The PyTorch adapter attaches exactly once before the first trainable root-module
+forward. It requires one optimizer that owns all trainable parameters of that
+model and no parameters from another model. Multiple matching optimizers,
+foreign parameters, or a forward before optimizer construction fail closed.
+The other built-ins attach at their framework-owned initialization boundary and
+likewise fail closed if the expected complete object bundle is unavailable.
+On a replacement generation, built-ins accept GEMINI restart contexts and
+verify that the framework recovered the exact manager-selected step before
+training begins. A durable-source restart requires a custom worker adapter that
+owns the framework's durable loader.
+
+Worker policy is a strict versioned TOML file:
+
+```toml
+schema_version = 1
+interval = 10
+enable_checkpoint = true
+enable_detection = true
+
+[checkpoint]
+disk_folder = "/shared/checkpoints"
+disk_flush_interval = 100
+verify_integrity = true
+
+[replay]
+rotate_layers = true
+```
+
+Unknown fields, missing or unsupported schema versions, and invalid values fail
+closed. Disabled feature sections are still validated. `replication_jump` must
+be valid for the deployed checkpoint group; it is not inferred from the
+launcher node count.
+
+Custom stacks select `worker_adapter="package.module:factory"`. The factory
+receives `TorchrunWorkerContext` and returns an object implementing
+`install(context)`. A stack adapter owns framework-specific discovery and loop
+state. Torchrun itself cannot infer scheduler, dataloader position, or arbitrary
+caller-owned iteration state safely.
 
 ## Enable Resiliency
 

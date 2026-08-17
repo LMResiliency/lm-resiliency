@@ -45,8 +45,11 @@ manifests, target selection, supported faults, and safety boundaries.
 
 ## Production Loops
 
-The production-loop examples train tiny causal language models with deterministic synthetic tokens while preserving each framework's real training lifecycle.
-They support one or two hosts through standard `torchrun` arguments.
+The production-loop examples train tiny causal language models with
+deterministic synthetic tokens while preserving each framework's real training
+lifecycle. The four framework modules do not import `lm_resiliency`; the
+`lm_resiliency` rendezvous backend installs the selected worker adapter before
+the user module starts.
 
 | Framework | Example | Framework-owned path |
 |---|---|---|
@@ -56,26 +59,29 @@ They support one or two hosts through standard `torchrun` arguments.
 | Megatron Core | [megatron.py](production_loops/megatron.py) | `training.train()` and `train_step()` |
 | DeepSpeed | [deepspeed.py](production_loops/deepspeed.py) | `DeepSpeedEngine.backward()` and `DeepSpeedEngine.step()` |
 
-Run one example on a single eight-GPU host:
+Run one example on a single eight-GPU host from the repository root:
 
 ```bash
-torchrun --standalone --nproc-per-node=8 --module \
+export LM_RESILIENCY_RESTART_CONTEXT="${LM_RESILIENCY_RESTART_CONTEXT:-/tmp/lm-resiliency-torchtitan-context/context.json}"
+torchrun \
+  --nnodes=1:1 \
+  --nproc-per-node=8 \
+  --rdzv-backend=lm_resiliency \
+  --rdzv-endpoint=/tmp/lm-resiliency-torchtitan-rdzv \
+  --rdzv-id=torchtitan-production \
+  --rdzv-conf="store_type=file,node_id=node-a,active_nodes=node-a,\
+local_world_size=8,\
+worker_adapter=torchtitan,\
+worker_config=$PWD/examples/production_loops/worker_resiliency.toml" \
+  --module \
   examples.production_loops.torchtitan \
   --artifact-dir /tmp/torchtitan-production-loop
 ```
 
-Run it on two eight-GPU hosts:
-
-```bash
-torchrun --nnodes=2 --nproc-per-node=8 --module \
-  --node-rank="$NODE_RANK" \
-  --master-addr="$MASTER_ADDR" --master-port=29800 \
-  examples.production_loops.torchtitan \
-  --artifact-dir /tmp/torchtitan-production-loop
-```
-
-Replace the module and artifact directory for PyTorch, Megatron Core, or DeepSpeed.
-Use a different rendezvous port for concurrent jobs.
+Replace the module, adapter name, rendezvous paths, and artifact directory for
+PyTorch, Megatron Core, or DeepSpeed. The checked-in worker policy uses
+`replication_jump=4` for this eight-rank topology. Other world layouts must use
+a policy with a valid deployment-specific GEMINI pairing.
 
 Run the complete torchrun replacement campaign on one host with six GPUs:
 
@@ -106,7 +112,8 @@ steps 2 and 5 exactly before training resumes. It also verifies slot
 inheritance, clean agent shutdown, exact losses and RNG state, and strict final
 tensor error bounds against the baseline.
 
-Each example runs ten steps by default.
-Set `--steps` to change the duration.
-Add `--inject-fault` to introduce one transient hidden-layer replay fault at step 4 on the last global rank.
-The fault campaign requires exact SCOUT localization, exclusion of the fault-step checkpoint, a recovery-verified manager decision, and clean post-fault certification.
+Each framework example runs ten steps by default; set `--steps` to change the
+duration. The dedicated torchrun replacement campaign above exercises exact
+SCOUT localization, fault-step checkpoint exclusion, manager recovery
+selection, and clean post-replacement completion. The broader declarative fault
+campaign is documented under [Fault Injection Evaluation](#fault-injection-evaluation).
