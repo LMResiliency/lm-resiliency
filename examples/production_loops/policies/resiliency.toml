@@ -1,0 +1,15 @@
+schema_version = 1
+interval = 1
+enable_checkpoint = true
+enable_detection = true
+
+[checkpoint]
+replication_jump = 4
+disk_flush_interval = 0
+
+[replay]
+rotate_layers = false
+enable_temporal = false
+scale_factors = []
+straggler_min_slowdown_ratio = 100.0
+straggler_min_slowdown_ms = 10000.0
