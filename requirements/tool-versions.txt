@@ -1,7 +1,7 @@
 # Exact versions shared by contributor environments and automation.
 build==1.5.0
 detect-secrets==1.5.0
-mypy==1.17.1
+mypy==2.3.0
 packaging==25.0
 pip-audit==2.10.1
 pre-commit==4.6.1
