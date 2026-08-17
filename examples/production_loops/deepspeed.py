@@ -12,7 +12,7 @@ Run on one eight-GPU host:
       --rdzv-conf="store_type=file,\
 lm_resiliency_restart_context_path=/tmp/lm-resiliency-deepspeed-context/context.json,\
 lm_resiliency_worker_config=$PWD/examples/production_loops/policies/resiliency.toml" \
-      --nnodes=1:1 --nproc-per-node=8 --module \
+      --nnodes=1:1 --nproc-per-node=8 --max-restarts=4 --module \
       examples.production_loops.deepspeed \
       --validation-output-dir /tmp/deepspeed-production-loop
 """
@@ -28,6 +28,7 @@ import torch.nn as nn
 
 from examples.production_loops._common import (
     parse_run_arguments,
+    training_step_range,
     write_validation_summary,
 )
 
@@ -136,13 +137,18 @@ def main() -> None:
             "steps_per_print": 1_000,
         },
     )
+    summary = None
     try:
-        for step in range(args.steps):
+        for step in training_step_range(engine.global_steps, args.steps):
             tokens, labels = _tokens(rank, step, engine.device)
             loss = engine(tokens, labels)
             engine.backward(loss)
             engine.step()
 
+        if engine.global_steps != args.steps:
+            raise AssertionError(
+                f"step mismatch: deepspeed={engine.global_steps}, target={args.steps}"
+            )
         summary = {
             "framework": "deepspeed",
             "framework_loop": "DeepSpeedEngine.backward/step",
@@ -151,14 +157,15 @@ def main() -> None:
             "steps": engine.global_steps,
             "zero_stage": 2,
         }
-        write_validation_summary(
-            args.validation_output_dir,
-            summary,
-            writer=rank == 0,
-        )
     finally:
         engine.destroy()
         dist.destroy_process_group()
+    assert summary is not None
+    write_validation_summary(
+        args.validation_output_dir,
+        summary,
+        writer=rank == 0,
+    )
 
 
 if __name__ == "__main__":

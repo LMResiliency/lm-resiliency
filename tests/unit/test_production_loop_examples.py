@@ -6,6 +6,8 @@ import pytest
 
 from examples.production_loops._common import (
     parse_run_arguments,
+    torchrun_checkpoint_step,
+    training_step_range,
     write_validation_summary,
 )
 from lm_resiliency.integrations.torchrun.worker_adapter import (
@@ -48,6 +50,31 @@ def test_shared_summary_writer_skips_non_writer_rank(tmp_path: Path) -> None:
     assert not list(tmp_path.iterdir())
 
 
+def test_shared_training_range_resumes_from_torchrun_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LM_RESILIENCY_TORCHRUN_CHECKPOINT_STEP", "4")
+
+    assert torchrun_checkpoint_step() == 4
+    assert list(training_step_range(torchrun_checkpoint_step(), 7)) == [4, 5, 6]
+
+
+@pytest.mark.parametrize(
+    ("current_step", "target_step"),
+    [
+        (4, 4),
+        (5, 4),
+        (-1, 4),
+    ],
+)
+def test_shared_training_range_rejects_invalid_resume_target(
+    current_step: int,
+    target_step: int,
+) -> None:
+    with pytest.raises(ValueError):
+        training_step_range(current_step, target_step)
+
+
 @pytest.mark.parametrize(
     "module_name",
     [
@@ -81,6 +108,7 @@ def test_user_training_examples_have_no_lm_resiliency_imports(
     )
     assert "LM_RESILIENCY_TORCHRUN_ADAPTER_ATTACHED" not in source
     assert "assert_torchrun_adapter_attached" not in source
+    assert "--max-restarts=4" in source
 
 
 def test_checked_in_production_policy_is_valid(tmp_path: Path) -> None:

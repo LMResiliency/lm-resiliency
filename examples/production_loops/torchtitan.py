@@ -12,7 +12,7 @@ Run on one eight-GPU host:
       --rdzv-conf="store_type=file,\
 lm_resiliency_restart_context_path=/tmp/lm-resiliency-torchtitan-context/context.json,\
 lm_resiliency_worker_config=$PWD/examples/production_loops/policies/resiliency.toml" \
-      --nnodes=1:1 --nproc-per-node=8 --module \
+      --nnodes=1:1 --nproc-per-node=8 --max-restarts=4 --module \
       examples.production_loops.torchtitan \
       --validation-output-dir /tmp/torchtitan-production-loop
 """
@@ -148,6 +148,8 @@ def main() -> None:
             args.steps,
         )
     )
+    rank = dist.get_rank()
+    summary = None
     try:
         trainer.train()
         if trainer.step != args.steps:
@@ -163,15 +165,15 @@ def main() -> None:
             "steps": trainer.step,
             "dataloader_index": trainer.dataloader.index,
         }
-        write_validation_summary(
-            args.validation_output_dir,
-            summary,
-            writer=dist.get_rank() == 0,
-        )
     finally:
         if dist.is_initialized():
-            dist.barrier()
             dist.destroy_process_group()
+    assert summary is not None
+    write_validation_summary(
+        args.validation_output_dir,
+        summary,
+        writer=rank == 0,
+    )
 
 
 if __name__ == "__main__":

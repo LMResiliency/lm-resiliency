@@ -12,7 +12,7 @@ Run on one eight-GPU host:
       --rdzv-conf="store_type=file,\
 lm_resiliency_restart_context_path=/tmp/lm-resiliency-pytorch-context/context.json,\
 lm_resiliency_worker_config=$PWD/examples/production_loops/policies/resiliency.toml" \
-      --nnodes=1:1 --nproc-per-node=8 --module \
+      --nnodes=1:1 --nproc-per-node=8 --max-restarts=4 --module \
       examples.production_loops.pytorch \
       --validation-output-dir /tmp/pytorch-production-loop
 """
@@ -28,6 +28,8 @@ from torch.nn.parallel import DistributedDataParallel
 
 from examples.production_loops._common import (
     parse_run_arguments,
+    torchrun_checkpoint_step,
+    training_step_range,
     write_validation_summary,
 )
 
@@ -128,8 +130,9 @@ def main() -> None:
         device_ids=[local_rank],
     )
     optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4)
+    summary = None
     try:
-        for step in range(args.steps):
+        for step in training_step_range(torchrun_checkpoint_step(), args.steps):
             tokens, labels = _tokens(rank, step, device)
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -145,14 +148,14 @@ def main() -> None:
             "world_size": world_size,
             "steps": args.steps,
         }
-        write_validation_summary(
-            args.validation_output_dir,
-            summary,
-            writer=rank == 0,
-        )
     finally:
-        dist.barrier()
         dist.destroy_process_group()
+    assert summary is not None
+    write_validation_summary(
+        args.validation_output_dir,
+        summary,
+        writer=rank == 0,
+    )
 
 
 if __name__ == "__main__":

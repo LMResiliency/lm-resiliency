@@ -64,6 +64,7 @@ Run one example on a single eight-GPU host from the repository root:
 torchrun \
   --nnodes=1:1 \
   --nproc-per-node=8 \
+  --max-restarts=4 \
   --rdzv-backend=lm_resiliency \
   --rdzv-endpoint=/tmp/lm-resiliency-torchtitan-rdzv \
   --rdzv-id=torchtitan-production \

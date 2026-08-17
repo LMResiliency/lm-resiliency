@@ -92,7 +92,9 @@ The production example validates its application-owned DDP loop.
 Dedicated lifecycle programs additionally validate FSDP2 and HSDP on the same two hosts.
 
 The executable one-host and two-host `torchrun` commands are documented in [Production-loop examples](../examples/README.md).
-The same examples enable the integration campaign directly with `--inject-fault`.
+Destructive injection is exercised separately through the
+[fault-injection evaluation](../examples/fault_injection/README.md), keeping
+the zero-import production loops free of validation-only fault controls.
 
 ## Native PyTorch
 
