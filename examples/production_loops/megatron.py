@@ -1,4 +1,4 @@
-"""Run lm-resiliency inside Megatron Core's production training loop.
+"""Run Megatron Core's production training loop with injected resiliency.
 
 The job uses a real Megatron GPTModel, Megatron DDP, distributed Adam, the
 framework forward/backward schedule, ``train_step()``, and ``train()``.
@@ -6,28 +6,21 @@ Only token generation and external logging/checkpoint services are synthetic.
 
 Run on one eight-GPU host:
 
-    torchrun --standalone --nproc-per-node=8 --module \
+    torchrun --rdzv-backend=lm_resiliency \
+      --rdzv-endpoint=/tmp/lm-resiliency-megatron-rdzv \
+      --rdzv-id=megatron-production \
+      --rdzv-conf="store_type=file,\
+lm_resiliency_restart_context_path=/tmp/lm-resiliency-megatron-context/context.json,\
+lm_resiliency_worker_config=$PWD/examples/production_loops/policies/resiliency.toml" \
+      --nnodes=1:1 --nproc-per-node=8 --module \
       examples.production_loops.megatron \
-      --artifact-dir /tmp/megatron-production-loop
-
-Run the same program on two eight-GPU hosts:
-
-    torchrun --nnodes=2 --nproc-per-node=8 --module \
-      --node-rank=$NODE_RANK \
-      --master-addr=$MASTER_ADDR --master-port=29801 \
-      examples.production_loops.megatron \
-      --artifact-dir /tmp/megatron-production-loop
-
-Add ``--inject-fault`` to exercise localization and checkpoint rejection.
+      --validation-output-dir /tmp/megatron-production-loop
 """
 
 from __future__ import annotations
 
-import argparse
-import json
 import sys
 from functools import partial
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterator
 
@@ -35,10 +28,9 @@ import torch
 import torch.distributed as dist
 
 from examples.production_loops._common import (
-    ReplayFaultCampaign,
-    add_run_arguments,
+    parse_run_arguments,
+    write_validation_summary,
 )
-from lm_resiliency import InMemoryCkptConfig, ReplayHarnessConfig, enable_resiliency
 
 VOCABULARY_SIZE = 128
 SEQUENCE_LENGTH = 16
@@ -223,11 +215,9 @@ def _tokens(rank: int, step: int, device: torch.device) -> tuple[torch.Tensor, .
 def _data_iterator(
     rank: int,
     device: torch.device,
-    campaign: ReplayFaultCampaign,
 ) -> Iterator[tuple[torch.Tensor, ...]]:
     step = 0
     while True:
-        campaign.start_step(step + 1)
         yield _tokens(rank, step, device)
         step += 1
 
@@ -322,15 +312,8 @@ def _build_model_optimizer_scheduler(device: torch.device):
     return model, optimizer, scheduler, config
 
 
-def main(*, inject_fault_by_default: bool = False) -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--artifact-dir", type=Path, required=True)
-    add_run_arguments(
-        parser,
-        inject_fault_by_default=inject_fault_by_default,
-    )
-    parsed = parser.parse_args()
-    parsed.artifact_dir.mkdir(parents=True, exist_ok=True)
+def main() -> None:
+    parsed = parse_run_arguments()
 
     dist.init_process_group(backend="cpu:gloo,cuda:nccl")
     rank = dist.get_rank()
@@ -344,11 +327,6 @@ def main(*, inject_fault_by_default: bool = False) -> None:
     )
     from megatron.training import training
 
-    campaign = ReplayFaultCampaign.from_args(
-        parsed,
-        rank=rank,
-        world_size=world_size,
-    )
     args = _arguments(rank, world_size, parsed.steps)
     init_num_microbatches_calculator(
         rank=rank,
@@ -362,81 +340,21 @@ def main(*, inject_fault_by_default: bool = False) -> None:
     _install_training_services(training, args)
     model, optimizer, scheduler, config = _build_model_optimizer_scheduler(device)
 
-    state_holder: dict[str, Any] = {}
-
-    def capture_loop_state() -> dict[str, Any]:
-        handle = state_holder["handle"]
-        return {
-            "megatron_loop": {
-                "iteration": handle.step_count,
-                "consumed_train_samples": args.consumed_train_samples,
-                "skipped_train_samples": args.skipped_train_samples,
-            }
-        }
-
-    def restore_loop_state(state: dict[str, Any]) -> None:
-        loop = state.get("megatron_loop", {})
-        args.iteration = int(loop.get("iteration", args.iteration))
-        args.consumed_train_samples = int(
-            loop.get("consumed_train_samples", args.consumed_train_samples)
-        )
-        args.skipped_train_samples = int(
-            loop.get("skipped_train_samples", args.skipped_train_samples)
-        )
-
-    handle = enable_resiliency(
-        [model],
-        optimizer,
-        opt_param_scheduler=scheduler,
-        interval=1,
-        checkpoint=InMemoryCkptConfig(
-            enable=True,
-            interval=1,
-            replication_jump=max(1, world_size // 2),
-            disk_flush_interval=0,
-            disk_folder=str(parsed.artifact_dir / "gemini"),
-        ),
-        replay=ReplayHarnessConfig(
-            check_interval=1,
-            rotate_layers=False,
-            enable_temporal=False,
-            scale_factors=[],
-            straggler_min_slowdown_ratio=100.0,
-            straggler_min_slowdown_ms=10_000.0,
-        ),
-        extra_state_fn=capture_loop_state,
-        load_extra_state_fn=restore_loop_state,
-        fault_callback=campaign.record_fault,
-        orchestration=campaign.orchestration,
-    )
-    state_holder["handle"] = handle
-    campaign.bind(handle)
-    args.iteration = handle.step_count
-
     try:
         iteration, _ = training.train(
             _forward_step,
             [model],
             optimizer,
             scheduler,
-            _data_iterator(rank, device, campaign),
+            _data_iterator(rank, device),
             None,
             None,
             config,
             {},
             None,
         )
-        handle._ckpt_manager.maybe_wait()
-        result = handle._replay_harness.last_result
-        if iteration != parsed.steps or handle.step_count != parsed.steps:
-            raise AssertionError(
-                f"step mismatch: megatron={iteration}, resiliency={handle.step_count}"
-            )
-        campaign.validate(
-            handle,
-            result,
-            {"embedding", "hidden", "output", "optimizer"},
-        )
+        if iteration != parsed.steps:
+            raise AssertionError(f"step mismatch: megatron={iteration}")
 
         summary = {
             "framework": "megatron",
@@ -444,22 +362,15 @@ def main(*, inject_fault_by_default: bool = False) -> None:
             "model": "megatron.core.models.gpt.GPTModel",
             "world_size": world_size,
             "steps": iteration,
-            "resiliency_steps": handle.step_count,
-            "checkpoint_step": handle._ckpt_manager._last_saved_step,
-            "checked_recipes": sorted(result.checked_recipe_ids),
             "consumed_train_samples": args.consumed_train_samples,
-            **campaign.summary(),
         }
-        if rank == 0:
-            (parsed.artifact_dir / "megatron-production-loop.json").write_text(
-                json.dumps(summary, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            print(json.dumps(summary, sort_keys=True), flush=True)
+        write_validation_summary(
+            parsed.validation_output_dir,
+            summary,
+            writer=rank == 0,
+        )
     finally:
         failed = sys.exc_info()[0] is not None
-        campaign.close()
-        handle.close()
         if not failed:
             dist.barrier()
             from megatron.core import parallel_state as mpu
