@@ -61,7 +61,7 @@ dev = [
     "detect-secrets==1.5.0",
     "mypy==1.17.1",
     "packaging==25.0",
-    "pip-audit==2.9.0",
+    "pip-audit==2.10.1",
     "pre-commit==4.6.1",
     "pytest==9.1.1",
     "pytest-timeout==2.4.0",
