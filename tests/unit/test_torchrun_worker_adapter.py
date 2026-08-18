@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import threading
 import types
 from dataclasses import replace
 from pathlib import Path
@@ -451,6 +452,78 @@ def test_failed_outer_import_does_not_select_transitive_framework(
         assert adapter.selected_framework is None
         assert adapter.delegate is None
     finally:
+        adapter.close()
+
+
+def test_failed_import_cannot_rollback_another_thread_framework_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deepspeed = types.ModuleType("deepspeed")
+    deepspeed.initialize = lambda: (object(),)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "deepspeed", deepspeed)
+    adapter = _AutoFrameworkAdapter(
+        {
+            "enable_checkpoint": False,
+            "enable_detection": False,
+        }
+    )
+    adapter.install(_context(tmp_path))
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_calling = threading.Event()
+    second_operation_started = threading.Event()
+    second_done = threading.Event()
+    errors: list[BaseException] = []
+
+    def failed_operation() -> None:
+        first_started.set()
+        release_first.wait(timeout=5)
+        raise ImportError("unrelated import failed")
+
+    def first_import() -> None:
+        try:
+            adapter._run_import("user_helper", failed_operation)
+        except ImportError:
+            return
+        except BaseException as error:
+            errors.append(error)
+
+    def successful_operation() -> Any:
+        second_operation_started.set()
+        return deepspeed
+
+    def second_import() -> None:
+        second_calling.set()
+        try:
+            adapter._run_import("deepspeed", successful_operation)
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            second_done.set()
+
+    first = threading.Thread(target=first_import)
+    second = threading.Thread(target=second_import)
+    try:
+        first.start()
+        assert first_started.wait(timeout=5)
+        second.start()
+        assert second_calling.wait(timeout=5)
+        assert not second_operation_started.wait(timeout=1)
+        release_first.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+
+        assert not first.is_alive()
+        assert not second.is_alive()
+        assert second_done.is_set()
+        assert not errors
+        assert adapter.selected_framework == "deepspeed"
+        assert isinstance(adapter.delegate, DeepSpeedWorkerAdapter)
+    finally:
+        release_first.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
         adapter.close()
 
 
@@ -903,6 +976,56 @@ def test_native_adapter_runs_process_group_teardown_when_close_fails(
 
     assert events == ["close", "destroy"]
     assert optimizer.param_groups
+
+
+def test_native_adapter_intercepts_teardown_alias_captured_before_attachment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import torch
+    import torch.distributed as dist
+
+    events: list[str] = []
+
+    class Handle:
+        def close(self) -> None:
+            events.append("close")
+
+    monkeypatch.setattr(
+        "lm_resiliency.integrations.pytorch.enable_resiliency",
+        lambda *_args, **_kwargs: Handle(),
+    )
+    monkeypatch.setattr(
+        dist,
+        "destroy_process_group",
+        lambda _group=None: events.append("destroy"),
+    )
+    adapter = _AutoFrameworkAdapter(
+        {
+            "enable_checkpoint": False,
+            "enable_detection": False,
+        }
+    )
+    adapter.install(_context(tmp_path))
+    namespace: dict[str, Any] = {}
+    try:
+        exec(
+            "from torch.distributed import destroy_process_group as teardown",
+            namespace,
+        )
+        delegate = adapter.delegate
+        assert isinstance(delegate, NativePyTorchAdapter)
+        model = torch.nn.Linear(4, 2)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        model(torch.ones(1, 4))
+
+        namespace["teardown"]()
+
+        assert optimizer.param_groups
+        assert events == ["close", "destroy"]
+        assert not delegate.attached
+    finally:
+        adapter.close()
 
 
 def test_native_pytorch_adapter_requires_exact_manager_selected_step(

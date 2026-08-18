@@ -125,6 +125,24 @@ def test_exact_memory_clone_failure_still_reaches_collective_vote():
     vote.assert_called_once_with(0)
 
 
+def test_verified_status_failure_still_reaches_collective_vote():
+    manager = object.__new__(InMemoryCheckpointManager)
+    manager._checkpoint_status = MagicMock()
+    manager._checkpoint_status.read.side_effect = RuntimeError("status unreadable")
+    manager._disk = MagicMock()
+    manager._rank = 0
+
+    with patch.object(manager, "_collective_min_step", return_value=0) as vote:
+        loaded = manager._load_exact_collectively_validated_shard(
+            23,
+            RecoveryMode.RECOVERY_VERIFIED,
+        )
+
+    assert loaded is None
+    vote.assert_called_once_with(0)
+    manager._disk.has_rank.assert_not_called()
+
+
 def _gloo_recovery_worker(
     rank: int,
     world_size: int,

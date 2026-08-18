@@ -689,11 +689,22 @@ class InMemoryCheckpointManager:
         if isinstance(step, bool) or not isinstance(step, int) or step < 1:
             raise ValueError("checkpoint step must be a positive integer")
         if mode is RecoveryMode.RECOVERY_VERIFIED:
-            status = self._checkpoint_status.read()
-            locally_eligible = status.recovery_verified_step == step and self._disk.has_rank(
-                step, self._rank
-            )
+            locally_eligible = False
+            local_error: Exception | None = None
+            try:
+                status = self._checkpoint_status.read()
+                locally_eligible = status.recovery_verified_step == step and self._disk.has_rank(
+                    step, self._rank
+                )
+            except Exception as error:  # noqa: BLE001 - every rank must vote
+                local_error = error
             if self._collective_min_step(int(locally_eligible)) != 1:
+                if local_error is not None:
+                    logger.error(
+                        "Recovery-verified checkpoint eligibility failed at step %s: %s",
+                        step,
+                        local_error,
+                    )
                 return None
             return self._load_collectively_validated_disk_shard(step)
 

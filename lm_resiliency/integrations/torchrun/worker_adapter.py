@@ -270,7 +270,8 @@ class _SingleAttachAdapter:
                 handle = self._enable(*objects)
                 try:
                     self._validate_recovery(handle)
-                    self._restore_cleanup_hook = self._install_cleanup_hook(*objects)
+                    if self._restore_cleanup_hook is None:
+                        self._restore_cleanup_hook = self._install_cleanup_hook(*objects)
                 except BaseException:
                     close = getattr(handle, "close", None)
                     if callable(close):
@@ -466,6 +467,11 @@ class NativePyTorchAdapter(_SingleAttachAdapter):
             if fully_shard_module is not None and self._original_fully_shard is not None:
                 fully_shard_module.fully_shard = self._original_fully_shard
 
+        try:
+            self._restore_cleanup_hook = self._install_cleanup_hook()
+        except BaseException:
+            restore()
+            raise
         return restore
 
     @staticmethod
@@ -913,6 +919,7 @@ class _AutoFrameworkAdapter:
     def __init__(self, options: Mapping[str, Any] | None = None) -> None:
         self._options = dict(options or {})
         self._lock = threading.RLock()
+        self._import_transaction_lock = threading.RLock()
         self._state = threading.local()
         self._context: TorchrunWorkerContext | None = None
         self._native: NativePyTorchAdapter | None = None
@@ -990,14 +997,15 @@ class _AutoFrameworkAdapter:
             importlib.import_module = monitored_import_module
 
     def close(self) -> None:
-        with self._lock:
-            self._restore_imports_locked()
-            delegates = tuple(
-                adapter for adapter in (self._delegate, self._native) if adapter is not None
-            )
-            self._delegate = None
-            self._native = None
-            self._context = None
+        with self._import_transaction_lock:
+            with self._lock:
+                self._restore_imports_locked()
+                delegates = tuple(
+                    adapter for adapter in (self._delegate, self._native) if adapter is not None
+                )
+                self._delegate = None
+                self._native = None
+                self._context = None
         for adapter in delegates:
             close = getattr(adapter, "close", None)
             if callable(close):
@@ -1013,6 +1021,7 @@ class _AutoFrameworkAdapter:
         depth = getattr(self._state, "depth", 0)
         outermost = depth == 0
         if outermost:
+            self._import_transaction_lock.acquire()
             with self._lock:
                 self._state.import_snapshot = (
                     self._selected_framework,
@@ -1035,6 +1044,7 @@ class _AutoFrameworkAdapter:
             self._state.depth = depth
             if outermost:
                 del self._state.import_snapshot
+                self._import_transaction_lock.release()
 
     def _rollback_import_selection(
         self,
