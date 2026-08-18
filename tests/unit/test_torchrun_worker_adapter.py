@@ -716,6 +716,85 @@ def test_native_pytorch_waits_for_outermost_optimizer_constructor(
         adapter.close()
 
 
+def test_native_pytorch_instruments_optimizer_defined_after_bootstrap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import torch
+
+    attached: list[Any] = []
+
+    def fake_enable(_model: Any, optimizer: Any, **_kwargs: Any) -> object:
+        assert optimizer.ready
+        attached.append(optimizer)
+        return object()
+
+    monkeypatch.setattr(
+        "lm_resiliency.integrations.pytorch.enable_resiliency",
+        fake_enable,
+    )
+    monkeypatch.setattr(NativePyTorchAdapter, "_distributed_world_size", lambda _self: 2)
+    adapter = NativePyTorchAdapter({"enable_checkpoint": False, "enable_detection": False})
+    adapter.install(_context(tmp_path))
+    try:
+        model = torch.nn.Linear(4, 2)
+        adapter._register_distributed_model(model)
+
+        class UserOptimizer(torch.optim.Optimizer):
+            def __init__(self, parameters: Any) -> None:
+                super().__init__(parameters, {"lr": 0.1})
+                self.ready = True
+
+            def step(self, closure: Any | None = None) -> None:
+                del closure
+
+        optimizer = UserOptimizer(model.parameters())
+
+        assert attached == [optimizer]
+        assert adapter.attached
+    finally:
+        adapter.close()
+
+
+def test_native_pytorch_selects_outermost_bottom_up_fsdp_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import torch
+
+    class Model(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.first = torch.nn.Linear(4, 4)
+            self.second = torch.nn.Linear(4, 2)
+
+    calls: list[tuple[Any, Any]] = []
+
+    def fake_enable(model: Any, optimizer: Any, **_kwargs: Any) -> object:
+        calls.append((model, optimizer))
+        return object()
+
+    monkeypatch.setattr(
+        "lm_resiliency.integrations.pytorch.enable_resiliency",
+        fake_enable,
+    )
+    monkeypatch.setattr(NativePyTorchAdapter, "_distributed_world_size", lambda _self: 2)
+    adapter = NativePyTorchAdapter({"enable_checkpoint": False, "enable_detection": False})
+    adapter.install(_context(tmp_path))
+    try:
+        model = Model()
+        adapter._register_distributed_model(model.first)
+        adapter._register_distributed_model(model.second)
+        adapter._register_distributed_model(model)
+
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+
+        assert calls == [(model, optimizer)]
+        assert adapter.attached
+    finally:
+        adapter.close()
+
+
 def test_native_pytorch_disabled_policy_is_a_distributed_noop(
     tmp_path: Path,
     process_group: None,

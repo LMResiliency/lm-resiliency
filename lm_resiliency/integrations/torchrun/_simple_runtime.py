@@ -79,9 +79,8 @@ class SimpleRestartContextFile:
     def write(self, context: RestartContext) -> None:
         if not isinstance(context, RestartContext):
             raise TypeError("context must be RestartContext")
+        self.prepare()
         parent = self._path.parent
-        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self._validate_private(parent)
         encoded = context.to_json().encode("utf-8")
         if len(encoded) > _MAX_CONTEXT_BYTES:
             raise SimpleRuntimeError("restart context is too large")
@@ -141,6 +140,13 @@ class SimpleRestartContextFile:
             os.fsync(directory)
         finally:
             os.close(directory)
+
+    def prepare(self) -> None:
+        """Create and validate the owner-only parent directory."""
+
+        parent = self._path.parent
+        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._validate_private(parent)
 
     @staticmethod
     def _validate_private(path: Path) -> None:
@@ -510,8 +516,10 @@ class SimpleRendezvousHandler(RendezvousHandler):
         self._local_addr = local_addr
         self._clock = clock
         self._monotonic_clock = monotonic_clock
-        self._plans = SimpleRecoveryPlanStore(store, run_id=config.run_id)
         self._context = SimpleRestartContextFile(config.restart_context_path)
+        self._context.prepare()
+        self._worker_policy_digest = _worker_policy_digest(config.worker_config)
+        self._plans = SimpleRecoveryPlanStore(store, run_id=config.run_id)
         self._agent_id = secrets.token_hex(16)
         self._plans.register_node(
             config.node_id,
@@ -529,7 +537,6 @@ class SimpleRendezvousHandler(RendezvousHandler):
         self._last_assignment: tuple[_NodeAssignment, ...] = ()
         self._heartbeat_observations: dict[str, tuple[str, int, float, bool]] = {}
         self._heartbeat_observation_lock = threading.Lock()
-        self._worker_policy_digest = _worker_policy_digest(config.worker_config)
         self._heartbeat.start()
 
     @property
@@ -934,6 +941,15 @@ def _worker_policy_digest(path: Path | None) -> str:
         raise SimpleRuntimeError(f"failed to read worker config {path}") from error
     if len(encoded) > _MAX_WORKER_CONFIG_BYTES:
         raise SimpleRuntimeError("worker config is too large")
+    from .worker_adapter import (
+        TorchrunWorkerAdapterError,
+        _validate_worker_config_bytes,
+    )
+
+    try:
+        _validate_worker_config_bytes(encoded, path=path)
+    except TorchrunWorkerAdapterError as error:
+        raise SimpleRuntimeError(f"invalid worker config {path}: {error}") from error
     return hashlib.sha256(b"lm-resiliency/worker-policy/v1\0" + encoded).hexdigest()
 
 

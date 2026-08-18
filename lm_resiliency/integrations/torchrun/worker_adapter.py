@@ -18,7 +18,7 @@ import threading
 import time
 import types
 import weakref
-from collections.abc import Callable, Mapping, MutableMapping
+from collections.abc import Callable, Iterable, Mapping, MutableMapping
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Protocol, Union, get_args, get_origin, get_type_hints
@@ -38,6 +38,7 @@ _EXPECTED_GENERATION_ENV = "LM_RESILIENCY_TORCHRUN_EXPECTED_GENERATION"
 _ATTACHED_ENV = "LM_RESILIENCY_TORCHRUN_ADAPTER_ATTACHED"
 _GENERATION_ENV = "LM_RESILIENCY_GENERATION"
 _CHECKPOINT_STEP_ENV = "LM_RESILIENCY_TORCHRUN_CHECKPOINT_STEP"
+_MAX_WORKER_CONFIG_BYTES = 1 << 20
 _BUILTIN_PYTORCH = "pytorch"
 _BUILTIN_TORCHTITAN = "torchtitan"
 _BUILTIN_MEGATRON = "megatron"
@@ -345,10 +346,11 @@ class NativePyTorchAdapter(_SingleAttachAdapter):
         self._attached_optimizer: Any | None = None
         self._original_module_call: Callable[..., Any] | None = None
         self._original_optimizer_init: Callable[..., None] | None = None
+        self._original_optimizer_init_subclass: Any = None
         self._original_ddp_init: Callable[..., None] | None = None
         self._original_fsdp_init: Callable[..., None] | None = None
         self._original_fully_shard: Callable[..., Any] | None = None
-        self._optimizer_initializers: list[tuple[type[Any], Callable[..., None]]] = []
+        self._optimizer_initializers: list[tuple[type[Any], Callable[..., None] | None]] = []
         self._optimizer_init_state = threading.local()
 
     def _install_hook(self) -> Callable[[], None]:
@@ -358,6 +360,9 @@ class NativePyTorchAdapter(_SingleAttachAdapter):
 
         self._original_module_call = torch.nn.Module.__call__
         self._original_optimizer_init = torch.optim.Optimizer.__init__
+        self._original_optimizer_init_subclass = torch.optim.Optimizer.__dict__.get(
+            "__init_subclass__"
+        )
         self._original_ddp_init = DistributedDataParallel.__init__
         adapter = self
 
@@ -387,27 +392,21 @@ class NativePyTorchAdapter(_SingleAttachAdapter):
         torch.optim.Optimizer.__init__ = optimizer_init
         DistributedDataParallel.__init__ = ddp_init
         for optimizer_type in _optimizer_types(torch.optim.Optimizer):
-            original_init = optimizer_type.__dict__.get("__init__")
-            if not callable(original_init):
-                continue
+            self._wrap_optimizer_initializer(optimizer_type)
 
-            def concrete_optimizer_init(
-                instance: Any,
-                *args: Any,
-                _original: Callable[..., None] = original_init,
-                **kwargs: Any,
-            ) -> None:
-                depth = getattr(adapter._optimizer_init_state, "depth", 0)
-                adapter._optimizer_init_state.depth = depth + 1
-                try:
-                    _original(instance, *args, **kwargs)
-                finally:
-                    adapter._optimizer_init_state.depth = depth
-                if depth == 0:
-                    adapter._attach_distributed_candidate()
+        original_init_subclass = self._original_optimizer_init_subclass
 
-            self._optimizer_initializers.append((optimizer_type, original_init))
-            optimizer_type.__init__ = concrete_optimizer_init
+        def optimizer_init_subclass(
+            optimizer_type: type[Any],
+            **kwargs: Any,
+        ) -> None:
+            if original_init_subclass is None:
+                super(torch.optim.Optimizer, optimizer_type).__init_subclass__(**kwargs)
+            else:
+                original_init_subclass.__get__(None, optimizer_type)(**kwargs)
+            adapter._wrap_optimizer_initializer(optimizer_type)
+
+        torch.optim.Optimizer.__init_subclass__ = classmethod(optimizer_init_subclass)
 
         fsdp_type = None
         fully_shard_module = None
@@ -451,9 +450,16 @@ class NativePyTorchAdapter(_SingleAttachAdapter):
             assert self._original_ddp_init is not None
             torch.nn.Module.__call__ = self._original_module_call
             torch.optim.Optimizer.__init__ = self._original_optimizer_init
+            if self._original_optimizer_init_subclass is None:
+                del torch.optim.Optimizer.__init_subclass__
+            else:
+                torch.optim.Optimizer.__init_subclass__ = self._original_optimizer_init_subclass
             DistributedDataParallel.__init__ = self._original_ddp_init
             for optimizer_type, original_init in self._optimizer_initializers:
-                optimizer_type.__init__ = original_init
+                if original_init is None:
+                    del optimizer_type.__init__
+                else:
+                    optimizer_type.__init__ = original_init
             self._optimizer_initializers.clear()
             if fsdp_type is not None and self._original_fsdp_init is not None:
                 fsdp_type.__init__ = self._original_fsdp_init
@@ -477,19 +483,25 @@ class NativePyTorchAdapter(_SingleAttachAdapter):
         if self._distributed_world_size() <= 1:
             return
         with self._lock:
-            candidates = [
+            candidates = _outermost_models(
                 model
                 for reference in self._distributed_models
                 if (model := reference()) is not None
-            ]
-        if len(candidates) > 1:
-            raise TorchrunWorkerAdapterError(
-                "cannot attach native PyTorch adapter: multiple distributed root models"
             )
-        if candidates:
-            self._attach_if_candidate(candidates[0], require_optimizer=False)
+        if len(candidates) == 1:
+            self._attach_if_candidate(
+                candidates[0],
+                require_optimizer=False,
+                defer_no_match=True,
+            )
 
-    def _attach_if_candidate(self, model: Any, *, require_optimizer: bool = True) -> None:
+    def _attach_if_candidate(
+        self,
+        model: Any,
+        *,
+        require_optimizer: bool = True,
+        defer_no_match: bool = False,
+    ) -> None:
         with self._lock:
             if self._handle is not None:
                 return
@@ -521,6 +533,8 @@ class NativePyTorchAdapter(_SingleAttachAdapter):
                         return
                     reason = "no optimizer was constructed before the first model forward"
                 elif not matches:
+                    if defer_no_match:
+                        return
                     reason = "no optimizer owns exactly one model's trainable parameters"
                 else:
                     reason = "multiple optimizers own the model's trainable parameters"
@@ -545,6 +559,32 @@ class NativePyTorchAdapter(_SingleAttachAdapter):
             recovery_mode=self._context.recovery_mode,
             **_recovery_options(self._context),
         )
+
+    def _wrap_optimizer_initializer(self, optimizer_type: type[Any]) -> None:
+        if any(existing is optimizer_type for existing, _original in self._optimizer_initializers):
+            return
+        declared_init = optimizer_type.__dict__.get("__init__")
+        original_init = declared_init if callable(declared_init) else None
+        inherited_init = optimizer_type.__init__
+        delegate = original_init or inherited_init
+        adapter = self
+
+        def concrete_optimizer_init(
+            instance: Any,
+            *args: Any,
+            **kwargs: Any,
+        ) -> None:
+            depth = getattr(adapter._optimizer_init_state, "depth", 0)
+            adapter._optimizer_init_state.depth = depth + 1
+            try:
+                delegate(instance, *args, **kwargs)
+            finally:
+                adapter._optimizer_init_state.depth = depth
+            if depth == 0:
+                adapter._attach_distributed_candidate()
+
+        self._optimizer_initializers.append((optimizer_type, original_init))
+        optimizer_type.__init__ = concrete_optimizer_init
 
 
 NativePyTorchDDPAdapter = NativePyTorchAdapter
@@ -1401,8 +1441,19 @@ def _load_config(
         return {}
     try:
         encoded = path.read_bytes()
-    except (OSError, _toml.TOMLDecodeError) as error:
+    except OSError as error:
         raise TorchrunWorkerAdapterError(f"failed to read worker config {path}") from error
+    return _parse_config_bytes(encoded, path=path, expected_digest=expected_digest)
+
+
+def _parse_config_bytes(
+    encoded: bytes,
+    *,
+    path: Path,
+    expected_digest: str | None = None,
+) -> dict[str, Any]:
+    if len(encoded) > _MAX_WORKER_CONFIG_BYTES:
+        raise TorchrunWorkerAdapterError("worker config is too large")
     observed_digest = hashlib.sha256(b"lm-resiliency/worker-policy/v1\0" + encoded).hexdigest()
     if expected_digest is not None and observed_digest != expected_digest:
         raise TorchrunWorkerAdapterError("worker config changed after rendezvous policy agreement")
@@ -1434,6 +1485,11 @@ def _load_config(
             )
         payload["adapter"] = normalized
     return payload
+
+
+def _validate_worker_config_bytes(encoded: bytes, *, path: Path) -> None:
+    payload = _parse_config_bytes(encoded, path=path)
+    _feature_options(payload, types.SimpleNamespace(run_id="policy-validation"))
 
 
 def _feature_options(
@@ -1630,6 +1686,36 @@ def _optimizer_types(root: type[Any]) -> tuple[type[Any], ...]:
         result.append(optimizer_type)
         pending.extend(optimizer_type.__subclasses__())
     return tuple(result)
+
+
+def _outermost_models(models: Iterable[Any]) -> tuple[Any, ...]:
+    candidates: list[Any] = []
+    seen: set[int] = set()
+    for model in models:
+        identity = id(model)
+        if identity not in seen:
+            seen.add(identity)
+            candidates.append(model)
+    parameter_ids = {
+        id(model): {id(parameter) for parameter in model.parameters()} for model in candidates
+    }
+    roots = []
+    for candidate in candidates:
+        nested = False
+        candidate_parameters = parameter_ids[id(candidate)]
+        for other in candidates:
+            if other is candidate:
+                continue
+            if any(module is candidate for module in other.modules()):
+                nested = True
+                break
+            other_parameters = parameter_ids[id(other)]
+            if candidate_parameters and candidate_parameters < other_parameters:
+                nested = True
+                break
+        if not nested:
+            roots.append(candidate)
+    return tuple(roots)
 
 
 def _reset_worker_adapter_for_tests() -> None:

@@ -112,7 +112,9 @@ that owns all trainable parameters of that model and no parameters from another
 model. Multiple matching optimizers, foreign parameters, or a distributed
 forward without a recognized all-rank construction boundary fail closed before
 LM Resiliency starts collective attachment. Single-process jobs retain
-root-module-forward discovery.
+root-module-forward discovery. Bottom-up FSDP2/HSDP wrapping is reduced to the
+outermost sharded root, and optimizer subclasses defined after bootstrap are
+instrumented when the class is created.
 The other built-ins attach at their framework-owned initialization boundary and
 likewise fail closed if the expected complete object bundle is unavailable.
 On a replacement generation, built-ins accept GEMINI restart contexts and load

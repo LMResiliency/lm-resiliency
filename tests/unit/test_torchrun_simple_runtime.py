@@ -36,6 +36,7 @@ from lm_resiliency.integrations.torchrun._simple_runtime import (
     SimpleRendezvousHandler,
     SimpleRestartContextFile,
     SimpleRuntimeConfig,
+    SimpleRuntimeError,
     _create_rendezvous_handler,
     _machine_node_id,
     _node_id_from_machine_id,
@@ -118,6 +119,66 @@ def test_restart_context_write_creates_private_parent(tmp_path: Path) -> None:
 
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
     assert context_file.read() == context
+
+
+def test_handler_rejects_unsafe_context_directory_before_registration(
+    tmp_path: Path,
+) -> None:
+    store = HashStore()
+    context_directory = tmp_path / "unsafe-context"
+    context_directory.mkdir(mode=0o755)
+    context_directory.chmod(0o755)
+    config = replace(
+        _config(tmp_path, "node-a"),
+        restart_context_path=(context_directory / "context.json").resolve(),
+    )
+
+    with pytest.raises(SimpleRuntimeError, match="directory must be owner-only"):
+        SimpleRendezvousHandler(
+            config,
+            store=store,
+            local_addr="127.0.0.1",
+        )
+
+    plans = SimpleRecoveryPlanStore(store, run_id=RUN_ID)
+    assert not store.check([plans._registrations_key])
+
+
+def test_handler_rejects_invalid_policy_before_registration(tmp_path: Path) -> None:
+    store = HashStore()
+    policy = (tmp_path / "oversized-worker.toml").resolve()
+    policy.write_bytes(b"x" * ((1 << 20) + 1))
+    config = replace(_config(tmp_path, "node-a"), worker_config=policy)
+
+    with pytest.raises(SimpleRuntimeError, match="worker config is too large"):
+        SimpleRendezvousHandler(
+            config,
+            store=store,
+            local_addr="127.0.0.1",
+        )
+
+    plans = SimpleRecoveryPlanStore(store, run_id=RUN_ID)
+    assert not store.check([plans._registrations_key])
+
+
+def test_handler_rejects_malformed_policy_before_registration(tmp_path: Path) -> None:
+    store = HashStore()
+    policy = (tmp_path / "invalid-worker.toml").resolve()
+    policy.write_text(
+        'schema_version = 1\nenable_checkpoint = "yes"\n',
+        encoding="utf-8",
+    )
+    config = replace(_config(tmp_path, "node-a"), worker_config=policy)
+
+    with pytest.raises(SimpleRuntimeError, match="enable_checkpoint must be a boolean"):
+        SimpleRendezvousHandler(
+            config,
+            store=store,
+            local_addr="127.0.0.1",
+        )
+
+    plans = SimpleRecoveryPlanStore(store, run_id=RUN_ID)
+    assert not store.check([plans._registrations_key])
 
 
 def _start(
