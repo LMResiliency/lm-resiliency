@@ -350,6 +350,11 @@ DeepSpeed, Megatron Core, and TorchTitan also completed a focused
 restart-and-replacement campaign through their framework-owned training
 boundaries.
 
+Runnable bootstrap and manager-driven end-to-end programs live under
+[`examples/torchrun`](../examples/torchrun/README.md). The
+resiliency-cycle controller launches torchrun agents and is not itself a
+training worker.
+
 ## Current Boundaries
 
 - fixed-size replacement only; no scale-up or scale-down;
