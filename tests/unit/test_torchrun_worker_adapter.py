@@ -199,11 +199,21 @@ def test_custom_adapter_bootstraps_user_script_without_lm_imports(
     user_source = textwrap.dedent(
         """
         import os
+        import subprocess
+        import sys
         from pathlib import Path
 
         marker = Path(os.environ["ADAPTER_MARKER"])
         if not marker.exists():
             raise RuntimeError("adapter did not run before user code")
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import os; assert 'LM_RESILIENCY_TORCHRUN_BOOTSTRAP' not in os.environ",
+            ],
+            check=True,
+        )
         Path(os.environ["USER_SUCCESS"]).write_text("ok", encoding="utf-8")
         """
     )

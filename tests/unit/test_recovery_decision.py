@@ -254,6 +254,27 @@ def test_decision_falls_back_to_durable_checkpoint_identity():
     assert decision["available"] is True
 
 
+def test_durable_fallback_preserves_live_checkpoint_topology():
+    manager = MagicMock()
+    manager.local_recovery_step.return_value = -1
+    manager.topology_id = "checkpoint-topology"
+    record = SimpleNamespace(step=11, checkpoint_id="durable-step-11")
+    durable = SimpleNamespace(latest_validated=record)
+
+    decision = build_recovery_decision(
+        failure_kind="sdc",
+        recovery_mode=RecoveryMode.RECOVERY_VERIFIED,
+        all_ranks_accessible=False,
+        reason="sdc_detected",
+        checkpoint_manager=manager,
+        durable_checkpoint=durable,
+        allow_collective=False,
+    )
+
+    assert decision["checkpoint_source"] == "durable"
+    assert decision["topology_digest"] == "checkpoint-topology"
+
+
 def test_decision_explicitly_reports_when_no_checkpoint_is_available():
     decision = build_recovery_decision(
         failure_kind="machine_unavailable",

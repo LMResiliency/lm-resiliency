@@ -44,6 +44,9 @@ def build_recovery_decision(
     source: RecoveryCheckpointSource = "none"
 
     if checkpoint_manager is not None:
+        candidate_topology = getattr(checkpoint_manager, "topology_id", None)
+        if isinstance(candidate_topology, str) and candidate_topology:
+            topology_digest = candidate_topology
         if allow_collective:
             checkpoint_step = int(checkpoint_manager.find_latest(mode))  # type: ignore[attr-defined]
         elif hasattr(checkpoint_manager, "local_recovery_step"):
@@ -53,9 +56,6 @@ def build_recovery_decision(
             checkpoint_step = int(status.recovery_verified_step)
         if checkpoint_step > 0:
             source = "gemini"
-            candidate_topology = getattr(checkpoint_manager, "topology_id", None)
-            if isinstance(candidate_topology, str) and candidate_topology:
-                topology_digest = candidate_topology
 
     if checkpoint_step <= 0 and durable_checkpoint is not None:
         record = durable_checkpoint.latest_validated  # type: ignore[attr-defined]

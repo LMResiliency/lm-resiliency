@@ -593,8 +593,10 @@ class InMemoryCheckpointManager:
         if not self.config.enable:
             return None
 
-        resolved = self._activate_recovery_mode(mode)
         if step is not None:
+            resolved = self._activate_recovery_mode_collectively(mode)
+            if resolved is None:
+                return None
             loaded = self._load_exact_collectively_validated_shard(step, resolved)
             if loaded is None:
                 return None
@@ -603,6 +605,7 @@ class InMemoryCheckpointManager:
             state_dict = unflatten(metadata, tensors)
             logger.info("Loaded exact checkpoint at manager-selected step %s", step)
             return state_dict, step
+        resolved = self._activate_recovery_mode(mode)
         memory_step, disk_step = self._recovery_steps(resolved)
         if memory_step <= 0 and disk_step <= 0:
             return None
@@ -644,8 +647,10 @@ class InMemoryCheckpointManager:
         if not self.config.enable:
             return None
 
-        resolved = self._activate_recovery_mode(mode)
         if step is not None:
+            resolved = self._activate_recovery_mode_collectively(mode)
+            if resolved is None:
+                return None
             loaded = self._load_exact_collectively_validated_shard(step, resolved)
             if loaded is None:
                 return None
@@ -654,6 +659,7 @@ class InMemoryCheckpointManager:
             extra = (metadata.non_tensor_data or {}).get(_EXTRA_KEY)
             logger.info("Loaded exact checkpoint tensors at manager-selected step %s", step)
             return tensors, step, extra
+        resolved = self._activate_recovery_mode(mode)
         memory_step, disk_step = self._recovery_steps(resolved)
         if memory_step <= 0 and disk_step <= 0:
             return None
@@ -729,6 +735,22 @@ class InMemoryCheckpointManager:
                 step,
                 local_error,
             )
+        return None
+
+    def _activate_recovery_mode_collectively(
+        self,
+        mode: RecoveryMode | str | None,
+    ) -> RecoveryMode | None:
+        resolved: RecoveryMode | None = None
+        local_error: Exception | None = None
+        try:
+            resolved = self._activate_recovery_mode(mode)
+        except Exception as error:  # noqa: BLE001 - every rank must vote
+            local_error = error
+        if self._collective_min_step(int(resolved is not None)) == 1:
+            return resolved
+        if local_error is not None:
+            logger.error("Failed to activate exact checkpoint recovery mode: %s", local_error)
         return None
 
     def _load_collectively_validated_disk_shard(

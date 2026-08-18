@@ -1367,6 +1367,8 @@ def bootstrap_worker_from_environment(
         return None
     with _bootstrap_lock:
         if _installed_adapter is not None:
+            if isinstance(environ, MutableMapping):
+                disable_worker_bootstrap_environment(environ)
             return _installed_adapter
         context = _context_from_environment(environ)
         generation_target = environ if isinstance(environ, MutableMapping) else os.environ
@@ -1383,6 +1385,7 @@ def bootstrap_worker_from_environment(
             adapter = _load_custom_adapter(adapter_spec, context)
         adapter.install(context)
         _installed_adapter = adapter
+        disable_worker_bootstrap_environment(generation_target)
         return adapter
 
 

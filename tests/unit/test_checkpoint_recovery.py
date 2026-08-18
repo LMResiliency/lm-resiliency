@@ -80,6 +80,35 @@ def test_exact_manager_selected_step_never_falls_forward(tmp_path):
     resumed.close()
 
 
+@pytest.mark.parametrize("load_method", ["load", "load_tensors"])
+def test_exact_recovery_collectively_rejects_activation_failure(
+    tmp_path,
+    load_method,
+):
+    manager = InMemoryCheckpointManager(
+        InMemoryCkptConfig(
+            enable=True,
+            interval=1,
+            disk_flush_interval=0,
+            disk_folder=str(tmp_path),
+        )
+    )
+    with (
+        patch.object(
+            manager,
+            "_activate_recovery_mode",
+            side_effect=RuntimeError("status unavailable"),
+        ),
+        patch.object(manager, "_collective_min_step", return_value=0) as collective,
+        patch.object(manager, "_load_exact_collectively_validated_shard") as load_exact,
+    ):
+        assert getattr(manager, load_method)(mode="recovery_verified", step=7) is None
+
+    collective.assert_called_once_with(0)
+    load_exact.assert_not_called()
+    manager.close()
+
+
 def test_checkpoint_manager_rejects_manager_topology_mismatch(tmp_path):
     with pytest.raises(RuntimeError, match="manager-selected checkpoint topology"):
         InMemoryCheckpointManager(
