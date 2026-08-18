@@ -233,6 +233,51 @@ def _gloo_identity_worker(
         dist.destroy_process_group()
 
 
+def _gloo_exact_request_worker(
+    rank: int,
+    world_size: int,
+    rendezvous: str,
+    result_dir: str,
+) -> None:
+    dist.init_process_group(
+        "gloo",
+        init_method=f"file://{rendezvous}",
+        rank=rank,
+        world_size=world_size,
+        timeout=dt.timedelta(seconds=30),
+    )
+    try:
+        manager = object.__new__(InMemoryCheckpointManager)
+        manager.config = SimpleNamespace(enable=True)
+        manager._world_size = world_size
+        manager._process_group = None
+
+        rejected: list[bool] = []
+        requests = (
+            ("load", 7 + rank, RecoveryMode.LATEST_GEMINI),
+            (
+                "load_tensors",
+                7,
+                RecoveryMode.LATEST_GEMINI if rank == 0 else RecoveryMode.RECOVERY_VERIFIED,
+            ),
+        )
+        for method, step, mode in requests:
+            try:
+                getattr(manager, method)(mode=mode, step=step)
+            except RuntimeError as error:
+                rejected.append(
+                    "disagree on the manager-selected recovery step or mode" in str(error)
+                )
+            else:
+                rejected.append(False)
+
+        Path(result_dir, f"exact-request-rank-{rank}.json").write_text(
+            json.dumps({"rejected": rejected})
+        )
+    finally:
+        dist.destroy_process_group()
+
+
 @pytest.mark.skipif(not dist.is_gloo_available(), reason="PyTorch Gloo backend is unavailable")
 def test_cpu_gloo_recovery_consensus(tmp_path):
     world_size = 2
@@ -277,3 +322,27 @@ def test_cpu_gloo_requires_exact_run_identity_agreement(tmp_path):
         for rank in range(world_size)
     ]
     assert results == [{"rejected": True}, {"rejected": True}]
+
+
+@pytest.mark.skipif(not dist.is_gloo_available(), reason="PyTorch Gloo backend is unavailable")
+def test_cpu_gloo_exact_recovery_requires_request_agreement(tmp_path):
+    world_size = 2
+    rendezvous = tmp_path / "exact-request-rendezvous"
+    result_dir = tmp_path / "exact-request-results"
+    result_dir.mkdir()
+
+    mp.spawn(
+        _gloo_exact_request_worker,
+        args=(world_size, str(rendezvous), str(result_dir)),
+        nprocs=world_size,
+        join=True,
+    )
+
+    results = [
+        json.loads((result_dir / f"exact-request-rank-{rank}.json").read_text())
+        for rank in range(world_size)
+    ]
+    assert results == [
+        {"rejected": [True, True]},
+        {"rejected": [True, True]},
+    ]

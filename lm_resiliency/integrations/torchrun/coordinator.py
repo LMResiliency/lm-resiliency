@@ -249,10 +249,18 @@ class TorchrunRecoveryCoordinator:
                 remaining_ms=0 if remaining <= 0 else math.ceil(remaining * 1_000),
             )
 
-        publish_remaining(remaining_seconds)
+        initial_failures = 0
+        try:
+            publish_remaining(remaining_seconds)
+        except Exception:
+            # The plan is already committed and cannot be rolled back. Keep the
+            # coordinator alive so the renewal thread can retry this first lease
+            # publication instead of stranding the successor generation.
+            initial_failures = 1
 
         def renew() -> None:
-            consecutive_failures = 0
+            consecutive_failures = initial_failures
+            wait_before_publish = initial_failures == 0
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -261,8 +269,11 @@ class TorchrunRecoveryCoordinator:
                     except Exception:
                         pass
                     return
-                if stop.wait(min(_PLAN_LEASE_RENEW_INTERVAL_SECONDS, remaining)):
+                if wait_before_publish and stop.wait(
+                    min(_PLAN_LEASE_RENEW_INTERVAL_SECONDS, remaining)
+                ):
                     return
+                wait_before_publish = True
                 try:
                     publish_remaining(deadline - time.monotonic())
                     consecutive_failures = 0

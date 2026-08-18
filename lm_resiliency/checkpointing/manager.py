@@ -594,17 +594,18 @@ class InMemoryCheckpointManager:
             return None
 
         if step is not None:
-            resolved = self._activate_recovery_mode_collectively(mode)
-            if resolved is None:
+            request = self._agree_exact_recovery_request(step, mode)
+            if request is None:
                 return None
-            loaded = self._load_exact_collectively_validated_shard(step, resolved)
+            agreed_step, resolved = request
+            loaded = self._load_exact_collectively_validated_shard(agreed_step, resolved)
             if loaded is None:
                 return None
             metadata, tensors = loaded
             self._metadata = metadata
             state_dict = unflatten(metadata, tensors)
-            logger.info("Loaded exact checkpoint at manager-selected step %s", step)
-            return state_dict, step
+            logger.info("Loaded exact checkpoint at manager-selected step %s", agreed_step)
+            return state_dict, agreed_step
         resolved = self._activate_recovery_mode(mode)
         memory_step, disk_step = self._recovery_steps(resolved)
         if memory_step <= 0 and disk_step <= 0:
@@ -648,17 +649,21 @@ class InMemoryCheckpointManager:
             return None
 
         if step is not None:
-            resolved = self._activate_recovery_mode_collectively(mode)
-            if resolved is None:
+            request = self._agree_exact_recovery_request(step, mode)
+            if request is None:
                 return None
-            loaded = self._load_exact_collectively_validated_shard(step, resolved)
+            agreed_step, resolved = request
+            loaded = self._load_exact_collectively_validated_shard(agreed_step, resolved)
             if loaded is None:
                 return None
             metadata, tensors = loaded
             self._metadata = metadata
             extra = (metadata.non_tensor_data or {}).get(_EXTRA_KEY)
-            logger.info("Loaded exact checkpoint tensors at manager-selected step %s", step)
-            return tensors, step, extra
+            logger.info(
+                "Loaded exact checkpoint tensors at manager-selected step %s",
+                agreed_step,
+            )
+            return tensors, agreed_step, extra
         resolved = self._activate_recovery_mode(mode)
         memory_step, disk_step = self._recovery_steps(resolved)
         if memory_step <= 0 and disk_step <= 0:
@@ -736,6 +741,72 @@ class InMemoryCheckpointManager:
                 local_error,
             )
         return None
+
+    def _agree_exact_recovery_request(
+        self,
+        step: int,
+        mode: RecoveryMode | str | None,
+    ) -> tuple[int, RecoveryMode] | None:
+        resolved: RecoveryMode | None = None
+        local_error: Exception | None = None
+        try:
+            if isinstance(step, bool) or not isinstance(step, int) or step < 1:
+                raise ValueError("checkpoint step must be a positive integer")
+            resolved = self._resolved_recovery_mode(mode)
+        except Exception as error:  # noqa: BLE001 - every rank must agree or reject
+            local_error = error
+
+        mode_code = -1 if resolved is None else (0 if resolved is RecoveryMode.LATEST_GEMINI else 1)
+        lower, upper = self._collective_int_bounds(
+            (
+                int(local_error is None),
+                step if local_error is None else -1,
+                mode_code,
+            )
+        )
+        if lower[0] != 1 or upper[0] != 1:
+            if not dist.is_initialized() or self._world_size == 1:
+                assert local_error is not None
+                raise local_error
+            if local_error is not None:
+                logger.error("Invalid exact checkpoint recovery request: %s", local_error)
+            raise RuntimeError("checkpoint ranks supplied an invalid exact recovery request")
+        if lower[1:] != upper[1:]:
+            raise RuntimeError(
+                "checkpoint ranks disagree on the manager-selected recovery step or mode"
+            )
+        agreed_mode = (
+            RecoveryMode.LATEST_GEMINI if lower[2] == 0 else RecoveryMode.RECOVERY_VERIFIED
+        )
+        activated = self._activate_recovery_mode_collectively(agreed_mode)
+        if activated is None:
+            return None
+        return lower[1], activated
+
+    def _collective_int_bounds(
+        self,
+        values: tuple[int, ...],
+    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        if not dist.is_initialized() or self._world_size == 1:
+            return values, values
+
+        device = torch.device("cpu")
+        try:
+            backend = dist.get_backend(self._process_group)
+        except Exception:  # noqa: BLE001 - best-effort backend detection
+            backend = ""
+        if str(backend).lower() == "nccl":
+            if not torch.cuda.is_available():
+                raise RuntimeError("NCCL checkpoint request agreement requires a CUDA device")
+            device = torch.device("cuda", torch.cuda.current_device())
+
+        lower = torch.tensor(values, dtype=torch.int64, device=device)
+        upper = lower.clone()
+        dist.all_reduce(lower, op=dist.ReduceOp.MIN, group=self._process_group)
+        dist.all_reduce(upper, op=dist.ReduceOp.MAX, group=self._process_group)
+        return tuple(int(value) for value in lower.tolist()), tuple(
+            int(value) for value in upper.tolist()
+        )
 
     def _activate_recovery_mode_collectively(
         self,

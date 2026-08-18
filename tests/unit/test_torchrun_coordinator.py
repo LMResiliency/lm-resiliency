@@ -233,6 +233,44 @@ def test_coordinator_retries_transient_plan_lease_failure(
     coordinator.close()
 
 
+def test_coordinator_retries_initial_plan_lease_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = HashStore()
+    plans = SimpleRecoveryPlanStore(store, run_id="run")
+    plans.register_node("node-a", "agent-a", max_nodes=1)
+    assert plans.ensure_initial_nodes(min_nodes=1, max_nodes=1) == ("node-a",)
+    coordinator = TorchrunRecoveryCoordinator(store, run_id="run")
+    original = coordinator._plans.renew_plan_lease
+    calls = 0
+
+    def flaky_renew(*args: object, **kwargs: object) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("transient initial store failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(coordinator._plans, "renew_plan_lease", flaky_renew)
+    placement = coordinator.publish_successor(
+        generation=0,
+        active_node_ids=("node-a",),
+        quarantined_node_ids=(),
+        request=_request(generation=0),
+        local_world_size=1,
+    )
+    plan = plans.read(placement.generation)
+    assert plan is not None
+    deadline = time.monotonic() + 2
+    while plans.read_plan_lease(plan) is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    assert calls >= 2
+    assert plans.read_plan_lease(plan) is not None
+    coordinator.check_health()
+    coordinator.close()
+
+
 def test_coordinator_surfaces_persistent_plan_lease_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
