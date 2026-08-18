@@ -693,7 +693,7 @@ class InMemoryCheckpointManager:
             local_error: Exception | None = None
             try:
                 status = self._checkpoint_status.read()
-                locally_eligible = status.recovery_verified_step == step and self._disk.has_rank(
+                locally_eligible = status.is_recovery_verified(step) and self._disk.has_rank(
                     step, self._rank
                 )
             except Exception as error:  # noqa: BLE001 - every rank must vote
@@ -794,6 +794,7 @@ class InMemoryCheckpointManager:
                     -1 if resolved is RecoveryMode.RECOVERY_VERIFIED else status.candidate_step
                 ),
                 recovery_verified_step=status.recovery_verified_step,
+                recovery_verified_steps=status.recovery_verified_steps,
                 recovery_mode=resolved.value,
             )
         )
@@ -805,6 +806,7 @@ class InMemoryCheckpointManager:
             CheckpointStatus(
                 candidate_step=-1,
                 recovery_verified_step=status.recovery_verified_step,
+                recovery_verified_steps=status.recovery_verified_steps,
                 recovery_mode=status.recovery_mode,
             )
         )
@@ -895,6 +897,7 @@ class InMemoryCheckpointManager:
         status = CheckpointStatus(
             candidate_step=candidate_step,
             recovery_verified_step=verified_step,
+            recovery_verified_steps=previous.recovery_verified_steps,
             recovery_mode=RecoveryMode.LATEST_GEMINI.value,
         )
         self._checkpoint_status.write(status)

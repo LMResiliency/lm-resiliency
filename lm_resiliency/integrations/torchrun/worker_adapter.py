@@ -521,6 +521,11 @@ class NativePyTorchAdapter(_SingleAttachAdapter):
                 optimizer = reference()
                 if optimizer is not None:
                     optimizers.append(optimizer)
+            if len(optimizers) > 1:
+                raise TorchrunWorkerAdapterError(
+                    "cannot attach native PyTorch adapter: multiple optimizers "
+                    "were constructed in this process"
+                )
             model_parameters = {id(parameter) for parameter in model.parameters()}
             matches = [
                 optimizer
@@ -707,9 +712,15 @@ class MegatronWorkerAdapter(_SingleAttachAdapter):
             state_dict = getattr(scheduler, "state_dict", None)
             if not callable(state_dict):
                 raise TorchrunWorkerAdapterError("Megatron scheduler does not expose state_dict()")
+            current_iteration = getattr(args, "curr_iteration", None)
+            completed_iteration = (
+                _nonnegative_int(args.iteration, "Megatron iteration")
+                if current_iteration is None
+                else _nonnegative_int(current_iteration, "Megatron current iteration") + 1
+            )
             return {
                 "torchrun_megatron_loop": {
-                    "iteration": _nonnegative_int(handle.step_count, "Megatron iteration"),
+                    "iteration": completed_iteration,
                     "consumed_train_samples": _nonnegative_int(
                         args.consumed_train_samples,
                         "Megatron consumed_train_samples",
@@ -925,11 +936,14 @@ class _AutoFrameworkAdapter:
         self._native: NativePyTorchAdapter | None = None
         self._delegate: TorchrunWorkerAdapter | None = None
         self._selected_framework: str | None = None
+        self._agreed_framework: str | None = None
         self._inference_error: TorchrunWorkerAdapterError | None = None
         self._original_import: Callable[..., Any] | None = None
         self._original_import_module: Callable[..., Any] | None = None
         self._import_wrapper: Callable[..., Any] | None = None
         self._import_module_wrapper: Callable[..., Any] | None = None
+        self._restore_framework_agreement_hook: Callable[[], None] | None = None
+        self._framework_agreement_active = False
 
     @property
     def selected_framework(self) -> str | None:
@@ -961,8 +975,15 @@ class _AutoFrameworkAdapter:
                     )
                 return
             self._context = context
-            self._original_import = builtins.__import__
-            self._original_import_module = importlib.import_module
+            try:
+                self._restore_framework_agreement_hook = self._install_framework_agreement_hook()
+                self._framework_agreement_active = True
+                self._original_import = builtins.__import__
+                self._original_import_module = importlib.import_module
+            except BaseException:
+                self._restore_framework_agreement_locked()
+                self._context = None
+                raise
 
             def monitored_import(
                 name: str,
@@ -1000,6 +1021,7 @@ class _AutoFrameworkAdapter:
         with self._import_transaction_lock:
             with self._lock:
                 self._restore_imports_locked()
+                self._restore_framework_agreement_locked()
                 delegates = tuple(
                     adapter for adapter in (self._delegate, self._native) if adapter is not None
                 )
@@ -1091,16 +1113,30 @@ class _AutoFrameworkAdapter:
     def _install_tentative_pytorch_locked(self) -> None:
         if self._selected_framework is not None or self._native is not None:
             return
+        if self._agreed_framework not in {None, _BUILTIN_PYTORCH}:
+            error = TorchrunWorkerAdapterError(
+                "native PyTorch was imported after the worker cohort agreed on "
+                f"{self._agreed_framework!r}"
+            )
+            self._inference_error = error
+            raise error
         assert self._context is not None
         adapter = NativePyTorchAdapter(
             self._options,
-            before_attach=self._raise_if_inference_failed,
+            before_attach=lambda: self._before_framework_attach(_BUILTIN_PYTORCH),
             on_attach=self._native_attached,
         )
         adapter.install(self._context)
         self._native = adapter
 
     def _select_specialized_locked(self, framework: str) -> None:
+        if self._agreed_framework not in {None, framework}:
+            error = TorchrunWorkerAdapterError(
+                f"{framework} was imported after the worker cohort agreed on "
+                f"{self._agreed_framework!r}"
+            )
+            self._inference_error = error
+            raise error
         if self._selected_framework is not None:
             if self._selected_framework != framework:
                 error = TorchrunWorkerAdapterError(
@@ -1124,7 +1160,7 @@ class _AutoFrameworkAdapter:
         self._selected_framework = framework
         adapter = adapter_type(
             self._options,
-            before_attach=self._raise_if_inference_failed,
+            before_attach=lambda: self._before_framework_attach(framework),
             on_attach=lambda: self._specialized_attached(framework),
         )
         self._delegate = adapter
@@ -1158,6 +1194,104 @@ class _AutoFrameworkAdapter:
         with self._lock:
             if self._inference_error is not None:
                 raise self._inference_error
+
+    def _install_framework_agreement_hook(self) -> Callable[[], None]:
+        import torch.distributed as dist
+
+        c10d = importlib.import_module("torch.distributed.distributed_c10d")
+        originals = (
+            (dist, "init_process_group", dist.init_process_group),
+            (c10d, "init_process_group", c10d.init_process_group),
+        )
+        wrappers: list[tuple[Any, str, Callable[..., Any], Callable[..., Any]]] = []
+        adapter = self
+
+        for module, name, original in originals:
+
+            def init_process_group(
+                *args: Any,
+                _original: Callable[..., Any] = original,
+                **kwargs: Any,
+            ) -> Any:
+                result = _original(*args, **kwargs)
+                with adapter._lock:
+                    active = adapter._framework_agreement_active
+                if active:
+                    adapter._agree_framework_cohort()
+                return result
+
+            setattr(module, name, init_process_group)
+            wrappers.append((module, name, original, init_process_group))
+
+        def restore() -> None:
+            for module, name, original, wrapper in wrappers:
+                if getattr(module, name) is wrapper:
+                    setattr(module, name, original)
+
+        return restore
+
+    def _agree_framework_cohort(self) -> None:
+        import torch.distributed as dist
+
+        with self._import_transaction_lock:
+            with self._lock:
+                if self._inference_error is not None:
+                    raise self._inference_error
+                if self._agreed_framework is not None:
+                    return
+                candidate = self._framework_candidate_locked()
+            if not dist.is_initialized():
+                raise TorchrunWorkerAdapterError(
+                    "framework agreement requires an initialized default process group"
+                )
+            world_size = dist.get_world_size()
+            gathered: list[str | None] = [None] * world_size
+            dist.all_gather_object(gathered, candidate)
+            agreed = gathered[0] if gathered else None
+            if agreed is None or any(framework != agreed for framework in gathered):
+                error = TorchrunWorkerAdapterError(
+                    f"worker ranks inferred different training frameworks: {gathered!r}"
+                )
+                with self._lock:
+                    self._inference_error = error
+                raise error
+            with self._lock:
+                if self._framework_candidate_locked() != agreed:
+                    error = TorchrunWorkerAdapterError(
+                        "framework inference changed during worker cohort agreement"
+                    )
+                    self._inference_error = error
+                    raise error
+                self._agreed_framework = agreed
+
+    def _before_framework_attach(self, framework: str) -> None:
+        import torch.distributed as dist
+
+        self._raise_if_inference_failed()
+        if not dist.is_initialized() or dist.get_world_size() <= 1:
+            return
+        with self._lock:
+            if self._agreed_framework != framework:
+                error = TorchrunWorkerAdapterError(
+                    "distributed framework attachment requires cohort agreement "
+                    f"on {framework!r}, observed {self._agreed_framework!r}"
+                )
+                self._inference_error = error
+                raise error
+
+    def _framework_candidate_locked(self) -> str | None:
+        if self._selected_framework is not None:
+            return self._selected_framework
+        if self._native is not None:
+            return _BUILTIN_PYTORCH
+        return None
+
+    def _restore_framework_agreement_locked(self) -> None:
+        self._framework_agreement_active = False
+        restore = self._restore_framework_agreement_hook
+        self._restore_framework_agreement_hook = None
+        if restore is not None:
+            restore()
 
     def _restore_imports_locked(self) -> None:
         if (

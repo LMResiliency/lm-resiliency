@@ -53,7 +53,9 @@ against the same supported framework ranges as the corresponding explicit
 
 PyTorch is tentative until attachment because all higher-level frameworks
 import it. Importing more than one higher-level supported framework before
-attachment fails closed. Worker width comes from torchrun's standard
+attachment fails closed. Distributed workers agree on the inferred framework
+when the default process group initializes; missing or conflicting evidence
+fails before any built-in adapter enters attachment collectives. Worker width comes from torchrun's standard
 `LOCAL_WORLD_SIZE`; replacement contexts must agree with that value.
 Assigned nodes must agree on the exact worker-policy digest, and bootstrap
 revalidates the policy bytes before adapter installation.

@@ -196,8 +196,11 @@ When `lm_resiliency_worker_config` is set, the rendezvous plugin installs framew
 monitoring before Python executes the user module. Native PyTorch is tentative;
 an import of TorchTitan, Megatron Core, or DeepSpeed selects the corresponding
 more specific adapter before attachment. Multiple higher-level supported
-frameworks fail closed. The user module still owns the ordinary framework
-training loop.
+frameworks fail closed. After the default process group initializes, every rank
+agrees on the inferred framework before a built-in adapter can enter GEMINI or
+SCOUT collectives. Missing or conflicting framework evidence fails all ranks
+before attachment. The user module still owns the ordinary framework training
+loop.
 
 Torchrun supplies `LOCAL_WORLD_SIZE` to every worker from
 `--nproc-per-node`. Replacement workers compare that value with the

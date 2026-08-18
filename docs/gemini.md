@@ -168,6 +168,9 @@ newest shard set that every rank can load and validate.
 At a dense accepted boundary, it persists the latest local CPU checkpoint and received peer replica as recovery-verified.
 At a dynamic recipe-cycle boundary, it persists them as the new candidate and records candidate and recovery-verified steps separately.
 Each rank owns its status sidecar; several workers on one node never update the same mutable trust record.
+The sidecar retains verified-generation history, and exact recovery additionally
+requires the selected shard to remain present. A manager-selected step therefore
+remains eligible after a newer generation advances the current recovery pointer.
 The sidecar is also published by same-directory replacement. Remote filesystem
 clients can briefly observe incomplete bytes while another client replaces the
 file, so readers retry only byte, UTF-8, and JSON visibility failures for a

@@ -98,7 +98,9 @@ Built-in adapter selection is inferred from framework imports:
 PyTorch is treated as tentative because every higher-level framework imports
 it. Importing TorchTitan, Megatron Core, or DeepSpeed before attachment selects
 that more specific adapter. Importing multiple higher-level supported
-frameworks fails closed instead of selecting one arbitrarily.
+frameworks fails closed instead of selecting one arbitrarily. Distributed
+workers also agree on the inferred framework when the default process group
+initializes, before any built-in adapter enters attachment collectives.
 
 Worker adapters do **not** accept a parallelism strategy. They pass the same
 framework objects to the existing `enable_resiliency()` API that explicit user

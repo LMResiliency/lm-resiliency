@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import os
 import subprocess
 import sys
@@ -67,6 +68,48 @@ def _recovery_context(
         recovery_mode="recovery_verified",
         topology_digest="topology",
         restart_deadline_unix_ms=9_999_999_999_999,
+    )
+
+
+def _framework_disagreement_worker(
+    rank: int,
+    rendezvous_path: str,
+    output_dir: str,
+) -> None:
+    import torch.distributed as dist
+
+    adapter = _AutoFrameworkAdapter({"enable_checkpoint": False, "enable_detection": False})
+    context = TorchrunWorkerContext(
+        run_id="framework-agreement",
+        node_id=f"node-{rank}",
+        local_world_size=1,
+        restart_context_path=(Path(output_dir) / f"context-{rank}.json").resolve(),
+    )
+    if rank == 1:
+        deepspeed = types.ModuleType("deepspeed")
+        deepspeed.initialize = lambda: (object(),)  # type: ignore[attr-defined]
+        sys.modules["deepspeed"] = deepspeed
+    adapter.install(context)
+    try:
+        __import__("torch" if rank == 0 else "deepspeed")
+        try:
+            dist.init_process_group(
+                "gloo",
+                init_method=f"file://{rendezvous_path}",
+                rank=rank,
+                world_size=2,
+            )
+        except TorchrunWorkerAdapterError as error:
+            outcome = str(error)
+        else:
+            outcome = "framework agreement unexpectedly succeeded"
+    finally:
+        adapter.close()
+        if dist.is_initialized():
+            dist.destroy_process_group()
+    (Path(output_dir) / f"framework-agreement-{rank}.txt").write_text(
+        outcome,
+        encoding="utf-8",
     )
 
 
@@ -559,6 +602,97 @@ def test_framework_inference_rejects_multiple_specialized_frameworks(
         adapter.close()
 
 
+def test_framework_inference_rejects_cross_rank_disagreement_before_attachment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import torch.distributed as dist
+
+    deepspeed = types.ModuleType("deepspeed")
+    engine = object()
+    deepspeed.initialize = lambda: (engine,)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "deepspeed", deepspeed)
+    monkeypatch.setattr(dist, "init_process_group", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+
+    def gather_frameworks(gathered: list[str | None], local: str | None) -> None:
+        gathered[:] = [local, "pytorch"]
+
+    monkeypatch.setattr(dist, "all_gather_object", gather_frameworks)
+    enable = MagicMock()
+    monkeypatch.setattr(
+        "lm_resiliency.integrations.deepspeed.training.enable_resiliency",
+        enable,
+    )
+    adapter = _AutoFrameworkAdapter({"enable_checkpoint": False, "enable_detection": False})
+    adapter.install(_context(tmp_path))
+    try:
+        __import__("deepspeed")
+
+        with pytest.raises(
+            TorchrunWorkerAdapterError,
+            match="inferred different training frameworks",
+        ):
+            dist.init_process_group("gloo")
+        with pytest.raises(
+            TorchrunWorkerAdapterError,
+            match="inferred different training frameworks",
+        ):
+            deepspeed.initialize()
+
+        enable.assert_not_called()
+    finally:
+        adapter.close()
+
+
+def test_framework_inference_disagreement_fails_all_gloo_ranks(tmp_path: Path) -> None:
+    context = multiprocessing.get_context("spawn")
+    rendezvous = tmp_path / "framework-agreement-store"
+    processes = [
+        context.Process(
+            target=_framework_disagreement_worker,
+            args=(rank, str(rendezvous), str(tmp_path)),
+        )
+        for rank in range(2)
+    ]
+
+    original_sys_path = list(sys.path)
+    repository_root = str(Path(__file__).resolve().parents[2])
+    original_python_path = os.environ.get("PYTHONPATH")
+    bootstrap_environment = {
+        name: os.environ.pop(name)
+        for name in tuple(os.environ)
+        if name.startswith("LM_RESILIENCY_TORCHRUN_")
+    }
+    sys.path[:] = [repository_root, *(path for path in sys.path if path != repository_root)]
+    os.environ["PYTHONPATH"] = os.pathsep.join(
+        path for path in (repository_root, original_python_path) if path
+    )
+    try:
+        for process in processes:
+            process.start()
+    finally:
+        sys.path[:] = original_sys_path
+        if original_python_path is None:
+            os.environ.pop("PYTHONPATH", None)
+        else:
+            os.environ["PYTHONPATH"] = original_python_path
+        os.environ.update(bootstrap_environment)
+    for process in processes:
+        process.join(timeout=30)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+
+    assert [process.exitcode for process in processes] == [0, 0]
+    outcomes = [
+        (tmp_path / f"framework-agreement-{rank}.txt").read_text(encoding="utf-8")
+        for rank in range(2)
+    ]
+    assert all("inferred different training frameworks" in outcome for outcome in outcomes)
+
+
 @pytest.fixture
 def process_group(tmp_path: Path) -> Generator[None, None, None]:
     import torch.distributed as dist
@@ -713,6 +847,28 @@ def test_native_pytorch_adapter_delegates_plain_root_module_without_parallelism(
         assert calls[0][1] is optimizer
         assert "parallelism_info" not in calls[0][2]
         assert adapter.handle is sentinel
+    finally:
+        adapter.close()
+
+
+def test_native_pytorch_adapter_rejects_multiple_single_process_training_pairs(
+    tmp_path: Path,
+) -> None:
+    import torch
+
+    adapter = NativePyTorchAdapter({"enable_checkpoint": False, "enable_detection": False})
+    adapter.install(_context(tmp_path))
+    try:
+        model_a = torch.nn.Linear(4, 2)
+        model_b = torch.nn.Linear(4, 2)
+        optimizer_a = torch.optim.SGD(model_a.parameters(), lr=0.1)
+        optimizer_b = torch.optim.AdamW(model_b.parameters(), lr=0.1)
+
+        with pytest.raises(TorchrunWorkerAdapterError, match="multiple optimizers"):
+            model_a(torch.ones(1, 4))
+
+        assert optimizer_a is not optimizer_b
+        assert not adapter.attached
     finally:
         adapter.close()
 
@@ -1201,9 +1357,10 @@ def test_megatron_adapter_delegates_exact_setup_result_without_parallelism(
         assert adapter.handle is sentinel
         capture = calls[0][3]["extra_state_fn"]
         restore = calls[0][3]["load_extra_state_fn"]
+        arguments.curr_iteration = 18
         assert capture() == {
             "torchrun_megatron_loop": {
-                "iteration": 17,
+                "iteration": 19,
                 "consumed_train_samples": 34,
                 "skipped_train_samples": 2,
                 "scheduler": {"num_steps": 17},

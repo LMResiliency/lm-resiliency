@@ -54,6 +54,30 @@ def test_checkpoint_status_store_is_rank_scoped(tmp_dir):
     assert rank_one.path.name == "GEMINI_CHECKPOINT_STATUS.rank-1"
 
 
+def test_checkpoint_status_round_trips_verified_history(tmp_dir):
+    store = CheckpointStatusStore(tmp_dir, rank=0)
+    status = CheckpointStatus(
+        candidate_step=30,
+        recovery_verified_step=20,
+        recovery_verified_steps=(10,),
+    )
+
+    store.write(status)
+
+    assert store.read() == CheckpointStatus(
+        candidate_step=30,
+        recovery_verified_step=20,
+        recovery_verified_steps=(10, 20),
+    )
+    assert store.read().is_recovery_verified(10)
+    legacy = status.to_dict()
+    legacy.pop("recovery_verified_steps")
+    assert CheckpointStatus.from_dict(legacy) == CheckpointStatus(
+        candidate_step=30,
+        recovery_verified_step=20,
+    )
+
+
 def test_checkpoint_status_retries_transient_partial_json(tmp_dir):
     store = CheckpointStatusStore(tmp_dir, rank=0, run_id="run-a", topology_id="topology-a")
     status = CheckpointStatus(candidate_step=10, recovery_verified_step=5)
@@ -289,6 +313,30 @@ def test_verified_boundary_immediately_marks_dense_checkpoint_recoverable(mock_d
         assert mgr.local_recovery_step(RecoveryMode.RECOVERY_VERIFIED) == 10
     recovered = mgr.load(mode=RecoveryMode.RECOVERY_VERIFIED)
     assert recovered is not None and recovered[1] == 10
+    mgr.close()
+
+
+@patch("torch.distributed.is_initialized", return_value=False)
+def test_exact_recovery_keeps_older_verified_generation_eligible(mock_dist, tmp_dir):
+    config = InMemoryCkptConfig(
+        enable=True,
+        interval=1,
+        disk_flush_interval=0,
+        disk_folder=tmp_dir,
+    )
+    mgr = InMemoryCheckpointManager(config)
+    mgr.save({"w": torch.full((1,), 10.0)}, step=10)
+    mgr.persist_verified_boundary(10)
+    mgr.save({"w": torch.full((1,), 20.0)}, step=20)
+    status = mgr.persist_verified_boundary(20)
+
+    assert status.recovery_verified_step == 20
+    assert status.recovery_verified_steps == (10, 20)
+    recovered = mgr.load(mode=RecoveryMode.RECOVERY_VERIFIED, step=10)
+
+    assert recovered is not None
+    assert recovered[1] == 10
+    assert torch.equal(recovered[0]["w"], torch.full((1,), 10.0))
     mgr.close()
 
 

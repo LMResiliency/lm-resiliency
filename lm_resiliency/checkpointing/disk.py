@@ -157,17 +157,33 @@ class CheckpointStatus:
 
     candidate_step: int = -1
     recovery_verified_step: int = -1
+    recovery_verified_steps: tuple[int, ...] = ()
     recovery_mode: str = "latest"
+
+    def __post_init__(self) -> None:
+        verified = set(self.recovery_verified_steps)
+        if self.recovery_verified_step > 0:
+            verified.add(self.recovery_verified_step)
+        if any(
+            isinstance(step, bool) or not isinstance(step, int) or step < 1 for step in verified
+        ):
+            raise ValueError("recovery_verified_steps must contain positive integers")
+        object.__setattr__(self, "recovery_verified_steps", tuple(sorted(verified)))
+
+    def is_recovery_verified(self, step: int) -> bool:
+        """Whether ``step`` retains durable recovery-verification evidence."""
+        return step in self.recovery_verified_steps
 
     def to_dict(
         self, *, run_id: str | None = None, topology_id: str | None = None
-    ) -> dict[str, int | str | None]:
+    ) -> dict[str, object]:
         return {
             "schema_version": _STATUS_SCHEMA_VERSION,
             "run_id": run_id,
             "topology_id": topology_id,
             "candidate_step": self.candidate_step,
             "recovery_verified_step": self.recovery_verified_step,
+            "recovery_verified_steps": list(self.recovery_verified_steps),
             "recovery_mode": self.recovery_mode,
         }
 
@@ -187,9 +203,13 @@ class CheckpointStatus:
             raise CheckpointIdentityMismatch(
                 "GEMINI checkpoint status belongs to another run or topology"
             )
+        verified_steps = value.get("recovery_verified_steps", ())
+        if not isinstance(verified_steps, (list, tuple)):
+            raise ValueError("GEMINI recovery_verified_steps must be a JSON array")
         return cls(
             candidate_step=int(value.get("candidate_step", -1)),
             recovery_verified_step=int(value.get("recovery_verified_step", -1)),
+            recovery_verified_steps=tuple(verified_steps),
             recovery_mode=str(value.get("recovery_mode", "latest")),
         )
 
@@ -306,9 +326,13 @@ class CheckpointStatusStore:
             return CheckpointStatus()
         verified_steps = [status.recovery_verified_step for status in statuses]
         verified_step = min(verified_steps) if all(step > 0 for step in verified_steps) else -1
+        common_verified = set(statuses[0].recovery_verified_steps)
+        for status in statuses[1:]:
+            common_verified.intersection_update(status.recovery_verified_steps)
         return CheckpointStatus(
             candidate_step=-1,
             recovery_verified_step=verified_step,
+            recovery_verified_steps=tuple(sorted(common_verified)),
             recovery_mode="recovery_verified",
         )
 
