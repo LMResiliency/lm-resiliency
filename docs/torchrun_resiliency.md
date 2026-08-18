@@ -64,7 +64,7 @@ The plan contains the information torchrun needs:
 - the exact node-to-slot assignment for the successor generation;
 - quarantined node IDs;
 - recovery mode and checkpoint source;
-- checkpoint step and optional durable checkpoint ID;
+- checkpoint step, checkpoint manifest ID, and optional durable checkpoint ID;
 - expected world size and topology digest; and
 - an exclusive restart deadline.
 

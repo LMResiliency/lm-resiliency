@@ -72,6 +72,7 @@ class TorchrunWorkerContext:
     first_global_rank: int | None = None
     checkpoint_step: int | None = None
     checkpoint_id: str | None = None
+    checkpoint_manifest_id: str | None = None
     checkpoint_source: str | None = None
     recovery_mode: str | None = None
     topology_digest: str | None = None
@@ -118,6 +119,8 @@ class TorchrunWorkerContext:
             raise ValueError("restart_deadline_monotonic_ns must be a positive integer")
         if self.checkpoint_id is not None:
             _nonempty(self.checkpoint_id, "checkpoint_id")
+        if self.checkpoint_manifest_id is not None:
+            _nonempty(self.checkpoint_manifest_id, "checkpoint_manifest_id")
         if self.checkpoint_source not in {None, "gemini", "durable"}:
             raise ValueError("checkpoint_source must be 'gemini' or 'durable'")
         if self.recovery_mode not in {None, "latest", "recovery_verified"}:
@@ -128,6 +131,7 @@ class TorchrunWorkerContext:
             self.logical_node_slot,
             self.first_global_rank,
             self.checkpoint_step,
+            self.checkpoint_manifest_id,
             self.checkpoint_source,
             self.recovery_mode,
             self.topology_digest,
@@ -351,7 +355,13 @@ class NativePyTorchAdapter(_SingleAttachAdapter):
         self._original_ddp_init: Callable[..., None] | None = None
         self._original_fsdp_init: Callable[..., None] | None = None
         self._original_fully_shard: Callable[..., Any] | None = None
-        self._optimizer_initializers: list[tuple[type[Any], Callable[..., None] | None]] = []
+        self._optimizer_initializers: list[
+            tuple[
+                type[Any],
+                Callable[..., None] | None,
+                Callable[..., None],
+            ]
+        ] = []
         self._optimizer_init_state = threading.local()
 
     def _install_hook(self) -> Callable[[], None]:
@@ -407,7 +417,8 @@ class NativePyTorchAdapter(_SingleAttachAdapter):
                 original_init_subclass.__get__(None, optimizer_type)(**kwargs)
             adapter._wrap_optimizer_initializer(optimizer_type)
 
-        torch.optim.Optimizer.__init_subclass__ = classmethod(optimizer_init_subclass)
+        installed_init_subclass = classmethod(optimizer_init_subclass)
+        torch.optim.Optimizer.__init_subclass__ = installed_init_subclass
 
         fsdp_type = None
         fully_shard_module = None
@@ -449,22 +460,35 @@ class NativePyTorchAdapter(_SingleAttachAdapter):
             assert self._original_module_call is not None
             assert self._original_optimizer_init is not None
             assert self._original_ddp_init is not None
-            torch.nn.Module.__call__ = self._original_module_call
-            torch.optim.Optimizer.__init__ = self._original_optimizer_init
-            if self._original_optimizer_init_subclass is None:
-                del torch.optim.Optimizer.__init_subclass__
-            else:
-                torch.optim.Optimizer.__init_subclass__ = self._original_optimizer_init_subclass
-            DistributedDataParallel.__init__ = self._original_ddp_init
-            for optimizer_type, original_init in self._optimizer_initializers:
-                if original_init is None:
-                    del optimizer_type.__init__
+            if torch.nn.Module.__dict__.get("__call__") is module_call:
+                torch.nn.Module.__call__ = self._original_module_call
+            if torch.optim.Optimizer.__dict__.get("__init__") is optimizer_init:
+                torch.optim.Optimizer.__init__ = self._original_optimizer_init
+            if torch.optim.Optimizer.__dict__.get("__init_subclass__") is installed_init_subclass:
+                if self._original_optimizer_init_subclass is None:
+                    del torch.optim.Optimizer.__init_subclass__
                 else:
-                    optimizer_type.__init__ = original_init
+                    torch.optim.Optimizer.__init_subclass__ = self._original_optimizer_init_subclass
+            if DistributedDataParallel.__dict__.get("__init__") is ddp_init:
+                DistributedDataParallel.__init__ = self._original_ddp_init
+            for optimizer_type, original_init, installed_init in self._optimizer_initializers:
+                if optimizer_type.__dict__.get("__init__") is installed_init:
+                    if original_init is None:
+                        del optimizer_type.__init__
+                    else:
+                        optimizer_type.__init__ = original_init
             self._optimizer_initializers.clear()
-            if fsdp_type is not None and self._original_fsdp_init is not None:
+            if (
+                fsdp_type is not None
+                and self._original_fsdp_init is not None
+                and fsdp_type.__dict__.get("__init__") is fsdp_init
+            ):
                 fsdp_type.__init__ = self._original_fsdp_init
-            if fully_shard_module is not None and self._original_fully_shard is not None:
+            if (
+                fully_shard_module is not None
+                and self._original_fully_shard is not None
+                and getattr(fully_shard_module, "fully_shard", None) is wrapped_fully_shard
+            ):
                 fully_shard_module.fully_shard = self._original_fully_shard
 
         try:
@@ -572,7 +596,10 @@ class NativePyTorchAdapter(_SingleAttachAdapter):
         )
 
     def _wrap_optimizer_initializer(self, optimizer_type: type[Any]) -> None:
-        if any(existing is optimizer_type for existing, _original in self._optimizer_initializers):
+        if any(
+            existing is optimizer_type
+            for existing, _original, _installed in self._optimizer_initializers
+        ):
             return
         declared_init = optimizer_type.__dict__.get("__init__")
         original_init = declared_init if callable(declared_init) else None
@@ -594,7 +621,9 @@ class NativePyTorchAdapter(_SingleAttachAdapter):
             if depth == 0:
                 adapter._attach_distributed_candidate()
 
-        self._optimizer_initializers.append((optimizer_type, original_init))
+        self._optimizer_initializers.append(
+            (optimizer_type, original_init, concrete_optimizer_init)
+        )
         optimizer_type.__init__ = concrete_optimizer_init
 
 
@@ -620,7 +649,12 @@ class TorchTitanWorkerAdapter(_SingleAttachAdapter):
             return original(trainer, *args, **kwargs)
 
         trainer_type.train = train
-        return lambda: setattr(trainer_type, "train", original)
+
+        def restore() -> None:
+            if trainer_type.train is train:
+                trainer_type.train = original
+
+        return restore
 
     def _enable(self, trainer: Any) -> Any:
         assert self._context is not None
@@ -684,8 +718,10 @@ class MegatronWorkerAdapter(_SingleAttachAdapter):
         setattr(module, "train", train)
 
         def restore() -> None:
-            setattr(module, "setup_model_and_optimizer", original_setup)
-            setattr(module, "train", original_train)
+            if getattr(module, "setup_model_and_optimizer", None) is setup:
+                setattr(module, "setup_model_and_optimizer", original_setup)
+            if getattr(module, "train", None) is train:
+                setattr(module, "train", original_train)
 
         return restore
 
@@ -824,6 +860,7 @@ class DeepSpeedWorkerAdapter(_SingleAttachAdapter):
         )
         self._engine: Any | None = None
         self._original_load_checkpoint: Callable[..., Any] | None = None
+        self._installed_load_checkpoint: Callable[..., Any] | None = None
 
     def _install_hook(self) -> Callable[[], None]:
         try:
@@ -845,7 +882,12 @@ class DeepSpeedWorkerAdapter(_SingleAttachAdapter):
             return result
 
         setattr(module, "initialize", initialize)
-        return lambda: setattr(module, "initialize", original)
+
+        def restore() -> None:
+            if getattr(module, "initialize", None) is initialize:
+                setattr(module, "initialize", original)
+
+        return restore
 
     def _enable(self, engine: Any) -> Any:
         if engine is None:
@@ -911,6 +953,7 @@ class DeepSpeedWorkerAdapter(_SingleAttachAdapter):
                 return result
 
         engine.load_checkpoint = wrapped_load_checkpoint
+        self._installed_load_checkpoint = wrapped_load_checkpoint
 
     def _install_cleanup_hook(self, engine: Any) -> Callable[[], None]:
         original = getattr(engine, "destroy", None)
@@ -935,9 +978,16 @@ class DeepSpeedWorkerAdapter(_SingleAttachAdapter):
     def close(self) -> None:
         engine = self._engine
         original_load_checkpoint = self._original_load_checkpoint
-        if engine is not None and original_load_checkpoint is not None:
+        installed_load_checkpoint = self._installed_load_checkpoint
+        if (
+            engine is not None
+            and original_load_checkpoint is not None
+            and installed_load_checkpoint is not None
+            and getattr(engine, "load_checkpoint", None) is installed_load_checkpoint
+        ):
             engine.load_checkpoint = original_load_checkpoint
         self._original_load_checkpoint = None
+        self._installed_load_checkpoint = None
         self._engine = None
         super().close()
 
@@ -1582,6 +1632,7 @@ def _context_from_environment(environment: Mapping[str, str]) -> TorchrunWorkerC
             "first_global_rank": restart.first_global_rank,
             "checkpoint_step": restart.checkpoint_step,
             "checkpoint_id": restart.checkpoint_id,
+            "checkpoint_manifest_id": restart.checkpoint_manifest_id,
             "checkpoint_source": restart.checkpoint_source,
             "recovery_mode": restart.recovery_mode,
             "topology_digest": restart.topology_digest,

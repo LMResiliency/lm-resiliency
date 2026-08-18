@@ -69,6 +69,7 @@ def _recovery_context(
         first_global_rank=0,
         checkpoint_step=checkpoint_step,
         checkpoint_id=("checkpoint-4" if checkpoint_source == "durable" else None),
+        checkpoint_manifest_id="manifest-4",
         checkpoint_source=checkpoint_source,
         recovery_mode="recovery_verified",
         topology_digest="topology",
@@ -1047,6 +1048,41 @@ def test_native_pytorch_instruments_optimizer_defined_after_bootstrap(
         adapter.close()
 
 
+def test_native_pytorch_preserves_later_optimizer_initializer_wrapper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import torch
+
+    original_init = torch.optim.Adam.__init__
+    monkeypatch.setattr(NativePyTorchAdapter, "_distributed_world_size", lambda _self: 2)
+    monkeypatch.setattr(
+        "lm_resiliency.integrations.pytorch.enable_resiliency",
+        lambda *_args, **_kwargs: object(),
+    )
+    adapter = NativePyTorchAdapter({"enable_checkpoint": False, "enable_detection": False})
+    adapter.install(_context(tmp_path))
+    installed_init = torch.optim.Adam.__init__
+    calls: list[torch.optim.Adam] = []
+
+    def later_init(instance: torch.optim.Adam, *args: Any, **kwargs: Any) -> None:
+        calls.append(instance)
+        installed_init(instance, *args, **kwargs)
+
+    torch.optim.Adam.__init__ = later_init
+    try:
+        model = torch.nn.Linear(4, 2)
+        adapter._register_distributed_model(model)
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
+
+        assert calls == [optimizer]
+        assert adapter.attached
+        assert torch.optim.Adam.__init__ is later_init
+    finally:
+        adapter.close()
+        torch.optim.Adam.__init__ = original_init
+
+
 def test_native_pytorch_selects_outermost_bottom_up_fsdp_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1593,6 +1629,51 @@ def test_deepspeed_adapter_delegates_exact_engine_without_parallelism(
         adapter.close()
 
 
+def test_framework_entry_hooks_preserve_later_wrappers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torchtitan = types.ModuleType("torchtitan")
+    torchtitan.__path__ = []
+    train_module = types.ModuleType("torchtitan.train")
+
+    class Trainer:
+        def train(self) -> str:
+            return "trained"
+
+    train_module.Trainer = Trainer  # type: ignore[attr-defined]
+    deepspeed = types.ModuleType("deepspeed")
+    deepspeed.initialize = lambda: (object(),)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "torchtitan", torchtitan)
+    monkeypatch.setitem(sys.modules, "torchtitan.train", train_module)
+    monkeypatch.setitem(sys.modules, "deepspeed", deepspeed)
+
+    torchtitan_adapter = TorchTitanWorkerAdapter()
+    deepspeed_adapter = DeepSpeedWorkerAdapter()
+    torchtitan_adapter.install(_context(tmp_path))
+    deepspeed_adapter.install(_context(tmp_path))
+    installed_train = Trainer.train
+    installed_initialize = deepspeed.initialize  # type: ignore[attr-defined]
+
+    def later_train(trainer: Trainer) -> str:
+        return installed_train(trainer)
+
+    def later_initialize() -> tuple[object]:
+        return installed_initialize()
+
+    Trainer.train = later_train
+    deepspeed.initialize = later_initialize  # type: ignore[attr-defined]
+    try:
+        torchtitan_adapter.close()
+        deepspeed_adapter.close()
+
+        assert Trainer.train is later_train
+        assert deepspeed.initialize is later_initialize  # type: ignore[attr-defined]
+    finally:
+        Trainer.train = installed_train
+        deepspeed.initialize = installed_initialize  # type: ignore[attr-defined]
+
+
 def test_deepspeed_adapter_rejects_framework_load_after_manager_recovery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1888,7 +1969,7 @@ def test_successor_worker_requires_exact_restart_context_generation(tmp_path: Pa
         _context_from_environment(environment)
 
 
-def test_successor_worker_preserves_manager_topology_digest(tmp_path: Path) -> None:
+def test_successor_worker_preserves_manager_checkpoint_identity(tmp_path: Path) -> None:
     context_path = (tmp_path / "restart-context.json").resolve()
     restart = RestartContext(
         plan_id="plan-1",
@@ -1924,6 +2005,7 @@ def test_successor_worker_preserves_manager_topology_digest(tmp_path: Path) -> N
     context = _context_from_environment(environment)
 
     assert context.topology_digest == "checkpoint-topology"
+    assert context.checkpoint_manifest_id == "manifest-4"
 
 
 @pytest.mark.parametrize(

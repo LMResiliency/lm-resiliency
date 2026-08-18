@@ -192,8 +192,10 @@ without owning subprocess, scheduler, SSH, or GPU placement behavior.
 Custom stacks set `adapter = "package.module:factory"` in the worker TOML. The
 factory receives `TorchrunWorkerContext` and returns an object implementing
 `install(context)`. A stack adapter owns framework-specific discovery and loop
-state. Torchrun itself cannot infer scheduler, dataloader position, or arbitrary
-caller-owned iteration state safely.
+state. Successor contexts include the manager-selected checkpoint source, step,
+durable checkpoint ID when applicable, checkpoint manifest ID, topology digest,
+and recovery deadline. Torchrun itself cannot infer scheduler, dataloader
+position, or arbitrary caller-owned iteration state safely.
 
 ## Enable Resiliency
 
