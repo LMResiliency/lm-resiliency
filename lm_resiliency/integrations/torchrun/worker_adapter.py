@@ -381,10 +381,7 @@ class NativePyTorchAdapter(_SingleAttachAdapter):
             if adapter._distributed_world_size() == 1:
                 adapter._attach_if_candidate(instance)
             elif not adapter.attached:
-                raise TorchrunWorkerAdapterError(
-                    "distributed native PyTorch automatic attachment requires a "
-                    "DDP or FSDP construction boundary on every rank"
-                )
+                adapter._attach_distributed_candidate(instance)
             assert adapter._original_module_call is not None
             return adapter._original_module_call(instance, *args, **kwargs)
 
@@ -507,76 +504,110 @@ class NativePyTorchAdapter(_SingleAttachAdapter):
     def _register_distributed_model(self, model: Any) -> None:
         with self._lock:
             self._distributed_models.append(weakref.ref(model))
-        self._attach_distributed_candidate()
 
-    def _attach_distributed_candidate(self) -> None:
+    def _attach_distributed_candidate(self, model: Any) -> None:
         if self._distributed_world_size() <= 1:
             return
         with self._lock:
             candidates = _outermost_models(
-                model
+                candidate
                 for reference in self._distributed_models
-                if (model := reference()) is not None
+                if (candidate := reference()) is not None
             )
-        if len(candidates) == 1:
-            self._attach_if_candidate(
-                candidates[0],
-                require_optimizer=False,
-                defer_no_match=True,
+            if not candidates or all(candidate is not model for candidate in candidates):
+                raise TorchrunWorkerAdapterError(
+                    "distributed native PyTorch automatic attachment requires a "
+                    "DDP or FSDP construction boundary on every rank"
+                )
+            recognized = len(candidates) == 1 and candidates[0] is model
+            optimizer: Any | None = None
+            local_error: str | None = None
+            if not recognized:
+                local_error = (
+                    "distributed native PyTorch automatic attachment requires one "
+                    "recognized outermost DDP or FSDP model on every rank"
+                )
+            else:
+                optimizer, local_error = self._candidate_optimizer_locked(candidates[0])
+        if not self._agree_distributed_candidate(local_error is None):
+            detail = f": {local_error}" if local_error is not None else ""
+            raise TorchrunWorkerAdapterError(
+                "cannot attach native PyTorch adapter: every rank must have exactly "
+                f"one matching model/optimizer pair{detail}"
             )
+        assert recognized
+        assert optimizer is not None
+        self._attached_model = model
+        self._attached_optimizer = optimizer
+        self._attach(model, optimizer)
+
+    @staticmethod
+    def _agree_distributed_candidate(locally_valid: bool) -> bool:
+        import torch
+        import torch.distributed as dist
+
+        if not dist.is_initialized():
+            raise TorchrunWorkerAdapterError(
+                "distributed native PyTorch attachment requires an initialized "
+                "default process group"
+            )
+        backend = dist.get_backend()
+        device = torch.device("cpu")
+        if backend == dist.Backend.NCCL or str(backend).lower() == "nccl":
+            if not torch.cuda.is_available():
+                raise TorchrunWorkerAdapterError(
+                    "NCCL native PyTorch attachment agreement requires CUDA"
+                )
+            device = torch.device("cuda", torch.cuda.current_device())
+        valid = torch.tensor(int(locally_valid), dtype=torch.int32, device=device)
+        dist.all_reduce(valid, op=dist.ReduceOp.MIN)
+        return bool(valid.item())
+
+    def _candidate_optimizer_locked(self, model: Any) -> tuple[Any | None, str | None]:
+        trainable = {id(parameter) for parameter in model.parameters() if parameter.requires_grad}
+        if not trainable:
+            return None, "the distributed model has no trainable parameters"
+        optimizers = []
+        for reference in self._optimizers:
+            optimizer = reference()
+            if optimizer is not None:
+                optimizers.append(optimizer)
+        if len(optimizers) > 1:
+            return None, "multiple optimizers were constructed in this process"
+        model_parameters = {id(parameter) for parameter in model.parameters()}
+        matches = [
+            optimizer
+            for optimizer in optimizers
+            if trainable
+            <= {id(parameter) for group in optimizer.param_groups for parameter in group["params"]}
+            <= model_parameters
+        ]
+        if len(matches) != 1:
+            if not optimizers:
+                reason = "no optimizer was constructed before the first model forward"
+            elif not matches:
+                reason = "no optimizer owns exactly one model's trainable parameters"
+            else:
+                reason = "multiple optimizers own the model's trainable parameters"
+            return None, reason
+        return matches[0], None
 
     def _attach_if_candidate(
         self,
         model: Any,
-        *,
-        require_optimizer: bool = True,
-        defer_no_match: bool = False,
     ) -> None:
         with self._lock:
             if self._handle is not None:
                 return
-            trainable = {
-                id(parameter) for parameter in model.parameters() if parameter.requires_grad
-            }
-            if not trainable:
+            optimizer, reason = self._candidate_optimizer_locked(model)
+            if reason == "the distributed model has no trainable parameters":
                 return
-            optimizers = []
-            for reference in self._optimizers:
-                optimizer = reference()
-                if optimizer is not None:
-                    optimizers.append(optimizer)
-            if len(optimizers) > 1:
-                raise TorchrunWorkerAdapterError(
-                    "cannot attach native PyTorch adapter: multiple optimizers "
-                    "were constructed in this process"
-                )
-            model_parameters = {id(parameter) for parameter in model.parameters()}
-            matches = [
-                optimizer
-                for optimizer in optimizers
-                if trainable
-                <= {
-                    id(parameter)
-                    for group in optimizer.param_groups
-                    for parameter in group["params"]
-                }
-                <= model_parameters
-            ]
-            if len(matches) != 1:
-                if not optimizers:
-                    if not require_optimizer:
-                        return
-                    reason = "no optimizer was constructed before the first model forward"
-                elif not matches:
-                    if defer_no_match:
-                        return
-                    reason = "no optimizer owns exactly one model's trainable parameters"
-                else:
-                    reason = "multiple optimizers own the model's trainable parameters"
+            if reason is not None:
                 raise TorchrunWorkerAdapterError(f"cannot attach native PyTorch adapter: {reason}")
             self._attached_model = model
-            self._attached_optimizer = matches[0]
-        self._attach(model, matches[0])
+            self._attached_optimizer = optimizer
+        assert optimizer is not None
+        self._attach(model, optimizer)
 
     def _enable(self, model: Any, optimizer: Any) -> Any:
         assert self._context is not None
@@ -618,8 +649,6 @@ class NativePyTorchAdapter(_SingleAttachAdapter):
                 delegate(instance, *args, **kwargs)
             finally:
                 adapter._optimizer_init_state.depth = depth
-            if depth == 0:
-                adapter._attach_distributed_candidate()
 
         self._optimizer_initializers.append(
             (optimizer_type, original_init, concrete_optimizer_init)
@@ -1748,6 +1777,10 @@ def _feature_options(
         excluded={"enable", "interval"},
         section="checkpoint",
     )
+    if checkpoint_values.get("disk_flush_interval", 0) < 0:
+        raise TorchrunWorkerAdapterError(
+            "checkpoint.disk_flush_interval must be a non-negative integer"
+        )
     replay_values = _dataclass_options(
         ReplayHarnessConfig,
         payload.get("replay", {}),

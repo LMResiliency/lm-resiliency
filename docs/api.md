@@ -112,11 +112,13 @@ DDP, FSDP2/HSDP, TP, SP, CP, PP, EP, expert-TP, ZeRO, and framework-specific
 process-group discovery.
 
 The distributed PyTorch adapter attaches only after a DDP or FSDP construction
-boundary that every participating rank must cross. It requires one optimizer
-that owns all trainable parameters of that model and no parameters from another
-model. Multiple matching optimizers, foreign parameters, or a distributed
-forward without a recognized all-rank construction boundary fail closed before
-LM Resiliency starts collective attachment. Single-process jobs retain
+boundary that every participating rank must cross. At the first recognized
+distributed forward, all ranks agree that each owns exactly one valid
+model/optimizer pair before any rank starts LM Resiliency attachment
+collectives. The optimizer must own all trainable parameters of that model and
+no parameters from another model. Multiple optimizers, foreign parameters, or
+a distributed forward without a recognized all-rank construction boundary fail
+closed before attachment. Single-process jobs retain
 root-module-forward discovery. Bottom-up FSDP2/HSDP wrapping is reduced to the
 outermost sharded root, and optimizer subclasses defined after bootstrap are
 instrumented when the class is created.
@@ -168,7 +170,8 @@ closed. Assigned nodes must agree on the exact policy contents at rendezvous,
 and each worker revalidates that digest before parsing the policy. Disabled
 feature sections are still validated. `replication_jump` must
 be valid for the deployed checkpoint group; it is not inferred from the
-launcher node count. Supplying `lm_resiliency_worker_config` enables automatic worker
+launcher node count. `checkpoint.disk_flush_interval` must be nonnegative; zero
+disables periodic disk persistence. Supplying `lm_resiliency_worker_config` enables automatic worker
 instrumentation; omitting it leaves explicit `enable_resiliency()` integrations
 unchanged. Explicit integrations can call `get_torchrun_worker_context()` to
 obtain run identity, hashed node identity, worker width, generation, logical

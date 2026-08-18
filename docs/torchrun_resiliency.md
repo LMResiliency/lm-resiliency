@@ -233,8 +233,11 @@ sharded optimizers, or caller-owned loop state provide a custom adapter rather
 than relying on process-wide object scanning.
 
 Distributed native PyTorch attachment requires a recognized DDP or FSDP
-construction boundary that all participating ranks cross. Rank-local warmup
-forwards cannot initiate LM Resiliency collectives.
+construction boundary that all participating ranks cross. At the first
+recognized distributed forward, every rank collectively proves that it has
+exactly one valid model/optimizer pair before any rank starts LM Resiliency
+attachment collectives. Rank-local warmup forwards cannot initiate those
+collectives.
 
 After attachment, built-in adapters bind cleanup to the framework's normal
 distributed teardown boundary. The resiliency handle closes before process
@@ -249,6 +252,8 @@ The worker policy is schema-versioned and strict even for disabled features.
 Every assigned node publishes a digest of the exact policy bytes, rendezvous
 requires one cohort-wide value, and worker bootstrap revalidates the digest
 before parsing or installing an adapter.
+`checkpoint.disk_flush_interval` must be nonnegative; zero disables periodic
+disk persistence.
 Custom stacks set `adapter = "package.module:factory"` in that policy; built-in
 frameworks omit `adapter` and use import inference.
 GEMINI topology settings remain deployment-owned: for example,

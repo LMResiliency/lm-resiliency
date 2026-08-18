@@ -119,6 +119,52 @@ def _framework_disagreement_worker(
     )
 
 
+def _native_candidate_disagreement_worker(
+    rank: int,
+    rendezvous_path: str,
+    output_dir: str,
+) -> None:
+    import torch
+    import torch.distributed as dist
+    from torch.nn.parallel import DistributedDataParallel
+
+    dist.init_process_group(
+        "gloo",
+        init_method=f"file://{rendezvous_path}",
+        rank=rank,
+        world_size=2,
+    )
+    adapter = NativePyTorchAdapter({"enable_checkpoint": False, "enable_detection": False})
+    adapter.install(
+        TorchrunWorkerContext(
+            run_id="native-candidate-agreement",
+            node_id=f"node-{rank}",
+            local_world_size=1,
+            restart_context_path=(Path(output_dir) / f"context-{rank}.json").resolve(),
+        )
+    )
+    try:
+        model = DistributedDataParallel(torch.nn.Linear(4, 2))
+        parameters = list(model.parameters())
+        if rank == 1:
+            parameters.append(torch.nn.Parameter(torch.ones(1)))
+        torch.optim.SGD(parameters, lr=0.1)
+        try:
+            model(torch.ones(1, 4))
+        except TorchrunWorkerAdapterError as error:
+            outcome = str(error)
+        else:
+            outcome = "native candidate agreement unexpectedly succeeded"
+    finally:
+        adapter.close()
+        if dist.is_initialized():
+            dist.destroy_process_group()
+    (Path(output_dir) / f"native-candidate-agreement-{rank}.txt").write_text(
+        outcome,
+        encoding="utf-8",
+    )
+
+
 def _clean_environment() -> dict[str, str]:
     environment = dict(os.environ)
     for name in tuple(environment):
@@ -756,6 +802,56 @@ def test_framework_inference_disagreement_fails_all_gloo_ranks(tmp_path: Path) -
     assert all("inferred different training frameworks" in outcome for outcome in outcomes)
 
 
+def test_native_candidate_disagreement_fails_all_gloo_ranks(tmp_path: Path) -> None:
+    context = multiprocessing.get_context("spawn")
+    rendezvous = tmp_path / "native-candidate-agreement-store"
+    processes = [
+        context.Process(
+            target=_native_candidate_disagreement_worker,
+            args=(rank, str(rendezvous), str(tmp_path)),
+        )
+        for rank in range(2)
+    ]
+
+    original_sys_path = list(sys.path)
+    repository_root = str(Path(__file__).resolve().parents[2])
+    original_python_path = os.environ.get("PYTHONPATH")
+    bootstrap_environment = {
+        name: os.environ.pop(name)
+        for name in tuple(os.environ)
+        if name.startswith("LM_RESILIENCY_TORCHRUN_")
+    }
+    sys.path[:] = [repository_root, *(path for path in sys.path if path != repository_root)]
+    os.environ["PYTHONPATH"] = os.pathsep.join(
+        path for path in (repository_root, original_python_path) if path
+    )
+    try:
+        for process in processes:
+            process.start()
+    finally:
+        sys.path[:] = original_sys_path
+        if original_python_path is None:
+            os.environ.pop("PYTHONPATH", None)
+        else:
+            os.environ["PYTHONPATH"] = original_python_path
+        os.environ.update(bootstrap_environment)
+    for process in processes:
+        process.join(timeout=30)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+
+    assert [process.exitcode for process in processes] == [0, 0]
+    outcomes = [
+        (tmp_path / f"native-candidate-agreement-{rank}.txt").read_text(encoding="utf-8")
+        for rank in range(2)
+    ]
+    assert all(
+        "every rank must have exactly one matching model/optimizer pair" in outcome
+        for outcome in outcomes
+    )
+
+
 @pytest.fixture
 def process_group(tmp_path: Path) -> Generator[None, None, None]:
     import torch.distributed as dist
@@ -993,14 +1089,13 @@ def test_native_pytorch_waits_for_outermost_optimizer_constructor(
         "lm_resiliency.integrations.pytorch.enable_resiliency",
         fake_enable,
     )
-    monkeypatch.setattr(NativePyTorchAdapter, "_distributed_world_size", lambda _self: 2)
     adapter = NativePyTorchAdapter({"enable_checkpoint": False, "enable_detection": False})
     adapter.install(_context(tmp_path))
     try:
         model = torch.nn.Linear(4, 2)
-        adapter._register_distributed_model(model)
 
         optimizer = ChildOptimizer(model.parameters())
+        model(torch.ones(1, 4))
 
         assert attached == [optimizer]
         assert adapter.attached
@@ -1025,12 +1120,10 @@ def test_native_pytorch_instruments_optimizer_defined_after_bootstrap(
         "lm_resiliency.integrations.pytorch.enable_resiliency",
         fake_enable,
     )
-    monkeypatch.setattr(NativePyTorchAdapter, "_distributed_world_size", lambda _self: 2)
     adapter = NativePyTorchAdapter({"enable_checkpoint": False, "enable_detection": False})
     adapter.install(_context(tmp_path))
     try:
         model = torch.nn.Linear(4, 2)
-        adapter._register_distributed_model(model)
 
         class UserOptimizer(torch.optim.Optimizer):
             def __init__(self, parameters: Any) -> None:
@@ -1041,6 +1134,7 @@ def test_native_pytorch_instruments_optimizer_defined_after_bootstrap(
                 del closure
 
         optimizer = UserOptimizer(model.parameters())
+        model(torch.ones(1, 4))
 
         assert attached == [optimizer]
         assert adapter.attached
@@ -1055,7 +1149,6 @@ def test_native_pytorch_preserves_later_optimizer_initializer_wrapper(
     import torch
 
     original_init = torch.optim.Adam.__init__
-    monkeypatch.setattr(NativePyTorchAdapter, "_distributed_world_size", lambda _self: 2)
     monkeypatch.setattr(
         "lm_resiliency.integrations.pytorch.enable_resiliency",
         lambda *_args, **_kwargs: object(),
@@ -1072,8 +1165,8 @@ def test_native_pytorch_preserves_later_optimizer_initializer_wrapper(
     torch.optim.Adam.__init__ = later_init
     try:
         model = torch.nn.Linear(4, 2)
-        adapter._register_distributed_model(model)
         optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
+        model(torch.ones(1, 4))
 
         assert calls == [optimizer]
         assert adapter.attached
@@ -1095,6 +1188,9 @@ def test_native_pytorch_selects_outermost_bottom_up_fsdp_root(
             self.first = torch.nn.Linear(4, 4)
             self.second = torch.nn.Linear(4, 2)
 
+        def forward(self, value: Any) -> Any:
+            return self.second(self.first(value))
+
     calls: list[tuple[Any, Any]] = []
 
     def fake_enable(model: Any, optimizer: Any, **_kwargs: Any) -> object:
@@ -1106,6 +1202,11 @@ def test_native_pytorch_selects_outermost_bottom_up_fsdp_root(
         fake_enable,
     )
     monkeypatch.setattr(NativePyTorchAdapter, "_distributed_world_size", lambda _self: 2)
+    monkeypatch.setattr(
+        NativePyTorchAdapter,
+        "_agree_distributed_candidate",
+        staticmethod(lambda locally_valid: locally_valid),
+    )
     adapter = NativePyTorchAdapter({"enable_checkpoint": False, "enable_detection": False})
     adapter.install(_context(tmp_path))
     try:
@@ -1115,6 +1216,7 @@ def test_native_pytorch_selects_outermost_bottom_up_fsdp_root(
         adapter._register_distributed_model(model)
 
         optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        model(torch.ones(1, 4))
 
         assert calls == [(model, optimizer)]
         assert adapter.attached
@@ -1890,6 +1992,22 @@ def test_disabled_worker_features_still_validate_their_sections(
     with pytest.raises(
         TorchrunWorkerAdapterError,
         match=f"unknown {section} fields",
+    ):
+        _feature_options(payload, _context(tmp_path))
+
+
+def test_worker_policy_rejects_negative_disk_flush_interval_when_disabled(
+    tmp_path: Path,
+) -> None:
+    payload = {
+        "schema_version": 1,
+        "enable_checkpoint": False,
+        "checkpoint": {"disk_flush_interval": -1},
+    }
+
+    with pytest.raises(
+        TorchrunWorkerAdapterError,
+        match="checkpoint.disk_flush_interval must be a non-negative integer",
     ):
         _feature_options(payload, _context(tmp_path))
 
