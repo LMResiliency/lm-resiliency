@@ -171,7 +171,9 @@ and each worker revalidates that digest before parsing the policy. Disabled
 feature sections are still validated. `replication_jump` must
 be valid for the deployed checkpoint group; it is not inferred from the
 launcher node count. `checkpoint.disk_flush_interval` must be nonnegative; zero
-disables periodic disk persistence. Supplying `lm_resiliency_worker_config` enables automatic worker
+disables periodic disk persistence. `checkpoint.replication_jump` must be `-1`
+or positive, and `checkpoint.replication_chunk_size` must be positive. Supplying
+`lm_resiliency_worker_config` enables automatic worker
 instrumentation; omitting it leaves explicit `enable_resiliency()` integrations
 unchanged. Explicit integrations can call `get_torchrun_worker_context()` to
 obtain run identity, hashed node identity, worker width, generation, logical

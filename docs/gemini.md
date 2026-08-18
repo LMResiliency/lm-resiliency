@@ -186,9 +186,12 @@ node-local checkpoints written earlier with `verify_integrity=False` are not eli
 Node-local files use checkpoint format version 3. Files and status sidecars live
 under an opaque run/topology namespace. Every shard also records the exact run
 ID, topology fingerprint, owner rank, and step; the loader checks all four before
-recovery can apply state. The topology fingerprint covers world size, checkpoint
-group ranks, and the replication assignment, and all checkpoint ranks agree on
-the run/topology contract collectively during manager construction.
+recovery can apply state. Each checkpoint group first agrees on its group ranks
+and replication assignment. All training ranks then derive one job-wide
+fingerprint from the ordered per-rank group fingerprints, so disjoint
+checkpoint groups share one manager-facing topology identity without discarding
+group membership. All ranks also agree on the run identity during manager
+construction.
 
 Tensors are loaded through PyTorch's `weights_only=True` path, while reconstruction metadata is represented by a schema-constrained JSON document. The metadata schema supports the built-in containers and scalar types used by framework state, NumPy RNG values, and dense CPU tensors such as PyTorch RNG state. GEMINI validates the payload fields, metadata types, tensor count, shapes, dtypes, reconstruction paths, identity, and optional CRC values before recovery can apply state. Unsupported caller-owned metadata fails the checkpoint write instead of falling back to unrestricted pickle deserialization.
 

@@ -167,9 +167,7 @@ class InMemoryCheckpointManager:
         self.config.run_id = self._run_id
         topology = self._checkpoint_topology(jump)
         self._require_exact_checkpoint_contract(self._run_id, topology)
-        self._topology_id = hashlib.sha256(
-            json.dumps(topology, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
+        self._topology_id = self._job_checkpoint_topology_id(self._run_id, topology)
         if expected_topology_id is not None and self._topology_id != expected_topology_id:
             raise RuntimeError(
                 "manager-selected checkpoint topology does not match the live worker topology"
@@ -249,7 +247,7 @@ class InMemoryCheckpointManager:
         }
 
     def _require_exact_checkpoint_contract(self, run_id: str, topology: dict[str, object]) -> None:
-        """Fail before disk eligibility if checkpoint ranks disagree on identity."""
+        """Fail before disk eligibility if one checkpoint group disagrees on identity."""
         if not dist.is_initialized() or dist.get_world_size(self._process_group) == 1:
             return
         encoded = json.dumps(
@@ -271,6 +269,45 @@ class InMemoryCheckpointManager:
             raise RuntimeError(
                 "checkpoint ranks disagree on run_id or topology; node-local recovery is unsafe"
             )
+
+    def _job_checkpoint_topology_id(
+        self,
+        run_id: str,
+        topology: dict[str, object],
+    ) -> str:
+        """Return one job-wide identity for all disjoint checkpoint groups."""
+
+        topology_digest = hashlib.sha256(
+            json.dumps(topology, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).digest()
+        if not dist.is_initialized() or self._world_size == 1:
+            return topology_digest.hex()
+
+        run_digest = hashlib.sha256(run_id.encode("utf-8")).digest()
+        device = torch.device("cpu")
+        if str(dist.get_backend()).lower() == "nccl":
+            if not torch.cuda.is_available():
+                raise RuntimeError("NCCL job topology agreement requires a CUDA device")
+            device = torch.device("cuda", torch.cuda.current_device())
+        local = torch.tensor(
+            list(run_digest + topology_digest),
+            dtype=torch.uint8,
+            device=device,
+        )
+        gathered = [torch.empty_like(local) for _ in range(self._world_size)]
+        dist.all_gather(gathered, local)
+        records = [bytes(int(value) for value in item.cpu().tolist()) for item in gathered]
+        if any(record[:32] != records[0][:32] for record in records[1:]):
+            raise RuntimeError(
+                "checkpoint ranks disagree on run_id or topology; node-local recovery is unsafe"
+            )
+        job_topology = {
+            "rank_checkpoint_topology_digests": [record[32:].hex() for record in records],
+            "world_size": self._world_size,
+        }
+        return hashlib.sha256(
+            json.dumps(job_topology, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
 
     def _should_skip_replication(self, par_info: Any | None) -> bool:
         if not self.config.skip_replication_if_hsdp:

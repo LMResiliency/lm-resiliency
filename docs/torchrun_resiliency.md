@@ -252,6 +252,8 @@ The worker policy is schema-versioned and strict even for disabled features.
 Every assigned node publishes a digest of the exact policy bytes, rendezvous
 requires one cohort-wide value, and worker bootstrap revalidates the digest
 before parsing or installing an adapter.
+`checkpoint.replication_jump` must be `-1` or positive,
+`checkpoint.replication_chunk_size` must be positive, and
 `checkpoint.disk_flush_interval` must be nonnegative; zero disables periodic
 disk persistence.
 Custom stacks set `adapter = "package.module:factory"` in that policy; built-in
@@ -265,6 +267,8 @@ contract documented in [GEMINI](gemini.md#peer-replication).
 The public `TorchrunRecoveryCoordinator` wraps the canonical store protocol:
 
 ```python
+import time
+
 from lm_resiliency.integrations.torchrun import (
     TorchrunRecoveryCoordinator,
     TorchrunRecoveryRequest,
@@ -285,6 +289,11 @@ successor = coordinator.publish_successor(
     local_world_size=1,
     replacement=(faulty_slot, selected_standby),
 )
+
+# Deployment-owned evidence determines when the successor group is running.
+while not successor_admitted(successor):
+    coordinator.check_health()
+    time.sleep(0.1)
 
 coordinator.close()
 ```

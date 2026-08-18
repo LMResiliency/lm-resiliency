@@ -1996,18 +1996,41 @@ def test_disabled_worker_features_still_validate_their_sections(
         _feature_options(payload, _context(tmp_path))
 
 
-def test_worker_policy_rejects_negative_disk_flush_interval_when_disabled(
+@pytest.mark.parametrize(
+    ("checkpoint", "message"),
+    [
+        (
+            {"disk_flush_interval": -1},
+            "checkpoint.disk_flush_interval must be a non-negative integer",
+        ),
+        (
+            {"replication_jump": 0},
+            "checkpoint.replication_jump must be -1 or a positive integer",
+        ),
+        (
+            {"replication_jump": -2},
+            "checkpoint.replication_jump must be -1 or a positive integer",
+        ),
+        (
+            {"replication_chunk_size": 0},
+            "checkpoint.replication_chunk_size must be a positive integer",
+        ),
+    ],
+)
+def test_worker_policy_rejects_invalid_checkpoint_values_when_disabled(
     tmp_path: Path,
+    checkpoint: dict[str, int],
+    message: str,
 ) -> None:
     payload = {
         "schema_version": 1,
         "enable_checkpoint": False,
-        "checkpoint": {"disk_flush_interval": -1},
+        "checkpoint": checkpoint,
     }
 
     with pytest.raises(
         TorchrunWorkerAdapterError,
-        match="checkpoint.disk_flush_interval must be a non-negative integer",
+        match=message,
     ):
         _feature_options(payload, _context(tmp_path))
 

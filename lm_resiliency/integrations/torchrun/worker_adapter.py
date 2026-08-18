@@ -1777,6 +1777,15 @@ def _feature_options(
         excluded={"enable", "interval"},
         section="checkpoint",
     )
+    replication_jump = checkpoint_values.get("replication_jump", -1)
+    if replication_jump == 0 or replication_jump < -1:
+        raise TorchrunWorkerAdapterError(
+            "checkpoint.replication_jump must be -1 or a positive integer"
+        )
+    if checkpoint_values.get("replication_chunk_size", 1) < 1:
+        raise TorchrunWorkerAdapterError(
+            "checkpoint.replication_chunk_size must be a positive integer"
+        )
     if checkpoint_values.get("disk_flush_interval", 0) < 0:
         raise TorchrunWorkerAdapterError(
             "checkpoint.disk_flush_interval must be a non-negative integer"
