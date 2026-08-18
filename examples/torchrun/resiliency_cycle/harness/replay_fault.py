@@ -177,19 +177,19 @@ class ReplayFaultCampaign:
             or self._target_calls == 1
         ):
             return None
-        corrupted, changed = _add_to_first_tensor(output)
+        corrupted, changed = _sign_flip_first_tensor(output)
         if not changed:
             raise RuntimeError("the replay target produced no tensor output")
         self._injected_calls += 1
         return corrupted
 
 
-def _add_to_first_tensor(value: Any) -> tuple[Any, bool]:
+def _sign_flip_first_tensor(value: Any) -> tuple[Any, bool]:
     leaves, spec = tree_flatten(value)
     changed = False
     for index, leaf in enumerate(leaves):
         if isinstance(leaf, torch.Tensor):
-            leaves[index] = leaf + 1.0
+            leaves[index] = -leaf
             changed = True
             break
     return tree_unflatten(leaves, spec), changed

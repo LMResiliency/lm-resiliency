@@ -44,7 +44,7 @@ class PyTorchDriver:
             orchestration=config.orchestration,
             extra_state_fn=lambda: dict(self._extra_state),
             load_extra_state_fn=self._load_extra_state,
-            recovery_mode=config.recovery_mode,
+            **config.recovery_options(),
         )
 
     def _load_extra_state(self, value: dict[str, Any]) -> None:

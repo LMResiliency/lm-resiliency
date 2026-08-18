@@ -67,14 +67,20 @@ class MegatronDriver:
             orchestration=config.orchestration,
             extra_state_fn=self._extra_state_dict,
             load_extra_state_fn=self._load_extra_state_dict,
-            recovery_mode=config.recovery_mode,
+            **config.recovery_options(),
         )
-        self.args.iteration = self.handle.step_count
+        if self.args.iteration != self.handle.step_count:
+            raise RuntimeError("Megatron loop iteration does not match the recovered GEMINI step")
         self._adapter = MegatronAdapter([self.model], self.optimizer, self.scheduler)
 
     def _extra_state_dict(self) -> dict[str, Any]:
         return {
             "fault_validation": dict(self._extra_state),
+            "iteration": int(self._extra_state["absolute_step"]),
+            "consumed_train_samples": (
+                int(self.args.consumed_train_samples) + MICRO_BATCH_SIZE * self.world_size
+            ),
+            "skipped_train_samples": int(self.args.skipped_train_samples),
             "scheduler": self.scheduler.state_dict(),
         }
 
@@ -84,9 +90,19 @@ class MegatronDriver:
             raise RuntimeError("Megatron fault-validation state is malformed")
         self._extra_state.clear()
         self._extra_state.update(state)
+        self.args.iteration = _nonnegative_int(value.get("iteration"), "iteration")
+        self.args.consumed_train_samples = _nonnegative_int(
+            value.get("consumed_train_samples"),
+            "consumed_train_samples",
+        )
+        self.args.skipped_train_samples = _nonnegative_int(
+            value.get("skipped_train_samples"),
+            "skipped_train_samples",
+        )
         scheduler = value.get("scheduler")
-        if scheduler is not None:
-            self.scheduler.load_state_dict(scheduler)
+        if not isinstance(scheduler, dict):
+            raise RuntimeError("Megatron scheduler state is malformed")
+        self.scheduler.load_state_dict(scheduler)
 
     def _data_iterator(self, start_step: int) -> Iterator[tuple[torch.Tensor, ...]]:
         step = start_step
@@ -109,6 +125,7 @@ class MegatronDriver:
         forward_backward = get_forward_backward_func()
         for step in range(self.handle.step_count + 1, total_steps + 1):
             self._extra_state["absolute_step"] = step
+            self.args.curr_iteration = step - 1
             before_step(step)
             result = self._training.train_step(
                 _forward_step,
@@ -140,8 +157,10 @@ class MegatronDriver:
     def framework_state(self) -> dict[str, Any]:
         return {
             "absolute_step": int(self._extra_state["absolute_step"]),
+            "consumed_train_samples": int(self.args.consumed_train_samples),
             "iteration": int(self.args.iteration),
             "scheduler_num_steps": int(self.scheduler.num_steps),
+            "skipped_train_samples": int(self.args.skipped_train_samples),
             "step_count": int(self.handle.step_count),
         }
 
@@ -152,3 +171,9 @@ class MegatronDriver:
 
             mpu.destroy_model_parallel()
             dist.destroy_process_group()
+
+
+def _nonnegative_int(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RuntimeError(f"Megatron {name} must be a non-negative integer")
+    return value

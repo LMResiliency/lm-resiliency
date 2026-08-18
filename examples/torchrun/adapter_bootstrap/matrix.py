@@ -26,6 +26,7 @@ def _write_worker_policy(path: Path, *, replication_jump: int) -> None:
                 "[checkpoint]",
                 f"replication_jump = {replication_jump}",
                 "disk_flush_interval = 0",
+                f"disk_folder = {json.dumps(str((path.parent / 'checkpoints').resolve()))}",
                 "",
                 "[replay]",
                 "rotate_layers = false",

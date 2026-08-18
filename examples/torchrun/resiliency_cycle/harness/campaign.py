@@ -57,7 +57,6 @@ class PressureTopology:
     placements: tuple[GpuNodePlacement, ...]
     world_size: int
     replication_jump: int
-    topology_digest: str
 
 
 def default_pressure_campaign() -> FaultCampaign:
@@ -136,6 +135,8 @@ def pressure_events(campaign: FaultCampaign) -> tuple[PressureEvent, ...]:
             raise ValueError("pressure incidents require one deterministic trigger and fault")
         fault = incident.faults[0]
         if fault.type is FailureType.HANG and fault.target.surface is FaultSurface.PROCESS:
+            if fault.target.operation != "manager_restart":
+                raise ValueError("restart incidents require operation='manager_restart'")
             kind = "restart"
             fault_rank = None
         elif (
@@ -143,6 +144,17 @@ def pressure_events(campaign: FaultCampaign) -> tuple[PressureEvent, ...]:
             and fault.target.surface is FaultSurface.OUTPUT
             and fault.target.rank is not None
         ):
+            if (
+                fault.target.component != "transformer_block"
+                or fault.target.index != 0
+                or fault.target.metadata.get("injection_mode") != "scout_replay_only"
+                or fault.parameters.get("operation") != "sign_flip"
+                or fault.parameters.get("scope") != "100%"
+            ):
+                raise ValueError(
+                    "replacement incidents require the supported replay-only "
+                    "transformer-block sign_flip over 100% of the selected tensor"
+                )
             kind = "replacement"
             fault_rank = fault.target.rank
         else:
@@ -171,6 +183,17 @@ def load_campaign_bundle(path: Path) -> tuple[FaultCampaign, tuple[PressureEvent
         campaign = default_pressure_campaign()
         atomic_json(manifest_path, campaign.to_dict())
     return campaign, pressure_events(campaign)
+
+
+def require_fresh_campaign_run(path: Path) -> None:
+    """Reject bundle reuse so stale evidence cannot satisfy controller waits."""
+
+    unexpected = sorted(entry.name for entry in path.iterdir() if entry.name != CAMPAIGN_FILENAME)
+    if unexpected:
+        raise ValueError(
+            "fault campaign directory must be fresh and contain only campaign.json; "
+            f"found stale or unrelated entries: {unexpected!r}"
+        )
 
 
 def campaign_layout(
@@ -223,7 +246,6 @@ def campaign_layout(
         placements=placements,
         world_size=active_nodes,
         replication_jump=replication_jump,
-        topology_digest=(f"ddp-world-{active_nodes}-replication-jump-{replication_jump}-gpu-nodes"),
     )
 
 

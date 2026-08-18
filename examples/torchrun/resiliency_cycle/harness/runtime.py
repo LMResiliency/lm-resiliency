@@ -59,9 +59,20 @@ class DriverConfig:
     checkpoint: InMemoryCkptConfig
     replay: ReplayHarnessConfig
     recovery_mode: str | None
+    recovery_step: int | None
+    expected_topology_id: str | None
     fault_callback: Callable[[Any], None]
     orchestration: OrchestrationHooks
     total_steps: int
+
+    def recovery_options(self) -> dict[str, Any]:
+        """Return the exact manager-selected recovery constraints."""
+
+        return {
+            "recovery_mode": self.recovery_mode,
+            "_recovery_step": self.recovery_step,
+            "_expected_topology_id": self.expected_topology_id,
+        }
 
 
 def replay_config() -> ReplayHarnessConfig:
@@ -123,6 +134,16 @@ def checkpoint_is_safe_for_replacement(
             flush=True,
         )
     return safe
+
+
+def checkpoint_topology_digest(handle: Any) -> str:
+    """Return the live GEMINI job-wide topology identity."""
+
+    manager = _checkpoint_manager(handle)
+    topology_digest = None if manager is None else manager.topology_id
+    if not isinstance(topology_digest, str) or not topology_digest:
+        raise AssertionError("GEMINI did not publish a checkpoint topology digest")
+    return topology_digest
 
 
 def tensor_digest(values: Sequence[torch.Tensor]) -> str:
@@ -219,8 +240,10 @@ class CampaignRuntime:
             / f"step-{self.context.checkpoint_step}-rank-{self.rank}.json"
         )
         state = driver.verification_state()
+        topology_digest = checkpoint_topology_digest(driver.handle)
         recovered = (
             driver.handle.step_count == self.context.checkpoint_step
+            and topology_digest == self.context.topology_digest
             and tensor_digest([*state["model"], *state["optimizer"]]) == expected["state_digest"]
             and rng_digest(driver.device) == expected["rng_digest"]
             and driver.framework_state() == expected["framework_state"]
@@ -236,6 +259,7 @@ class CampaignRuntime:
                 "node_id": self.node_id,
                 "rank": self.rank,
                 "recovered_exact": recovered,
+                "topology_digest": topology_digest,
             },
         )
 
@@ -266,7 +290,11 @@ class CampaignRuntime:
                 "restart-only failure did not flush the latest verified checkpoint",
                 driver.device,
             )
-            self._write_incident("restart", checkpoint_step=self.event.checkpoint_step)
+            self._write_incident(
+                "restart",
+                checkpoint_step=self.event.checkpoint_step,
+                topology_digest=checkpoint_topology_digest(driver.handle),
+            )
             self._wait_for_restart()
         if self.faults:
             self._validate_and_report_fault(driver, checkpoint_manager)
@@ -291,6 +319,7 @@ class CampaignRuntime:
                 "losses": self.losses,
                 "node_id": self.node_id,
                 "rank": self.rank,
+                "topology_digest": checkpoint_topology_digest(driver.handle),
             }
         )
         prefix = "baseline" if self.mode == "baseline" else f"final-g{self.generation}"
@@ -385,6 +414,7 @@ class CampaignRuntime:
         self._write_incident(
             "fault",
             checkpoint_step=expected_step,
+            topology_digest=checkpoint_topology_digest(driver.handle),
             extra={
                 "decision": decision,
                 "peer_ranks": list(fault.peer_ranks),
@@ -398,6 +428,7 @@ class CampaignRuntime:
         kind: str,
         *,
         checkpoint_step: int,
+        topology_digest: str,
         extra: Mapping[str, Any] | None = None,
     ) -> None:
         if self.event is None:
@@ -409,12 +440,14 @@ class CampaignRuntime:
             "incident_id": self.event.incident_id,
             "node_id": self.node_id,
             "rank": self.rank,
+            "topology_digest": topology_digest,
         }
         report.update(extra or {})
         atomic_json(
             self.artifact_dir / f"{kind}-g{self.generation}-r{self.rank}.json",
             report,
         )
+
         atomic_json(
             self.artifact_dir / f"losses-g{self.generation}-r{self.rank}.json",
             {

@@ -80,7 +80,7 @@ class TorchTitanDriver:
             device=self.device,
             fault_callback=config.fault_callback,
             orchestration=config.orchestration,
-            recovery_mode=config.recovery_mode,
+            **config.recovery_options(),
         )
         self._latest_loss: float | None = None
         self._original_loss = self.trainer.loss_fn

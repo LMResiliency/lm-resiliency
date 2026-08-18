@@ -27,9 +27,9 @@ from .harness.artifacts import atomic_json, read_json, wait_for_paths
 from .harness.campaign import (
     STATE_FILENAME,
     PressureEvent,
-    PressureTopology,
     campaign_layout,
     load_campaign_bundle,
+    require_fresh_campaign_run,
 )
 from .harness.launch import (
     PressureLaunchOptions,
@@ -42,6 +42,7 @@ from .harness.launch import (
 )
 from .harness.verify import (
     MODEL_MAX_ABS_DIFF,
+    checkpoint_topology_digest,
     compare_baseline,
     loss_difference_limit,
     optimizer_difference_limit,
@@ -85,7 +86,7 @@ def _publish_plan(
     event: PressureEvent,
     replacement_node: str | None,
     quarantined: Sequence[str],
-    topology: PressureTopology,
+    topology_digest: str,
 ) -> TorchrunSuccessorPlacement:
     replacement = None
     if event.kind == "replacement":
@@ -109,7 +110,7 @@ def _publish_plan(
             checkpoint_source="gemini",
             checkpoint_step=event.checkpoint_step,
             checkpoint_manifest_id=(f"gemini-{recovery_mode}-{event.checkpoint_step}"),
-            topology_digest=topology.topology_digest,
+            topology_digest=topology_digest,
             restart_deadline_unix_ms=time.time_ns() // 1_000_000 + 120_000,
         ),
         local_world_size=1,
@@ -142,6 +143,7 @@ def _orchestrate(args: argparse.Namespace) -> None:
         rendezvous_host=args.rdzv_host,
     )
     campaign, events = load_campaign_bundle(campaign_dir)
+    require_fresh_campaign_run(campaign_dir)
     topology = campaign_layout(
         gpus=args.gpus,
         remote_gpus=args.remote_gpus,
@@ -219,6 +221,7 @@ def _orchestrate(args: argparse.Namespace) -> None:
         replacements = iter(initial.standby_node_ids)
         quarantined: list[str] = []
         completed_events: list[str] = []
+        observed_topology_digest: str | None = None
         for generation, event in enumerate(events):
             report_prefix = "fault" if event.kind == "replacement" else "restart"
             report_paths = [
@@ -227,6 +230,10 @@ def _orchestrate(args: argparse.Namespace) -> None:
             ]
             wait_for_paths(report_paths, processes=processes, timeout=options.timeout)
             reports = [read_json(path) for path in report_paths]
+            topology_digest = checkpoint_topology_digest(reports)
+            if observed_topology_digest is not None and topology_digest != observed_topology_digest:
+                raise AssertionError("GEMINI checkpoint topology changed across generations")
+            observed_topology_digest = topology_digest
             replacement_node = None
             if event.kind == "replacement":
                 assert event.fault_rank is not None
@@ -251,7 +258,7 @@ def _orchestrate(args: argparse.Namespace) -> None:
                 event=event,
                 replacement_node=replacement_node,
                 quarantined=quarantined,
-                topology=topology,
+                topology_digest=topology_digest,
             )
             current_nodes = list(successor.active_node_ids)
             quarantined = list(successor.quarantined_node_ids)
@@ -274,6 +281,8 @@ def _orchestrate(args: argparse.Namespace) -> None:
             recovery = [read_json(path) for path in recovery_paths]
             if not all(item["recovered_exact"] for item in recovery):
                 raise AssertionError("GEMINI recovery was not exact on every rank")
+            if checkpoint_topology_digest(recovery) != topology_digest:
+                raise AssertionError("successor workers recovered a different topology")
             if event.kind == "replacement":
                 assert event.fault_rank is not None and replacement_node is not None
                 if recovery[event.fault_rank]["node_id"] != replacement_node:
@@ -306,6 +315,7 @@ def _orchestrate(args: argparse.Namespace) -> None:
             {
                 "campaign": campaign.name,
                 "campaign_manifest_identity": campaign.manifest_identity,
+                "checkpoint_topology_digest": observed_topology_digest,
                 "framework": options.framework,
                 "final_nodes": current_nodes,
                 "final_step": total_steps,

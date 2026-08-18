@@ -102,12 +102,17 @@ def prepare_remote_source(options: PressureLaunchOptions) -> None:
         ],
         check=True,
     )
-    site_packages_code = 'import sysconfig; print(sysconfig.get_paths()["purelib"])'
-    install_command = (
-        f"site_packages=$({shlex.quote(options.remote_python)} -c "
-        f"{shlex.quote(site_packages_code)}) && "
-        f'/usr/bin/pip install --upgrade --no-deps --target "$site_packages" '
-        f"-e {shlex.quote(str(options.remote_source_dir))}"
+    install_command = shlex.join(
+        [
+            options.remote_python,
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "--no-deps",
+            "-e",
+            str(options.remote_source_dir),
+        ]
     )
     subprocess.run(
         [
@@ -202,16 +207,22 @@ def launch_managed_agents(
     endpoint: str | None,
     max_restarts: int,
 ) -> list[LaunchedAgent]:
-    return [
-        _launch_managed_agent(
-            options=options,
-            placement=placement,
-            endpoint=endpoint,
-            max_restarts=max_restarts,
-            topology=topology,
-        )
-        for placement in topology.placements
-    ]
+    launched: list[LaunchedAgent] = []
+    try:
+        for placement in topology.placements:
+            launched.append(
+                _launch_managed_agent(
+                    options=options,
+                    placement=placement,
+                    endpoint=endpoint,
+                    max_restarts=max_restarts,
+                    topology=topology,
+                )
+            )
+    except BaseException:
+        cleanup_agents(options, launched, remote_run_id=options.run_id)
+        raise
+    return launched
 
 
 def cleanup_agents(
@@ -337,45 +348,45 @@ def _launch_process(
     remote: bool,
 ) -> LaunchedAgent:
     log = log_path.open("wb")
-    source_root = options.remote_source_dir if remote else Path(__file__).resolve().parents[4]
-    if source_root is None:
-        raise ValueError("source root is not initialized")
-    process_environment = dict(environment)
-    existing_python_path = process_environment.get("PYTHONPATH")
-    process_environment["PYTHONPATH"] = (
-        f"{source_root}:{existing_python_path}" if existing_python_path else str(source_root)
-    )
-    if remote:
-        remote_shell = (
-            f"cd {shlex.quote(str(options.remote_source_dir))} && "
-            f"{shlex.join(['env', *[f'{key}={value}' for key, value in process_environment.items()], *command])}"
+    try:
+        source_root = options.remote_source_dir if remote else Path(__file__).resolve().parents[4]
+        if source_root is None:
+            raise ValueError("source root is not initialized")
+        process_environment = dict(environment)
+        existing_python_path = process_environment.get("PYTHONPATH")
+        process_environment["PYTHONPATH"] = (
+            f"{source_root}:{existing_python_path}" if existing_python_path else str(source_root)
         )
-        process = subprocess.Popen(
-            [
-                "ssh",
-                "-o",
-                "BatchMode=yes",
-                options.remote_host,
-                remote_shell,
-            ],
-            stdout=log,
-            stderr=subprocess.STDOUT,
-        )
-    else:
-        local_environment = dict(os.environ)
-        local_environment.update(process_environment)
-        process = subprocess.Popen(
-            list(command),
-            env=local_environment,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-        )
+        if remote:
+            remote_shell = (
+                f"cd {shlex.quote(str(options.remote_source_dir))} && "
+                f"{shlex.join(['env', *[f'{key}={value}' for key, value in process_environment.items()], *command])}"
+            )
+            process = subprocess.Popen(
+                [
+                    "ssh",
+                    "-o",
+                    "BatchMode=yes",
+                    options.remote_host,
+                    remote_shell,
+                ],
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+        else:
+            local_environment = dict(os.environ)
+            local_environment.update(process_environment)
+            process = subprocess.Popen(
+                list(command),
+                env=local_environment,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+    except BaseException:
+        log.close()
+        raise
     return LaunchedAgent(process, log)
 
 
 def _gpu_environment(gpu_id: str) -> dict[str, str]:
-    return {
-        "CUDA_VISIBLE_DEVICES": gpu_id,
-        "GLOO_SOCKET_IFNAME": "ens32",
-        "NCCL_SOCKET_IFNAME": "ens32",
-    }
+    return {"CUDA_VISIBLE_DEVICES": gpu_id}

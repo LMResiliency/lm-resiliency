@@ -29,6 +29,18 @@ def optimizer_difference_limit(framework: str) -> float:
     return OPTIMIZER_MAX_ABS_DIFF
 
 
+def checkpoint_topology_digest(reports: Sequence[dict[str, object]]) -> str:
+    """Return the one live GEMINI topology identity agreed by every report."""
+
+    values = [report.get("topology_digest") for report in reports]
+    if not values or any(not isinstance(value, str) or not value for value in values):
+        raise AssertionError("incident report checkpoint topology is malformed")
+    unique_values = set(values)
+    if len(unique_values) != 1:
+        raise AssertionError("incident reports disagree on checkpoint topology")
+    return unique_values.pop()
+
+
 def validate_fault_reports(
     reports: Sequence[dict[str, object]],
     *,
@@ -38,6 +50,7 @@ def validate_fault_reports(
     world_size: int,
 ) -> None:
     expected_bitmap = [int(rank == fault_rank) for rank in range(world_size)]
+    topology_digest = checkpoint_topology_digest(reports)
     for report in reports:
         if report["generation"] != expected_generation:
             raise AssertionError("fault report generation mismatch")
@@ -50,6 +63,7 @@ def validate_fault_reports(
             decision["recovery_mode"] != "recovery_verified"
             or decision["checkpoint_source"] != "gemini"
             or decision["checkpoint_step"] != expected_checkpoint_step
+            or decision.get("topology_digest") != topology_digest
             or not decision["available"]
         ):
             raise AssertionError(f"invalid recovery decision: {decision}")

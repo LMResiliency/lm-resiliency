@@ -128,6 +128,11 @@ baseline-*.log
 *.log
 ```
 
+Use a fresh directory for every run. Before launching any worker, the
+controller rejects a bundle containing anything other than `campaign.json`;
+this prevents reports or final artifacts from an earlier run satisfying the
+current campaign's waits.
+
 The checked-in short campaign uses four active GPU-nodes and one standby. It
 schedules one same-node restart followed by one SCOUT-localized replacement:
 
@@ -170,7 +175,10 @@ python -m examples.torchrun.resiliency_cycle.pressure orchestrate \
 ```
 
 SSH must work in batch mode. The controller copies the current source tree to
-`--remote-source-dir` before launching remote agents.
+`--remote-source-dir` before launching remote agents and installs it with the
+interpreter selected by `--remote-python`. Gloo and NCCL choose their normal
+host interfaces; set their standard environment variables in the launch
+environment only when the deployment requires an explicit interface.
 
 ### Acceptance Criteria
 
@@ -179,7 +187,8 @@ The controller exits successfully only when:
 - every scheduled incident produces reports from the full active world;
 - SCOUT localizes each replay-only SDC to the scheduled logical rank;
 - the selected standby inherits the failed rank and logical slot;
-- every successor rank restores the manager-selected checkpoint exactly;
+- every successor rank restores the manager-selected checkpoint step and
+  job-wide GEMINI topology exactly;
 - RNG and framework-owned recovery state match; and
 - final loss, model, and optimizer state remain within the
   framework-specific baseline tolerances.

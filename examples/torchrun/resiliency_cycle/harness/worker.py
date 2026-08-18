@@ -8,7 +8,10 @@ from collections.abc import Callable
 from pathlib import Path
 
 from lm_resiliency import FaultCampaign
-from lm_resiliency.integrations.torchrun import get_torchrun_worker_context
+from lm_resiliency.integrations.torchrun import (
+    TorchrunWorkerContext,
+    get_torchrun_worker_context,
+)
 
 from .campaign import CAMPAIGN_FILENAME, pressure_events
 from .replay_fault import ReplayFaultCampaign
@@ -21,6 +24,15 @@ from .runtime import (
 )
 
 FRAMEWORKS = ("pytorch", "deepspeed", "megatron", "torchtitan")
+
+
+def _validate_worker_context(context: TorchrunWorkerContext | None) -> None:
+    if context is None:
+        return
+    if context.local_world_size != 1:
+        raise RuntimeError("fault-injection validation requires one worker per torchrun agent")
+    if context.generation > 0 and context.checkpoint_source != "gemini":
+        raise RuntimeError("resiliency-cycle successors require GEMINI recovery contexts")
 
 
 def _driver_factory(framework: str) -> Callable[[DriverConfig], FrameworkDriver]:
@@ -54,8 +66,7 @@ def run_worker(
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     context = get_torchrun_worker_context() if mode == "campaign" else None
-    if context is not None and context.local_world_size != 1:
-        raise RuntimeError("fault-injection validation requires one worker per torchrun agent")
+    _validate_worker_context(context)
     generation = 0 if context is None else context.generation
     node_id = f"baseline-rank-{rank}" if context is None else context.node_id
 
@@ -100,6 +111,8 @@ def run_worker(
             ),
             replay=replay_config(),
             recovery_mode=context.recovery_mode if context is not None else None,
+            recovery_step=context.checkpoint_step if context is not None else None,
+            expected_topology_id=context.topology_digest if context is not None else None,
             fault_callback=runtime.record_fault,
             orchestration=runtime.orchestration,
             total_steps=total_steps,
@@ -114,8 +127,10 @@ def run_worker(
         )
         runtime.finish(driver)
     finally:
-        runtime.close()
-        driver.close()
+        try:
+            runtime.close()
+        finally:
+            driver.close()
 
 
 def main() -> None:

@@ -56,7 +56,7 @@ class DeepSpeedDriver:
             device=self.device,
             fault_callback=config.fault_callback,
             orchestration=config.orchestration,
-            recovery_mode=config.recovery_mode,
+            **config.recovery_options(),
         )
         self._adapter = DeepSpeedAdapter(self.engine)
 
