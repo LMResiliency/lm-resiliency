@@ -129,7 +129,7 @@ def prepare_remote_source(options: PressureLaunchOptions) -> None:
 def terminate_remote_run(options: PressureLaunchOptions, run_id: str) -> None:
     if not options.remote_enabled:
         return
-    pattern = f"[r]dzv-id={re.escape(run_id)}"
+    pattern = _remote_run_pattern(run_id)
     command = (
         f"pkill -TERM -f -- {shlex.quote(pattern)} || true; "
         "sleep 1; "
@@ -231,17 +231,56 @@ def cleanup_agents(
     *,
     remote_run_id: str,
 ) -> None:
-    for agent in agents:
-        if agent.process.poll() is None:
-            agent.process.terminate()
-    terminate_remote_run(options, remote_run_id)
+    active_error = sys.exception()
+    failures: list[BaseException] = []
     for agent in agents:
         try:
-            agent.process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            agent.process.kill()
-            agent.process.wait(timeout=10)
-        agent.log.close()
+            if agent.process.poll() is None:
+                agent.process.terminate()
+        except BaseException as error:
+            failures.append(error)
+    try:
+        terminate_remote_run(options, remote_run_id)
+    except BaseException as error:
+        failures.append(error)
+    for agent in agents:
+        try:
+            try:
+                agent.process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                agent.process.kill()
+                agent.process.wait(timeout=10)
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            try:
+                agent.log.close()
+            except BaseException as error:
+                failures.append(error)
+    _handle_cleanup_failures(failures, active_error=active_error)
+
+
+def _remote_run_pattern(run_id: str) -> str:
+    """Return a pkill pattern matching one complete torchrun rendezvous ID."""
+
+    return rf"(^|[[:space:]])--[r]dzv-id={re.escape(run_id)}([[:space:]]|$)"
+
+
+def _handle_cleanup_failures(
+    failures: Sequence[BaseException],
+    *,
+    active_error: BaseException | None,
+) -> None:
+    if not failures:
+        return
+    details = "; ".join(f"{type(error).__name__}: {error}" for error in failures)
+    if active_error is not None:
+        active_error.add_note(f"additional agent cleanup failures: {details}")
+        return
+    signal = next((error for error in failures if not isinstance(error, Exception)), None)
+    if signal is not None:
+        raise signal
+    raise RuntimeError(f"agent cleanup failed: {details}") from failures[0]
 
 
 def _launch_managed_agent(

@@ -155,6 +155,10 @@ def pressure_events(campaign: FaultCampaign) -> tuple[PressureEvent, ...]:
                     "replacement incidents require the supported replay-only "
                     "transformer-block sign_flip over 100% of the selected tensor"
                 )
+            if incident.trigger.at[0] < 2:
+                raise ValueError(
+                    "replacement incidents must follow at least one clean checkpoint step"
+                )
             kind = "replacement"
             fault_rank = fault.target.rank
         else:

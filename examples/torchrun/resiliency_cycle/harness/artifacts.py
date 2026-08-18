@@ -6,7 +6,7 @@ import json
 import os
 import subprocess
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -46,9 +46,14 @@ def wait_for_paths(
     *,
     processes: Sequence[subprocess.Popen[bytes]],
     timeout: float,
+    health_check: Callable[[], None] | None = None,
 ) -> None:
     deadline = time.monotonic() + timeout
-    while not all(path.exists() for path in paths):
+    while True:
+        if health_check is not None:
+            health_check()
+        if all(path.exists() for path in paths):
+            return
         failed = [process.returncode for process in processes if process.poll() not in (None, 0)]
         if failed:
             raise RuntimeError(f"torchrun agent failed with exit codes {failed}")

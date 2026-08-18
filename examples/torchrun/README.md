@@ -153,7 +153,8 @@ profile: eight active GPU-nodes, eight standbys, sixteen same-node restarts,
 and eight replacements.
 
 Fault injection is configured only through the campaign bundle. It is not a
-worker-policy or `--rdzv-conf` setting.
+worker-policy or `--rdzv-conf` setting. Replacement incidents must run at step
+2 or later so a clean recovery-verified checkpoint exists before corruption.
 
 ### Multi-Host Run
 

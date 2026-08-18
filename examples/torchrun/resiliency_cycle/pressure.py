@@ -243,7 +243,12 @@ def _orchestrate(args: argparse.Namespace) -> None:
                 artifacts / f"{report_prefix}-g{generation}-r{rank}.json"
                 for rank in range(topology.world_size)
             ]
-            wait_for_paths(report_paths, processes=processes, timeout=options.timeout)
+            wait_for_paths(
+                report_paths,
+                processes=processes,
+                timeout=options.timeout,
+                health_check=coordinator.check_health if generation > 0 else None,
+            )
             reports = [read_json(path) for path in report_paths]
             topology_digest = checkpoint_topology_digest(reports)
             if observed_topology_digest is not None and topology_digest != observed_topology_digest:
@@ -292,7 +297,12 @@ def _orchestrate(args: argparse.Namespace) -> None:
                 artifacts / f"recovery-g{successor.generation}-r{rank}.json"
                 for rank in range(topology.world_size)
             ]
-            wait_for_paths(recovery_paths, processes=processes, timeout=options.timeout)
+            wait_for_paths(
+                recovery_paths,
+                processes=processes,
+                timeout=options.timeout,
+                health_check=coordinator.check_health,
+            )
             recovery = [read_json(path) for path in recovery_paths]
             if not all(item["recovered_exact"] for item in recovery):
                 raise AssertionError("GEMINI recovery was not exact on every rank")
@@ -308,7 +318,12 @@ def _orchestrate(args: argparse.Namespace) -> None:
         final_paths = [
             artifacts / f"final-g{len(events)}-r{rank}.json" for rank in range(topology.world_size)
         ]
-        wait_for_paths(final_paths, processes=processes, timeout=options.timeout)
+        wait_for_paths(
+            final_paths,
+            processes=processes,
+            timeout=options.timeout,
+            health_check=coordinator.check_health,
+        )
         loss_diff, model_diff, optimizer_diff = compare_baseline(
             campaign_dir,
             generations=len(events) + 1,

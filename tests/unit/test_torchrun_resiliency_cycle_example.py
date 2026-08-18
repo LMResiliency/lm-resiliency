@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 
 from examples.torchrun.resiliency_cycle.harness import launch
+from examples.torchrun.resiliency_cycle.harness.artifacts import wait_for_paths
 from examples.torchrun.resiliency_cycle.harness.campaign import (
     CAMPAIGN_FILENAME,
     STATE_FILENAME,
@@ -128,6 +129,19 @@ def test_campaign_rejects_unsupported_replay_corruption() -> None:
     replacement["faults"][0]["parameters"]["operation"] = "scale"
 
     with pytest.raises(ValueError, match="sign_flip"):
+        pressure_events(FaultCampaign.from_dict(value))
+
+
+def test_campaign_rejects_replacement_before_a_clean_checkpoint() -> None:
+    value = default_pressure_campaign().to_dict()
+    replacement = next(
+        incident
+        for incident in value["incidents"]
+        if incident["faults"][0]["type"] == "tensor_corruption"
+    )
+    replacement["trigger"]["at"] = [1]
+
+    with pytest.raises(ValueError, match="at least one clean checkpoint"):
         pressure_events(FaultCampaign.from_dict(value))
 
 
@@ -318,6 +332,26 @@ def test_remote_install_uses_selected_python(
     ]
 
 
+def test_remote_process_pattern_matches_only_the_complete_run_id() -> None:
+    pattern = launch._remote_run_pattern("run-12")
+
+    exact = subprocess.run(
+        ["grep", "-Eq", pattern],
+        input="python torchrun --rdzv-id=run-12 --module worker",
+        text=True,
+        check=False,
+    )
+    prefix = subprocess.run(
+        ["grep", "-Eq", pattern],
+        input="python torchrun --rdzv-id=run-123 --module worker",
+        text=True,
+        check=False,
+    )
+
+    assert exact.returncode == 0
+    assert prefix.returncode == 1
+
+
 def test_partial_managed_launch_is_cleaned_up(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -369,6 +403,116 @@ def test_partial_managed_launch_is_cleaned_up(
         )
 
     assert cleaned == [first]
+
+
+def test_cleanup_reaps_every_agent_when_remote_termination_times_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StubbornProcess:
+        returncode: int | None = None
+
+        def __init__(self) -> None:
+            self.killed = False
+            self.terminated = False
+            self.waits = 0
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def wait(self, timeout: float) -> int:
+            self.waits += 1
+            if self.waits == 1:
+                raise subprocess.TimeoutExpired("torchrun", timeout)
+            self.returncode = -9
+            return self.returncode
+
+        def kill(self) -> None:
+            self.killed = True
+
+    processes = [StubbornProcess(), StubbornProcess()]
+    agents = [
+        LaunchedAgent(process=process, log=io.BytesIO())  # type: ignore[arg-type]
+        for process in processes
+    ]
+    options = PressureLaunchOptions(
+        fault_campaign_dir=tmp_path,
+        framework="pytorch",
+        run_id="cleanup-timeout",
+        timeout=10,
+        remote_host="worker-b",
+    )
+    monkeypatch.setattr(
+        launch,
+        "terminate_remote_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(subprocess.TimeoutExpired("ssh", 10)),
+    )
+
+    with pytest.raises(RuntimeError, match="agent cleanup failed"):
+        launch.cleanup_agents(options, agents, remote_run_id=options.run_id)
+
+    assert all(process.terminated for process in processes)
+    assert all(process.killed for process in processes)
+    assert all(process.waits == 2 for process in processes)
+    assert all(agent.log.closed for agent in agents)
+
+
+def test_cleanup_failure_does_not_replace_active_orchestration_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = SimpleNamespace(
+        poll=lambda: 0,
+        terminate=lambda: None,
+        wait=lambda timeout: 0,
+        kill=lambda: None,
+    )
+    agent = LaunchedAgent(process=process, log=io.BytesIO())  # type: ignore[arg-type]
+    options = PressureLaunchOptions(
+        fault_campaign_dir=tmp_path,
+        framework="pytorch",
+        run_id="preserve-error",
+        timeout=10,
+        remote_host="worker-b",
+    )
+    monkeypatch.setattr(
+        launch,
+        "terminate_remote_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("ssh failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="orchestration failed") as captured:
+        try:
+            raise RuntimeError("orchestration failed")
+        finally:
+            launch.cleanup_agents(options, [agent], remote_run_id=options.run_id)
+
+    assert any("ssh failed" in note for note in captured.value.__notes__)
+    assert agent.log.closed
+
+
+def test_artifact_wait_polls_coordinator_health(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    def check_health() -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("lease renewal failed")
+
+    with pytest.raises(RuntimeError, match="lease renewal failed"):
+        wait_for_paths(
+            [tmp_path / "missing.json"],
+            processes=(),
+            timeout=60,
+            health_check=check_health,
+        )
+
+    assert calls == 1
 
 
 def test_agent_cleanup_runs_when_coordinator_close_fails(
