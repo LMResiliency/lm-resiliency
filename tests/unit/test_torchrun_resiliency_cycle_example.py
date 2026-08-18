@@ -39,9 +39,11 @@ from examples.torchrun.resiliency_cycle.harness.replay_fault import (
 from examples.torchrun.resiliency_cycle.harness.runtime import (
     DriverConfig,
     checkpoint_is_safe_for_replacement,
+    close_resources,
 )
 from examples.torchrun.resiliency_cycle.harness.verify import (
     checkpoint_topology_digest,
+    loss_difference,
     loss_difference_limit,
     optimizer_difference_limit,
 )
@@ -200,8 +202,10 @@ def test_fault_campaign_requires_two_clean_post_fault_steps() -> None:
         ReplayFaultCampaign.from_args(args, rank=0, world_size=2)
 
 
+@pytest.mark.parametrize("last_saved_step", [-1, 2])
 @pytest.mark.parametrize("flushed_step", [-1, 2])
 def test_replacement_accepts_verified_disk_checkpoint_after_process_restart(
+    last_saved_step: int,
     flushed_step: int,
 ) -> None:
     state = {"flushed": False}
@@ -211,7 +215,7 @@ def test_replacement_accepts_verified_disk_checkpoint_after_process_restart(
         return flushed_step
 
     manager = SimpleNamespace(
-        _last_saved_step=-1,
+        _last_saved_step=last_saved_step,
         checkpoint_status=SimpleNamespace(recovery_verified_step=2),
         local_recovery_step=lambda mode: (
             2 if state["flushed"] and mode == "recovery_verified" else -1
@@ -220,6 +224,61 @@ def test_replacement_accepts_verified_disk_checkpoint_after_process_restart(
     handle = SimpleNamespace(flush_for_restart=flush_for_restart)
 
     assert checkpoint_is_safe_for_replacement(manager, handle, expected_step=2)
+
+
+def test_replacement_rejects_a_saved_contaminated_candidate() -> None:
+    manager = SimpleNamespace(
+        _last_saved_step=3,
+        checkpoint_status=SimpleNamespace(recovery_verified_step=2),
+        local_recovery_step=lambda mode: 2 if mode == "recovery_verified" else -1,
+    )
+    handle = SimpleNamespace(flush_for_restart=lambda: 2)
+
+    assert not checkpoint_is_safe_for_replacement(manager, handle, expected_step=2)
+
+
+def test_cleanup_runs_every_action_and_preserves_the_first_failure(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[str] = []
+
+    def fail_handle() -> None:
+        calls.append("handle")
+        raise RuntimeError("handle close failed")
+
+    def close_framework() -> None:
+        calls.append("framework")
+
+    def fail_process_group() -> None:
+        calls.append("process-group")
+        raise RuntimeError("process group close failed")
+
+    with pytest.raises(RuntimeError, match="handle close failed"):
+        close_resources(
+            ("resiliency handle", fail_handle),
+            ("framework", close_framework),
+            ("default process group", fail_process_group),
+        )
+
+    assert calls == ["handle", "framework", "process-group"]
+    assert "additional default process group cleanup failure" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("expected", "actual"),
+    [
+        (float("nan"), 1.0),
+        (1.0, float("nan")),
+        (float("inf"), 1.0),
+        (1.0, float("-inf")),
+    ],
+)
+def test_loss_difference_rejects_non_finite_values(
+    expected: float,
+    actual: float,
+) -> None:
+    with pytest.raises(AssertionError, match="non-finite"):
+        loss_difference(expected, actual, rank=0, step="2")
 
 
 @pytest.mark.parametrize(

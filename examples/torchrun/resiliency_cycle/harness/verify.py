@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -27,6 +28,15 @@ def optimizer_difference_limit(framework: str) -> float:
     if framework == "deepspeed":
         return DEEPSPEED_OPTIMIZER_MAX_ABS_DIFF
     return OPTIMIZER_MAX_ABS_DIFF
+
+
+def loss_difference(expected: float, actual: float, *, rank: int, step: str) -> float:
+    """Return a finite loss difference or reject invalid numerical evidence."""
+
+    difference = abs(expected - actual)
+    if not all(math.isfinite(value) for value in (expected, actual, difference)):
+        raise AssertionError(f"rank {rank} loss at step {step} is non-finite")
+    return difference
 
 
 def checkpoint_topology_digest(reports: Sequence[dict[str, object]]) -> str:
@@ -120,7 +130,7 @@ def compare_baseline(
         baseline_losses = {key: float(value) for key, value in baseline["losses"].items()}
         for step, expected in baseline_losses.items():
             actual = float(campaign_losses[rank][step])
-            difference = abs(expected - actual)
+            difference = loss_difference(expected, actual, rank=rank, step=step)
             maximum_loss_difference = max(maximum_loss_difference, difference)
             loss_limit = loss_difference_limit(observed_framework)
             if difference > loss_limit:

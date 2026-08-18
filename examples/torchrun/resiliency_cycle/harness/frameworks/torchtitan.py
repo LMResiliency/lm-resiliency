@@ -11,7 +11,7 @@ import torch.distributed as dist
 from examples.production_loops.torchtitan import _job_config, _register_train_spec
 from lm_resiliency.integrations.torchtitan import enable_resiliency
 
-from ..runtime import DriverConfig, clone_tensors, tensor_leaves
+from ..runtime import DriverConfig, clone_tensors, close_resources, tensor_leaves
 
 
 class _ObservedLoader:
@@ -141,9 +141,19 @@ class TorchTitanDriver:
         }
 
     def close(self) -> None:
-        self.trainer.loss_fn = self._original_loss
-        self.trainer.lr_schedulers.step = self._original_scheduler_step
-        self.handle.close()
-        self.trainer.close()
-        if dist.is_initialized():
-            dist.destroy_process_group()
+        def restore_loss() -> None:
+            self.trainer.loss_fn = self._original_loss
+
+        def restore_scheduler() -> None:
+            self.trainer.lr_schedulers.step = self._original_scheduler_step
+
+        close_resources(
+            ("TorchTitan loss hook", restore_loss),
+            ("TorchTitan scheduler hook", restore_scheduler),
+            ("resiliency handle", self.handle.close),
+            ("TorchTitan trainer", self.trainer.close),
+            (
+                "default process group",
+                lambda: dist.destroy_process_group() if dist.is_initialized() else None,
+            ),
+        )

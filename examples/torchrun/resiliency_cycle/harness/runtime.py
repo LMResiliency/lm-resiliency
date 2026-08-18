@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -115,13 +116,15 @@ def checkpoint_is_safe_for_replacement(
     *,
     expected_step: int,
 ) -> bool:
-    """Verify that only the last clean checkpoint is recoverable."""
+    """Verify that the contaminated step was neither saved nor made recoverable."""
 
+    last_saved_step = int(checkpoint_manager._last_saved_step)
     verified_step = checkpoint_manager.checkpoint_status.recovery_verified_step
     flushed_step = handle.flush_for_restart()
     recoverable_step = checkpoint_manager.local_recovery_step("recovery_verified")
     safe = (
-        verified_step == expected_step
+        last_saved_step in (-1, expected_step)
+        and verified_step == expected_step
         and flushed_step in (-1, expected_step)
         and recoverable_step == expected_step
     )
@@ -129,11 +132,29 @@ def checkpoint_is_safe_for_replacement(
         print(
             "replacement checkpoint diagnostics: "
             f"rank={os.environ.get('RANK', 'unknown')} "
-            f"expected={expected_step} verified={verified_step} "
+            f"expected={expected_step} saved={last_saved_step} verified={verified_step} "
             f"flushed={flushed_step} recoverable={recoverable_step}",
             flush=True,
         )
     return safe
+
+
+def close_resources(*actions: tuple[str, Callable[[], None]]) -> None:
+    """Run every cleanup action and re-raise the first failure."""
+
+    failures: list[tuple[str, BaseException, Any]] = []
+    for name, action in actions:
+        try:
+            action()
+        except BaseException as error:
+            failures.append((name, error, error.__traceback__))
+    if not failures:
+        return
+
+    for name, error, _ in failures[1:]:
+        print(f"additional {name} cleanup failure: {error}", file=sys.stderr)
+    _, first_error, first_traceback = failures[0]
+    raise first_error.with_traceback(first_traceback)
 
 
 def checkpoint_topology_digest(handle: Any) -> str:

@@ -18,7 +18,7 @@ from examples.production_loops.megatron import (
 )
 from lm_resiliency.integrations.megatron import MegatronAdapter, enable_resiliency
 
-from ..runtime import DriverConfig, clone_tensors
+from ..runtime import DriverConfig, clone_tensors, close_resources
 
 
 class MegatronDriver:
@@ -165,12 +165,21 @@ class MegatronDriver:
         }
 
     def close(self) -> None:
-        self.handle.close()
-        if dist.is_initialized():
+        def destroy_model_parallel() -> None:
+            if not dist.is_initialized():
+                return
             from megatron.core import parallel_state as mpu
 
             mpu.destroy_model_parallel()
-            dist.destroy_process_group()
+
+        close_resources(
+            ("resiliency handle", self.handle.close),
+            ("Megatron model parallel", destroy_model_parallel),
+            (
+                "default process group",
+                lambda: dist.destroy_process_group() if dist.is_initialized() else None,
+            ),
+        )
 
 
 def _nonnegative_int(value: Any, name: str) -> int:

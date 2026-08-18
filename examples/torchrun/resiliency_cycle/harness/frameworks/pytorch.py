@@ -12,7 +12,7 @@ from torch.nn.parallel import DistributedDataParallel
 from examples.production_loops.pytorch import TinyCausalLM, _tokens
 from lm_resiliency.integrations.pytorch import enable_resiliency
 
-from ..runtime import DriverConfig, clone_tensors
+from ..runtime import DriverConfig, clone_tensors, close_resources
 
 
 class PyTorchDriver:
@@ -90,6 +90,10 @@ class PyTorchDriver:
         }
 
     def close(self) -> None:
-        self.handle.close()
-        if dist.is_initialized():
-            dist.destroy_process_group()
+        close_resources(
+            ("resiliency handle", self.handle.close),
+            (
+                "default process group",
+                lambda: dist.destroy_process_group() if dist.is_initialized() else None,
+            ),
+        )

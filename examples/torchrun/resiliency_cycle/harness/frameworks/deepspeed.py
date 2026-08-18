@@ -16,7 +16,7 @@ from examples.production_loops.deepspeed import (
 from lm_resiliency.integrations.deepspeed import enable_resiliency
 from lm_resiliency.integrations.deepspeed.adapter import DeepSpeedAdapter
 
-from ..runtime import DriverConfig, clone_tensors
+from ..runtime import DriverConfig, clone_tensors, close_resources
 
 
 class DeepSpeedDriver:
@@ -90,7 +90,11 @@ class DeepSpeedDriver:
         }
 
     def close(self) -> None:
-        self.handle.close()
-        self.engine.destroy()
-        if dist.is_initialized():
-            dist.destroy_process_group()
+        close_resources(
+            ("resiliency handle", self.handle.close),
+            ("DeepSpeed engine", self.engine.destroy),
+            (
+                "default process group",
+                lambda: dist.destroy_process_group() if dist.is_initialized() else None,
+            ),
+        )
