@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import torch.nn as nn
 
-from lm_resiliency.integrations.torchtitan import enable_resiliency
+from lm_resiliency.integrations.torchtitan import _SchedulerStepHook, enable_resiliency
 from lm_resiliency.integrations.torchtitan.adapter import TorchTitanAdapter
 
 
@@ -136,6 +136,18 @@ def test_trainer_records_only_successful_durable_load():
     trainer.step = 7
     assert trainer.checkpointer.load(step=-1) is True
     handle._restore_step.assert_called_once_with(7)
+
+
+def test_scheduler_hook_preserves_later_wrapper():
+    scheduler = _Stateful({})
+    optimizer = object()
+    hook = _SchedulerStepHook(scheduler, optimizer, lambda *_args: None)
+    later_wrapper = MagicMock(return_value=17)
+    scheduler.step = later_wrapper
+
+    hook.remove()
+
+    assert scheduler.step is later_wrapper
 
 
 def test_trainer_skips_durable_load_after_gemini_recovery():

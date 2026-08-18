@@ -194,6 +194,7 @@ class DeepSpeedResiliency:
         self._durable_checkpoint = build_durable_checkpoint(
             durable_checkpoint,
             self._replay_harness,
+            topology_digest=expected_topology_id,
         )
         self._optimizer_replays = self._build_optimizer_replays()
         self._certification = CheckpointCertificationCoordinator(

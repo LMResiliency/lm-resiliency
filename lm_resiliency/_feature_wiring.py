@@ -204,6 +204,7 @@ def _wire_features(
                 operation,
                 name=name,
             ),
+            topology_digest=expected_topology_id,
         )
 
     recovered = False

@@ -201,6 +201,7 @@ class MegatronResiliency:
         self._durable_checkpoint = build_durable_checkpoint(
             durable_checkpoint,
             self._replay_harness,
+            topology_digest=expected_topology_id,
         )
         self._optimizer_replays = self._build_optimizer_replays()
         self._certification = CheckpointCertificationCoordinator(
@@ -218,9 +219,11 @@ class MegatronResiliency:
         self._original_step = optimizer.step
         optimizer.step = self._wrapped_step
         self._original_scheduler_step = None
+        self._installed_scheduler_step = None
         if opt_param_scheduler is not None:
             self._original_scheduler_step = opt_param_scheduler.step
-            opt_param_scheduler.step = self._wrapped_scheduler_step
+            self._installed_scheduler_step = self._wrapped_scheduler_step
+            opt_param_scheduler.step = self._installed_scheduler_step
 
     def _wrapped_step(self, *args, **kwargs) -> Any:
         """Capture optimizer evidence and defer completion to Megatron's scheduler."""
@@ -468,7 +471,10 @@ class MegatronResiliency:
         self._closed = True
         unregister_automatic_cleanup(self)
         self._optimizer.step = self._original_step
-        if self._original_scheduler_step is not None:
+        if (
+            self._original_scheduler_step is not None
+            and self._opt_param_scheduler.step is self._installed_scheduler_step
+        ):
             self._opt_param_scheduler.step = self._original_scheduler_step
         self._pending_optimizer_step_tensors = None
         self._optimizer_step_pending = False

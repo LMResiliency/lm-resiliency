@@ -261,6 +261,7 @@ class PyTorchFSDPResiliency(ResiliencyHandle):
         self.durable_checkpoint = build_durable_checkpoint(
             durable_checkpoint,
             self.replay_harness,
+            topology_digest=expected_topology_id,
         )
         self._certification = CheckpointCertificationCoordinator(
             checkpoint_manager=self.ckpt_manager,

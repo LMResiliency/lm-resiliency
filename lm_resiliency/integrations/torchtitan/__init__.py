@@ -47,7 +47,8 @@ class _SchedulerStepHook:
         self._callback = callback
         self._original_step = scheduler.step
         self._removed = False
-        scheduler.step = self._wrapped_step
+        self._installed_step = self._wrapped_step
+        scheduler.step = self._installed_step
 
     def _wrapped_step(self, *args: Any, **kwargs: Any) -> Any:
         result = self._original_step(*args, **kwargs)
@@ -58,7 +59,8 @@ class _SchedulerStepHook:
         if self._removed:
             return
         self._removed = True
-        self._scheduler.step = self._original_step
+        if self._scheduler.step is self._installed_step:
+            self._scheduler.step = self._original_step
 
 
 def enable_resiliency(

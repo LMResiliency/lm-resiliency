@@ -63,6 +63,9 @@ def build_recovery_decision(
             checkpoint_step = int(record.step)
             checkpoint_id = str(record.checkpoint_id)
             source = "durable"
+            durable_topology = getattr(durable_checkpoint, "topology_digest", None)
+            if isinstance(durable_topology, str) and durable_topology:
+                topology_digest = durable_topology
 
     return RecoveryDecision(
         failure_kind=str(failure_kind),

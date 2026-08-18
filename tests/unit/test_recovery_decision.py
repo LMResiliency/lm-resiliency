@@ -236,7 +236,10 @@ def test_checkpoint_stall_emits_latest_checkpoint_decision():
 
 def test_decision_falls_back_to_durable_checkpoint_identity():
     record = SimpleNamespace(step=11, checkpoint_id="scout-step-11-epoch-2-plan")
-    durable = SimpleNamespace(latest_validated=record)
+    durable = SimpleNamespace(
+        latest_validated=record,
+        topology_digest="durable-topology",
+    )
 
     decision = build_recovery_decision(
         failure_kind="sdc",
@@ -251,6 +254,7 @@ def test_decision_falls_back_to_durable_checkpoint_identity():
     assert decision["checkpoint_source"] == "durable"
     assert decision["checkpoint_step"] == 11
     assert decision["checkpoint_id"] == record.checkpoint_id
+    assert decision["topology_digest"] == "durable-topology"
     assert decision["available"] is True
 
 

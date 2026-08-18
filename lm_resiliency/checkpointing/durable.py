@@ -203,17 +203,23 @@ class DurableCheckpointCoordinator:
         shape_ids: Sequence[str],
         process_group: dist.ProcessGroup | None = None,
         checkpoint_io: Callable[[str, str], ContextManager[None]] | None = None,
+        topology_digest: str | None = None,
     ) -> None:
         if not shape_plan_id:
             raise ValueError("durable checkpoint shape_plan_id cannot be empty")
         if not shape_ids or len(shape_ids) != len(set(shape_ids)):
             raise ValueError("durable checkpoint shape IDs must be non-empty and unique")
+        if topology_digest is not None and (
+            not isinstance(topology_digest, str) or not topology_digest.strip()
+        ):
+            raise ValueError("durable checkpoint topology_digest must be a non-empty string")
 
         self.config = config
         self.shape_plan_id = shape_plan_id
         self.shape_ids = tuple(shape_ids)
         self._process_group = process_group
         self._checkpoint_io = checkpoint_io
+        self.topology_digest = topology_digest
         self._rank = dist.get_rank(process_group) if dist.is_initialized() else 0
         self._world_size = dist.get_world_size(process_group) if dist.is_initialized() else 1
         if config.writer_rank >= self._world_size:

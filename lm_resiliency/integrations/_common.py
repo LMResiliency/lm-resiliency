@@ -51,6 +51,8 @@ def build_checkpoint_manager(
 def build_durable_checkpoint(
     config: DurableCheckpointConfig | None,
     replay_harness: Any | None,
+    *,
+    topology_digest: str | None = None,
 ) -> DurableCheckpointCoordinator | None:
     """Bind framework checkpoint callbacks to the active SCOUT shape plan."""
     if config is None:
@@ -65,6 +67,7 @@ def build_durable_checkpoint(
             operation,
             name=name,
         ),
+        topology_digest=topology_digest,
     )
 
 

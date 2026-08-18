@@ -179,6 +179,26 @@ class TestOptimizerWrapping:
     @patch("torch.distributed.is_initialized", return_value=False)
     @patch("torch.distributed.get_world_size", return_value=1)
     @patch("torch.distributed.get_rank", return_value=0)
+    def test_close_preserves_later_scheduler_wrapper(self, *mocks):
+        model = FakeModel()
+        optimizer = FakeOptimizer()
+        scheduler = FakeScheduler()
+        resiliency = MegatronResiliency(
+            model=[model],
+            optimizer=optimizer,
+            opt_param_scheduler=scheduler,
+            ckpt_config=InMemoryCkptConfig(enable=False),
+        )
+        later_wrapper = MagicMock(return_value=17)
+        scheduler.step = later_wrapper
+
+        resiliency.close()
+
+        assert scheduler.step is later_wrapper
+
+    @patch("torch.distributed.is_initialized", return_value=False)
+    @patch("torch.distributed.get_world_size", return_value=1)
+    @patch("torch.distributed.get_rank", return_value=0)
     def test_wrapped_step_returns_original_result(self, *mocks):
         model = FakeModel()
         optimizer = FakeOptimizer()
