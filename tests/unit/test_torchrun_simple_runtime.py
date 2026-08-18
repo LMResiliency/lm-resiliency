@@ -15,11 +15,14 @@ from pathlib import Path
 import pytest
 from torch.distributed import HashStore
 from torch.distributed.elastic.rendezvous import (
+    RendezvousConnectionError,
     RendezvousInfo,
     RendezvousParameters,
+    RendezvousStateError,
     RendezvousTimeoutError,
 )
 
+from lm_resiliency.integrations.torchrun import create_rendezvous_handler
 from lm_resiliency.integrations.torchrun._protocol import (
     ProtocolValidationError,
     RestartContext,
@@ -180,6 +183,27 @@ def test_config_resolves_torchrun_fields(tmp_path: Path) -> None:
     assert config.worker_config == worker_config
 
 
+def test_public_entry_point_accepts_rendezvous_parameters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    params = RendezvousParameters(
+        backend="lm_resiliency",
+        endpoint=str(tmp_path / "rdzv"),
+        run_id=RUN_ID,
+        min_nodes=1,
+        max_nodes=1,
+        lm_resiliency_restart_context_path=str((tmp_path / "context.json").resolve()),
+    )
+    sentinel = object()
+    monkeypatch.setattr(
+        "lm_resiliency.integrations.torchrun._simple_runtime._create_rendezvous_handler",
+        lambda received: sentinel if received is params else None,
+    )
+
+    assert create_rendezvous_handler(params) is sentinel
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
@@ -311,6 +335,7 @@ def test_worker_config_is_the_automatic_adapter_opt_in(
             monkeypatch.delenv(name, raising=False)
 
     policy = (tmp_path / "worker.toml").resolve()
+    policy.write_text("schema_version = 1\n", encoding="utf-8")
     automatic = _create_rendezvous_handler(parameters("automatic", worker_config=policy))
     try:
         assert os.environ[activation] == "1"
@@ -546,13 +571,24 @@ def test_same_node_successor_plan_signals_job_restart(
 def test_ready_record_requires_matching_live_agent(tmp_path: Path) -> None:
     store = HashStore()
     active_a = SimpleRendezvousHandler(
-        replace(_config(tmp_path, "node-a"), join_timeout_ms=50),
+        replace(_config(tmp_path, "node-a"), join_timeout_ms=1_000),
         store=store,
         local_addr="127.0.0.1",
     )
     inactive_b = _handler(tmp_path, store, "node-b")
     assert inactive_b.shutdown()
-    store.set(active_a._ready_key(0, "node-b"), b"stale-agent")
+    store.set(
+        active_a._ready_key(0, "node-b"),
+        json.dumps(
+            {
+                "agent_id": "stale-agent",
+                "policy_digest": active_a._worker_policy_digest,
+                "schema_version": 1,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8"),
+    )
     store.set(
         active_a._heartbeat_key("node-b"),
         json.dumps(
@@ -568,6 +604,89 @@ def test_ready_record_requires_matching_live_agent(tmp_path: Path) -> None:
         active_a.next_rendezvous()
 
     assert active_a.shutdown()
+
+
+def test_assigned_nodes_must_agree_on_worker_policy(tmp_path: Path) -> None:
+    store = HashStore()
+    policy_a = (tmp_path / "a.toml").resolve()
+    policy_b = (tmp_path / "b.toml").resolve()
+    policy_a.write_text("schema_version = 1\ninterval = 1\n", encoding="utf-8")
+    policy_b.write_text("schema_version = 1\ninterval = 2\n", encoding="utf-8")
+    active_a = SimpleRendezvousHandler(
+        replace(_config(tmp_path, "node-a"), worker_config=policy_a),
+        store=store,
+        local_addr="127.0.0.1",
+    )
+    active_b = SimpleRendezvousHandler(
+        replace(_config(tmp_path, "node-b"), worker_config=policy_b),
+        store=store,
+        local_addr="127.0.0.1",
+    )
+    thread_a, result_a = _start(active_a)
+    thread_b, result_b = _start(active_b)
+
+    with pytest.raises(RendezvousStateError, match="worker policy"):
+        _result(thread_a, result_a)
+    with pytest.raises(RendezvousStateError, match="worker policy"):
+        _result(thread_b, result_b)
+
+    assert active_a.shutdown()
+    assert active_b.shutdown()
+
+
+def test_worker_retry_waits_for_manager_successor(tmp_path: Path) -> None:
+    store = HashStore()
+    active_a = SimpleRendezvousHandler(
+        replace(_config(tmp_path, "node-a"), join_timeout_ms=1_000),
+        store=store,
+        local_addr="127.0.0.1",
+    )
+    active_b = SimpleRendezvousHandler(
+        replace(_config(tmp_path, "node-b"), join_timeout_ms=1_000),
+        store=store,
+        local_addr="127.0.0.1",
+    )
+    thread_a, result_a = _start(active_a)
+    thread_b, result_b = _start(active_b)
+    _result(thread_a, result_a)
+    _result(thread_b, result_b)
+
+    with pytest.raises(RendezvousTimeoutError, match="successor generation"):
+        active_a.next_rendezvous()
+
+    assert active_a.shutdown()
+    assert active_b.shutdown()
+
+
+def test_failed_bootstrap_consumes_generation_until_successor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = HashStore()
+    handler = SimpleRendezvousHandler(
+        replace(
+            _config(tmp_path, "node-a"),
+            min_nodes=1,
+            max_nodes=1,
+            join_timeout_ms=1_000,
+        ),
+        store=store,
+        local_addr="127.0.0.1",
+    )
+    monkeypatch.setattr(
+        handler,
+        "_build_bootstrap",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RendezvousConnectionError("bootstrap failed")
+        ),
+    )
+
+    with pytest.raises(RendezvousConnectionError, match="bootstrap failed"):
+        handler.next_rendezvous()
+    with pytest.raises(RendezvousTimeoutError, match="successor generation"):
+        handler.next_rendezvous()
+
+    assert handler.shutdown()
 
 
 def test_wait_for_group_abandons_superseded_generation(tmp_path: Path) -> None:

@@ -128,6 +128,7 @@ class MegatronResiliency:
         extra_state_fn: Callable[[], dict[str, Any]] | None = None,
         load_extra_state_fn: Callable[[dict[str, Any]], None] | None = None,
         durable_checkpoint: DurableCheckpointConfig | None = None,
+        expected_topology_id: str | None = None,
     ) -> None:
         self._model = model
         self._optimizer = optimizer
@@ -167,6 +168,7 @@ class MegatronResiliency:
             manager_factory=InMemoryCheckpointManager,
             parallelism_info_fn=self._adapter.get_parallelism_info,
             process_group=self._checkpoint_gloo_group,
+            expected_topology_id=expected_topology_id,
         )
         # SCOUT: layer replay detection
         self._replay_harness: ModelReplayHarness | None = None
@@ -273,7 +275,12 @@ class MegatronResiliency:
             optimizer_step_tensors=optimizer_step_tensors,
         )
 
-    def try_recover(self, mode: RecoveryMode | str | None = None) -> int:
+    def try_recover(
+        self,
+        mode: RecoveryMode | str | None = None,
+        *,
+        step: int | None = None,
+    ) -> int:
         """Attempt fast recovery from in-memory checkpoint.
 
         All ranks must call this collectively. Returns the recovered step
@@ -285,7 +292,7 @@ class MegatronResiliency:
         if self._ckpt_manager is None:
             return -1
 
-        result = self._ckpt_manager.load_tensors(mode=mode)
+        result = self._ckpt_manager.load_tensors(mode=mode, step=step)
         if result is None:
             return -1
 
@@ -534,6 +541,8 @@ def enable_resiliency(
     load_fallback: Callable[[], int | None] | None = None,
     durable_checkpoint: DurableCheckpointConfig | None = None,
     recovery_mode: RecoveryMode | str | None = None,
+    _recovery_step: int | None = None,
+    _expected_topology_id: str | None = None,
 ) -> MegatronResiliency:
     """Enable GEMINI + SCOUT for a megatron-core training job. One call.
 
@@ -602,10 +611,11 @@ def enable_resiliency(
         extra_state_fn=extra_state_fn,
         load_extra_state_fn=load_extra_state_fn,
         durable_checkpoint=durable_checkpoint,
+        expected_topology_id=_expected_topology_id,
     )
     _bind_orchestration(orchestration, resiliency)
 
-    recover_with_fallback(resiliency, load_fallback, recovery_mode)
+    recover_with_fallback(resiliency, load_fallback, recovery_mode, _recovery_step)
 
     register_automatic_cleanup(resiliency)
     return resiliency

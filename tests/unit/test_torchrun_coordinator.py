@@ -102,7 +102,6 @@ def test_coordinator_rejects_stale_or_uncommitted_manager_state() -> None:
             request=_request(generation=0),
             local_world_size=1,
         )
-
     first = coordinator.publish_successor(
         generation=0,
         active_node_ids=("node-a", "node-b"),
@@ -112,6 +111,15 @@ def test_coordinator_rejects_stale_or_uncommitted_manager_state() -> None:
         replacement=(1, "node-c"),
     )
 
+    with pytest.raises(ValueError, match="not registered"):
+        coordinator.publish_successor(
+            generation=1,
+            active_node_ids=first.active_node_ids,
+            quarantined_node_ids=first.quarantined_node_ids,
+            request=_request(generation=1),
+            local_world_size=1,
+            replacement=(0, "node-unregistered"),
+        )
     with pytest.raises(RuntimeError, match="stale"):
         coordinator.publish_successor(
             generation=0,

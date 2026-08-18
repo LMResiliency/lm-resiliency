@@ -40,7 +40,7 @@ lm-resiliency-discover-moe-regimes = "lm_resiliency.cli.discover_moe_regimes:mai
 lm-resiliency-quickstart = "lm_resiliency.quickstart:main"
 
 [project.entry-points."torchrun.handlers"]
-lm_resiliency = "lm_resiliency.integrations.torchrun:get_rendezvous_handler_creator"
+lm_resiliency = "lm_resiliency.integrations.torchrun:create_rendezvous_handler"
 
 [project.urls]
 Homepage = "https://github.com/LMResiliency/lm-resiliency"

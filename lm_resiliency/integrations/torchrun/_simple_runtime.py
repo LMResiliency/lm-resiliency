@@ -38,6 +38,7 @@ _BACKEND = "lm_resiliency"
 _PREFIX = "lm_resiliency/simple/v1"
 _MAX_CONTEXT_BYTES = 1 << 20
 _MAX_REGISTRATION_BYTES = 1 << 20
+_MAX_WORKER_CONFIG_BYTES = 1 << 20
 _MACHINE_ID_PATH_ENV = "LM_RESILIENCY_MACHINE_ID_PATH"
 _DEFAULT_MACHINE_ID_PATH = Path("/etc/machine-id")
 _ALLOWED_CONFIG = {
@@ -263,6 +264,7 @@ class SimpleRecoveryPlanStore:
         self._generation_key = f"{self._prefix}/generation"
         self._registrations_key = f"{self._prefix}/initial/registrations"
         self._initial_nodes_key = f"{self._prefix}/initial/nodes"
+        self._max_nodes_key = f"{self._prefix}/initial/max_nodes"
         self._store.compare_set(self._generation_key, b"", b"0")
 
     @property
@@ -276,6 +278,14 @@ class SimpleRecoveryPlanStore:
         node_id = _nonempty(node_id, "node_id")
         agent_id = _nonempty(agent_id, "agent_id")
         _positive_int(max_nodes, "max_nodes")
+        encoded_max_nodes = str(max_nodes).encode("ascii")
+        stored_max_nodes = self._store.compare_set(
+            self._max_nodes_key,
+            b"",
+            encoded_max_nodes,
+        )
+        if stored_max_nodes != encoded_max_nodes:
+            raise RecoveryPlanCorrupt("torchrun agents disagree on max_nodes")
         record = _canonical_json(
             {
                 "agent_id": agent_id,
@@ -317,9 +327,26 @@ class SimpleRecoveryPlanStore:
             return None
         return self._decode_initial_nodes(self._store.get(self._initial_nodes_key))
 
-    def registered_nodes(self, *, max_nodes: int) -> tuple[str, ...]:
+    def registered_nodes(self, *, max_nodes: int | None = None) -> tuple[str, ...]:
+        if self._store.check([self._max_nodes_key]):
+            committed_max_nodes = _decode_positive_integer(
+                self._store.get(self._max_nodes_key),
+                "registered max_nodes",
+            )
+        elif max_nodes is not None:
+            committed_max_nodes = _positive_int(max_nodes, "max_nodes")
+            self._store.compare_set(
+                self._max_nodes_key,
+                b"",
+                str(committed_max_nodes).encode("ascii"),
+            )
+        else:
+            raise RecoveryPlanCorrupt("registered allocation is missing max_nodes")
+        if max_nodes is not None and max_nodes != committed_max_nodes:
+            raise RecoveryPlanCorrupt("manager max_nodes does not match registered allocation")
         return tuple(
-            node_id for node_id, _agent_id in self._decode_registrations(max_nodes=max_nodes)
+            node_id
+            for node_id, _agent_id in self._decode_registrations(max_nodes=committed_max_nodes)
         )
 
     def read(self, generation: int) -> RestartPlan | None:
@@ -502,6 +529,7 @@ class SimpleRendezvousHandler(RendezvousHandler):
         self._last_assignment: tuple[_NodeAssignment, ...] = ()
         self._heartbeat_observations: dict[str, tuple[str, int, float, bool]] = {}
         self._heartbeat_observation_lock = threading.Lock()
+        self._worker_policy_digest = _worker_policy_digest(config.worker_config)
         self._heartbeat.start()
 
     @property
@@ -520,6 +548,13 @@ class SimpleRendezvousHandler(RendezvousHandler):
             self._raise_if_closed()
             self._raise_heartbeat_error()
             generation = self._plans.current_generation()
+            if self._last_generation is not None and generation <= self._last_generation:
+                if self._monotonic_clock() >= admission_deadline:
+                    raise RendezvousTimeoutError(
+                        "timed out waiting for a manager-owned successor generation"
+                    )
+                self._closed.wait(self._config.poll_interval_ms / 1_000)
+                continue
             plan = self._plans.read(generation)
             assignment = self._assignment(generation, plan)
             if assignment is None:
@@ -553,7 +588,13 @@ class SimpleRendezvousHandler(RendezvousHandler):
                     raise RendezvousStateError("failed to publish restart context") from error
             self._store.set(
                 self._ready_key(generation, self._config.node_id),
-                self._agent_id.encode("utf-8"),
+                _canonical_json(
+                    {
+                        "agent_id": self._agent_id,
+                        "policy_digest": self._worker_policy_digest,
+                        "schema_version": 1,
+                    }
+                ),
             )
             if not self._wait_for_group(generation, assignment, deadline):
                 continue
@@ -565,12 +606,12 @@ class SimpleRendezvousHandler(RendezvousHandler):
                 f"{self._plans.prefix}/bootstrap/{generation}/",
                 self._store,
             )
+            self._last_generation = generation
+            self._last_assignment = assignment
             bootstrap = self._build_bootstrap(slot, group_store, deadline)
             from .worker_adapter import configure_worker_generation_environment
 
             configure_worker_generation_environment(generation)
-            self._last_generation = generation
-            self._last_assignment = assignment
             return RendezvousInfo(
                 store=group_store,
                 rank=slot,
@@ -657,10 +698,22 @@ class SimpleRendezvousHandler(RendezvousHandler):
             self._raise_heartbeat_error()
             if self._plans.current_generation() != generation:
                 return False
-            if self._store.check(keys) and all(
-                self._ready_agent_is_live(generation, item.node_id) for item in assignment
-            ):
-                return True
+            if self._store.check(keys):
+                records = [
+                    self._ready_agent_record(generation, item.node_id) for item in assignment
+                ]
+                if all(record is not None for record in records):
+                    digests = {record[1] for record in records if record is not None}
+                    if len(digests) != 1:
+                        raise RendezvousStateError(
+                            "assigned nodes disagree on the LM Resiliency worker policy"
+                        )
+                    if all(
+                        self._heartbeat_is_live(item.node_id, agent_id=record[0])
+                        for item, record in zip(assignment, records)
+                        if record is not None
+                    ):
+                        return True
             if self._monotonic_clock() >= deadline:
                 raise RendezvousTimeoutError("timed out waiting for assigned nodes")
             self._closed.wait(self._config.poll_interval_ms / 1_000)
@@ -708,12 +761,27 @@ class SimpleRendezvousHandler(RendezvousHandler):
                 return
             self._closed.wait(interval)
 
-    def _ready_agent_is_live(self, generation: int, node_id: str) -> bool:
+    def _ready_agent_record(self, generation: int, node_id: str) -> tuple[str, str] | None:
         try:
-            agent_id = self._store.get(self._ready_key(generation, node_id)).decode("utf-8")
-        except (UnicodeError, ValueError):
-            return False
-        return bool(agent_id) and self._heartbeat_is_live(node_id, agent_id=agent_id)
+            payload = json.loads(
+                self._store.get(self._ready_key(generation, node_id)),
+                object_pairs_hook=_reject_duplicate_fields,
+            )
+        except (TypeError, ValueError, UnicodeError, json.JSONDecodeError):
+            return None
+        if (
+            not isinstance(payload, Mapping)
+            or set(payload) != {"agent_id", "policy_digest", "schema_version"}
+            or type(payload.get("schema_version")) is not int
+            or payload.get("schema_version") != 1
+        ):
+            return None
+        try:
+            agent_id = _nonempty(payload.get("agent_id"), "agent_id")
+            policy_digest = _nonempty(payload.get("policy_digest"), "policy_digest")
+        except ValueError:
+            return None
+        return agent_id, policy_digest
 
     def _heartbeat_is_live(self, node_id: str, *, agent_id: str | None = None) -> bool:
         key = self._heartbeat_key(node_id)
@@ -823,6 +891,7 @@ def _create_rendezvous_handler(params: RendezvousParameters) -> RendezvousHandle
                     node_id=config.node_id,
                     restart_context_path=config.restart_context_path,
                     config_path=config.worker_config,
+                    policy_digest=handler._worker_policy_digest,
                 )
             except Exception as error:
                 handler.shutdown()
@@ -843,6 +912,29 @@ def _optional_nonempty(value: object, name: str) -> str | None:
 
 def _optional_int(value: object, name: str, default: int) -> int:
     return default if value is None else _positive_int(value, name)
+
+
+def _decode_positive_integer(encoded: bytes, name: str) -> int:
+    try:
+        value = encoded.decode("ascii")
+    except UnicodeError as error:
+        raise RecoveryPlanCorrupt(f"{name} is malformed") from error
+    try:
+        return _positive_int(value, name)
+    except ValueError as error:
+        raise RecoveryPlanCorrupt(f"{name} is malformed") from error
+
+
+def _worker_policy_digest(path: Path | None) -> str:
+    if path is None:
+        return hashlib.sha256(b"lm-resiliency/worker-policy/none/v1").hexdigest()
+    try:
+        encoded = path.read_bytes()
+    except OSError as error:
+        raise SimpleRuntimeError(f"failed to read worker config {path}") from error
+    if len(encoded) > _MAX_WORKER_CONFIG_BYTES:
+        raise SimpleRuntimeError("worker config is too large")
+    return hashlib.sha256(b"lm-resiliency/worker-policy/v1\0" + encoded).hexdigest()
 
 
 def _positive_int(value: object, name: str) -> int:

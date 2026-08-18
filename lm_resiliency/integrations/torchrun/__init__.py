@@ -27,6 +27,16 @@ def get_rendezvous_handler_creator() -> Callable[["RendezvousParameters"], "Rend
     return create
 
 
+def create_rendezvous_handler(
+    params: "RendezvousParameters",
+) -> "RendezvousHandler":
+    """Create the LM Resiliency rendezvous handler for a torchrun entry point."""
+
+    from ._simple_runtime import _create_rendezvous_handler
+
+    return _create_rendezvous_handler(params)
+
+
 from .coordinator import (  # noqa: E402
     TorchrunInitialPlacement,
     TorchrunRecoveryCoordinator,
@@ -62,6 +72,7 @@ __all__ = [
     "TorchrunWorkerAdapterError",
     "TorchrunWorkerContext",
     "derive_torchrun_node_id",
+    "create_rendezvous_handler",
     "get_torchrun_worker_context",
     "get_rendezvous_handler_creator",
 ]

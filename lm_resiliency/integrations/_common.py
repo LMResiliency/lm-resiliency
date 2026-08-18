@@ -31,6 +31,7 @@ def build_checkpoint_manager(
     parallelism_info: Any = _UNSET,
     parallelism_info_fn: Callable[[], Any] | None = None,
     process_group: Any = _UNSET,
+    expected_topology_id: str | None = None,
 ) -> tuple[Any | None, int]:
     """Create an enabled GEMINI checkpoint manager."""
     if config is None or not config.enable or config.interval <= 0:
@@ -42,6 +43,8 @@ def build_checkpoint_manager(
         manager_kwargs["parallelism_info"] = parallelism_info
     if process_group is not _UNSET:
         manager_kwargs["process_group"] = process_group
+    if expected_topology_id is not None:
+        manager_kwargs["expected_topology_id"] = expected_topology_id
     return manager_factory(**manager_kwargs), config.interval
 
 
@@ -183,9 +186,14 @@ def recover_with_fallback(
     resiliency: Any,
     load_fallback: Callable[[], int | None] | None,
     recovery_mode: RecoveryMode | str | None = None,
+    recovery_step: int | None = None,
 ) -> None:
     """Try GEMINI first and apply a framework fallback resume step."""
-    recovered = resiliency.try_recover(mode=recovery_mode)
+    recovered = (
+        resiliency.try_recover(mode=recovery_mode)
+        if recovery_step is None
+        else resiliency.try_recover(mode=recovery_mode, step=recovery_step)
+    )
     if recovered >= 0:
         return
     durable = getattr(

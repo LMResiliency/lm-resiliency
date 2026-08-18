@@ -40,8 +40,9 @@ policy. Framework imports select the built-in adapter, which is qualified
 against the same supported framework ranges as the corresponding explicit
 `enable_resiliency()` integration:
 
-- Native PyTorch observes one root module and optimizer, then delegates topology
-  discovery to the existing PyTorch integration.
+- Native PyTorch observes a DDP/FSDP all-rank construction boundary and one
+  matching optimizer, then delegates topology discovery to the existing
+  PyTorch integration. Single-process jobs may attach at the root forward.
 - TorchTitan attaches to `torchtitan.train.Trainer.train` and passes the
   initialized trainer unchanged.
 - Megatron Core attaches to
@@ -54,6 +55,8 @@ PyTorch is tentative until attachment because all higher-level frameworks
 import it. Importing more than one higher-level supported framework before
 attachment fails closed. Worker width comes from torchrun's standard
 `LOCAL_WORLD_SIZE`; replacement contexts must agree with that value.
+Assigned nodes must agree on the exact worker-policy digest, and bootstrap
+revalidates the policy bytes before adapter installation.
 Automatic bootstrap publishes the manager-selected resume position through
 `LM_RESILIENCY_TORCHRUN_CHECKPOINT_STEP`, allowing zero-import applications to
 restore deterministic input position.
@@ -62,7 +65,8 @@ a subsequent `engine.load_checkpoint()` call. A custom adapter is required when
 an application must coordinate DeepSpeed framework client state with GEMINI
 recovery.
 Built-in adapters close their resiliency handles before the corresponding
-framework or default process-group teardown.
+framework or default process-group teardown. Framework teardown still runs if
+handle close raises, while the close failure remains the primary error.
 Each rendezvous agent derives its physical identity from `/etc/machine-id`,
 publishes only a domain-separated hash, and participates in automatic
 generation-zero admission. Duplicate machine identities fail closed.

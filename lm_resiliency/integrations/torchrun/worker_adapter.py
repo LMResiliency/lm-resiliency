@@ -9,6 +9,7 @@ as the module imports its training stack.
 from __future__ import annotations
 
 import builtins
+import hashlib
 import importlib
 import importlib.util
 import inspect
@@ -28,6 +29,7 @@ _toml = importlib.import_module(
 
 _ACTIVATE_ENV = "LM_RESILIENCY_TORCHRUN_BOOTSTRAP"
 _CONFIG_ENV = "LM_RESILIENCY_TORCHRUN_WORKER_CONFIG"
+_POLICY_DIGEST_ENV = "LM_RESILIENCY_TORCHRUN_WORKER_POLICY_DIGEST"
 _RUN_ID_ENV = "LM_RESILIENCY_TORCHRUN_RUN_ID"
 _NODE_ID_ENV = "LM_RESILIENCY_TORCHRUN_NODE_ID"
 _LOCAL_WORLD_SIZE_ENV = "LOCAL_WORLD_SIZE"
@@ -71,6 +73,7 @@ class TorchrunWorkerContext:
     checkpoint_id: str | None = None
     checkpoint_source: str | None = None
     recovery_mode: str | None = None
+    topology_digest: str | None = None
     restart_deadline_unix_ms: int | None = None
 
     def __post_init__(self) -> None:
@@ -118,12 +121,15 @@ class TorchrunWorkerContext:
             raise ValueError("checkpoint_source must be 'gemini' or 'durable'")
         if self.recovery_mode not in {None, "latest", "recovery_verified"}:
             raise ValueError("recovery_mode must be 'latest' or 'recovery_verified'")
+        if self.topology_digest is not None:
+            _nonempty(self.topology_digest, "topology_digest")
         recovery_fields = (
             self.logical_node_slot,
             self.first_global_rank,
             self.checkpoint_step,
             self.checkpoint_source,
             self.recovery_mode,
+            self.topology_digest,
             self.restart_deadline_unix_ms,
         )
         if self.generation == 0 and (
@@ -242,7 +248,8 @@ class _SingleAttachAdapter:
         def destroy_process_group(group: Any | None = None) -> None:
             world = getattr(dist.group, "WORLD", None)
             if group is None or group is world:
-                adapter.close()
+                _close_before_teardown(adapter, lambda: original(group))
+                return
             original(group)
 
         dist.destroy_process_group = destroy_process_group
@@ -333,21 +340,35 @@ class NativePyTorchAdapter(_SingleAttachAdapter):
             on_attach=on_attach,
         )
         self._optimizers: list[weakref.ReferenceType[Any]] = []
+        self._distributed_models: list[weakref.ReferenceType[Any]] = []
         self._attached_model: Any | None = None
         self._attached_optimizer: Any | None = None
         self._original_module_call: Callable[..., Any] | None = None
         self._original_optimizer_init: Callable[..., None] | None = None
+        self._original_ddp_init: Callable[..., None] | None = None
+        self._original_fsdp_init: Callable[..., None] | None = None
+        self._original_fully_shard: Callable[..., Any] | None = None
+        self._optimizer_initializers: list[tuple[type[Any], Callable[..., None]]] = []
+        self._optimizer_init_state = threading.local()
 
     def _install_hook(self) -> Callable[[], None]:
         import torch.nn
         import torch.optim
+        from torch.nn.parallel import DistributedDataParallel
 
         self._original_module_call = torch.nn.Module.__call__
         self._original_optimizer_init = torch.optim.Optimizer.__init__
+        self._original_ddp_init = DistributedDataParallel.__init__
         adapter = self
 
         def module_call(instance: Any, *args: Any, **kwargs: Any) -> Any:
-            adapter._attach_if_candidate(instance)
+            if adapter._distributed_world_size() == 1:
+                adapter._attach_if_candidate(instance)
+            elif not adapter.attached:
+                raise TorchrunWorkerAdapterError(
+                    "distributed native PyTorch automatic attachment requires a "
+                    "DDP or FSDP construction boundary on every rank"
+                )
             assert adapter._original_module_call is not None
             return adapter._original_module_call(instance, *args, **kwargs)
 
@@ -357,18 +378,118 @@ class NativePyTorchAdapter(_SingleAttachAdapter):
             with adapter._lock:
                 adapter._optimizers.append(weakref.ref(instance))
 
+        def ddp_init(instance: Any, *args: Any, **kwargs: Any) -> None:
+            assert adapter._original_ddp_init is not None
+            adapter._original_ddp_init(instance, *args, **kwargs)
+            adapter._register_distributed_model(instance)
+
         torch.nn.Module.__call__ = module_call
         torch.optim.Optimizer.__init__ = optimizer_init
+        DistributedDataParallel.__init__ = ddp_init
+        for optimizer_type in _optimizer_types(torch.optim.Optimizer):
+            original_init = optimizer_type.__dict__.get("__init__")
+            if not callable(original_init):
+                continue
+
+            def concrete_optimizer_init(
+                instance: Any,
+                *args: Any,
+                _original: Callable[..., None] = original_init,
+                **kwargs: Any,
+            ) -> None:
+                depth = getattr(adapter._optimizer_init_state, "depth", 0)
+                adapter._optimizer_init_state.depth = depth + 1
+                try:
+                    _original(instance, *args, **kwargs)
+                finally:
+                    adapter._optimizer_init_state.depth = depth
+                if depth == 0:
+                    adapter._attach_distributed_candidate()
+
+            self._optimizer_initializers.append((optimizer_type, original_init))
+            optimizer_type.__init__ = concrete_optimizer_init
+
+        fsdp_type = None
+        fully_shard_module = None
+        try:
+            from torch.distributed.fsdp import FullyShardedDataParallel
+
+            fsdp_type = FullyShardedDataParallel
+            self._original_fsdp_init = fsdp_type.__init__
+
+            def fsdp_init(instance: Any, *args: Any, **kwargs: Any) -> None:
+                assert adapter._original_fsdp_init is not None
+                adapter._original_fsdp_init(instance, *args, **kwargs)
+                adapter._register_distributed_model(instance)
+
+            fsdp_type.__init__ = fsdp_init
+        except ImportError:
+            pass
+        try:
+            fully_shard_module = importlib.import_module("torch.distributed.fsdp")
+            fully_shard = getattr(fully_shard_module, "fully_shard", None)
+            if callable(fully_shard):
+                self._original_fully_shard = fully_shard
+
+                def wrapped_fully_shard(
+                    module: Any,
+                    *args: Any,
+                    **kwargs: Any,
+                ) -> Any:
+                    assert adapter._original_fully_shard is not None
+                    result = adapter._original_fully_shard(module, *args, **kwargs)
+                    adapter._register_distributed_model(module)
+                    return result
+
+                fully_shard_module.fully_shard = wrapped_fully_shard
+        except ImportError:
+            pass
 
         def restore() -> None:
             assert self._original_module_call is not None
             assert self._original_optimizer_init is not None
+            assert self._original_ddp_init is not None
             torch.nn.Module.__call__ = self._original_module_call
             torch.optim.Optimizer.__init__ = self._original_optimizer_init
+            DistributedDataParallel.__init__ = self._original_ddp_init
+            for optimizer_type, original_init in self._optimizer_initializers:
+                optimizer_type.__init__ = original_init
+            self._optimizer_initializers.clear()
+            if fsdp_type is not None and self._original_fsdp_init is not None:
+                fsdp_type.__init__ = self._original_fsdp_init
+            if fully_shard_module is not None and self._original_fully_shard is not None:
+                fully_shard_module.fully_shard = self._original_fully_shard
 
         return restore
 
-    def _attach_if_candidate(self, model: Any) -> None:
+    @staticmethod
+    def _distributed_world_size() -> int:
+        import torch.distributed as dist
+
+        return dist.get_world_size() if dist.is_initialized() else 1
+
+    def _register_distributed_model(self, model: Any) -> None:
+        with self._lock:
+            self._distributed_models.append(weakref.ref(model))
+        self._attach_distributed_candidate()
+
+    def _attach_distributed_candidate(self) -> None:
+        if self._distributed_world_size() <= 1:
+            return
+        with self._lock:
+            candidates = [
+                model
+                for reference in self._distributed_models
+                if (model := reference()) is not None
+            ]
+        if len(candidates) > 1:
+            raise TorchrunWorkerAdapterError(
+                "cannot attach native PyTorch adapter: multiple distributed root models"
+            )
+        if candidates:
+            self._attach_if_candidate(candidates[0], require_optimizer=False)
+
+    def _attach_if_candidate(self, model: Any, *, require_optimizer: bool = True) -> None:
         with self._lock:
             if self._handle is not None:
                 return
@@ -396,6 +517,8 @@ class NativePyTorchAdapter(_SingleAttachAdapter):
             ]
             if len(matches) != 1:
                 if not optimizers:
+                    if not require_optimizer:
+                        return
                     reason = "no optimizer was constructed before the first model forward"
                 elif not matches:
                     reason = "no optimizer owns exactly one model's trainable parameters"
@@ -420,6 +543,7 @@ class NativePyTorchAdapter(_SingleAttachAdapter):
             checkpoint=checkpoint,
             replay=replay,
             recovery_mode=self._context.recovery_mode,
+            **_recovery_options(self._context),
         )
 
 
@@ -460,6 +584,7 @@ class TorchTitanWorkerAdapter(_SingleAttachAdapter):
             ckpt_config=checkpoint,
             detection_config=replay,
             recovery_mode=self._context.recovery_mode,
+            **_recovery_options(self._context),
         )
 
 
@@ -527,12 +652,15 @@ class MegatronWorkerAdapter(_SingleAttachAdapter):
         args = module.get_args()
         holder: dict[str, Any] = {}
 
-        def capture_loop_state() -> dict[str, dict[str, int]]:
+        def capture_loop_state() -> dict[str, Any]:
             handle = holder.get("handle")
             if handle is None:
                 raise TorchrunWorkerAdapterError(
                     "Megatron loop state was captured before resiliency attachment completed"
                 )
+            state_dict = getattr(scheduler, "state_dict", None)
+            if not callable(state_dict):
+                raise TorchrunWorkerAdapterError("Megatron scheduler does not expose state_dict()")
             return {
                 "torchrun_megatron_loop": {
                     "iteration": _nonnegative_int(handle.step_count, "Megatron iteration"),
@@ -544,6 +672,7 @@ class MegatronWorkerAdapter(_SingleAttachAdapter):
                         args.skipped_train_samples,
                         "Megatron skipped_train_samples",
                     ),
+                    "scheduler": state_dict(),
                 }
             }
 
@@ -557,6 +686,7 @@ class MegatronWorkerAdapter(_SingleAttachAdapter):
                 "iteration",
                 "consumed_train_samples",
                 "skipped_train_samples",
+                "scheduler",
             }
             if set(loop_state) != expected:
                 raise TorchrunWorkerAdapterError(
@@ -574,6 +704,12 @@ class MegatronWorkerAdapter(_SingleAttachAdapter):
                 loop_state["skipped_train_samples"],
                 "Megatron skipped_train_samples",
             )
+            load_state_dict = getattr(scheduler, "load_state_dict", None)
+            if not callable(load_state_dict):
+                raise TorchrunWorkerAdapterError(
+                    "Megatron scheduler does not expose load_state_dict()"
+                )
+            load_state_dict(loop_state["scheduler"])
 
         checkpoint, replay, root = _feature_options(self._options, self._context)
         handle = enable_resiliency(
@@ -588,6 +724,7 @@ class MegatronWorkerAdapter(_SingleAttachAdapter):
             recovery_mode=self._context.recovery_mode,
             extra_state_fn=capture_loop_state,
             load_extra_state_fn=restore_loop_state,
+            **_recovery_options(self._context),
         )
         holder["handle"] = handle
         args.iteration = handle.step_count
@@ -600,8 +737,10 @@ class MegatronWorkerAdapter(_SingleAttachAdapter):
         adapter = self
 
         def destroy_model_parallel(*args: Any, **kwargs: Any) -> Any:
-            adapter.close()
-            return original(*args, **kwargs)
+            return _close_before_teardown(
+                adapter,
+                lambda: original(*args, **kwargs),
+            )
 
         module.destroy_model_parallel = destroy_model_parallel
 
@@ -667,6 +806,7 @@ class DeepSpeedWorkerAdapter(_SingleAttachAdapter):
             ckpt_config=checkpoint,
             detection_config=replay,
             recovery_mode=self._context.recovery_mode,
+            **_recovery_options(self._context),
         )
         self._engine = engine
         return handle
@@ -698,8 +838,10 @@ class DeepSpeedWorkerAdapter(_SingleAttachAdapter):
         adapter = self
 
         def destroy(*args: Any, **kwargs: Any) -> Any:
-            adapter.close()
-            return original(*args, **kwargs)
+            return _close_before_teardown(
+                adapter,
+                lambda: original(*args, **kwargs),
+            )
 
         engine.destroy = destroy
 
@@ -829,27 +971,53 @@ class _AutoFrameworkAdapter:
         **kwargs: Any,
     ) -> Any:
         depth = getattr(self._state, "depth", 0)
-        if depth == 0:
-            self._state.observed_roots = []
+        outermost = depth == 0
+        if outermost:
+            with self._lock:
+                self._state.import_snapshot = (
+                    self._selected_framework,
+                    self._native is not None,
+                )
         self._state.depth = depth + 1
-        completed = False
         try:
             result = operation(*args, **kwargs)
-            completed = True
+            if not getattr(self._state, "suppress_observation", False):
+                root = self._supported_root(observed_name)
+                if root is not None:
+                    self._observe_root(root)
             return result
+        except BaseException:
+            if outermost:
+                selected_framework, had_native = self._state.import_snapshot
+                self._rollback_import_selection(selected_framework, had_native)
+            raise
         finally:
             self._state.depth = depth
-            if completed and not getattr(self._state, "suppress_observation", False):
-                root = self._supported_root(observed_name)
-                observed_roots = self._state.observed_roots
-                if root is not None and root not in observed_roots:
-                    observed_roots.append(root)
-            if depth == 0:
-                observed_roots = tuple(self._state.observed_roots)
-                del self._state.observed_roots
-                if completed:
-                    for root in observed_roots:
-                        self._observe_root(root)
+            if outermost:
+                del self._state.import_snapshot
+
+    def _rollback_import_selection(
+        self,
+        selected_framework: str | None,
+        had_native: bool,
+    ) -> None:
+        with self._lock:
+            if self._selected_framework == selected_framework and (
+                (self._native is not None) == had_native
+            ):
+                return
+            delegates = tuple(
+                adapter for adapter in (self._delegate, self._native) if adapter is not None
+            )
+            self._delegate = None
+            self._native = None
+            self._selected_framework = selected_framework
+            self._inference_error = None
+        for adapter in delegates:
+            adapter.close()
+        if selected_framework is None and had_native:
+            with self._lock:
+                self._install_tentative_pytorch_locked()
 
     def _supported_root(self, module_name: str) -> str | None:
         if not isinstance(module_name, str) or not module_name or module_name.startswith("."):
@@ -978,7 +1146,10 @@ def bootstrap_worker_from_environment(
         generation_target = environ if isinstance(environ, MutableMapping) else os.environ
         generation_target[_GENERATION_ENV] = str(context.generation)
         generation_target[_CHECKPOINT_STEP_ENV] = str(context.checkpoint_step or 0)
-        options = _load_config(context.config_path)
+        options = _load_config(
+            context.config_path,
+            expected_digest=environ.get(_POLICY_DIGEST_ENV),
+        )
         adapter_spec = options.pop("adapter", None)
         if adapter_spec is None:
             adapter: TorchrunWorkerAdapter = _AutoFrameworkAdapter(options)
@@ -1050,6 +1221,7 @@ def disable_worker_bootstrap_environment(
     target = os.environ if environment is None else environment
     target.pop(_ACTIVATE_ENV, None)
     target.pop(_CONFIG_ENV, None)
+    target.pop(_POLICY_DIGEST_ENV, None)
 
 
 def configure_worker_bootstrap_environment(
@@ -1058,6 +1230,7 @@ def configure_worker_bootstrap_environment(
     node_id: str,
     restart_context_path: Path,
     config_path: Path | None,
+    policy_digest: str | None = None,
     environment: dict[str, str] | None = None,
 ) -> None:
     """Configure child-process environment for automatic worker bootstrap."""
@@ -1067,6 +1240,8 @@ def configure_worker_bootstrap_environment(
             raise TypeError("config_path must be pathlib.Path")
         if not config_path.is_absolute():
             raise ValueError("config_path must be absolute")
+    if policy_digest is not None:
+        policy_digest = _nonempty(policy_digest, "policy_digest")
     target = os.environ if environment is None else environment
     before = dict(target)
     configure_worker_context_environment(
@@ -1084,6 +1259,8 @@ def configure_worker_bootstrap_environment(
         target.clear()
         target.update(before)
         raise TorchrunWorkerAdapterError(f"conflicting worker environment {_CONFIG_ENV}")
+    if policy_digest is not None:
+        values[_POLICY_DIGEST_ENV] = policy_digest
     for name, value in values.items():
         existing = target.get(name)
         if existing is not None and existing != value:
@@ -1178,6 +1355,7 @@ def _context_from_environment(environment: Mapping[str, str]) -> TorchrunWorkerC
             "checkpoint_id": restart.checkpoint_id,
             "checkpoint_source": restart.checkpoint_source,
             "recovery_mode": restart.recovery_mode,
+            "topology_digest": restart.topology_digest,
             "restart_deadline_unix_ms": restart.restart_deadline_unix_ms,
         }
     return TorchrunWorkerContext(
@@ -1210,13 +1388,27 @@ def _load_custom_adapter(
     return adapter
 
 
-def _load_config(path: Path | None) -> dict[str, Any]:
+def _load_config(
+    path: Path | None,
+    *,
+    expected_digest: str | None = None,
+) -> dict[str, Any]:
     if path is None:
+        if expected_digest is not None:
+            raise TorchrunWorkerAdapterError(
+                "worker policy digest was configured without a worker config"
+            )
         return {}
     try:
-        with path.open("rb") as stream:
-            payload = _toml.load(stream)
+        encoded = path.read_bytes()
     except (OSError, _toml.TOMLDecodeError) as error:
+        raise TorchrunWorkerAdapterError(f"failed to read worker config {path}") from error
+    observed_digest = hashlib.sha256(b"lm-resiliency/worker-policy/v1\0" + encoded).hexdigest()
+    if expected_digest is not None and observed_digest != expected_digest:
+        raise TorchrunWorkerAdapterError("worker config changed after rendezvous policy agreement")
+    try:
+        payload = _toml.loads(encoded.decode("utf-8"))
+    except (UnicodeError, _toml.TOMLDecodeError) as error:
         raise TorchrunWorkerAdapterError(f"failed to read worker config {path}") from error
     if not isinstance(payload, dict):
         raise TorchrunWorkerAdapterError("worker config must be a TOML table")
@@ -1283,6 +1475,15 @@ def _feature_options(
             "enable_detection": enable_detection,
         },
     )
+
+
+def _recovery_options(context: TorchrunWorkerContext) -> dict[str, Any]:
+    if context.checkpoint_step is None:
+        return {}
+    return {
+        "_recovery_step": context.checkpoint_step,
+        "_expected_topology_id": context.topology_digest,
+    }
 
 
 def _dataclass_options(
@@ -1393,6 +1594,42 @@ def _config_bool(value: object, name: str) -> bool:
     if not isinstance(value, bool):
         raise TorchrunWorkerAdapterError(f"{name} must be a boolean")
     return value
+
+
+def _close_before_teardown(
+    adapter: _SingleAttachAdapter,
+    teardown: Callable[[], Any],
+) -> Any:
+    close_error: BaseException | None = None
+    close_traceback = None
+    try:
+        adapter.close()
+    except BaseException as error:
+        close_error = error
+        close_traceback = error.__traceback__
+    try:
+        result = teardown()
+    except BaseException as teardown_error:
+        if close_error is not None:
+            raise close_error.with_traceback(close_traceback) from teardown_error
+        raise
+    if close_error is not None:
+        raise close_error.with_traceback(close_traceback)
+    return result
+
+
+def _optimizer_types(root: type[Any]) -> tuple[type[Any], ...]:
+    result: list[type[Any]] = []
+    pending = list(root.__subclasses__())
+    seen: set[type[Any]] = set()
+    while pending:
+        optimizer_type = pending.pop()
+        if optimizer_type in seen:
+            continue
+        seen.add(optimizer_type)
+        result.append(optimizer_type)
+        pending.extend(optimizer_type.__subclasses__())
+    return tuple(result)
 
 
 def _reset_worker_adapter_for_tests() -> None:

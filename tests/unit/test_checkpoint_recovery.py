@@ -54,6 +54,44 @@ def test_flush_for_restart_own_shard_round_trip(tmp_path):
     reloaded_manager.close()
 
 
+def test_exact_manager_selected_step_never_falls_forward(tmp_path):
+    config = InMemoryCkptConfig(
+        enable=True,
+        interval=1,
+        disk_flush_interval=0,
+        disk_folder=str(tmp_path),
+        run_id="exact-step-run",
+    )
+    manager = InMemoryCheckpointManager(config)
+    manager.save({"w": torch.full((2,), 7.0)}, step=7)
+    manager.maybe_wait()
+    assert manager.flush_for_restart() == 7
+    manager.save({"w": torch.full((2,), 8.0)}, step=8)
+    manager.maybe_wait()
+    assert manager.flush_for_restart() == 8
+    manager.close()
+
+    resumed = InMemoryCheckpointManager(config)
+    exact = resumed.load(mode="latest", step=7)
+    assert exact is not None
+    assert exact[1] == 7
+    assert torch.equal(exact[0]["w"], torch.full((2,), 7.0))
+    assert resumed.load(mode="latest", step=6) is None
+    resumed.close()
+
+
+def test_checkpoint_manager_rejects_manager_topology_mismatch(tmp_path):
+    with pytest.raises(RuntimeError, match="manager-selected checkpoint topology"):
+        InMemoryCheckpointManager(
+            InMemoryCkptConfig(
+                enable=True,
+                disk_folder=str(tmp_path),
+                run_id="topology-run",
+            ),
+            expected_topology_id="not-the-live-topology",
+        )
+
+
 def test_fresh_run_cannot_discover_stale_node_local_checkpoint(tmp_path):
     first = InMemoryCheckpointManager(
         InMemoryCkptConfig(

@@ -32,6 +32,7 @@ def test_prepare_recovery_emits_exact_gemini_checkpoint_selection():
             "checkpoint_source": "gemini",
             "checkpoint_step": 24,
             "checkpoint_id": None,
+            "topology_digest": None,
             "all_ranks_accessible": True,
             "available": True,
             "reason": "accessible_straggler",
@@ -40,6 +41,24 @@ def test_prepare_recovery_emits_exact_gemini_checkpoint_selection():
     assert handle.last_recovery_decision == decisions[0]
     assert json.loads(json.dumps(decisions[0])) == decisions[0]
     manager.find_latest.assert_not_called()
+
+
+def test_recovery_decision_reports_checkpoint_topology_digest():
+    manager = MagicMock()
+    manager.local_recovery_step.return_value = 24
+    manager.topology_id = "checkpoint-topology"
+
+    decision = build_recovery_decision(
+        failure_kind="straggler",
+        recovery_mode=RecoveryMode.LATEST_GEMINI,
+        all_ranks_accessible=True,
+        reason="accessible_straggler",
+        checkpoint_manager=manager,
+        durable_checkpoint=None,
+        allow_collective=False,
+    )
+
+    assert decision["topology_digest"] == "checkpoint-topology"
 
 
 def test_replay_sdc_emits_recovery_decision_before_fault_report():
@@ -100,6 +119,7 @@ def test_replay_straggler_emits_latest_checkpoint_decision():
             "checkpoint_source": "gemini",
             "checkpoint_step": 21,
             "checkpoint_id": None,
+            "topology_digest": None,
             "all_ranks_accessible": True,
             "available": True,
             "reason": "replay_straggler_allows_latest_recovery",
@@ -132,6 +152,7 @@ def test_oob_hang_emits_conservative_noncollective_decision():
             "checkpoint_source": "gemini",
             "checkpoint_step": 18,
             "checkpoint_id": None,
+            "topology_digest": None,
             "all_ranks_accessible": False,
             "available": True,
             "reason": "oob_hang_requires_conservative_recovery",
@@ -166,6 +187,7 @@ def test_dataloader_stall_emits_latest_checkpoint_decision():
             "checkpoint_source": "gemini",
             "checkpoint_step": 19,
             "checkpoint_id": None,
+            "topology_digest": None,
             "all_ranks_accessible": True,
             "available": True,
             "reason": "dataloader_stall_allows_latest_recovery",
@@ -203,6 +225,7 @@ def test_checkpoint_stall_emits_latest_checkpoint_decision():
             "checkpoint_source": "gemini",
             "checkpoint_step": 21,
             "checkpoint_id": None,
+            "topology_digest": None,
             "all_ranks_accessible": True,
             "available": True,
             "reason": "checkpoint_io_stall_allows_latest_recovery",

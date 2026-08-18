@@ -87,6 +87,8 @@ def _wire_features(
     load_fallback: Callable[[], None] | None = None,
     durable_checkpoint: DurableCheckpointConfig | None = None,
     recovery_mode: RecoveryMode | str | None = None,
+    recovery_step: int | None = None,
+    expected_topology_id: str | None = None,
     step_hook_registrar: Callable[[Callable[[Any, Any, Any], None]], Any] | None = None,
 ) -> ResiliencyHandle:
     """Wire GEMINI checkpointing and/or SCOUT detection onto the optimizer.
@@ -175,6 +177,7 @@ def _wire_features(
             config=checkpoint,
             parallelism_info=parallelism_info,
             process_group=group,
+            expected_topology_id=expected_topology_id,
         )
         checkpoint_interval = checkpoint.interval
 
@@ -205,7 +208,7 @@ def _wire_features(
 
     recovered = False
     if state.ckpt_manager is not None:
-        result = state.ckpt_manager.load(mode=recovery_mode)
+        result = state.ckpt_manager.load(mode=recovery_mode, step=recovery_step)
         if result is not None:
             sd, step = result
             model.load_state_dict(sd["model"])

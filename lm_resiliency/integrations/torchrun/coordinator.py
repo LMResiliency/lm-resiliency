@@ -158,6 +158,9 @@ class TorchrunRecoveryCoordinator:
             failed_node_id = active[slot]
             if replacement_node_id in active or replacement_node_id in quarantined:
                 raise ValueError("replacement node is already active or quarantined")
+            registered = set(self._plans.registered_nodes())
+            if replacement_node_id not in registered:
+                raise ValueError("replacement node is not registered in this torchrun allocation")
             active[slot] = replacement_node_id
             quarantined.append(failed_node_id)
         plan = RestartPlan(

@@ -217,12 +217,19 @@ is intentionally fail-closed; stacks with custom trainers, multiple optimizers,
 sharded optimizers, or caller-owned loop state provide a custom adapter rather
 than relying on process-wide object scanning.
 
+Distributed native PyTorch attachment requires a recognized DDP or FSDP
+construction boundary that all participating ranks cross. Rank-local warmup
+forwards cannot initiate LM Resiliency collectives.
+
 After attachment, built-in adapters bind cleanup to the framework's normal
 distributed teardown boundary. The resiliency handle closes before process
 groups are destroyed, so asynchronous checkpoint and replay work completes
 before the application reports a clean exit.
 
 The worker policy is schema-versioned and strict even for disabled features.
+Every assigned node publishes a digest of the exact policy bytes, rendezvous
+requires one cohort-wide value, and worker bootstrap revalidates the digest
+before parsing or installing an adapter.
 Custom stacks set `adapter = "package.module:factory"` in that policy; built-in
 frameworks omit `adapter` and use import inference.
 GEMINI topology settings remain deployment-owned: for example,
@@ -313,6 +320,7 @@ boundaries.
 - the manager, not torchrun, owns evidence evaluation and quarantine policy;
 - one shared control-store endpoint is required;
 - built-in injected adapters support exact manager-selected GEMINI recovery;
+  the selected step and checkpoint-topology digest are validated before load;
   durable-source replacement requires a custom adapter with a framework loader;
 - replacement does not repair hardware or allocate new hosts; and
 - the production campaign uses DDP and tiny deterministic workloads, not

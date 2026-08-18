@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -12,6 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Generator, cast
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -62,6 +64,7 @@ def _recovery_context(
         checkpoint_id=("checkpoint-4" if checkpoint_source == "durable" else None),
         checkpoint_source=checkpoint_source,
         recovery_mode="recovery_verified",
+        topology_digest="topology",
         restart_deadline_unix_ms=9_999_999_999_999,
     )
 
@@ -192,6 +195,54 @@ def test_custom_adapter_bootstraps_user_script_without_lm_imports(
     }
 
 
+def test_worker_bootstrap_preserves_existing_sitecustomize(tmp_path: Path) -> None:
+    marker = tmp_path / "sitecustomize.txt"
+    existing = tmp_path / "existing"
+    existing.mkdir()
+    (existing / "sitecustomize.py").write_text(
+        "from pathlib import Path\n"
+        "import os\n"
+        "Path(os.environ['SITE_MARKER']).write_text('loaded', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    config = tmp_path / "worker.toml"
+    config.write_text(
+        'schema_version = 1\nadapter = "custom_adapter:create"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "custom_adapter.py").write_text(
+        "class Adapter:\n"
+        "    def install(self, context):\n"
+        "        pass\n"
+        "def create(context):\n"
+        "    return Adapter()\n",
+        encoding="utf-8",
+    )
+    environment = _clean_environment()
+    environment["LOCAL_WORLD_SIZE"] = "1"
+    environment["SITE_MARKER"] = str(marker)
+    environment["PYTHONPATH"] = os.pathsep.join(
+        [str(existing), str(tmp_path), str(Path(__file__).parents[2])]
+    )
+    _configure_bootstrap(
+        replace(_context(tmp_path), config_path=config.resolve()),
+        environment,
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", "pass"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert marker.read_text(encoding="utf-8") == "loaded"
+
+
 def test_worker_bootstrap_fails_closed_before_user_code(tmp_path: Path) -> None:
     adapter_module = tmp_path / "broken_adapter.py"
     adapter_module.write_text(
@@ -243,6 +294,17 @@ def test_worker_bootstrap_environment_conflict_is_transactional(tmp_path: Path) 
         _configure_bootstrap(_context(tmp_path), environment)
 
     assert environment == before
+
+
+def test_worker_bootstrap_rejects_policy_changed_after_rendezvous(tmp_path: Path) -> None:
+    config = tmp_path / "worker.toml"
+    original = b"schema_version = 1\ninterval = 1\n"
+    config.write_bytes(original)
+    digest = hashlib.sha256(b"lm-resiliency/worker-policy/v1\0" + original).hexdigest()
+    config.write_text("schema_version = 1\ninterval = 2\n", encoding="utf-8")
+
+    with pytest.raises(TorchrunWorkerAdapterError, match="changed after rendezvous"):
+        _load_config(config, expected_digest=digest)
 
 
 def test_worker_context_uses_torchrun_local_world_size(tmp_path: Path) -> None:
@@ -331,6 +393,35 @@ def test_framework_inference_observes_transitive_deepspeed_import(
 
         assert adapter.selected_framework == "deepspeed"
         assert isinstance(adapter.delegate, DeepSpeedWorkerAdapter)
+    finally:
+        adapter.close()
+
+
+def test_framework_inference_wraps_transitively_imported_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deepspeed = types.ModuleType("deepspeed")
+    engine = object()
+    deepspeed.initialize = lambda: (engine,)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "deepspeed", deepspeed)
+    monkeypatch.setattr(
+        "lm_resiliency.integrations.deepspeed.training.enable_resiliency",
+        lambda *_args, **_kwargs: object(),
+    )
+    adapter = _AutoFrameworkAdapter({"enable_checkpoint": False, "enable_detection": False})
+    adapter.install(_context(tmp_path))
+
+    def import_helper() -> Any:
+        from deepspeed import initialize
+
+        return initialize
+
+    try:
+        initialize = adapter._run_import("user_helper", import_helper)
+        initialize()
+        assert isinstance(adapter.delegate, DeepSpeedWorkerAdapter)
+        assert adapter.delegate.attached
     finally:
         adapter.close()
 
@@ -553,6 +644,78 @@ def test_native_pytorch_adapter_delegates_plain_root_module_without_parallelism(
         adapter.close()
 
 
+def test_native_pytorch_distributed_warmup_fails_before_collective_attach(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import torch
+
+    enable = MagicMock()
+    monkeypatch.setattr(
+        "lm_resiliency.integrations.pytorch.enable_resiliency",
+        enable,
+    )
+    monkeypatch.setattr(NativePyTorchAdapter, "_distributed_world_size", lambda _self: 2)
+    adapter = NativePyTorchAdapter({"enable_checkpoint": False, "enable_detection": False})
+    adapter.install(_context(tmp_path))
+    try:
+        model = torch.nn.Linear(4, 2)
+        torch.optim.SGD(model.parameters(), lr=0.1)
+
+        with pytest.raises(
+            TorchrunWorkerAdapterError,
+            match="DDP or FSDP construction boundary",
+        ):
+            model(torch.ones(1, 4))
+
+        enable.assert_not_called()
+    finally:
+        adapter.close()
+
+
+def test_native_pytorch_waits_for_outermost_optimizer_constructor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import torch
+
+    class ParentOptimizer(torch.optim.SGD):
+        def __init__(self, parameters: Any) -> None:
+            super().__init__(parameters, lr=0.1)
+            self.parent_ready = True
+
+    class ChildOptimizer(ParentOptimizer):
+        def __init__(self, parameters: Any) -> None:
+            super().__init__(parameters)
+            self.child_ready = True
+
+    attached: list[ChildOptimizer] = []
+
+    def fake_enable(_model: Any, optimizer: ChildOptimizer, **_kwargs: Any) -> object:
+        assert optimizer.parent_ready
+        assert optimizer.child_ready
+        attached.append(optimizer)
+        return object()
+
+    monkeypatch.setattr(
+        "lm_resiliency.integrations.pytorch.enable_resiliency",
+        fake_enable,
+    )
+    monkeypatch.setattr(NativePyTorchAdapter, "_distributed_world_size", lambda _self: 2)
+    adapter = NativePyTorchAdapter({"enable_checkpoint": False, "enable_detection": False})
+    adapter.install(_context(tmp_path))
+    try:
+        model = torch.nn.Linear(4, 2)
+        adapter._register_distributed_model(model)
+
+        optimizer = ChildOptimizer(model.parameters())
+
+        assert attached == [optimizer]
+        assert adapter.attached
+    finally:
+        adapter.close()
+
+
 def test_native_pytorch_disabled_policy_is_a_distributed_noop(
     tmp_path: Path,
     process_group: None,
@@ -625,6 +788,42 @@ def test_native_adapter_closes_handle_before_process_group_teardown(
     assert optimizer.param_groups
     assert events == ["close", "destroy"]
     assert not adapter.attached
+
+
+def test_native_adapter_runs_process_group_teardown_when_close_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import torch
+    import torch.distributed as dist
+
+    events: list[str] = []
+
+    class Handle:
+        def close(self) -> None:
+            events.append("close")
+            raise RuntimeError("close failed")
+
+    monkeypatch.setattr(
+        "lm_resiliency.integrations.pytorch.enable_resiliency",
+        lambda *_args, **_kwargs: Handle(),
+    )
+    monkeypatch.setattr(
+        dist,
+        "destroy_process_group",
+        lambda _group=None: events.append("destroy"),
+    )
+    adapter = NativePyTorchAdapter({"enable_checkpoint": False, "enable_detection": False})
+    adapter.install(_context(tmp_path))
+    model = torch.nn.Linear(4, 2)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    model(torch.ones(1, 4))
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        dist.destroy_process_group()
+
+    assert events == ["close", "destroy"]
+    assert optimizer.param_groups
 
 
 def test_native_pytorch_adapter_requires_exact_manager_selected_step(
@@ -742,7 +941,10 @@ def test_megatron_adapter_delegates_exact_setup_result_without_parallelism(
     )
     model = [object(), object()]
     optimizer = object()
-    scheduler = object()
+    scheduler = SimpleNamespace(
+        state_dict=lambda: {"num_steps": 17},
+        load_state_dict=lambda state: setattr(scheduler, "restored", state),
+    )
     arguments = SimpleNamespace(
         iteration=0,
         consumed_train_samples=34,
@@ -802,6 +1004,7 @@ def test_megatron_adapter_delegates_exact_setup_result_without_parallelism(
                 "iteration": 17,
                 "consumed_train_samples": 34,
                 "skipped_train_samples": 2,
+                "scheduler": {"num_steps": 17},
             }
         }
         restore(
@@ -810,6 +1013,7 @@ def test_megatron_adapter_delegates_exact_setup_result_without_parallelism(
                     "iteration": 11,
                     "consumed_train_samples": 22,
                     "skipped_train_samples": 1,
+                    "scheduler": {"num_steps": 11},
                 }
             }
         )
@@ -818,6 +1022,7 @@ def test_megatron_adapter_delegates_exact_setup_result_without_parallelism(
             arguments.consumed_train_samples,
             arguments.skipped_train_samples,
         ) == (11, 22, 1)
+        assert scheduler.restored == {"num_steps": 11}
         parallel_state.destroy_model_parallel()  # type: ignore[attr-defined]
         assert teardown_events == ["close", "destroy"]
     finally:
@@ -1205,6 +1410,44 @@ def test_successor_worker_requires_exact_restart_context_generation(tmp_path: Pa
         _context_from_environment(environment)
 
 
+def test_successor_worker_preserves_manager_topology_digest(tmp_path: Path) -> None:
+    context_path = (tmp_path / "restart-context.json").resolve()
+    restart = RestartContext(
+        plan_id="plan-1",
+        run_id="adapter-run",
+        generation=1,
+        node_id="node-a",
+        logical_node_slot=0,
+        first_global_rank=0,
+        local_world_size=1,
+        expected_world_size=1,
+        topology_digest="checkpoint-topology",
+        recovery_mode="recovery_verified",
+        checkpoint_source="gemini",
+        checkpoint_step=4,
+        checkpoint_id=None,
+        checkpoint_manifest_id="manifest-4",
+        reason_code="attributed_sdc",
+        restart_deadline_unix_ms=9_999_999_999_999,
+    )
+    SimpleRestartContextFile(context_path).write(restart)
+    environment = {
+        "GROUP_RANK": "0",
+        "LOCAL_RANK": "0",
+        "LM_RESILIENCY_TORCHRUN_RUN_ID": "adapter-run",
+        "LM_RESILIENCY_TORCHRUN_NODE_ID": "node-a",
+        "LOCAL_WORLD_SIZE": "1",
+        "LM_RESILIENCY_TORCHRUN_RESTART_CONTEXT": str(context_path),
+        "LM_RESILIENCY_TORCHRUN_EXPECTED_GENERATION": "1",
+        "RANK": "0",
+        "WORLD_SIZE": "1",
+    }
+
+    context = _context_from_environment(environment)
+
+    assert context.topology_digest == "checkpoint-topology"
+
+
 @pytest.mark.parametrize(
     ("environment_changes", "context_changes", "message"),
     [
@@ -1354,6 +1597,7 @@ def test_torchrun_package_exports_stable_worker_adapter_api() -> None:
         "TorchrunWorkerAdapter",
         "TorchrunWorkerAdapterError",
         "TorchrunWorkerContext",
+        "create_rendezvous_handler",
         "derive_torchrun_node_id",
         "get_torchrun_worker_context",
         "get_rendezvous_handler_creator",

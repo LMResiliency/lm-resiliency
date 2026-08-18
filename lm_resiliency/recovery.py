@@ -17,6 +17,7 @@ class RecoveryDecision(TypedDict):
     checkpoint_source: RecoveryCheckpointSource
     checkpoint_step: int
     checkpoint_id: str | None
+    topology_digest: str | None
     all_ranks_accessible: bool
     available: bool
     reason: str
@@ -39,6 +40,7 @@ def build_recovery_decision(
     mode = RecoveryMode(recovery_mode)
     checkpoint_step = -1
     checkpoint_id: str | None = None
+    topology_digest: str | None = None
     source: RecoveryCheckpointSource = "none"
 
     if checkpoint_manager is not None:
@@ -51,6 +53,9 @@ def build_recovery_decision(
             checkpoint_step = int(status.recovery_verified_step)
         if checkpoint_step > 0:
             source = "gemini"
+            candidate_topology = getattr(checkpoint_manager, "topology_id", None)
+            if isinstance(candidate_topology, str) and candidate_topology:
+                topology_digest = candidate_topology
 
     if checkpoint_step <= 0 and durable_checkpoint is not None:
         record = durable_checkpoint.latest_validated  # type: ignore[attr-defined]
@@ -65,6 +70,7 @@ def build_recovery_decision(
         checkpoint_source=source,
         checkpoint_step=checkpoint_step,
         checkpoint_id=checkpoint_id,
+        topology_digest=topology_digest,
         all_ranks_accessible=bool(all_ranks_accessible),
         available=checkpoint_step > 0,
         reason=reason,

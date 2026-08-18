@@ -165,6 +165,7 @@ class PyTorchFSDPResiliency(ResiliencyHandle):
         load_extra_state_fn: Callable[[dict[str, Any]], None] | None = None,
         durable_checkpoint: DurableCheckpointConfig | None = None,
         step_hook_registrar: Callable[[Callable[[Any, Any, Any], None]], Any] | None = None,
+        expected_topology_id: str | None = None,
     ) -> None:
         super().__init__()
         self._model = model
@@ -182,6 +183,7 @@ class PyTorchFSDPResiliency(ResiliencyHandle):
             ckpt_config,
             manager_factory=InMemoryCheckpointManager,
             parallelism_info=self._parallelism_info,
+            expected_topology_id=expected_topology_id,
         )
         self._compare_updated_weights = False
         if detection_config is not None:
@@ -415,11 +417,16 @@ class PyTorchFSDPResiliency(ResiliencyHandle):
         )
         return local_result.bitmap
 
-    def try_recover(self, mode: RecoveryMode | str | None = None) -> int:
+    def try_recover(
+        self,
+        mode: RecoveryMode | str | None = None,
+        *,
+        step: int | None = None,
+    ) -> int:
         """Reload local shards from node-local (in place). Returns the step, or -1."""
         if self.ckpt_manager is None:
             return -1
-        result = self.ckpt_manager.load_tensors(mode=mode)
+        result = self.ckpt_manager.load_tensors(mode=mode, step=step)
         if result is None:
             return -1
         self._materialize_optimizer_state()
@@ -516,6 +523,8 @@ def enable_fsdp2_resiliency(
     load_extra_state_fn: Callable[[dict[str, Any]], None] | None = None,
     durable_checkpoint: DurableCheckpointConfig | None = None,
     recovery_mode: RecoveryMode | str | None = None,
+    recovery_step: int | None = None,
+    expected_topology_id: str | None = None,
     step_hook_registrar: Callable[[Callable[[Any, Any, Any], None]], Any] | None = None,
 ) -> PyTorchFSDPResiliency:
     """Build the native FSDP2/HSDP runtime and recover its local shards."""
@@ -539,9 +548,10 @@ def enable_fsdp2_resiliency(
         load_extra_state_fn=load_extra_state_fn,
         durable_checkpoint=durable_checkpoint,
         step_hook_registrar=step_hook_registrar,
+        expected_topology_id=expected_topology_id,
     )
     _bind_orchestration(orchestration, res)
-    recover_with_fallback(res, load_fallback, recovery_mode)
+    recover_with_fallback(res, load_fallback, recovery_mode, recovery_step)
     return res
 
 

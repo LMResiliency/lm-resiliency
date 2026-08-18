@@ -125,6 +125,7 @@ class InMemoryCheckpointManager:
         parallelism_info: Any | None = None,
         parallel_dims: Any | None = None,
         process_group: dist.ProcessGroup | None = None,
+        expected_topology_id: str | None = None,
     ) -> None:
         self.config = config
 
@@ -169,6 +170,10 @@ class InMemoryCheckpointManager:
         self._topology_id = hashlib.sha256(
             json.dumps(topology, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
+        if expected_topology_id is not None and self._topology_id != expected_topology_id:
+            raise RuntimeError(
+                "manager-selected checkpoint topology does not match the live worker topology"
+            )
 
         # Node-local (fast) tier. GEMINI is deliberately single-tier: durable /
         # global checkpointing is the pre-training framework's job (reached via the
@@ -281,6 +286,12 @@ class InMemoryCheckpointManager:
     # ──────────────────────────────────────────────────────────────────────────
     # Public API
     # ──────────────────────────────────────────────────────────────────────────
+
+    @property
+    def topology_id(self) -> str | None:
+        """Canonical checkpoint-topology digest, or ``None`` when disabled."""
+
+        return getattr(self, "_topology_id", None)
 
     def save(
         self,
@@ -569,6 +580,8 @@ class InMemoryCheckpointManager:
     def load(
         self,
         mode: RecoveryMode | str | None = None,
+        *,
+        step: int | None = None,
     ) -> tuple[dict[str, Any], int] | None:
         """Recover the latest rank-consistent checkpoint from memory or node-local disk.
 
@@ -581,6 +594,15 @@ class InMemoryCheckpointManager:
             return None
 
         resolved = self._activate_recovery_mode(mode)
+        if step is not None:
+            loaded = self._load_exact_collectively_validated_shard(step, resolved)
+            if loaded is None:
+                return None
+            metadata, tensors = loaded
+            self._metadata = metadata
+            state_dict = unflatten(metadata, tensors)
+            logger.info("Loaded exact checkpoint at manager-selected step %s", step)
+            return state_dict, step
         memory_step, disk_step = self._recovery_steps(resolved)
         if memory_step <= 0 and disk_step <= 0:
             return None
@@ -611,6 +633,8 @@ class InMemoryCheckpointManager:
     def load_tensors(
         self,
         mode: RecoveryMode | str | None = None,
+        *,
+        step: int | None = None,
     ) -> tuple[list[torch.Tensor], int, dict[str, Any] | None] | None:
         """Recover checkpoint as a flat tensor list (inverse of save_tensors).
 
@@ -621,6 +645,15 @@ class InMemoryCheckpointManager:
             return None
 
         resolved = self._activate_recovery_mode(mode)
+        if step is not None:
+            loaded = self._load_exact_collectively_validated_shard(step, resolved)
+            if loaded is None:
+                return None
+            metadata, tensors = loaded
+            self._metadata = metadata
+            extra = (metadata.non_tensor_data or {}).get(_EXTRA_KEY)
+            logger.info("Loaded exact checkpoint tensors at manager-selected step %s", step)
+            return tensors, step, extra
         memory_step, disk_step = self._recovery_steps(resolved)
         if memory_step <= 0 and disk_step <= 0:
             return None
@@ -647,6 +680,45 @@ class InMemoryCheckpointManager:
         extra = (metadata.non_tensor_data or {}).get(_EXTRA_KEY)
         logger.info(f"Loaded checkpoint tensors from {self._disk._folder} at step {latest}")
         return tensors, latest, extra
+
+    def _load_exact_collectively_validated_shard(
+        self,
+        step: int,
+        mode: RecoveryMode,
+    ) -> tuple[FlatStateDictMetadata, list[torch.Tensor]] | None:
+        if isinstance(step, bool) or not isinstance(step, int) or step < 1:
+            raise ValueError("checkpoint step must be a positive integer")
+        if mode is RecoveryMode.RECOVERY_VERIFIED:
+            status = self._checkpoint_status.read()
+            locally_eligible = status.recovery_verified_step == step and self._disk.has_rank(
+                step, self._rank
+            )
+            if self._collective_min_step(int(locally_eligible)) != 1:
+                return None
+            return self._load_collectively_validated_disk_shard(step)
+
+        slot = self._memory_slot_by_step(step)
+        loaded: tuple[FlatStateDictMetadata, list[torch.Tensor]] | None = None
+        local_error: Exception | None = None
+        if slot is not None:
+            loaded = (
+                self._slot_metadata(slot),
+                [tensor.clone() for tensor in slot.tensors],
+            )
+        else:
+            try:
+                loaded = self._disk.load(step)
+            except Exception as error:  # noqa: BLE001 - every rank must vote
+                local_error = error
+        if self._collective_min_step(int(loaded is not None)) == 1:
+            return loaded
+        if local_error is not None:
+            logger.error(
+                "Exact checkpoint validation failed at step %s: %s",
+                step,
+                local_error,
+            )
+        return None
 
     def _load_collectively_validated_disk_shard(
         self,

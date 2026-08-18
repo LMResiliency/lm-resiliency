@@ -48,7 +48,7 @@ The stable torchrun integration exports are:
 | Manager coordination | `TorchrunRecoveryCoordinator`, `TorchrunRecoveryRequest`, `TorchrunInitialPlacement`, `TorchrunSuccessorPlacement` |
 | Launcher configuration | `TorchrunLaunchConfig` |
 | Node identity | `derive_torchrun_node_id` |
-| Rendezvous registration | `get_rendezvous_handler_creator` |
+| Rendezvous registration | `create_rendezvous_handler`, `get_rendezvous_handler_creator` |
 
 Other module paths are internal unless this guide identifies them as supported.
 Objects under `lm_resiliency.experimental` may change within the `0.x` release series.
@@ -106,16 +106,21 @@ code would pass. The existing framework integration remains the single owner of
 DDP, FSDP2/HSDP, TP, SP, CP, PP, EP, expert-TP, ZeRO, and framework-specific
 process-group discovery.
 
-The PyTorch adapter attaches exactly once before the first trainable root-module
-forward. It requires one optimizer that owns all trainable parameters of that
-model and no parameters from another model. Multiple matching optimizers,
-foreign parameters, or a forward before optimizer construction fail closed.
+The distributed PyTorch adapter attaches only after a DDP or FSDP construction
+boundary that every participating rank must cross. It requires one optimizer
+that owns all trainable parameters of that model and no parameters from another
+model. Multiple matching optimizers, foreign parameters, or a distributed
+forward without a recognized all-rank construction boundary fail closed before
+LM Resiliency starts collective attachment. Single-process jobs retain
+root-module-forward discovery.
 The other built-ins attach at their framework-owned initialization boundary and
 likewise fail closed if the expected complete object bundle is unavailable.
-On a replacement generation, built-ins accept GEMINI restart contexts and
-verify that the framework recovered the exact manager-selected step before
-training begins. A durable-source restart requires a custom worker adapter that
-owns the framework's durable loader.
+On a replacement generation, built-ins accept GEMINI restart contexts and load
+only the exact manager-selected step. The live checkpoint-topology digest must
+match the manager plan before checkpoint state is applied. Missing, corrupt,
+unverified, newer, older, or topology-incompatible state fails closed. A
+durable-source restart requires a custom worker adapter that owns the
+framework's durable loader.
 Before the user module starts, bootstrap publishes the manager-selected resume
 position as `LM_RESILIENCY_TORCHRUN_CHECKPOINT_STEP` (`0` for generation zero).
 Zero-import applications can use that value to restore deterministic sampler or
@@ -149,14 +154,16 @@ rotate_layers = true
 ```
 
 Unknown fields, missing or unsupported schema versions, and invalid values fail
-closed. Disabled feature sections are still validated. `replication_jump` must
+closed. Assigned nodes must agree on the exact policy contents at rendezvous,
+and each worker revalidates that digest before parsing the policy. Disabled
+feature sections are still validated. `replication_jump` must
 be valid for the deployed checkpoint group; it is not inferred from the
 launcher node count. Supplying `lm_resiliency_worker_config` enables automatic worker
 instrumentation; omitting it leaves explicit `enable_resiliency()` integrations
 unchanged. Explicit integrations can call `get_torchrun_worker_context()` to
 obtain run identity, hashed node identity, worker width, generation, logical
-slot, and the manager-selected recovery decision without duplicating them as
-application arguments. Workers obtain their local width from torchrun's standard
+slot, topology digest, and the manager-selected recovery decision without
+duplicating them as application arguments. Workers obtain their local width from torchrun's standard
 `LOCAL_WORLD_SIZE` environment and verify replacement plans against it.
 
 Managers use `TorchrunRecoveryCoordinator` with the same c10d store used by the
@@ -677,10 +684,13 @@ resiliency = enable_resiliency(
 ```
 
 `report_recovery` receives a JSON-ready `RecoveryDecision` before the corresponding automatic fault report.
-The decision identifies the failure class, selected trust mode, checkpoint source, step, optional durable checkpoint ID, availability, and selection reason.
+The decision identifies the failure class, selected trust mode, checkpoint
+source, step, optional durable checkpoint ID, checkpoint-topology digest,
+availability, and selection reason.
 Checkpoint lookup in the reporting process is rank-local and noncollective because a fault may have already made the training process group unusable.
 The manager can conservatively combine worker decisions, include the selected decision in its restart command, and pass `recovery_mode` to the relaunched integration.
-The restarted GEMINI loader retains responsibility for selecting a rank-consistent generation collectively.
+The restarted GEMINI loader retains responsibility for collectively validating
+and loading that exact manager-selected generation.
 
 In-process SDC automatically emits a recovery-verified decision, while a replay-localized straggler emits a latest-GEMINI decision.
 An OOB hang emits a conservative recovery-verified decision without entering a blocked training process or invoking replay.

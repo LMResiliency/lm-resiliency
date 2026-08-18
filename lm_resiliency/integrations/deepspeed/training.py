@@ -119,6 +119,7 @@ class DeepSpeedResiliency:
         fault_callback: Callable[[ReplayResult], None] | None = None,
         oob_fault_callback: SCOUTFaultCallback | None = None,
         durable_checkpoint: DurableCheckpointConfig | None = None,
+        expected_topology_id: str | None = None,
     ) -> None:
         self._engine = engine
         self._device = device or torch.device("cuda")
@@ -152,6 +153,7 @@ class DeepSpeedResiliency:
             manager_factory=InMemoryCheckpointManager,
             parallelism_info_fn=self._adapter.get_parallelism_info,
             process_group=self._dp_gloo_group,
+            expected_topology_id=expected_topology_id,
         )
         # SCOUT: layer replay detection
         self._replay_harness: ModelReplayHarness | None = None
@@ -244,7 +246,12 @@ class DeepSpeedResiliency:
         finally:
             self._release_zero3_replay_parameters()
 
-    def try_recover(self, mode: RecoveryMode | str | None = None) -> int:
+    def try_recover(
+        self,
+        mode: RecoveryMode | str | None = None,
+        *,
+        step: int | None = None,
+    ) -> int:
         """Attempt fast recovery from in-memory checkpoint.
 
         All ranks must call this collectively. Returns the recovered step
@@ -256,7 +263,7 @@ class DeepSpeedResiliency:
         if self._ckpt_manager is None:
             return -1
 
-        result = self._ckpt_manager.load_tensors(mode=mode)
+        result = self._ckpt_manager.load_tensors(mode=mode, step=step)
         if result is None:
             return -1
 
@@ -534,6 +541,8 @@ def enable_resiliency(
     load_fallback: Callable[[], int | None] | None = None,
     durable_checkpoint: DurableCheckpointConfig | None = None,
     recovery_mode: RecoveryMode | str | None = None,
+    _recovery_step: int | None = None,
+    _expected_topology_id: str | None = None,
 ) -> DeepSpeedResiliency:
     """Enable GEMINI + SCOUT for a DeepSpeed training job. One call.
 
@@ -595,10 +604,11 @@ def enable_resiliency(
         fault_callback=fault_callback,
         oob_fault_callback=oob_fault_callback,
         durable_checkpoint=durable_checkpoint,
+        expected_topology_id=_expected_topology_id,
     )
     _bind_orchestration(orchestration, resiliency)
 
-    recover_with_fallback(resiliency, load_fallback, recovery_mode)
+    recover_with_fallback(resiliency, load_fallback, recovery_mode, _recovery_step)
 
     register_automatic_cleanup(resiliency)
     return resiliency

@@ -193,7 +193,9 @@ Important fields include:
 | `cross_pg_result` | Correlated endpoint and host replacement scope |
 
 Out-of-band failures use JSON-ready `SCOUTFaultReport` values.
-Checkpoint selection uses `RecoveryDecision`, including recovery mode, source, checkpoint step or durable ID, availability, and reason.
+Checkpoint selection uses `RecoveryDecision`, including recovery mode, source,
+checkpoint step or durable ID, checkpoint-topology digest, availability, and
+reason.
 
 `OrchestrationHooks` delivers both contracts to an external manager.
 SCOUT and the framework recommend a checkpoint; the manager owns restart, and the relaunched framework performs the rank-consistent load.
