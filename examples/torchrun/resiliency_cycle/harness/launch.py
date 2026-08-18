@@ -275,7 +275,7 @@ def _handle_cleanup_failures(
         return
     details = "; ".join(f"{type(error).__name__}: {error}" for error in failures)
     if active_error is not None:
-        active_error.add_note(f"additional agent cleanup failures: {details}")
+        print(f"additional agent cleanup failures: {details}", file=sys.stderr)
         return
     signal = next((error for error in failures if not isinstance(error, Exception)), None)
     if signal is not None:

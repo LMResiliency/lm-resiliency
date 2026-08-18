@@ -463,6 +463,7 @@ def test_cleanup_reaps_every_agent_when_remote_termination_times_out(
 def test_cleanup_failure_does_not_replace_active_orchestration_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     process = SimpleNamespace(
         poll=lambda: 0,
@@ -490,7 +491,7 @@ def test_cleanup_failure_does_not_replace_active_orchestration_error(
         finally:
             launch.cleanup_agents(options, [agent], remote_run_id=options.run_id)
 
-    assert any("ssh failed" in note for note in captured.value.__notes__)
+    assert "ssh failed" in capsys.readouterr().err
     assert agent.log.closed
 
 
