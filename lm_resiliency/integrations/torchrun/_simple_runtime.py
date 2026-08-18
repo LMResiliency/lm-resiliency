@@ -788,11 +788,12 @@ class SimpleRendezvousHandler(RendezvousHandler):
                         raise RendezvousStateError(
                             "assigned nodes disagree on the LM Resiliency worker policy"
                         )
-                    if all(
+                    heartbeat_states = [
                         self._heartbeat_is_live(item.node_id, agent_id=record[0])
                         for item, record in zip(assignment, records)
                         if record is not None
-                    ):
+                    ]
+                    if all(heartbeat_states):
                         return True
             if self._monotonic_clock() >= deadline:
                 raise RendezvousTimeoutError("timed out waiting for assigned nodes")

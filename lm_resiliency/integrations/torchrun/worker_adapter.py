@@ -870,22 +870,47 @@ class DeepSpeedWorkerAdapter(_SingleAttachAdapter):
     def _validate_recovery(self, handle: Any) -> None:
         super()._validate_recovery(handle)
         assert self._context is not None
-        if self._context.checkpoint_step is None:
-            return
         engine = self._engine
         load_checkpoint = getattr(engine, "load_checkpoint", None)
         if not callable(load_checkpoint):
             return
         self._original_load_checkpoint = load_checkpoint
 
-        def reject_framework_load(*_args: Any, **_kwargs: Any) -> Any:
-            raise TorchrunWorkerAdapterError(
-                "DeepSpeed load_checkpoint() cannot run after manager-selected "
-                "GEMINI recovery; use a custom worker adapter to coordinate "
-                "framework checkpoint client state"
-            )
+        if self._context.checkpoint_step is not None:
 
-        engine.load_checkpoint = reject_framework_load
+            def wrapped_load_checkpoint(*_args: Any, **_kwargs: Any) -> Any:
+                raise TorchrunWorkerAdapterError(
+                    "DeepSpeed load_checkpoint() cannot run after manager-selected "
+                    "GEMINI recovery; use a custom worker adapter to coordinate "
+                    "framework checkpoint client state"
+                )
+
+        else:
+
+            def wrapped_load_checkpoint(*args: Any, **kwargs: Any) -> Any:
+                current_step = _nonnegative_int(
+                    getattr(handle, "step_count", None),
+                    "DeepSpeed resiliency step_count",
+                )
+                if current_step != 0:
+                    raise TorchrunWorkerAdapterError(
+                        "DeepSpeed load_checkpoint() must run before the first "
+                        "LM Resiliency training step"
+                    )
+                result = load_checkpoint(*args, **kwargs)
+                loaded = (
+                    bool(result)
+                    if not isinstance(result, tuple)
+                    else bool(result) and result[0] is not None
+                )
+                if loaded:
+                    handle.step_count = _nonnegative_int(
+                        getattr(engine, "global_steps", None),
+                        "DeepSpeed engine.global_steps",
+                    )
+                return result
+
+        engine.load_checkpoint = wrapped_load_checkpoint
 
     def _install_cleanup_hook(self, engine: Any) -> Callable[[], None]:
         original = getattr(engine, "destroy", None)
@@ -1216,7 +1241,7 @@ class _AutoFrameworkAdapter:
                 with adapter._lock:
                     active = adapter._framework_agreement_active
                 if active:
-                    adapter._agree_framework_cohort()
+                    adapter._agree_framework_after_process_group_init()
                 return result
 
             setattr(module, name, init_process_group)
@@ -1229,7 +1254,20 @@ class _AutoFrameworkAdapter:
 
         return restore
 
-    def _agree_framework_cohort(self) -> None:
+    def _agree_framework_after_process_group_init(self) -> None:
+        import torch.distributed as dist
+
+        group = None
+        backend = dist.get_backend()
+        if backend == dist.Backend.NCCL or str(backend).lower() == "nccl":
+            group = dist.new_group(backend="gloo")
+        try:
+            self._agree_framework_cohort(group=group)
+        finally:
+            if group is not None:
+                dist.destroy_process_group(group)
+
+    def _agree_framework_cohort(self, *, group: Any | None = None) -> None:
         import torch.distributed as dist
 
         with self._import_transaction_lock:
@@ -1243,9 +1281,14 @@ class _AutoFrameworkAdapter:
                 raise TorchrunWorkerAdapterError(
                     "framework agreement requires an initialized default process group"
                 )
-            world_size = dist.get_world_size()
+            world_size = (
+                dist.get_world_size() if group is None else dist.get_world_size(group=group)
+            )
             gathered: list[str | None] = [None] * world_size
-            dist.all_gather_object(gathered, candidate)
+            if group is None:
+                dist.all_gather_object(gathered, candidate)
+            else:
+                dist.all_gather_object(gathered, candidate, group=group)
             agreed = gathered[0] if gathered else None
             if agreed is None or any(framework != agreed for framework in gathered):
                 error = TorchrunWorkerAdapterError(

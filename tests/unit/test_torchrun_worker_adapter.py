@@ -620,6 +620,7 @@ def test_framework_inference_rejects_cross_rank_disagreement_before_attachment(
     monkeypatch.setattr(dist, "init_process_group", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(dist, "is_initialized", lambda: True)
     monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+    monkeypatch.setattr(dist, "get_backend", lambda: "gloo")
 
     def gather_frameworks(gathered: list[str | None], local: str | None) -> None:
         gathered[:] = [local, "pytorch"]
@@ -647,6 +648,52 @@ def test_framework_inference_rejects_cross_rank_disagreement_before_attachment(
             deepspeed.initialize()
 
         enable.assert_not_called()
+    finally:
+        adapter.close()
+
+
+def test_framework_inference_uses_gloo_agreement_for_nccl_default_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import torch.distributed as dist
+
+    deepspeed = types.ModuleType("deepspeed")
+    deepspeed.initialize = lambda: (object(),)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "deepspeed", deepspeed)
+    monkeypatch.setattr(dist, "init_process_group", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_backend", lambda: "nccl")
+    gloo_group = object()
+    new_group = MagicMock(return_value=gloo_group)
+    destroy_group = MagicMock()
+    monkeypatch.setattr(dist, "new_group", new_group)
+    monkeypatch.setattr(dist, "destroy_process_group", destroy_group)
+
+    def world_size(*, group: Any | None = None) -> int:
+        assert group is gloo_group
+        return 2
+
+    def gather_frameworks(
+        gathered: list[str | None],
+        local: str | None,
+        *,
+        group: Any | None = None,
+    ) -> None:
+        assert group is gloo_group
+        gathered[:] = [local, local]
+
+    monkeypatch.setattr(dist, "get_world_size", world_size)
+    monkeypatch.setattr(dist, "all_gather_object", gather_frameworks)
+    adapter = _AutoFrameworkAdapter({"enable_checkpoint": False, "enable_detection": False})
+    adapter.install(_context(tmp_path))
+    try:
+        __import__("deepspeed")
+        dist.init_process_group("nccl")
+
+        new_group.assert_called_once_with(backend="gloo")
+        destroy_group.assert_called_once_with(gloo_group)
+        assert adapter.selected_framework == "deepspeed"
     finally:
         adapter.close()
 
@@ -1583,6 +1630,48 @@ def test_deepspeed_adapter_rejects_framework_load_after_manager_recovery(
 
     assert closed
     assert engine.load_checkpoint() == "framework checkpoint loaded"
+
+
+def test_deepspeed_adapter_seeds_counter_after_initial_framework_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Engine:
+        global_steps = 0
+        load_attempts = 0
+
+        def load_checkpoint(self) -> tuple[str | None, dict[str, object]]:
+            self.load_attempts += 1
+            if self.load_attempts == 1:
+                return None, {}
+            self.global_steps = 12
+            return "/checkpoint/12", {}
+
+    deepspeed = types.ModuleType("deepspeed")
+    engine = Engine()
+    deepspeed.initialize = lambda: (engine, None, None, None)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "deepspeed", deepspeed)
+    handle = SimpleNamespace(step_count=0, close=lambda: None)
+    monkeypatch.setattr(
+        "lm_resiliency.integrations.deepspeed.training.enable_resiliency",
+        lambda *_args, **_kwargs: handle,
+    )
+    adapter = DeepSpeedWorkerAdapter(
+        {
+            "enable_checkpoint": False,
+            "enable_detection": False,
+        }
+    )
+    adapter.install(_context(tmp_path))
+    try:
+        deepspeed.initialize()
+
+        assert engine.load_checkpoint() == (None, {})
+        assert handle.step_count == 0
+        assert engine.load_checkpoint() == ("/checkpoint/12", {})
+        assert handle.step_count == 12
+    finally:
+        adapter.close()
 
 
 def test_builtin_adapter_construction_does_not_import_optional_frameworks() -> None:

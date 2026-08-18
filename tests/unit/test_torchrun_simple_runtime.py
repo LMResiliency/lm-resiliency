@@ -750,6 +750,48 @@ def test_ready_record_requires_matching_live_agent(tmp_path: Path) -> None:
     assert active_a.shutdown()
 
 
+def test_group_wait_observes_every_assigned_heartbeat_per_poll(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = HashStore()
+    handler = _handler(tmp_path, store, "node-a")
+    assignment = tuple(
+        _NodeAssignment(logical_node_slot=slot, node_id=f"node-{slot}") for slot in range(3)
+    )
+    for item in assignment:
+        store.set(
+            handler._ready_key(0, item.node_id),
+            json.dumps(
+                {
+                    "agent_id": f"agent-{item.logical_node_slot}",
+                    "policy_digest": handler._worker_policy_digest,
+                    "schema_version": 1,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8"),
+        )
+    observed: list[str] = []
+
+    def observe(node_id: str, *, agent_id: str | None = None) -> bool:
+        assert agent_id is not None
+        observed.append(node_id)
+        return False
+
+    monkeypatch.setattr(handler, "_heartbeat_is_live", observe)
+
+    with pytest.raises(RendezvousTimeoutError, match="assigned nodes"):
+        handler._wait_for_group(
+            0,
+            assignment,
+            time.monotonic() - 1,
+        )
+
+    assert observed == [item.node_id for item in assignment]
+    assert handler.shutdown()
+
+
 def test_assigned_nodes_must_agree_on_worker_policy(tmp_path: Path) -> None:
     store = HashStore()
     policy_a = (tmp_path / "a.toml").resolve()

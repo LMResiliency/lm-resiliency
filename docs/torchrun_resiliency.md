@@ -207,6 +207,10 @@ agrees on the inferred framework before a built-in adapter can enter GEMINI or
 SCOUT collectives. Missing or conflicting framework evidence fails all ranks
 before attachment. The user module still owns the ordinary framework training
 loop.
+If the default process group uses NCCL, framework agreement runs on a temporary
+Gloo group and destroys that group immediately afterward. Agreement therefore
+does not require user code to bind `LOCAL_RANK` to a CUDA device before
+`init_process_group()`.
 
 Torchrun supplies `LOCAL_WORLD_SIZE` to every worker from
 `--nproc-per-node`. Replacement workers compare that value with the
@@ -234,6 +238,10 @@ After attachment, built-in adapters bind cleanup to the framework's normal
 distributed teardown boundary. The resiliency handle closes before process
 groups are destroyed, so asynchronous checkpoint and replay work completes
 before the application reports a clean exit.
+On generation zero, DeepSpeed may call `engine.load_checkpoint()` before its
+first resiliency-managed training step; a successful load seeds the resiliency
+counter from `engine.global_steps`. Successor generations reject framework
+loads after the manager-selected GEMINI state has been restored.
 
 The worker policy is schema-versioned and strict even for disabled features.
 Every assigned node publishes a digest of the exact policy bytes, rendezvous
@@ -279,8 +287,11 @@ selection/flush, quarantine, and standby placement succeed. Omitting
 `replacement` restarts the same assignments. Supplying `(logical_slot,
 standby_node_id)` replaces exactly one physical node while preserving its
 logical rank range. The coordinator must remain alive through successor
-admission so it can renew the store lease. `close()` stops renewal and wakes
-parked standbys after successful completion.
+admission so it can renew the store lease. Managers call `check_health()` while
+waiting for admission. Transient store errors are retried, while persistent
+renewal failure is latched and raised by health checks and later coordinator
+operations. `close()` stops renewal and wakes parked standbys after successful
+completion.
 
 `TorchrunLaunchConfig` constructs the framework-neutral torchrun argument list.
 It deliberately does not launch subprocesses, select GPUs, invoke SSH, or

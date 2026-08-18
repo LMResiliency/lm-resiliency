@@ -101,6 +101,9 @@ that more specific adapter. Importing multiple higher-level supported
 frameworks fails closed instead of selecting one arbitrarily. Distributed
 workers also agree on the inferred framework when the default process group
 initializes, before any built-in adapter enters attachment collectives.
+When the default backend is NCCL, this one-time agreement uses a temporary
+Gloo group so it does not depend on the application's CUDA device-binding
+order.
 
 Worker adapters do **not** accept a parallelism strategy. They pass the same
 framework objects to the existing `enable_resiliency()` API that explicit user
@@ -135,6 +138,9 @@ a later `engine.load_checkpoint()` call because it could overwrite the selected
 model and optimizer state. DeepSpeed applications that also restore
 framework-owned client state must provide a custom worker adapter that
 coordinates both recovery mechanisms.
+For generation zero, a successful DeepSpeed framework load is allowed before
+the first resiliency-managed training step and seeds the resiliency counter
+from `engine.global_steps`.
 Built-in adapters also close their resiliency handle at the framework's normal
 distributed teardown boundary, before process groups are destroyed. This
 completes asynchronous checkpoint and replay work before user code reports a
@@ -177,9 +183,11 @@ parked standbys. After successor publication, the coordinator renews a
 generation-specific store lease until the manager deadline. Agents combine its
 sequence and remaining duration with host-local monotonic time, so restart
 eligibility does not depend on synchronized wall clocks. Keep the coordinator
-alive through successor admission. `TorchrunLaunchConfig` constructs the common
-LM Resiliency torchrun arguments without owning subprocess, scheduler, SSH, or
-GPU placement behavior.
+alive through successor admission and poll `check_health()` while waiting.
+Transient lease-store failures are retried; persistent renewal failure is
+latched and raised by `check_health()` and subsequent coordinator operations.
+`TorchrunLaunchConfig` constructs the common LM Resiliency torchrun arguments
+without owning subprocess, scheduler, SSH, or GPU placement behavior.
 
 Custom stacks set `adapter = "package.module:factory"` in the worker TOML. The
 factory receives `TorchrunWorkerContext` and returns an object implementing

@@ -198,6 +198,83 @@ def test_coordinator_renews_plan_lease_until_close() -> None:
     assert plans.read_plan_lease(plan) == stopped_lease
 
 
+def test_coordinator_retries_transient_plan_lease_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = HashStore()
+    plans = SimpleRecoveryPlanStore(store, run_id="run")
+    plans.register_node("node-a", "agent-a", max_nodes=1)
+    assert plans.ensure_initial_nodes(min_nodes=1, max_nodes=1) == ("node-a",)
+    coordinator = TorchrunRecoveryCoordinator(store, run_id="run")
+    original = coordinator._plans.renew_plan_lease
+    calls = 0
+
+    def flaky_renew(*args: object, **kwargs: object) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("transient store failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(coordinator._plans, "renew_plan_lease", flaky_renew)
+    coordinator.publish_successor(
+        generation=0,
+        active_node_ids=("node-a",),
+        quarantined_node_ids=(),
+        request=_request(generation=0),
+        local_world_size=1,
+    )
+    deadline = time.monotonic() + 2
+    while calls < 3 and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    assert calls >= 3
+    coordinator.check_health()
+    coordinator.close()
+
+
+def test_coordinator_surfaces_persistent_plan_lease_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = HashStore()
+    plans = SimpleRecoveryPlanStore(store, run_id="run")
+    plans.register_node("node-a", "agent-a", max_nodes=1)
+    assert plans.ensure_initial_nodes(min_nodes=1, max_nodes=1) == ("node-a",)
+    coordinator = TorchrunRecoveryCoordinator(store, run_id="run")
+    original = coordinator._plans.renew_plan_lease
+    calls = 0
+
+    def failing_renew(*args: object, **kwargs: object) -> int:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise RuntimeError("persistent store failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(coordinator._plans, "renew_plan_lease", failing_renew)
+    coordinator.publish_successor(
+        generation=0,
+        active_node_ids=("node-a",),
+        quarantined_node_ids=(),
+        request=_request(generation=0),
+        local_world_size=1,
+    )
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        try:
+            coordinator.check_health()
+        except RuntimeError:
+            break
+        time.sleep(0.02)
+    else:
+        pytest.fail("coordinator did not surface persistent lease failure")
+
+    with pytest.raises(RuntimeError, match="lease renewal failed"):
+        coordinator.current_generation
+    with pytest.raises(RuntimeError, match="lease renewal failed"):
+        coordinator.close()
+
+
 def test_coordinator_rejects_expired_request_before_publish() -> None:
     store = HashStore()
     plans = SimpleRecoveryPlanStore(store, run_id="run")

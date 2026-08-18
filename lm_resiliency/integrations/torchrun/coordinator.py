@@ -17,6 +17,8 @@ from ._simple_runtime import (
     _node_id_from_machine_id,
 )
 
+_PLAN_LEASE_MAX_CONSECUTIVE_FAILURES = 3
+
 
 @dataclass(frozen=True, slots=True)
 class TorchrunInitialPlacement:
@@ -60,12 +62,22 @@ class TorchrunRecoveryCoordinator:
         self._lease_lock = threading.Lock()
         self._lease_stop: threading.Event | None = None
         self._lease_thread: threading.Thread | None = None
+        self._lease_error: Exception | None = None
 
     @property
     def current_generation(self) -> int:
         """Return the latest committed manager generation."""
 
+        self.check_health()
         return self._plans.current_generation()
+
+    def check_health(self) -> None:
+        """Raise if background recovery-plan lease renewal failed persistently."""
+
+        with self._lease_lock:
+            error = self._lease_error
+        if error is not None:
+            raise RuntimeError("recovery plan lease renewal failed") from error
 
     def initial_placement(
         self,
@@ -75,6 +87,7 @@ class TorchrunRecoveryCoordinator:
     ) -> TorchrunInitialPlacement | None:
         """Return generation-zero placement after the complete fleet registers."""
 
+        self.check_health()
         if isinstance(active_node_count, bool) or not isinstance(active_node_count, int):
             raise TypeError("active_node_count must be an integer")
         if isinstance(allocated_node_count, bool) or not isinstance(allocated_node_count, int):
@@ -109,6 +122,7 @@ class TorchrunRecoveryCoordinator:
     ) -> TorchrunSuccessorPlacement:
         """Commit one same-node restart or logical-slot replacement."""
 
+        self.check_health()
         if not isinstance(request, TorchrunRecoveryRequest):
             raise TypeError("request must be TorchrunRecoveryRequest")
         if isinstance(generation, bool) or not isinstance(generation, int):
@@ -216,6 +230,7 @@ class TorchrunRecoveryCoordinator:
 
         self._stop_plan_lease()
         self._plans.close_run()
+        self.check_health()
 
     def _start_plan_lease(
         self,
@@ -237,6 +252,7 @@ class TorchrunRecoveryCoordinator:
         publish_remaining(remaining_seconds)
 
         def renew() -> None:
+            consecutive_failures = 0
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -249,8 +265,13 @@ class TorchrunRecoveryCoordinator:
                     return
                 try:
                     publish_remaining(deadline - time.monotonic())
-                except Exception:
-                    return
+                    consecutive_failures = 0
+                except Exception as error:
+                    consecutive_failures += 1
+                    if consecutive_failures >= _PLAN_LEASE_MAX_CONSECUTIVE_FAILURES:
+                        with self._lease_lock:
+                            if self._lease_stop is stop and not stop.is_set():
+                                self._lease_error = error
 
         thread = threading.Thread(
             target=renew,
@@ -260,6 +281,7 @@ class TorchrunRecoveryCoordinator:
         with self._lease_lock:
             self._lease_stop = stop
             self._lease_thread = thread
+            self._lease_error = None
         thread.start()
 
     def _stop_plan_lease(self) -> None:
