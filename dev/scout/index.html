@@ -288,6 +288,10 @@ SCOUT wraps certified durable checkpoint callbacks and framework fallback loads 
 Use <code>instrument_dataloader(...)</code> and <code>checkpoint_io(...)</code> for other boundaries.</p>
 <p>An explicit <code>hang_master_addr</code> or <code>hang_master_port</code> selects TCP rendezvous.
 <code>hang_state_dir</code> remains available for status files and is used for file rendezvous only when no TCP endpoint is configured.
+When torchrun supplies the default TCP endpoint, SCOUT derives its OOB port from
+the torchrun run ID and LM Resiliency manager generation. Successor generations
+and back-to-back jobs therefore do not reuse a predecessor daemon's listener
+while it is shutting down.
 Each training publisher and daemon reader share an opaque run-, restart-generation-, process-, peer-group-, and rank-scoped shared-memory name plus an ownership token.
 A live publisher never attaches to or unlinks another owner's segment; a dead owner using the same exact channel can be reclaimed safely.
 Harness construction waits for the daemon's bounded readiness signal, and a supervisor reports unexpected post-start daemon exit as <code>oob_daemon_failure</code> while foreground step boundaries also fail explicitly if protection is unavailable.</p>
@@ -449,7 +453,9 @@ Important fields include:</p>
 </tbody>
 </table>
 <p>Out-of-band failures use JSON-ready <code>SCOUTFaultReport</code> values.
-Checkpoint selection uses <code>RecoveryDecision</code>, including recovery mode, source, checkpoint step or durable ID, availability, and reason.</p>
+Checkpoint selection uses <code>RecoveryDecision</code>, including recovery mode, source,
+checkpoint step or durable ID, checkpoint-topology digest, availability, and
+reason.</p>
 <p><code>OrchestrationHooks</code> delivers both contracts to an external manager.
 SCOUT and the framework recommend a checkpoint; the manager owns restart, and the relaunched framework performs the rank-consistent load.</p>
 <h2 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">&para;</a></h2>

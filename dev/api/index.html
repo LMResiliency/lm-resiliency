@@ -48,6 +48,8 @@
     <ul class="current">
     <li class="toctree-l2"><a class="reference internal" href="#public-api-stability">Public API Stability</a>
     </li>
+    <li class="toctree-l2"><a class="reference internal" href="#enable-through-torchrun">Enable Through Torchrun</a>
+    </li>
     <li class="toctree-l2"><a class="reference internal" href="#enable-resiliency">Enable Resiliency</a>
     </li>
     <li class="toctree-l2"><a class="reference internal" href="#framework-support">Framework Support</a>
@@ -169,6 +171,10 @@ This guide covers the public integration contract; component design and validati
 <td>Stable explicit framework entry points</td>
 </tr>
 <tr>
+<td><code>lm_resiliency.integrations.torchrun</code></td>
+<td>Stable torchrun worker-adapter API</td>
+</tr>
+<tr>
 <td><code>lm_resiliency.experimental</code></td>
 <td>Unstable low-level components</td>
 </tr>
@@ -252,8 +258,195 @@ This guide covers the public integration contract; component design and validati
 </tr>
 </tbody>
 </table>
+<p>The stable torchrun integration exports are:</p>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Exports</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Worker contract</td>
+<td><code>TorchrunWorkerAdapter</code>, <code>TorchrunWorkerContext</code>, <code>TorchrunWorkerAdapterError</code>, <code>get_torchrun_worker_context</code></td>
+</tr>
+<tr>
+<td>Built-in adapters</td>
+<td><code>NativePyTorchAdapter</code>, <code>NativePyTorchDDPAdapter</code>, <code>TorchTitanWorkerAdapter</code>, <code>MegatronWorkerAdapter</code>, <code>DeepSpeedWorkerAdapter</code></td>
+</tr>
+<tr>
+<td>Manager coordination</td>
+<td><code>TorchrunRecoveryCoordinator</code>, <code>TorchrunRecoveryRequest</code>, <code>TorchrunInitialPlacement</code>, <code>TorchrunSuccessorPlacement</code></td>
+</tr>
+<tr>
+<td>Launcher configuration</td>
+<td><code>TorchrunLaunchConfig</code></td>
+</tr>
+<tr>
+<td>Node identity</td>
+<td><code>derive_torchrun_node_id</code></td>
+</tr>
+<tr>
+<td>Rendezvous registration</td>
+<td><code>create_rendezvous_handler</code>, <code>get_rendezvous_handler_creator</code></td>
+</tr>
+</tbody>
+</table>
 <p>Other module paths are internal unless this guide identifies them as supported.
 Objects under <code>lm_resiliency.experimental</code> may change within the <code>0.x</code> release series.</p>
+<h2 id="enable-through-torchrun">Enable Through Torchrun<a class="headerlink" href="#enable-through-torchrun" title="Permanent link">&para;</a></h2>
+<p>The <code>lm_resiliency</code> rendezvous backend installs framework-import monitoring
+before the user module starts, then selects the corresponding worker adapter as
+the training stack is imported. The user training module does not import
+<code>lm_resiliency</code>:</p>
+<pre><code class="language-bash">torchrun \
+  --nnodes=1:1 \
+  --nproc-per-node=1 \
+  --rdzv-backend=lm_resiliency \
+  --rdzv-endpoint=/tmp/lm-resiliency-rdzv \
+  --rdzv-id=my-run \
+  --rdzv-conf=&quot;store_type=file,\
+lm_resiliency_restart_context_path=/tmp/lm-resiliency-context/context.json,\
+lm_resiliency_worker_config=/absolute/path/worker.toml&quot; \
+  --module your_training.module \
+  [application arguments...]
+</code></pre>
+<p>Set the context path with the
+<code>lm_resiliency_restart_context_path</code> rendezvous option. The runtime creates the
+parent with owner-only permissions while constructing the rendezvous handler.
+If the directory already exists with different ownership or group/other access,
+startup fails closed instead of changing administrator-provisioned permissions.</p>
+<p>The rendezvous handler derives a stable node identity from <code>/etc/machine-id</code>
+and commits the first <code>min_nodes</code> unique registrations as the initial training
+group. Additional registered nodes remain parked as standbys. Test harnesses
+and container deployments may point <code>LM_RESILIENCY_MACHINE_ID_PATH</code> at another
+absolute file containing a valid machine ID; duplicate identities fail closed.</p>
+<p>Built-in adapter selection is inferred from framework imports:</p>
+<table>
+<thead>
+<tr>
+<th>Imported framework</th>
+<th>Objects passed to the existing framework integration</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Native PyTorch</td>
+<td>One unambiguous root <code>torch.nn.Module</code> and optimizer</td>
+</tr>
+<tr>
+<td>TorchTitan</td>
+<td>The initialized <code>torchtitan.train.Trainer</code></td>
+</tr>
+<tr>
+<td>Megatron Core</td>
+<td>The model chunks, optimizer, and scheduler returned by <code>setup_model_and_optimizer()</code></td>
+</tr>
+<tr>
+<td>DeepSpeed</td>
+<td>The engine returned by <code>deepspeed.initialize()</code></td>
+</tr>
+</tbody>
+</table>
+<p>PyTorch is treated as tentative because every higher-level framework imports
+it. Importing TorchTitan, Megatron Core, or DeepSpeed before attachment selects
+that more specific adapter. Importing multiple higher-level supported
+frameworks fails closed instead of selecting one arbitrarily. Distributed
+workers also agree on the inferred framework when the default process group
+initializes, before any built-in adapter enters attachment collectives.
+When the default backend is NCCL, this one-time agreement uses a temporary
+Gloo group so it does not depend on the application's CUDA device-binding
+order.</p>
+<p>Worker adapters do <strong>not</strong> accept a parallelism strategy. They pass the same
+framework objects to the existing <code>enable_resiliency()</code> API that explicit user
+code would pass. The existing framework integration remains the single owner of
+DDP, FSDP2/HSDP, TP, SP, CP, PP, EP, expert-TP, ZeRO, and framework-specific
+process-group discovery.</p>
+<p>The distributed PyTorch adapter attaches only after a DDP or FSDP construction
+boundary that every participating rank must cross. At the first recognized
+distributed forward, all ranks agree that each owns exactly one valid
+model/optimizer pair before any rank starts LM Resiliency attachment
+collectives. The optimizer must own all trainable parameters of that model and
+no parameters from another model. Multiple optimizers, foreign parameters, or
+a distributed forward without a recognized all-rank construction boundary fail
+closed before attachment. Single-process jobs retain
+root-module-forward discovery. Bottom-up FSDP2/HSDP wrapping is reduced to the
+outermost sharded root, and optimizer subclasses defined after bootstrap are
+instrumented when the class is created.
+The other built-ins attach at their framework-owned initialization boundary and
+likewise fail closed if the expected complete object bundle is unavailable.
+On a replacement generation, built-ins accept GEMINI restart contexts and load
+only the exact manager-selected step. The live checkpoint-topology digest must
+match the manager plan before checkpoint state is applied. Missing, corrupt,
+unverified, newer, older, or topology-incompatible state fails closed. A
+durable-source restart requires a custom worker adapter that owns the
+framework's durable loader.
+Before the user module starts, bootstrap publishes the manager-selected resume
+position as <code>LM_RESILIENCY_TORCHRUN_CHECKPOINT_STEP</code> (<code>0</code> for generation zero).
+Zero-import applications can use that value to restore deterministic sampler or
+input position while the adapter independently verifies the recovered
+framework state.
+After manager-selected GEMINI recovery, the built-in DeepSpeed adapter rejects
+a later <code>engine.load_checkpoint()</code> call because it could overwrite the selected
+model and optimizer state. DeepSpeed applications that also restore
+framework-owned client state must provide a custom worker adapter that
+coordinates both recovery mechanisms.
+For generation zero, a successful DeepSpeed framework load is allowed before
+the first resiliency-managed training step and seeds the resiliency counter
+from <code>engine.global_steps</code>.
+Built-in adapters also close their resiliency handle at the framework's normal
+distributed teardown boundary, before process groups are destroyed. This
+completes asynchronous checkpoint and replay work before user code reports a
+clean shutdown.</p>
+<p>Worker policy is a strict versioned TOML file:</p>
+<pre><code class="language-toml">schema_version = 1
+interval = 10
+enable_checkpoint = true
+enable_detection = true
+
+[checkpoint]
+disk_folder = &quot;/shared/checkpoints&quot;
+disk_flush_interval = 100
+verify_integrity = true
+
+[replay]
+rotate_layers = true
+</code></pre>
+<p>Unknown fields, missing or unsupported schema versions, and invalid values fail
+closed. Assigned nodes must agree on the exact policy contents at rendezvous,
+and each worker revalidates that digest before parsing the policy. Disabled
+feature sections are still validated. <code>replication_jump</code> must
+be valid for the deployed checkpoint group; it is not inferred from the
+launcher node count. <code>checkpoint.disk_flush_interval</code> must be nonnegative; zero
+disables periodic disk persistence. <code>checkpoint.replication_jump</code> must be <code>-1</code>
+or positive, and <code>checkpoint.replication_chunk_size</code> must be positive. Supplying
+<code>lm_resiliency_worker_config</code> enables automatic worker
+instrumentation; omitting it leaves explicit <code>enable_resiliency()</code> integrations
+unchanged. Explicit integrations can call <code>get_torchrun_worker_context()</code> to
+obtain run identity, hashed node identity, worker width, generation, logical
+slot, topology digest, and the manager-selected recovery decision without
+duplicating them as application arguments. Workers obtain their local width from torchrun's standard
+<code>LOCAL_WORLD_SIZE</code> environment and verify replacement plans against it.</p>
+<p>Managers use <code>TorchrunRecoveryCoordinator</code> with the same c10d store used by the
+rendezvous backend. It exposes committed initial placement, publishes immutable
+same-node or replacement successor generations, and closes the run to wake
+parked standbys. After successor publication, the coordinator renews a
+generation-specific store lease until the manager deadline. Agents combine its
+sequence and remaining duration with host-local monotonic time, so restart
+eligibility does not depend on synchronized wall clocks. Keep the coordinator
+alive through successor admission and poll <code>check_health()</code> while waiting.
+Transient lease-store failures are retried; persistent renewal failure is
+latched and raised by <code>check_health()</code> and subsequent coordinator operations.
+<code>TorchrunLaunchConfig</code> constructs the common LM Resiliency torchrun arguments
+without owning subprocess, scheduler, SSH, or GPU placement behavior.</p>
+<p>Custom stacks set <code>adapter = "package.module:factory"</code> in the worker TOML. The
+factory receives <code>TorchrunWorkerContext</code> and returns an object implementing
+<code>install(context)</code>. A stack adapter owns framework-specific discovery and loop
+state. Successor contexts include the manager-selected checkpoint source, step,
+durable checkpoint ID when applicable, checkpoint manifest ID, topology digest,
+and recovery deadline. Torchrun itself cannot infer scheduler, dataloader
+position, or arbitrary caller-owned iteration state safely.</p>
 <h2 id="enable-resiliency">Enable Resiliency<a class="headerlink" href="#enable-resiliency" title="Permanent link">&para;</a></h2>
 <p>Initialize <code>torch.distributed</code>, create the framework training objects, and call <code>enable_resiliency</code> once on every rank:</p>
 <pre><code class="language-python">from lm_resiliency import enable_resiliency
@@ -722,10 +915,13 @@ resiliency = enable_resiliency(
 )
 </code></pre>
 <p><code>report_recovery</code> receives a JSON-ready <code>RecoveryDecision</code> before the corresponding automatic fault report.
-The decision identifies the failure class, selected trust mode, checkpoint source, step, optional durable checkpoint ID, availability, and selection reason.
+The decision identifies the failure class, selected trust mode, checkpoint
+source, step, optional durable checkpoint ID, checkpoint-topology digest,
+availability, and selection reason.
 Checkpoint lookup in the reporting process is rank-local and noncollective because a fault may have already made the training process group unusable.
 The manager can conservatively combine worker decisions, include the selected decision in its restart command, and pass <code>recovery_mode</code> to the relaunched integration.
-The restarted GEMINI loader retains responsibility for selecting a rank-consistent generation collectively.</p>
+The restarted GEMINI loader retains responsibility for collectively validating
+and loading that exact manager-selected generation.</p>
 <p>In-process SDC automatically emits a recovery-verified decision, while a replay-localized straggler emits a latest-GEMINI decision.
 An OOB hang emits a conservative recovery-verified decision without entering a blocked training process or invoking replay.
 An instrumented DataLoader stall emits a latest-GEMINI decision because the reporting worker remains accessible.
@@ -833,7 +1029,7 @@ Import low-level checkpoint managers, replay detectors, topology objects, and co
 See <a href="../moe_execution_regimes/#build-and-audit-the-catalog">MoE execution regimes</a> for the command and catalog-qualification requirements.</p>
 <h2 id="related-guides">Related Guides<a class="headerlink" href="#related-guides" title="Permanent link">&para;</a></h2>
 <ul>
-<li><a href="https://github.com/LMResiliency/lm-resiliency/blob/7f054b744fc277f8fcf67e9360823dc408c227e3/examples/README.md">Production-loop examples</a></li>
+<li><a href="https://github.com/LMResiliency/lm-resiliency/blob/813631f01bfcc972ba9dd2d3b64815a977a37906/examples/README.md">Production-loop examples</a></li>
 <li><a href="../fault_injection/">Fault injection evaluation</a></li>
 <li><a href="../gemini/">GEMINI</a></li>
 <li><a href="../scout/">SCOUT</a></li>

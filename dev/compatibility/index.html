@@ -200,7 +200,62 @@ Distributed GPU validation covers the exact framework versions listed as tested.
 </tbody>
 </table>
 <p>The primary combination also passes the distributed framework campaign.
-Production Megatron grouped-expert validation used PyTorch 2.10.0 and Transformer Engine 2.10.0.</p>
+Production Megatron grouped-expert validation used PyTorch 2.10.0 and Transformer Engine 2.10.0.
+The native <code>torchrun.handlers</code> rendezvous integration uses the supported
+PyTorch 2.10-2.13 entry-point contract. Its complete standby-replacement
+campaign was validated with PyTorch 2.13.0 on one host and across two eight-A100
+hosts. The two-host pressure campaign modeled each GPU as one node, with eight
+active agents and eight standbys. It completed 16 same-node restarts and eight
+SCOUT-localized node replacements. The supported-version CPU matrix covers
+handler construction and the manager-owned recovery-plan protocol on every
+declared PyTorch minor.
+Zero-import worker activation is additive and enabled by supplying a worker
+policy. Framework imports select the built-in adapter, which is qualified
+against the same supported framework ranges as the corresponding explicit
+<code>enable_resiliency()</code> integration:</p>
+<ul>
+<li>Native PyTorch observes a DDP/FSDP all-rank construction boundary and one
+  matching optimizer, then delegates topology discovery to the existing
+  PyTorch integration. Single-process jobs may attach at the root forward.</li>
+<li>TorchTitan attaches to <code>torchtitan.train.Trainer.train</code> and passes the
+  initialized trainer unchanged.</li>
+<li>Megatron Core attaches to
+  <code>megatron.training.training.setup_model_and_optimizer</code> and passes its model
+  chunks, optimizer, and scheduler unchanged.</li>
+<li>DeepSpeed attaches to <code>deepspeed.initialize</code> and passes its returned engine
+  unchanged.</li>
+</ul>
+<p>PyTorch is tentative until attachment because all higher-level frameworks
+import it. Importing more than one higher-level supported framework before
+attachment fails closed. Distributed workers agree on the inferred framework
+when the default process group initializes; missing or conflicting evidence
+fails before any built-in adapter enters attachment collectives. Worker width comes from torchrun's standard
+<code>LOCAL_WORLD_SIZE</code>; replacement contexts must agree with that value.
+Assigned nodes must agree on the exact worker-policy digest, and bootstrap
+revalidates the policy bytes before adapter installation.
+Automatic bootstrap publishes the manager-selected resume position through
+<code>LM_RESILIENCY_TORCHRUN_CHECKPOINT_STEP</code>, allowing zero-import applications to
+restore deterministic input position.
+After manager-selected GEMINI recovery, the built-in DeepSpeed adapter rejects
+a subsequent <code>engine.load_checkpoint()</code> call. A custom adapter is required when
+an application must coordinate DeepSpeed framework client state with GEMINI
+recovery.
+Built-in adapters close their resiliency handles before the corresponding
+framework or default process-group teardown. Framework teardown still runs if
+handle close raises, while the close failure remains the primary error.
+Each rendezvous agent derives its physical identity from <code>/etc/machine-id</code>,
+publishes only a domain-separated hash, and participates in automatic
+generation-zero admission. Duplicate machine identities fail closed.
+Explicit integrations obtain the same manager-selected context through
+<code>get_torchrun_worker_context()</code> without adding application CLI fields. The
+public <code>TorchrunRecoveryCoordinator</code> and <code>TorchrunLaunchConfig</code> are
+framework-neutral; scheduler, subprocess, SSH, and GPU placement policy remain
+outside the library.</p>
+<p>Adapters do not expose a parallelism-strategy option. DDP, FSDP2/HSDP, TP, SP,
+CP, PP, EP, expert-TP, ZeRO, and framework-specific group discovery remain
+owned by the existing framework integrations. Optional framework imports are
+lazy; importing <code>lm_resiliency</code> or constructing an unused adapter does not
+require TorchTitan, Megatron Core, or DeepSpeed.</p>
 <p>CUDA, NCCL, GPU, and topology details for distributed runs are recorded in <a href="../validation/">Validation</a>.</p>
 <h2 id="compatibility-policy">Compatibility Policy<a class="headerlink" href="#compatibility-policy" title="Permanent link">&para;</a></h2>
 <p>Patch releases inside the declared ranges are supported unless an upstream regression is documented.
@@ -210,7 +265,9 @@ Framework adapters may use framework-specific topology and optimizer APIs, so su
 Compatibility defects within a declared range are handled as release bugs and may require narrowing the range in a patch release.
 Contract tests require every declared Python and PyTorch minor series to appear in the CI matrix and require every CI combination to appear in this guide.</p>
 <h2 id="api-compatibility">API Compatibility<a class="headerlink" href="#api-compatibility" title="Permanent link">&para;</a></h2>
-<p>Stable exports from <code>lm_resiliency</code>, <code>lm_resiliency.manager_api</code>, and explicit framework integration entry points remain backward compatible across <code>0.1.x</code> patch releases.
+<p>Stable exports from <code>lm_resiliency</code>, <code>lm_resiliency.manager_api</code>, explicit
+framework integration entry points, and <code>lm_resiliency.integrations.torchrun</code>
+remain backward compatible across <code>0.1.x</code> patch releases.
 The documented <code>lm-resiliency-quickstart</code> and <code>lm-resiliency-discover-moe-regimes</code> commands and their existing options follow the same patch-release compatibility policy.
 Removing or changing a stable interface requires a new minor release and migration notes.
 Objects under <code>lm_resiliency.experimental</code> and unlisted module paths may change in any <code>0.x</code> release.

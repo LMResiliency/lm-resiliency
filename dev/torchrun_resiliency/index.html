@@ -62,149 +62,35 @@
               <ul class="current">
                 <li class="toctree-l1 current"><a class="reference internal current" href="#">Torchrun Resiliency</a>
     <ul class="current">
-    <li class="toctree-l2"><a class="reference internal" href="#decision-summary">Decision Summary</a>
+    <li class="toctree-l2"><a class="reference internal" href="#summary">Summary</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#why-nnodesminmax-is-not-a-standby-contract">Why --nnodes=min:max Is Not a Standby Contract</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#ownership">Ownership</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#recovery-plan">Recovery Plan</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#rendezvous-lifecycle">Rendezvous Lifecycle</a>
         <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#why-nnodesminmax-is-not-a-standby-contract">Why --nnodes=min:max is not a standby contract</a>
+    <li class="toctree-l3"><a class="reference internal" href="#initial-generation">Initial generation</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#replacement">Replacement</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#completion">Completion</a>
     </li>
         </ul>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#scope">Scope</a>
-        <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#goals">Goals</a>
+    <li class="toctree-l2"><a class="reference internal" href="#restart-context">Restart Context</a>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#initial-assumptions">Initial assumptions</a>
+    <li class="toctree-l2"><a class="reference internal" href="#configuration">Configuration</a>
     </li>
-    <li class="toctree-l3"><a class="reference internal" href="#non-goals-for-version-1">Non-goals for version 1</a>
+    <li class="toctree-l2"><a class="reference internal" href="#manager-interface">Manager Interface</a>
     </li>
-        </ul>
+    <li class="toctree-l2"><a class="reference internal" href="#safety-properties">Safety Properties</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#existing-interfaces-and-required-integration">Existing Interfaces and Required Integration</a>
+    <li class="toctree-l2"><a class="reference internal" href="#validation">Validation</a>
     </li>
-    <li class="toctree-l2"><a class="reference internal" href="#three-layer-architecture">Three-Layer Architecture</a>
-        <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#ownership-boundary">Ownership boundary</a>
-    </li>
-        </ul>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#identity-model">Identity Model</a>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#api-lm-resiliency-to-the-coordinator">API: lm-resiliency to the coordinator</a>
-        <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#fault-event">Fault event</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#recovery-proposal">Recovery proposal</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#checkpoint-inventory">Checkpoint inventory</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#local-client-protocol">Local client protocol</a>
-    </li>
-        </ul>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#api-coordinator-to-lm-resiliency">API: coordinator to lm-resiliency</a>
-        <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#restart-intent">Restart intent</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#committed-restart-plan">Committed restart plan</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#restart-context-passed-to-workers">Restart context passed to workers</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#prepare-for-restart-command">Prepare-for-restart command</a>
-    </li>
-        </ul>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#api-lm-resiliency-to-the-framework">API: lm-resiliency to the Framework</a>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#torchrun-rendezvous-integration">Torchrun Rendezvous Integration</a>
-        <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#node-states">Node states</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#job-states">Job states</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#coordinator">Coordinator</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#slot-aware-rendezvous">Slot-aware rendezvous</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#stock-elastic-agent-behavior">Stock elastic agent behavior</a>
-    </li>
-        </ul>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#control-plane-integrity">Control-Plane Integrity</a>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#healthy-path-cost">Healthy-Path Cost</a>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#recovery-policy">Recovery Policy</a>
-        <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#aggregation-rules">Aggregation rules</a>
-    </li>
-        </ul>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#checkpoint-placement-and-transfer">Checkpoint Placement and Transfer</a>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#end-to-end-flows">End-to-End Flows</a>
-        <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#initial-launch">Initial launch</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#accessible-straggler-replacement">Accessible straggler replacement</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#inaccessible-node">Inaccessible node</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#sdc">SDC</a>
-    </li>
-        </ul>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#failure-handling">Failure Handling</a>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#packaging-and-compatibility">Packaging and Compatibility</a>
-        <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#proposed-command">Proposed command</a>
-    </li>
-        </ul>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#validation-plan">Validation Plan</a>
-        <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#contract-tests">Contract tests</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#cpu-multi-process-tests">CPU multi-process tests</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#focused-gpu-and-multi-node-tests">Focused GPU and multi-node tests</a>
-    </li>
-        </ul>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#alternatives-considered">Alternatives Considered</a>
-        <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#use-stock-nnodesminmax-and-callbacks-only">Use stock --nnodes=min:max and callbacks only</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#use-a-custom-rendezvous-handler-without-a-recovery-coordinator">Use a custom rendezvous handler without a recovery coordinator</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#add-a-custom-elastic-agent">Add a custom elastic agent</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#add-a-new-upstream-torchrun-resiliency-policy-interface">Add a new upstream torchrun resiliency-policy interface</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#allow-the-active-world-to-shrink-after-a-failure">Allow the active world to shrink after a failure</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#put-placement-policy-inside-scout-or-gemini">Put placement policy inside SCOUT or GEMINI</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#delegate-replacement-decisions-to-an-external-scheduler">Delegate replacement decisions to an external scheduler</a>
-    </li>
-        </ul>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#phased-implementation">Phased Implementation</a>
-        <ul>
-    <li class="toctree-l3"><a class="reference internal" href="#phase-0-agree-on-contracts">Phase 0: agree on contracts</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#phase-1-manager-neutral-data-model">Phase 1: manager-neutral data model</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#phase-2-reference-torchrun-integration">Phase 2: reference torchrun integration</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#phase-3-framework-validation">Phase 3: framework validation</a>
-    </li>
-    <li class="toctree-l3"><a class="reference internal" href="#phase-4-production-hardening">Phase 4: production hardening</a>
-    </li>
-        </ul>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#open-questions">Open Questions</a>
-    </li>
-    <li class="toctree-l2"><a class="reference internal" href="#references">References</a>
+    <li class="toctree-l2"><a class="reference internal" href="#current-boundaries">Current Boundaries</a>
     </li>
     </ul>
                 </li>
@@ -245,248 +131,38 @@
           <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
             <div class="section" itemprop="articleBody">
               
-                <h1 id="torchrun-native-resiliency-integration">Torchrun Native Resiliency Integration<a class="headerlink" href="#torchrun-native-resiliency-integration" title="Permanent link">&para;</a></h1>
-<p>Status: draft for discussion</p>
-<p>Last updated: 2026-08-14</p>
-<h2 id="decision-summary">Decision Summary<a class="headerlink" href="#decision-summary" title="Permanent link">&para;</a></h2>
-<p>The recommended first design is <strong>fixed-size training with replacement</strong>, not
-general elastic training:</p>
+                <h1 id="torchrun-native-resiliency">Torchrun Native Resiliency<a class="headerlink" href="#torchrun-native-resiliency" title="Permanent link">&para;</a></h1>
+<p>Status: implemented and validated</p>
+<p>Last updated: 2026-08-17</p>
+<h2 id="summary">Summary<a class="headerlink" href="#summary" title="Permanent link">&para;</a></h2>
+<p>The integration uses fixed-size training with replacement:</p>
 <ul>
-<li>allocate a fleet of <code>max_nodes</code> homogeneous hosts;</li>
-<li>run the training job on exactly <code>min_nodes</code> active hosts;</li>
-<li>keep <code>max_nodes - min_nodes</code> hosts as agent-only standbys;</li>
-<li>preserve a stable logical node slot and rank range across restart;</li>
-<li>let SCOUT report fault evidence and GEMINI report recoverable checkpoint
-  state;</li>
-<li>let an LM Resiliency coordinator make the final quarantine, placement, and
-  restart-plan decision;</li>
-<li>use a custom <code>RendezvousHandler</code> to park standbys and expose only a
-  plan-selected replacement to torchrun's existing membership-change path; and</li>
-<li>pass one fenced <code>RestartContext</code> to every relaunched worker so
-  <code>lm-resiliency</code> and the framework recover the same checkpoint generation.</li>
+<li>the scheduler starts torchrun agents on an allocated fleet;</li>
+<li>exactly <code>min_nodes</code> logical slots run trainers;</li>
+<li>excess agents remain parked as standbys;</li>
+<li>SCOUT localizes the faulty logical rank;</li>
+<li>GEMINI selects and flushes one recovery-verified checkpoint;</li>
+<li>the LM Resiliency manager publishes one immutable <code>RestartPlan</code>; and</li>
+<li>the torchrun rendezvous handler consumes that plan, preserves logical slots,
+  restarts the healthy group, and admits only the selected standby.</li>
 </ul>
-<h3 id="why-nnodesminmax-is-not-a-standby-contract">Why <code>--nnodes=min:max</code> is not a standby contract<a class="headerlink" href="#why-nnodesminmax-is-not-a-standby-contract" title="Permanent link">&para;</a></h3>
-<p>In stock torchrun, <code>--nnodes=min_nodes:max_nodes</code> bounds the number of nodes
-that may participate in an elastic rendezvous. It does not divide an allocated
-fleet into active nodes and replacement-only standbys:</p>
-<ul>
-<li><code>min_nodes</code> is the threshold at which a rendezvous is allowed to complete,
-  not the exact number of nodes that must run trainers;</li>
-<li><code>max_nodes</code> is the largest active membership for a rendezvous round, not a
-  fleet size whose excess capacity is reserved; and</li>
-<li>every admitted node is an active worker-group member. There is no standard
-  state meaning "keep this agent registered, but do not start trainers unless a
-  particular active node is replaced."</li>
-</ul>
-<p>For example, <code>--nnodes=8:10</code> can initially form an active group of 8, 9, or 10
-nodes depending on which agents arrive before the rendezvous completes. If it
-starts with 8 and a ninth node arrives later, that node is a candidate for the
-next rendezvous round. The resulting membership change restarts the worker
-group and may increase <code>WORLD_SIZE</code>; it is not treated as passive reserve
-capacity. Conversely, after a departure, a new round may form with any allowed
-membership rather than waiting for a policy-selected replacement that restores
-exactly 8 active nodes.</p>
-<p>The semantic differences are:</p>
-<table>
-<thead>
-<tr>
-<th>Property</th>
-<th>Stock <code>--nnodes=min:max</code></th>
-<th>Replacement-only design</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>Active size</td>
-<td>Any rendezvous size in the configured range</td>
-<td>Exactly <code>min_nodes</code></td>
-</tr>
-<tr>
-<td>Extra nodes</td>
-<td>Elastic scale-up candidates</td>
-<td>Agent-only standbys</td>
-</tr>
-<tr>
-<td>Restart trigger</td>
-<td>Worker failure or rendezvous membership change</td>
-<td>Worker failure or a plan-selected membership change; admission is gated by <code>RestartPlan</code></td>
-</tr>
-<tr>
-<td>Placement</td>
-<td>Participants selected by rendezvous; ranks reassigned per round</td>
-<td>Coordinator selects a node for a specific logical slot</td>
-</tr>
-<tr>
-<td>Rank identity</td>
-<td>Global and group ranks may change after re-rendezvous</td>
-<td>Logical slot and rank range remain stable</td>
-</tr>
-<tr>
-<td>Fault exclusion</td>
-<td>No job-specific quarantine contract in the range</td>
-<td>Quarantined node and resource IDs cannot be readmitted</td>
-</tr>
-<tr>
-<td>Recovery state</td>
-<td>Restart is not coupled to checkpoint trust or completeness</td>
-<td>Relaunch is fenced to one complete trusted checkpoint manifest</td>
-</tr>
-</tbody>
-</table>
-<p>Even if a stock re-rendezvous happens to return to 8 nodes, it does not
-guarantee that the replacement inherits the departed node's rank range.
-Arbitrary renumbering can change framework parallel coordinates and disconnect
-GEMINI's rank-owned shards and peer replicas from their intended owners.
-<code>--max-restarts</code> only bounds retries; it does not add standby admission,
-quarantine, slot inheritance, or checkpoint-selection semantics. The design
-therefore needs an explicit replacement-only admission policy and stable
-logical slots in addition to a node-count range.</p>
-<p>The design uses existing torchrun extension points rather than adding a new
-resiliency-policy interface:</p>
-<ol>
-<li>register an out-of-tree <code>SlotAwareRendezvousHandler</code> through the
-   <code>torchrun.handlers</code> entry-point group;</li>
-<li>keep the stock <code>LocalElasticAgent</code> and its normal full-worker-group restart
-   behavior; and</li>
-<li>keep fault evaluation, checkpoint preparation, quarantine, and immutable
-   restart-plan selection in the LM Resiliency control plane.</li>
-</ol>
-<h2 id="scope">Scope<a class="headerlink" href="#scope" title="Permanent link">&para;</a></h2>
-<h3 id="goals">Goals<a class="headerlink" href="#goals" title="Permanent link">&para;</a></h3>
-<ul>
-<li>Replace a localized bad node with a healthy standby without changing the
-  training topology.</li>
-<li>Prevent quarantined nodes from rejoining later rendezvous generations.</li>
-<li>Select recovery state conservatively from SCOUT and GEMINI evidence.</li>
-<li>Preserve the complete framework state for one coherent optimizer step.</li>
-<li>Keep TorchTitan, native PyTorch, Megatron Core, and DeepSpeed integrations
-  independent of torchrun process-management details.</li>
-<li>Fence stale fault reports and restart commands from earlier generations.</li>
-<li>Fail closed when there are too few healthy nodes or no complete trusted
-  checkpoint.</li>
-</ul>
-<h3 id="initial-assumptions">Initial assumptions<a class="headerlink" href="#initial-assumptions" title="Permanent link">&para;</a></h3>
-<ul>
-<li><code>min_nodes</code> is the exact active training fleet size.</li>
-<li><code>max_nodes - min_nodes</code> is the maximum standby capacity.</li>
-<li>Every admitted node has the same local worker count and compatible hardware,
-  software, model configuration, and framework version.</li>
-<li>A replacement node inherits the failed node's logical slot and global-rank
-  range.</li>
-<li>Version 1 does not change DP, TP, PP, CP, EP, expert-TP, FSDP/HSDP, or ZeRO
-  degrees during recovery.</li>
-<li>Standby agents are running and reachable, but standby trainer processes are
-  not.</li>
-<li>The control store is strongly consistent enough to publish a single restart
-  plan by compare-and-swap.</li>
-</ul>
-<h3 id="non-goals-for-version-1">Non-goals for version 1<a class="headerlink" href="#non-goals-for-version-1" title="Permanent link">&para;</a></h3>
-<ul>
-<li>Elastic scale-up or scale-down of the active training world.</li>
-<li>Recovery with a different model-parallel layout or global batch size.</li>
-<li>Partial restart of one rank while the rest of the worker group continues.</li>
-<li>A planned restart that preserves the identical physical node membership;
-  version 1's healthy-group restart edge is admission of at least one standby.</li>
-<li>Reusing a node that SCOUT could not safely clear.</li>
-<li>Physical hardware repair.</li>
-<li>Turning inconclusive peer evidence into confident node attribution.</li>
-</ul>
-<h2 id="existing-interfaces-and-required-integration">Existing Interfaces and Required Integration<a class="headerlink" href="#existing-interfaces-and-required-integration" title="Permanent link">&para;</a></h2>
-<p>Stock torchrun already provides useful foundations:</p>
-<ul>
-<li>an agent process on every participating node;</li>
-<li>local worker lifecycle and failure monitoring;</li>
-<li>worker-group restart after process failure;</li>
-<li>dynamic rendezvous with <code>min_nodes</code> and <code>max_nodes</code>;</li>
-<li>custom rendezvous handlers through the <code>torchrun.handlers</code> entry-point group;</li>
-<li><code>RendezvousHandler.next_rendezvous()</code> for admission and rank assignment;</li>
-<li><code>RendezvousHandler.num_nodes_waiting()</code> for requesting re-rendezvous;</li>
-<li>restart-count and run-ID environment variables; and</li>
-<li>full worker-group restart on failure or membership change.</li>
-</ul>
-<p>The existing interfaces are sufficient for the torchrun lifecycle mechanics:</p>
-<ul>
-<li>a standby agent remains blocked in <code>next_rendezvous()</code>, so its trainers are
-  not started;</li>
-<li>the handler can return a deterministic group rank derived from a logical
-  slot;</li>
-<li>parked standbys are kept outside the handler's reported wait count; and</li>
-<li>after a restart plan commits, the handler reports only the selected
-  replacement through <code>num_nodes_waiting()</code>. The stock elastic agent then
-  performs its normal full-worker-group membership restart.</li>
-</ul>
-<p>The handler is not the recovery decision-maker. The integration still must
-provide contracts that stock torchrun does not:</p>
-<ol>
-<li><code>min_nodes:max_nodes</code> describes elastic active membership, not
-   <code>min_nodes</code> active nodes plus replacement-only standbys.</li>
-<li>The stock rendezvous handlers do not distinguish passive standbys from
-   scale-up candidates.</li>
-<li>Stock rank assignment is not stable across re-rendezvous.</li>
-<li>Torchrun failure handling does not consume SCOUT fault localization or
-   checkpoint trust.</li>
-<li>The rendezvous API does not define a quarantine database or logical-slot
-   inheritance contract.</li>
-<li>Checkpoint preparation and recovery-plan consensus remain application and
-   manager responsibilities.</li>
-</ol>
-<p>PyTorch 2.13 includes an experimental worker control-plane server, but it is a
-generic handler server and not a stable restart or quarantine protocol. The
-reference integration does not require that experimental surface.</p>
-<p>The integration must also avoid depending on <code>--max-restarts</code> as its only
-replacement budget. Failure retries and membership changes have had different
-accounting behavior across torchrun versions. The coordinator should own an
-explicit <code>max_replacement_generations</code> policy. The current runtime admits
-exactly one replacement generation because authoritative lifecycle readback
-currently proves only the first closed intent and successor. Configuration
-values greater than one fail closed until repeated lifecycle readback is
-implemented.</p>
-<h2 id="three-layer-architecture">Three-Layer Architecture<a class="headerlink" href="#three-layer-architecture" title="Permanent link">&para;</a></h2>
-<pre><code class="language-text">                    control store / coordinator
-              restart plans, slot leases, quarantine
-                              |
-                              v
-+------------------------------------------------------------------+
-| Layer 1: torchrun                                                 |
-|                                                                  |
-| Stock LocalElasticAgent     RendezvousHandler plugin              |
-| - monitors and restarts local workers                            |
-| - calls next_rendezvous() before worker launch                    |
-| - polls num_nodes_waiting() while workers are healthy             |
-| - performs the standard full-group membership restart            |
-+-----------------------------+------------------------------------+
-                              |
-        control client / store | restart-context file/environment
-                              v
-+------------------------------------------------------------------+
-| Layer 2: lm-resiliency                                           |
-|                                                                  |
-| SlotAwareRendezvousHandler  RestartCoordinator  SCOUT  GEMINI    |
-| TorchrunOrchestrationClient  manager_api                          |
-| - owns active/standby state and logical-slot assignments         |
-| - commits one fenced RestartPlan                                 |
-| - exposes only the selected replacement as waiting               |
-| - excludes quarantined nodes                                     |
-| - reports normalized fault evidence                              |
-| - proposes checkpoint trust and locally available state          |
-| - flushes and transfers eligible checkpoint shards               |
-| - validates and consumes the committed RestartContext            |
-| - performs rank-consistent checkpoint selection after relaunch   |
-+-----------------------------+------------------------------------+
-                              |
-             framework-neutral| recovery request and adapter
-                              v
-+------------------------------------------------------------------+
-| Layer 3: TorchTitan or another torchrun framework                 |
-|                                                                  |
-| FrameworkAdapter / Trainer                                       |
-| - owns model, optimizer, scheduler, RNG, sampler/data position    |
-| - exposes safe optimizer boundaries                              |
-| - loads framework durable state when GEMINI is unavailable        |
-| - resumes at the step selected by lm-resiliency                  |
-+------------------------------------------------------------------+
+<p>Torchrun is a lifecycle mechanism, not the recovery decision-maker. It does not
+re-evaluate SCOUT evidence, GEMINI trust, or placement policy.</p>
+<h2 id="why-nnodesminmax-is-not-a-standby-contract">Why <code>--nnodes=min:max</code> Is Not a Standby Contract<a class="headerlink" href="#why-nnodesminmax-is-not-a-standby-contract" title="Permanent link">&para;</a></h2>
+<p>Stock <code>--nnodes=min_nodes:max_nodes</code> permits any active rendezvous size in that
+range. It does not mean "<code>min_nodes</code> trainers plus reserved standby agents."</p>
+<p>For example, with <code>--nnodes=4:6</code>, late nodes are normally scale-up candidates.
+The simplified LM Resiliency handler instead keeps exactly four logical slots:</p>
+<pre><code class="language-text">generation 0:  node-a node-b node-c node-d
+standby:       node-e node-f
+
+failure:       node-d
+generation 1:  node-a node-b node-c node-e
+standby:       node-f
 </code></pre>
-<h3 id="ownership-boundary">Ownership boundary<a class="headerlink" href="#ownership-boundary" title="Permanent link">&para;</a></h3>
+<p><code>node-e</code> inherits <code>node-d</code>'s logical slot and global-rank range. World size,
+local worker count, and framework topology do not change.</p>
+<h2 id="ownership">Ownership<a class="headerlink" href="#ownership" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
 <tr>
@@ -496,1818 +172,340 @@ implemented.</p>
 </thead>
 <tbody>
 <tr>
-<td>Detection, localization, evidence confidence</td>
+<td>Fault detection and localization</td>
 <td>SCOUT</td>
 </tr>
 <tr>
-<td>Checkpoint capture, trust, inventory, transfer</td>
+<td>Checkpoint capture, trust, and recovery step</td>
 <td>GEMINI</td>
 </tr>
 <tr>
-<td>Final node quarantine and replacement policy</td>
-<td>LM Resiliency coordinator</td>
+<td>Quarantine, replacement choice, and final plan</td>
+<td>LM Resiliency manager</td>
 </tr>
 <tr>
-<td>Active/standby admission and logical-slot assignment</td>
-<td><code>SlotAwareRendezvousHandler</code> and coordinator</td>
+<td>Standby parking and stable slot admission</td>
+<td>torchrun rendezvous handler</td>
 </tr>
 <tr>
 <td>Worker-group stop and relaunch</td>
-<td>Stock torchrun elastic agent</td>
+<td>stock torchrun elastic agent</td>
 </tr>
 <tr>
-<td>Final restart generation and checkpoint manifest</td>
-<td>LM Resiliency coordinator</td>
+<td>Model, optimizer, RNG, scheduler, and input state</td>
+<td>framework integration</td>
 </tr>
 <tr>
-<td>Model and optimizer state semantics</td>
-<td>framework adapter</td>
-</tr>
-<tr>
-<td>Physical repair or scheduler allocation</td>
-<td>infrastructure manager</td>
+<td>Host allocation and physical repair</td>
+<td>scheduler/infrastructure</td>
 </tr>
 </tbody>
 </table>
-<p>SCOUT and GEMINI may recommend a replacement scope and recovery state, but they
-must not directly evict a physical host. A rank-local report is evidence, not a
-cluster-wide decision.</p>
-<h2 id="identity-model">Identity Model<a class="headerlink" href="#identity-model" title="Permanent link">&para;</a></h2>
-<p>Ranks cannot be used as durable resource identities. Every event and plan must
-carry both the current rank mapping and stable infrastructure identities.</p>
-<pre><code class="language-python">class AgentIdentity(TypedDict):
-    run_id: str
-    node_id: str  # Stable scheduler or infrastructure identity.
-    agent_id: str  # Unique torchrun agent incarnation.
-    hostname: str
-    local_world_size: int
-    resource_ids: list[str]  # GPU UUIDs, NICs, HCAs, or deployment IDs.
-    environment_digest: str  # Software, configuration, and capability identity.
-
-
-class WorkerIdentity(TypedDict):
-    run_id: str
-    generation: int
-    node_id: str
-    agent_id: str
-    logical_node_slot: int  # Stable for the lifetime of the training job.
-    global_rank: int
-    local_rank: int
-    local_world_size: int
-    hostname: str
-    gpu_uuid: str | None
-    topology_digest: str
-</code></pre>
-<p>The coordinator records an immutable <code>RankAssignment</code> for each generation:</p>
-<pre><code class="language-python">@dataclass(frozen=True)
-class RankAssignment:
-    run_id: str
-    generation: int
-    active_nodes: int
-    local_world_size: int
-    slot_to_node_id: dict[int, str]
-    slot_to_rank_range: dict[int, tuple[int, int]]
-    topology_digest: str
-</code></pre>
-<p>When node <code>host-a</code> in slot <code>3</code> is replaced by <code>host-spare-1</code>, the new node
-inherits slot <code>3</code> and the same rank range. This keeps GEMINI shard ownership and
-framework parallel coordinates stable.</p>
-<p><code>GROUP_RANK</code>, hostname, PID, and global rank alone are not valid quarantine
-keys. A quarantine record uses <code>node_id</code> and may also contain GPU, NIC, HCA, or
-other resource IDs.</p>
-<p>Version 1 behavior persists an immutable whole-node <code>NodeQuarantineRecord</code> for
-every excluded node. Record schema version 2 binds the stable run and node
-identities to the committed plan and intent, the failed and effective successor
-generations, the incident set, policy reason, affected resource evidence, and
-the complete coordinator lease identity, duration, and fencing token that
-authorized it. Schema version 1 is rejected rather than interpreted as this
-expanded layout. The resource list may be empty when evidence supports only
-node-level exclusion; it does not narrow the effect of the record. A node
-quarantine is permanent for the run and must be create-only under the
-coordinator lease.
-The quarantine write repository does not expose a standalone commit or read
-operation. It authenticates the held coordinator lease, validates plan/intent
-linkage and trusted resource ownership, then returns create-once writes that the
-coordinator must compose into the same guarded transaction as restart-plan
-publication and generation advancement. No quarantine is authoritative until a
-later combined reader verifies the matching persisted plan, successor
-generation, quarantine record, commit timestamp, and guard provenance from that
-transaction. Resource evidence passed to the repository must already be
-authorized from validated fault evidence; ownership validation prevents that
-evidence from naming another node's resource.</p>
-<p><code>node_id</code> must come from a trusted scheduler, cloud instance identity, or
-deployment inventory. A worker-provided hostname is diagnostic metadata and
-must not be allowed to choose its own quarantine identity. If no stable node
-identity is available, replacement mode should refuse to start.</p>
-<p>The trusted resource inventory maps every resource ID to both its stable node
-owner, resource kind (<code>gpu</code>, <code>nic</code>, <code>hca</code>, <code>link</code>, or <code>node</code>), and the global
-rank for rank-bound endpoints. Worker registration proves that an agent may
-report a resource; it does not allow the worker to relabel a GPU as a NIC or
-attribute another local worker's GPU to its own rank.</p>
-<p>The topology digest covers at least the active world size, local worker count,
-framework parallel dimensions, logical rank-to-parallel-coordinate mapping,
-checkpoint schema, and model configuration needed to interpret rank-local
-state. It is separate from <code>environment_digest</code>, which describes whether a node
-is eligible to run the same software and hardware workload.</p>
-<p>Each live agent persists a strict, versioned <code>AgentRegistrationRecord</code> that
-contains its complete immutable <code>AgentIdentity</code>, a unique registration lifetime
-ID, and the registration lease duration. The control-store revision is the
-opaque fencing token, and the store-stamped commit time plus duration determines
-expiry. Registration proves that one agent incarnation is live on a trusted
-node identity; it does not by itself make the node standby-eligible, admit it to
-a generation, or authorize resources absent from the trusted infrastructure
-inventory.</p>
-<p>The registration manager stores one live record per run and stable node ID.
-Retrying registration for the same immutable agent identity renews the existing
-registration ID; a different agent or changed environment remains blocked until
-the current registration expires. Renewal and release authenticate the complete
-held record, fencing revision, and authoritative grant time before issuing a
-store-time-guarded mutation. Expiry takeover creates a new registration ID and
-fencing token. Registration keys are independently scoped by hashed run and node
-identity, so agents on different nodes do not contend.</p>
-<p>Equivalent heartbeat renewals use a store refresh operation that compacts
-unreferenced intermediate values. The retained history keeps the initial and
-current values of each registration lifetime plus every revision consumed by a
-successful guarded transaction condition. Acknowledgements and plan commits
-therefore retain the exact registration authority they used, while long-running
-active and standby agents do not accumulate one durable history entry per
-heartbeat. History readers accept compacted same-registration mutation gaps only
-when the skipped renewals could all have completed before lease expiry.</p>
-<p>The coordinator does not enumerate arbitrary control-store keys. A registration
-reader receives the trusted scheduler node-ID set explicitly, derives the same
-hashed keys as the agents, and reads only those registrations. After completing
-the reads, it samples the observer clock once and classifies each trusted node
-as live, expired, or missing. This observation is conservative rather than an
-atomic multi-key snapshot: a concurrent renewal may appear expired or missing,
-but a selected registration must be revalidated before admission or plan
-commit. A store-stamped grant time later than the observer clock is a clock
-error, not a live registration.</p>
-<h2 id="api-lm-resiliency-to-the-coordinator">API: lm-resiliency to the coordinator<a class="headerlink" href="#api-lm-resiliency-to-the-coordinator" title="Permanent link">&para;</a></h2>
-<p>The current <code>OrchestrationHooks</code> callbacks are the starting point. The torchrun
-integration wraps them in a versioned, incident-correlated envelope and sends
-them to the coordinator through the configured manager transport. A local
-Unix-domain socket or sidecar may provide that transport, but the stock
-torchrun agent is not part of the protocol.</p>
-<h3 id="fault-event">Fault event<a class="headerlink" href="#fault-event" title="Permanent link">&para;</a></h3>
-<pre><code class="language-python">class HardwareFaultReport(TypedDict):
-    kind: Literal[&quot;hardware&quot;]
-    resource_kind: Literal[&quot;gpu&quot;, &quot;node&quot;, &quot;nic&quot;, &quot;hca&quot;, &quot;link&quot;]
-    resource_id: str
-    metric: str
-    value: float
-    severity: Literal[&quot;fatal&quot;]
-    message: str
-
-
-class FaultEvent(TypedDict):
-    schema_version: int
-    event_id: str
-    incident_id: str
-    run_id: str
-    generation: int
-    reporter: WorkerIdentity
-    optimizer_step: int
-    report: SCOUTFaultReport | HardwareFaultReport
-</code></pre>
-<p>Requirements:</p>
+<p>The manager publishes only after it has one safe decision. The torchrun-facing
+contract is therefore one canonical <code>RestartPlan</code>, not a second evidence or
+consensus protocol.</p>
+<h2 id="recovery-plan">Recovery Plan<a class="headerlink" href="#recovery-plan" title="Permanent link">&para;</a></h2>
+<p>The plan contains the information torchrun needs:</p>
 <ul>
-<li><code>event_id</code> is idempotent.</li>
-<li><code>incident_id</code> correlates the fault with recovery and checkpoint events.</li>
-<li>The coordinator rejects a stale <code>generation</code>.</li>
-<li>Event admission validates the reporter's node, logical slot, local worker
-  count, rank range, and topology digest against that generation's immutable
-  <code>RankAssignment</code>; worker-supplied rank arithmetic alone is insufficient.</li>
-<li>Event admission also binds the worker to its registered <code>AgentIdentity</code>.
-  Hardware reports are accepted only when the reported node or resource belongs
-  to that agent and both its node owner and resource kind match the trusted
-  scheduler or infrastructure inventory.</li>
-<li>The original <code>SCOUTFaultReport</code> is preserved without upgrading its
-  attribution. A direct <code>HealthEvent</code> is normalized to
-  <code>HardwareFaultReport</code> without upgrading its resource granularity.</li>
-<li>The coordinator resolves reported ranks through that generation's
-  <code>RankAssignment</code> and rejects any reported rank outside its committed ranges.</li>
-<li><code>failed_ranks</code>, <code>endpoint_rank</code>, <code>dataloader_culprit_ranks</code>, and
-  <code>stage_culprit_ranks</code> are validated together. Culprit and endpoint ranks must
-  be included in <code>failed_ranks</code>; node or resource endpoint IDs must resolve to
-  the endpoint rank's node through the trusted assignment and resource map.
-  Rank-bound resources must also match the trusted resource-to-rank binding;
-  node-shared NIC, HCA, and link resources need no artificial rank binding.</li>
-<li>The orchestration dispatcher allocates <code>incident_id</code> once and uses it for
-  both the recovery and fault callbacks. The client must not infer correlation
-  from callback timing.</li>
+<li>run, plan, intent, and generation identities;</li>
+<li>the exact node-to-slot assignment for the successor generation;</li>
+<li>quarantined node IDs;</li>
+<li>recovery mode and checkpoint source;</li>
+<li>checkpoint step, checkpoint manifest ID, and optional durable checkpoint ID;</li>
+<li>expected world size and topology digest; and</li>
+<li>an exclusive restart deadline.</li>
 </ul>
-<h3 id="recovery-proposal">Recovery proposal<a class="headerlink" href="#recovery-proposal" title="Permanent link">&para;</a></h3>
-<p>The existing <code>RecoveryDecision</code> remains a rank-local, noncollective result. At
-the torchrun boundary it is explicitly called a proposal:</p>
-<pre><code class="language-python">class RecoveryProposalEvent(TypedDict):
-    schema_version: int
-    event_id: str
-    incident_id: str
-    run_id: str
-    generation: int
-    reporter: WorkerIdentity
-    decision: RecoveryDecision
+<p>The runtime stores one create-once plan per successor generation. Publication
+advances the current generation by compare-and-set, so conflicting plans fail
+closed. The coordinator converts the manager's absolute deadline into a
+renewing store lease containing a sequence and remaining duration. Agents
+require locally observed lease progress and translate the remaining duration
+to their own monotonic clocks; they never compare wall-clock timestamps from
+different hosts. Lease freshness remains bounded by the heartbeat cadence, but
+the restart context carries the full manager window so worker startup is not
+limited to one heartbeat timeout.</p>
+<p>For GEMINI recovery the plan carries:</p>
+<pre><code class="language-text">recovery_mode = recovery_verified
+checkpoint_source = gemini
+checkpoint_step = &lt;verified optimizer step&gt;
+checkpoint_id = null
 </code></pre>
-<p>The coordinator combines proposals with a conservative lattice:</p>
-<pre><code class="language-text">RECOVERY_VERIFIED dominates LATEST_GEMINI
-unavailable required shard dominates locally available state
-missing or stale evidence blocks promotion to a less conservative mode
-</code></pre>
-<p>A schema-v1 proposal accepts only the known failure kinds <code>straggler</code>,
-<code>data_stall</code>, <code>checkpoint_stall</code>, <code>hang</code>, <code>uncertain</code>, <code>sdc</code>, and
-<code>machine_unavailable</code>. Unknown or newly introduced kinds are rejected until a
-new schema defines their recovery semantics.</p>
-<p>A worker must never interpret its local <code>checkpoint_step</code> as the final global
-step. The coordinator selects one step from the complete job-wide inventory,
-and the restarted job collectively validates that exact step before loading.</p>
-<h3 id="checkpoint-inventory">Checkpoint inventory<a class="headerlink" href="#checkpoint-inventory" title="Permanent link">&para;</a></h3>
-<p><code>RecoveryDecision</code> says what one worker recommends. Replacement also needs to
-know where every logical-rank shard can be obtained.</p>
-<pre><code class="language-python">class CheckpointCopy(TypedDict):
-    owner_global_rank: int
-    checkpoint_step: int
-    inventory_event_id: str
-    checkpoint_id: str | None
-    holder_node_id: str
-    holder_kind: Literal[&quot;owner&quot;, &quot;peer&quot;, &quot;durable&quot;]
-    storage_kind: Literal[&quot;memory&quot;, &quot;node_local&quot;, &quot;shared&quot;, &quot;remote&quot;]
-    location_token: str
-    complete: bool
-    checksums_available: bool
-
-
-class CheckpointInventoryEvent(TypedDict):
-    schema_version: int
-    event_id: str
-    run_id: str
-    generation: int
-    reporter: WorkerIdentity
-    step: int
-    trust: Literal[&quot;latest&quot;, &quot;candidate&quot;, &quot;recovery_verified&quot;]
-    topology_digest: str
-    copies: list[CheckpointCopy]
-</code></pre>
-<p>Only completed checkpoint slots may appear with <code>complete=True</code>.
-<code>checkpoint_step</code> must equal the enclosing inventory event's positive <code>step</code>;
-<code>inventory_event_id</code> binds the copy to that source event, and the coordinator
-validates the complete copy record against the referenced event when assembling
-the recovery manifest. A <code>CANDIDATE</code> inventory can be retained for diagnosis
-but is never selected for conservative recovery. Durable copies must use shared
-or remote storage and carry the opaque durable <code>checkpoint_id</code>; that ID must
-match the committed plan. Owner and peer copies do not carry a durable
-checkpoint ID. Node-local and in-memory copies remain subject to holder health
-and quarantine, and are eligible only when the inventory event was reported by
-that holder. Shared or remote copies may instead be referenced by an
-authenticated control-plane inventory.</p>
-<p><code>location_token</code> is an opaque control-plane reference, not an unchecked path
-that another worker is allowed to open.</p>
-<p>Worker inventory is not checkpoint certification. The coordinator consumes a
-separate record from the trusted SCOUT/GEMINI catalog store:</p>
-<pre><code class="language-python">class CheckpointCertification(TypedDict):
-    schema_version: int
-    certification_id: str
-    run_id: str
-    source_generation: int
-    step: int
-    topology_digest: str
-    checkpoint_source: Literal[&quot;gemini&quot;, &quot;durable&quot;]
-    checkpoint_id: str | None
-    expected_world_size: int
-    certification_kind: Literal[
-        &quot;dense_consensus&quot;,
-        &quot;dynamic_candidate_promotion&quot;,
-    ]
-    inventory_event_digests: dict[str, str]  # event ID to canonical SHA-256
-</code></pre>
-<p>This record is written only after job-wide dense acceptance or the documented
-two-cycle dynamic-catalog promotion. It is not accepted through the worker
-event sink. A worker-declared <code>recovery_verified</code> inventory is eligible only
-when a trusted certification matches its run, generation, step, topology,
-source, durable checkpoint ID, world size, and canonical inventory-event
-digest. Reusing an event ID with different copy contents therefore cannot reuse
-the earlier certification.</p>
-<h3 id="local-client-protocol">Local client protocol<a class="headerlink" href="#local-client-protocol" title="Permanent link">&para;</a></h3>
-<pre><code class="language-python">class ResiliencyEventSink(Protocol):
-    def publish_fault(self, event: FaultEvent) -&gt; None: ...
-    def publish_recovery(self, event: RecoveryProposalEvent) -&gt; None: ...
-    def publish_checkpoint(self, event: CheckpointInventoryEvent) -&gt; None: ...
-    def acknowledge_restart(self, ack: RestartAck) -&gt; None: ...
-</code></pre>
-<p>The callbacks must be bounded and must not use the training process group.
-Delivery failure is visible and causes the coordinator to use conservative
-recovery; it must not be silently treated as a healthy report.</p>
-<h2 id="api-coordinator-to-lm-resiliency">API: coordinator to lm-resiliency<a class="headerlink" href="#api-coordinator-to-lm-resiliency" title="Permanent link">&para;</a></h2>
-<p>Restart is a two-phase protocol:</p>
+<p>The shared GEMINI folder and stable checkpoint run ID remain deployment
+configuration. They are not duplicated in every restart plan.</p>
+<h2 id="rendezvous-lifecycle">Rendezvous Lifecycle<a class="headerlink" href="#rendezvous-lifecycle" title="Permanent link">&para;</a></h2>
+<h3 id="initial-generation">Initial generation<a class="headerlink" href="#initial-generation" title="Permanent link">&para;</a></h3>
+<p>Each agent reads <code>/etc/machine-id</code>, validates the standard 32-hexadecimal
+machine identity, and registers a domain-separated SHA-256 identifier in the
+rendezvous store. The raw machine ID is not published. The first <code>min_nodes</code>
+unique registrations are committed once as generation zero and logical slot
+order. Later registrations remain standbys. Every agent then heartbeats under
+its committed machine identity.</p>
+<ul>
+<li>assigned nodes publish readiness and form the worker group;</li>
+<li>unassigned nodes remain blocked in <code>next_rendezvous()</code>; and</li>
+<li>parked standbys are hidden from <code>num_nodes_waiting()</code>.</li>
+</ul>
+<p>Two live agents resolving to the same machine identity fail closed. This
+prevents two torchrun agents on one physical node from claiming separate
+failure domains. The validation campaign intentionally simulates multiple
+nodes on one host by setting <code>LM_RESILIENCY_MACHINE_ID_PATH</code> to a different
+synthetic machine-ID file for each agent.</p>
+<h3 id="replacement">Replacement<a class="headerlink" href="#replacement" title="Permanent link">&para;</a></h3>
+<p>After the manager publishes generation <code>N + 1</code>:</p>
 <ol>
-<li>a <code>RestartIntent</code> quiesces accessible workers and gathers final checkpoint
-   preparation results without advancing the generation; then</li>
-<li>an immutable <code>RestartPlan</code> selects the actual checkpoint and next placement
-   from those results.</li>
+<li>the coordinator renews the generation lease until the manager deadline;</li>
+<li>healthy active agents observe one live plan-selected replacement through
+   <code>num_nodes_waiting()</code>;</li>
+<li>stock torchrun performs its normal full-worker-group restart;</li>
+<li>the selected standby is admitted at the failed node's logical slot;</li>
+<li>every admitted node receives the same generation and world size;</li>
+<li>the handler writes a node-local canonical <code>RestartContext</code>; and</li>
+<li>workers enable LM Resiliency with the plan's recovery mode and restore the
+   selected GEMINI or durable checkpoint.</li>
 </ol>
-<p>This prevents a failed flush or transfer from invalidating a plan that already
-promised <code>LATEST_GEMINI</code>.</p>
-<h3 id="restart-intent">Restart intent<a class="headerlink" href="#restart-intent" title="Permanent link">&para;</a></h3>
-<pre><code class="language-python">class RestartIntent(TypedDict):
-    schema_version: int
-    intent_id: str
-    run_id: str
-    generation: int
-    incident_ids: list[str]
-    reason_code: str
-    minimum_recovery_mode: Literal[&quot;latest&quot;, &quot;recovery_verified&quot;]
-    suspected_node_ids: list[str]
-    prepare_deadline_unix_ms: int
-</code></pre>
-<p>The intent is a single-writer, compare-and-swap record for the current
-generation. It does not authorize a new worker group. Accessible workers
-observe it through <code>TorchrunOrchestrationClient</code>, quiesce at a framework-safe
-boundary, prepare eligible checkpoint state, and wait for either a committed
-plan or an explicit abort. The stock torchrun agent still considers the worker
-group healthy during this preparation phase.</p>
-<p>The persisted form is an immutable, strict <code>RestartIntentRecord</code>. It embeds the
-canonical intent and binds it to the exact committed generation-snapshot digest
-plus the complete coordinator lease identity, duration, and opaque fencing
-token that authorized it. Duplicate or unknown fields, unsupported schema
-versions, malformed nested intents, and noncanonical SHA-256 digests fail
-closed. A strict <code>RestartIntentHeadRecord</code> identifies the single current intent
-by run, generation, intent ID, and canonical intent-record digest. The head
-payload is immutable; its future store key is compare-and-swap managed so
-opening an intent can atomically create both the create-once intent record and
-the current pointer. The strict <code>RestartIntentLifecycleRecord</code> separately binds
-the last closed intent head to the coordinator lease that performed closure;
-that lease may be a renewal of the lease that opened the intent. The record
-schemas do not define a store mutation API. Lease-fenced intent creation,
-lifecycle observation and closure, and other lifecycle transitions are
-separate control-plane components. Each closure record is immutable and has a
-canonical digest. A strict <code>RestartIntentLifecycleHeadRecord</code> identifies the
-latest closure by run, positive closure index, generation, intent ID, and
-closure-record digest. The head is the only mutable lifecycle pointer; later
-readers require its store mutation and value sequences to equal the closure
-index so replaying an older A record after B cannot appear to roll lifecycle
-state back. A strict <code>RestartIntentClosedHeadRecord</code> is the durable closed value
-for the current-intent key. It binds the closure index, generation, and intent
-identity to the canonical lifecycle-head digest. A future closure transaction
-atomically replaces the open current-intent head with this marker while
-advancing the lifecycle head and creating the immutable closure record. The
-next intent replaces the marker instead of relying on deletion, so a restarted
-reader can prove closure from persisted state. Atomic opening and closure
-transactions are separate control-plane components. A frozen
-<code>InitialRestartIntentClosureRecords</code> value links the first committed intent to
-its immutable closure record, first lifecycle head, and durable closed marker.
-It exposes create-once closure/lifecycle writes, a revision-guarded
-current-head update, and an exact immutable-intent condition, but does not
-authenticate a closing lease or mutate the store. A frozen
-<code>PreparedInitialRestartIntentClosure</code> descriptor binds those records to a
-contiguous coordinator-lease authority slice beginning at the exact lease that
-opened the intent. It accepts same-lease renewal and nonoverlapping in-place
-replacement while rejecting skipped mutations, expired renewals, overlapping
-leases, recurrence of any generation or opening lease identity or fencing
-token after replacement, and delete/recreate transitions that lack a durable
-deletion tombstone. It bounds the future transaction to the final live lease
-but performs no store reads or mutations. A later preparer selects the slice
-from verified durable lease history. A frozen
-<code>PreparedInitialRestartIntentOpen</code> descriptor binds the first intent record,
-current-intent head, exact generation revisions, coordinator fencing token,
-canonical run-scoped keys, and lease/intent commit window. It exposes immutable
-create-once writes and side-effect-free generation conditions but performs no
-store reads or mutations. The descriptor carries the complete held coordinator
-lease and requires the intent record to match its identity, duration, fencing
-token, and authoritative grant time. A later preparer authenticates that handle
-against persisted ownership before constructing the descriptor. The initial
-preparer also revalidates the exact generation, intent scope, never-opened
-lifecycle state, and remaining lease/intent window against a monotonic
-coordinator clock sampled after those reads. The observation becomes the
-transaction's lower time bound; the store remains authoritative at execution.
-The prepared transaction also carries a never-created lifecycle-head
-condition. The store checks both current absence and durable key history at the
-same linearization point as the lease, generation conditions, and intent
-writes. The preparer performs no mutation. The initial-open executor submits
-that guarded transaction, translates lease, deadline, clock, generation, and
-lifecycle conflicts, and verifies that both returned entries share the expected
-bytes, commit time, transaction sequence, generation order, and lease
-provenance. Preparation preserves the authenticated lease entry's transaction,
-mutation, value, and lifetime sequences. Those sequences must equal the
-generation snapshot's authority for the same fencing token or advance
-consistently for a nonexpired renewal or nonoverlapping replacement. Execution
-requires both committed entries to match that exact lease provenance and to
-follow both the generation snapshot and the authenticated lease transaction.
-The lease mutation count cannot exceed the store-global transaction gap, a
-post-generation lease grant cannot predate the generation commit, and a lease
-ID or fencing token cannot reappear after a different acquisition in the
-verified generation history. Preparation obtains that history through one
-stable reader traversal rather than rereading the full predecessor chain for
-each generation.</p>
-<p>A non-mutating <code>RestartIntentClosurePreparer</code> reconstructs the current
-committed opening, double-collects verified coordinator-lease history, requires
-the supplied closing lease to be the live durable tail, selects the contiguous
-authority slice beginning at the opening lease, and samples a monotonic commit
-lower bound after those reads. It returns
-<code>PreparedInitialRestartIntentClosure</code>; a separate executor owns the guarded
-store transaction and committed-result verification. Lease-key lifetime
-changes remain rejected until the store retains authoritative deletion
-evidence.</p>
-<p><code>RestartIntentClosureExecutor</code> submits that prepared transaction and returns a
-frozen <code>CommittedInitialRestartIntentClosure</code> only after verifying the exact
-three-key result, immutable closure/lifecycle creation, one in-place
-current-head replacement, shared transaction identity, closing-lease
-provenance, prepared time window, and causal order after both opening and lease
-authority. Store revision, history, deadline, and clock failures are translated
-into closure-specific fail-closed errors.</p>
-<p>A read-only <code>RestartIntentOpenStateReader</code> reconstructs the same
-<code>CommittedInitialRestartIntentOpen</code> contract after coordinator failover. It
-stably reads the current-intent head and immutable intent, requires the
-intent's generation to remain current, locates the exact opening authority in
-verified durable coordinator-lease history, and reuses the existing
-prepared/committed validators. Missing records, noncanonical bytes,
-contradictory lifecycle state, deleted heads, and lease provenance absent from
-durable history fail closed. When the current head is a closed marker, the
-reader raises <code>RestartIntentOpenStateClosed</code> instead of treating the opening as
-absent. That signal does not authenticate the closure; the lifecycle reader
-must verify the linked closure records separately. The open-state reader
-performs no mutation.</p>
-<p>A frozen <code>PersistedInitialRestartIntentClosure</code> value decodes the first
-closure's immutable intent, retained open head, durable closed marker,
-immutable closure record, and lifecycle head from their authoritative store
-entries. It requires canonical bytes, one linked initial closure, immutable
-create-once records, exactly one current-head replacement, canonical
-coordinator-lease guard keys, shared opening and closure transactions, and
-causal transaction order. Generation and durable lease-history authentication
-remain the responsibility of the lifecycle reader that constructs this value.</p>
-<p>A frozen <code>AuthenticatedInitialRestartIntentClosure</code> value binds that decoded
-closure to the referenced immutable generation and verified durable
-coordinator-lease history. It resolves the exact generation, opening, and
-closing authorities, requires them to occur in order, requires generation and
-intent opening to precede the immediate successor generation in both
-transaction and store time, and verifies that generation creation, intent
-opening, and closure each committed inside their authoritative lease windows
-and before the next durable lease mutation. When an immediate successor
-exists, its exact guard must also resolve to durable lease history and its
-generation commit must fall inside that authority's lease window. Construction
-is fail closed and performs no control-store reads or mutations. Because
-retained value history does not identify the intervening delete transaction,
-an authority followed by a delete-and-recreate lifetime cannot authenticate an
-earlier commit; that case remains rejected until the store provides a durable
-deletion tombstone.</p>
-<p>A read-only <code>InitialRestartIntentLifecycleReader</code> observes that first closure
-separately. It takes stable snapshots of the current-intent head, its retained
-open predecessor, immutable intent, immutable closure record, and lifecycle
-head; requires durable history for every observed key; obtains the referenced
-generation and verified coordinator-lease history through their existing
-readers; then constructs <code>PersistedInitialRestartIntentClosure</code> and
-<code>AuthenticatedInitialRestartIntentClosure</code>. Missing, rewritten, split,
-noncanonical, or contradictory state fails closed. Retryable dependency-read
-contention remains retryable, and the reader performs no mutation.
-Before the first closure, the same stable observation requires the current
-open head and its linked immutable intent to remain canonical create-once
-records from one guarded transaction; it also requires the lifecycle head and
-initial closure key to have no durable history. The guard must be the run's
-canonical coordinator lease with the fencing token and lease digest carried by
-the immutable intent. Both opening entries require authoritative commit times,
-must follow the current generation, must bind its exact snapshot digest, and
-must name one exact authority in durable lease history whose grant, expiry, and
-fencing sequences bound the opening before the next lease mutation. The
-generation's own guard must resolve to one durable authority and satisfy the
-same causal lease bounds. Every suspected node must belong to that generation.
-Both pre-closure and closure reads double-collect verified generation and
-coordinator-lease histories around the persisted state so failover cannot
-combine old lease authority with a newer generation.</p>
-<p><code>suspected_node_ids</code> is the policy-approved replacement scope for the
-incident. Every listed node must belong to the committed generation and must be
-absent from the next assignment. Policy may additionally quarantine a removed
-node when the evidence supports doing so.</p>
-<p>An abort is allowed only before a plan is committed and only when resuming the
-same generation is safe. An SDC, inaccessible node, corrupted checkpoint, or
-lost worker group cannot be aborted back to normal training.</p>
-<h3 id="committed-restart-plan">Committed restart plan<a class="headerlink" href="#committed-restart-plan" title="Permanent link">&para;</a></h3>
-<p>Only the coordinator writes a <code>RestartPlan</code>. It is published atomically after
-checkpoint preparation finishes or times out and advances the monotonically
-increasing generation.</p>
-<pre><code class="language-python">class SlotAssignment(TypedDict):
-    logical_node_slot: int
-    node_id: str
-    first_global_rank: int
-    local_world_size: int
-
-
-class RestartPlan(TypedDict):
-    schema_version: int
-    plan_id: str
-    intent_id: str
-    run_id: str
-    from_generation: int
-    to_generation: int
-    incident_ids: list[str]
-    reason_code: str
-    recovery_mode: Literal[&quot;latest&quot;, &quot;recovery_verified&quot;]
-    checkpoint_source: Literal[&quot;gemini&quot;, &quot;durable&quot;]
-    checkpoint_step: int
-    checkpoint_id: str | None
-    checkpoint_manifest_id: str
-    slot_assignments: list[SlotAssignment]
-    quarantined_node_ids: list[str]
-    expected_world_size: int
-    topology_digest: str
-    restart_deadline_unix_ms: int
-</code></pre>
-<p>The persisted <code>RestartPlanRecord</code> contains the canonical plan; digests for the
-selected recovery-manifest record, checkpoint-evidence record, closed-intent
-lifecycle record, source generation, and successor generation; the exact
-node-to-quarantine-record digest map; and the coordinator lease identity that
-authorized publication. Its quarantine keys must exactly match
-<code>quarantined_node_ids</code>. The envelope is strict and immutable, but it is not a
-substitute for <code>validate_restart_plan()</code> or for the later atomic publication
-transaction.
-<code>RestartPlanEvidenceRecord</code> preserves the canonical inventory events and
-trusted certification records used to admit that plan. The record is bound to
-one run, plan ID, and manifest ID and exposes its own digest for the plan
-envelope. Construction proves only canonical durable evidence identity; later
-state validation must still match the events and certifications to the plan,
-manifest, acknowledgements, source generation, and copy eligibility.
-The publication bundle writes that evidence record create-once beside the
-manifest, plan, quarantine records, successor snapshot, and generation-head
-update. Its digest must already match the signed plan envelope.
-<code>RestartPlanGenerationState</code> binds that envelope to the exact closed intent,
-current generation, successor generation, successor assignment, and shared
-coordinator publication authority. Manifest and quarantine resolution remain
-separate cross-record checks.
-<code>RestartPlanManifestState</code> then binds the exact resolved manifest record and
-checks plan/manifest metadata, source world size, exact current-generation
-assignment when applicable, and trust compatibility. It still does not prove
-per-rank copy completeness or inventory certification.
-<code>RestartPlanQuarantineState</code> binds the exact node quarantine records and
-requires their digests, plan metadata, and coordinator authority to match the
-manifest-bound plan. It does not validate resource evidence or prove atomic
-publication.
-<code>RestartPlanInventoryState</code> then binds every manifest copy to its exact
-inventory event, source-generation reporter identity, local holder, and
-compatible trust state. It does not prove copy completeness, holder
-availability, acknowledgement authorization, or trusted certification.
-For <code>recovery_verified</code> manifests, <code>RestartPlanCertificationState</code> requires
-matching trusted catalog records whose canonical event digests cover every
-referenced inventory event. It still does not prove copy completeness or
-holder availability.
-For <code>latest</code> manifests, <code>RestartPlanLatestEvidenceState</code> requires the stable
-restart-acknowledgement collection to answer the exact closed intent and
-current generation, and every referenced inventory event must be authorized by
-the reporting agent's successful acknowledgement, flushed step, and canonical
-event digest. It still does not prove per-rank copy completeness, holder
-availability, or fallback eligibility.
-<code>RestartPlanCopyEligibilityState</code> independently requires exact rank coverage
-and rejects every incomplete, wrong-source, wrong-role, process-memory, or
-unavailable node-local copy advertised by the immutable manifest. Shared and
-remote copies remain independent of holder-node admission. This value does not
-establish latest acknowledgement or recovery-verified certification evidence.
-<code>RestartPlanRecoveryEvidenceState</code> composes that copy eligibility with exactly
-one matching trust path: latest restart-acknowledgement evidence or
-recovery-verified checkpoint certification. Both values must describe the same
-immutable inventory state. Placement, quarantine admission, and atomic
-publication remain separate checks.
-<code>RestartPlanPlacementState</code> performs the registration-backed part of placement
-admission without reading or mutating the control store. It requires the
-closed intent's suspected nodes to be removed, surviving nodes to retain their
-logical slots, the active node count to remain fixed, at least one genuinely
-new replacement node, and exact current registration histories for every
-successor node. Each selected registration must be live at one observation time
-and must match the planned local worker count and the coordinator's expected
-<code>environment_digest</code>. Trusted hardware inventory, previously committed
-quarantine state, recovery evidence, and atomic publication remain separate
-admission boundaries.
-<code>RestartPlanCandidateState</code> composes one placement state with one recovery
-evidence state only when both describe the exact same lifecycle and generation
-records. The registration observation must also precede the plan's exclusive
-restart deadline. This value is still only a publication candidate: trusted
-prior quarantine and the atomic store transaction remain separate gates.
-<code>RestartPlanPublicationRecords</code> derives the canonical immutable plan, manifest,
-quarantine, successor-generation, and generation-head writes from one admitted
-candidate. It CAS-updates the generation head and conditions on the exact
-current and manifest-source snapshot revisions plus every exact successor
-registration fencing revision. When the current and manifest-source snapshots
-share one generation key, their immutable records and revisions must both
-match. Its exclusive deadline is the earliest selected registration expiry or
-plan restart deadline. It performs no store access and does not authenticate
-the live coordinator lease, lifecycle revision, quarantine resource evidence,
-transaction result, or prior committed quarantine state.
-<code>RestartPlanPublicationAuthority</code> binds that bundle to the exact coordinator
-lease identity already embedded in its plan, successor, and quarantine
-records. Its observation must follow the candidate's generation,
-manifest-source, placement, and lease inputs, and its exclusive deadline is
-additionally capped by coordinator-lease expiry. This pure value performs no
-store access and does not prove that the supplied authority is still live.
-<code>RestartPlanPublicationAuthorityPreparer</code> reads a stable durable coordinator
-lease history around one monotonic clock sample, requires the live history tail
-to match the plan's exact coordinator identity and fencing token, and returns
-that pure authority value without mutating the store. Repeated lease changes
-remain retryable conflicts; missing, stale, expired, or contradictory authority
-fails closed. Lifecycle fencing, quarantine-resource authorization, execution,
-and committed-result verification remain separate publication layers.
-<code>RestartPlanPublicationLifecycleFence</code> derives immutable revision conditions
-for the exact closed intent, durable closed head, lifecycle record, and
-lifecycle head from one authenticated closure. It rejects any closure whose
-successor generation is already committed. Candidate identity, live-store
-observation, transaction execution, and committed-result verification remain
-separate layers.
-<code>RestartPlanPublicationLifecycleReader</code> converts the existing stable,
-authenticated lifecycle read into that fence without mutating the store. An
-open or missing intent, repeated read contention, or an already-committed
-successor remains a retryable publication conflict; contradictory persisted
-lifecycle state fails closed as corruption.
-<code>PreparedRestartPlanPublication</code> then composes the authenticated coordinator
-authority with that exact lifecycle fence. It requires the candidate's intent,
-closure, and source generation to match the authenticated lifecycle; requires
-the publication authority to be at or after the closing authority in the same
-durable lease history; and merges the lifecycle and candidate revision
-conditions into immutable transaction inputs. It still performs no store
-access, quarantine-resource authorization, execution, or result verification.
-<code>RestartPlanPublicationPreparer</code> sequences the existing live-authority
-preparer before the stable lifecycle reader and returns that composed value
-without mutating the store. It exposes one error boundary for retryable
-authority/lifecycle contention, lost coordinator authority, unsafe clocks, and
-durable corruption. A closure committed after the authority observation or
-other cross-read mismatch remains retryable contention.
-<code>RestartPlanPublicationExecutor</code> then submits those exact writes, guard,
-revision conditions, and store-time window in one atomic transaction. Its
-committed result verifies the exact key/value set, generation-head and
-immutable-record lineage, common transaction identity, coordinator-lease
-provenance, input ordering, and commit window before the publication is
-accepted. Lifecycle, generation, or registration churn remains a classified
-conflict; substituted store responses fail closed as corruption.
-<code>PersistedRestartPlanPublication</code> reconstructs the publication transaction
-from canonical plan, manifest, recovery-evidence, quarantine,
-successor-snapshot, and generation-head entries for one requested run. It
-requires exact envelope digests, the requested successor generation, an exact
-plan-derived successor assignment and predecessor digest, immutable record
-lineage, one transaction and commit time, canonical coordinator-lease guard
-provenance, a transaction sequence after the generation-head and lease
-mutations, and a commit inside both the lease and restart-deadline windows.
-Decoding also rejects manifest metadata or trust that conflicts with the plan,
-evidence metadata that conflicts with the plan or manifest, and quarantine
-records that conflict with the plan lifecycle or publication authority.
-This transaction decoder does not by itself resolve the source generation,
-closed lifecycle, lease history, inventory evidence, or currently committed
-generation; the stable publication reader performs those checks before
-rendezvous may expose the plan.
-<code>RestartPlanPublicationReader</code> double-collects the current generation and
-every atomic publication entry, decodes the stable bundle through
-<code>PersistedRestartPlanPublication</code>, and requires the successor snapshot and
-generation-head revisions plus store metadata to equal the authoritative
-current generation. Missing, malformed, mixed, or substituted state fails
-closed; repeated head movement remains a retryable read conflict. This first
-readback boundary still does not reauthorize lifecycle or checkpoint evidence.
-<code>RestartPlanPersistedRecoveryState</code> reauthorizes the checkpoint side of one
-persisted publication without reading or mutating the store. It resolves the
-exact manifest source generation, quarantine records, inventory events, copy
-eligibility, and exactly one trust path: persisted trusted certifications for
-<code>recovery_verified</code>, or supplied restart-acknowledgement evidence for <code>latest</code>.
-<code>RestartPlanPublicationReader.read_recovery_state()</code> double-collects that
-publication, the authenticated closed restart-intent lifecycle, and the exact
-manifest source snapshot. It requires the lifecycle's source snapshot and
-immediate successor, including authoritative store metadata, to equal the
-signed publication, and requires the publication transaction and commit time
-to follow lifecycle closure, before returning the reauthorized recovery state.
-Repeated lifecycle, generation, or lease-history movement remains a retryable
-conflict; missing, mixed, causally impossible, or unsafe recovery evidence
-fails closed. For <code>latest</code>, <code>read_recovery_state()</code> automatically reconstructs
-the exact stable restart-acknowledgement evidence from the same authenticated
-closed intent when the caller does not supply evidence explicitly. Collector
-contention remains retryable; missing, corrupted, or contradictory historical
-receipts fail closed.</p>
-<p>Before commit, the coordinator validates:</p>
+<p>Random late agents, unselected standbys, and plans without a progressing
+manager lease never create a restart signal.</p>
+<h3 id="completion">Completion<a class="headerlink" href="#completion" title="Permanent link">&para;</a></h3>
+<p>The manager closes the run after training completes. Parked agents exit cleanly
+without starting trainers.</p>
+<h2 id="restart-context">Restart Context<a class="headerlink" href="#restart-context" title="Permanent link">&para;</a></h2>
+<p>The handler writes one owner-only JSON file per node. The file contains:</p>
 <ul>
-<li>the plan is fenced to the same intent ID, run, generation, incidents, and
-  reason;</li>
-<li>the recovery mode is at least as conservative as the intent's minimum;</li>
-<li>every node in the intent's suspected scope is removed from the next
-  assignment;</li>
-<li>every new quarantine entry is both in that suspected scope and removed from
-  the current assignment; unrelated standbys require separate trusted fault
-  evidence before quarantine;</li>
-<li>exactly <code>min_nodes</code> active logical slots are assigned;</li>
-<li>at least one assigned node is new to the active membership, because version
-  1 uses standby admission as its healthy-group restart edge;</li>
-<li>every surviving node retains its committed logical slot and rank range;</li>
-<li>every assigned node is healthy, compatible, and not quarantined;</li>
-<li>each logical slot is assigned once;</li>
-<li>active size, local world size, total world size, and topology digest match the
-  committed generation;</li>
-<li>the checkpoint is complete for every required logical rank;</li>
-<li>every copy included in the committed manifest belongs to the selected
-  positive step and selected checkpoint source; a rank entry with one eligible
-  copy and any additional ineligible copy is rejected rather than left for the
-  loader to choose;</li>
-<li>every copy exactly matches its referenced inventory event, and the source
-  inventory trust satisfies the manifest trust;</li>
-<li>the checkpoint trust satisfies the selected recovery mode;</li>
-<li>the plan never selects <code>CANDIDATE</code>;</li>
-<li>the target step is coherent across all selected shards;</li>
-<li>the plan generation is the successor of the current committed generation;
-  and</li>
-<li>the restart deadline has not elapsed when the plan is committed or exposed
-  through rendezvous.</li>
+<li>run, plan, and generation identity;</li>
+<li>logical node slot and global-rank range;</li>
+<li>recovery mode and checkpoint selection;</li>
+<li>world size and topology digest; and</li>
+<li>a node-local monotonic lease deadline.</li>
 </ul>
-<h3 id="restart-context-passed-to-workers">Restart context passed to workers<a class="headerlink" href="#restart-context-passed-to-workers" title="Permanent link">&para;</a></h3>
-<p>Before returning from <code>next_rendezvous()</code>, <code>SlotAwareRendezvousHandler</code> derives
-a node-local context from the committed plan and writes it to an atomically
-replaced file. The deployment places the fixed file path in the torchrun
-agent's environment before launch, so every local worker receives:</p>
-<pre><code class="language-text">LM_RESILIENCY_RESTART_CONTEXT=/run/torchrun/&lt;run-id&gt;/restart-context.json
-</code></pre>
-<pre><code class="language-python">class RestartContext(TypedDict):
-    schema_version: int
-    plan_id: str
-    run_id: str
-    generation: int
-    node_id: str
-    logical_node_slot: int
-    first_global_rank: int
-    local_world_size: int
-    expected_world_size: int
-    topology_digest: str
-    recovery_mode: Literal[&quot;latest&quot;, &quot;recovery_verified&quot;]
-    checkpoint_source: Literal[&quot;gemini&quot;, &quot;durable&quot;]
-    checkpoint_step: int
-    checkpoint_id: str | None
-    checkpoint_manifest_id: str
-    reason_code: str
-</code></pre>
-<p>Each worker derives its expected rank as
-<code>first_global_rank + LOCAL_RANK</code>. <code>lm-resiliency</code> rejects startup if the
-context conflicts with torchrun's <code>RANK</code>, <code>LOCAL_RANK</code>, <code>LOCAL_WORLD_SIZE</code>,
-<code>WORLD_SIZE</code>, <code>TORCHELASTIC_RUN_ID</code>, or the framework topology.
-<code>expected_world_size</code> must also be divisible by <code>local_world_size</code>, so a
-context cannot describe a partial logical node slot.</p>
-<p>Before inspecting checkpoint fields, the worker validates the complete context
-against the currently committed <code>RestartPlan</code> for its node. The plan ID,
-successor generation, assignment, topology, recovery mode, checkpoint pin, and
-reason must match exactly. A leftover context from an earlier plan is rejected
-even when stable ranks make every torchrun environment value identical.
-This acceptance check receives trusted current time and rejects the context
-when the committed plan's restart deadline has elapsed. Rendezvous performs
-the same deadline check immediately before exposing the plan.</p>
-<p>The context must not contain a newer, less trusted local checkpoint merely
-because it exists on the replacement host.</p>
-<p>The committed <code>checkpoint_step</code> is a pin, not a hint. On a managed restart,
-GEMINI must load exactly that step from <code>checkpoint_manifest_id</code> on every rank
-or fail. Its existing collective <code>find_latest()</code> remains useful for validating
-rank-wide availability during unmanaged recovery, but it must not silently
-substitute a different step after the coordinator commits a plan. This requires
-an additive exact-step checkpoint-manager surface used by
-<code>enable_resiliency(..., restart_context=restart)</code>:</p>
-<pre><code class="language-python">checkpoint_manager.load_exact(
-    step=restart.checkpoint_step,
-    manifest_id=restart.checkpoint_manifest_id,
-    recovery_mode=restart.recovery_mode,
-)
-</code></pre>
-<p>This is an implementation boundary, not an additional call required in the
-training script. A durable source is similarly pinned by <code>checkpoint_id</code> and
-step.</p>
-<h3 id="prepare-for-restart-command">Prepare-for-restart command<a class="headerlink" href="#prepare-for-restart-command" title="Permanent link">&para;</a></h3>
-<p>For an accessible worker group, <code>TorchrunOrchestrationClient</code> derives a local
-command from the intent:</p>
-<pre><code class="language-python">class PrepareRestart(TypedDict):
-    intent_id: str
-    generation: int
-    minimum_recovery_mode: Literal[&quot;latest&quot;, &quot;recovery_verified&quot;]
-    destination_token: str | None
-    deadline_unix_ms: int
-</code></pre>
-<p>The <code>lm-resiliency</code> client:</p>
-<ol>
-<li>stops accepting new unsafe checkpoint candidates;</li>
-<li>waits boundedly for the eligible GEMINI capture and replication state;</li>
-<li>flushes completed owner and peer slots;</li>
-<li>transfers or mirrors only checkpoint state allowed by the plan; and</li>
-<li>writes a <code>RestartAck</code>.</li>
-</ol>
-<pre><code class="language-python">class RestartAck(TypedDict):
-    intent_id: str
-    run_id: str
-    node_id: str
-    agent_id: str
-    generation: int
-    flushed_step: int
-    inventory_event_digests: dict[str, str]  # event ID to canonical SHA-256
-    transferred_owner_ranks: list[int]
-    transferred_peer_ranks: list[int]
-    success: bool
-    reason: str
-</code></pre>
-<p>The listener only validates and stages the command. It must not call CUDA,
-framework, or checkpoint operations from a background listener thread. The
-framework adapter consumes the command at a safe optimizer boundary. GEMINI's
-bounded main-thread path performs the flush and writes the acknowledgement,
-after which the worker remains quiesced.</p>
-<p>The coordinator waits only until the intent deadline. Missing or failed
-acknowledgements make the associated latest inventory unavailable. A latest
-manifest may use an inventory event only when the reporting node returned a
-successful acknowledgement for the selected step and included that event ID.
-Previously certified recovery-verified inventory remains eligible without
-promoting unprepared latest state. Missing or failed preparation cannot promote
-<code>LATEST_GEMINI</code>; the coordinator must commit a plan using a complete
-recovery-verified source or fail the restart.</p>
-<p>The manager transport authenticates the acknowledgement sender. The
-coordinator checks the acknowledgement's run, node, and agent incarnation
-against that authenticated identity and requires the agent to match the
-inventory reporter. The coordinator also records receipt time outside the
-worker payload and rejects acknowledgements received at or after
-<code>prepare_deadline_unix_ms</code>. Payload identity fields and timestamps alone are
-not authentication. For latest recovery, the acknowledgement's canonical
-inventory digest must match the exact event used by the manifest; event-ID
-reuse cannot substitute different copies after preparation.</p>
-<p>The durable receipt envelope stores the worker acknowledgement together with
-the exact immutable restart-intent record, the authenticated agent-registration
-lifetime, its registration fencing token and authoritative grant time, and the
-coordinator-recorded receipt time. The envelope rejects a sender identity that
-does not match the acknowledgement, a receipt outside the authenticated
-registration lifetime, or a receipt at or after the intent deadline. The
-deadline is exclusive so every accepted receipt has a representable guarded
-commit window. The record is not self-authenticating: the acknowledgement
-persistence layer must still verify the registration and intent against
-authoritative control-store state before committing it.</p>
-<p>Each intent/node acknowledgement key is create-once. Its guarded transaction
-conditions on the exact immutable intent revision, the still-open current
-intent-head revision, and the authenticated agent-registration revision. A
-concurrent intent closure, agent renewal/replacement, or duplicate
-acknowledgement therefore prevents the receipt from being committed. A receipt
-must also be no earlier than the authoritative intent-opening commit, so
-pre-intent transport data cannot be replayed as preparation evidence. The
-coordinator-lease authority and commit-time window are added by a separate
-prepared-write layer before this transaction can execute.</p>
-<p>The prepared-write authority is one verified durable coordinator-lease value.
-Its commit lower bound must follow the receipt, intent opening, and lease grant;
-its exclusive deadline is bounded by both the restart-intent deadline and the
-lease expiry. This immutable value still performs no store reads or writes.
-The authentication value binds the receipt to the exact committed intent, the
-complete store-stamped agent-registration authority, active generation
-membership, and one coordinator-lease authority. It also rejects a receipt that
-predates the authoritative intent-opening commit. This value performs no store
-reads or writes. A following read-only layer constructs it from stable durable
-state before the preparation layer selects a bounded commit window.</p>
-<p>Each retained agent-registration value is first decoded as one immutable
-authority. The strict decoder binds canonical registration bytes to the
-expected run and node, requires an authoritative commit time, rejects guarded
-registration writes, and preserves the store transaction, mutation, value, and
-lifetime sequences. It also rejects impossible per-entry sequence lineage. The
-following stable reader validates that the retained history begins at the
-initial sequences and contains every replacement and recreated-key transition,
-plus the compacted same-registration renewal boundaries needed to prove lease
-continuity. It rejects overlapping registrations, expired renewal spans,
-recurrent registration identities or fencing tokens, and a current value that
-is not the retained tail. A released registration remains visible in the
-immutable history while the current value is absent.</p>
-<p>The restart-acknowledgement state reader double-collects the current open
-intent, verified agent-registration history, and durable coordinator-lease
-history. It binds a receipt to the exact current registration and live
-coordinator authority without sampling a clock or mutating the store. Durable
-contradictions fail closed, while repeated-read contention remains retryable.
-The following non-mutating preparer samples a monotonic coordinator clock only
-after authentication, rejects an elapsed registration, coordinator lease, or
-intent window, preserves the exact registration authority used by the atomic
-registration-revision condition, and chooses the earliest exclusive deadline
-for the guarded receipt transaction.</p>
-<p>The guarded acknowledgement executor publishes the create-once receipt while
-the intent, current-intent head, agent registration, and coordinator lease
-remain unchanged. Its committed result must match the exact receipt bytes,
-carry the prepared coordinator-lease provenance, remain inside the prepared
-time window, and follow the durable intent opening, registration authority, and
-coordinator authority in store transaction order. Conflicts distinguish
-changed intent state, lost registration, lost coordinator ownership, elapsed
-intent time, and contradictory store time.</p>
-<p>After coordinator failover, one strict persisted-receipt value reconstructs a
-committed acknowledgement from its canonical store entry, committed intent
-opening, complete agent-registration authority, and coordinator authority. It
-requires immutable key lineage, exact guard provenance, active generation
-membership, causal transaction order, and a commit inside all three authority
-windows. It performs no store reads; a following stable reader supplies the
-durable dependencies before acknowledgement collection or quorum logic.</p>
-<p>The per-node receipt reader double-collects the restart-intent opening, the
-create-once acknowledgement key, verified retained agent-registration history,
-and complete coordinator-lease history. For the active preparation path it
-reads the current opening. After closure it can instead consume the durable
-opening retained by the authenticated lifecycle record, without reconstructing
-lost preparation revisions or time bounds. A never-created receipt key returns
-no acknowledgement. Deleted, rewritten, malformed, or orphaned receipts fail
-closed. Renewed registrations and coordinator leases do not invalidate an
-already committed receipt because the reader resolves the exact historical
-authorities stamped into that receipt.</p>
-<p>An immutable collection value binds one receipt-or-absence observation to every
-active node in the committed generation. Its keys must exactly match the
-generation assignment, every receipt must answer the same intent opening and
-match its node key, and the mapping is frozen in active-slot order. The value
-separately exposes received, missing, successful, and explicitly failed node
-sets without making a quorum or restart-policy decision.</p>
-<p>A read-only collector obtains two identical full active-node observations while
-the durable restart-intent opening remains unchanged. Before closure it also
-stabilizes the current opening. After closure it accepts an authenticated
-lifecycle value and reconstructs the same durable opening from the retained
-immutable intent and open-head entries. Because acknowledgement keys are
-immutable create-once records, this double collect yields one stable
-receipt-or-absence snapshot without requiring a store-wide read transaction.
-Repeated changes are retryable conflicts; contradictory per-node state fails
-closed as corruption. The collector still makes no quorum or restart decision.</p>
-<p>A pure evidence value authorizes a <code>latest</code> checkpoint inventory event only
-when its reporter is valid for the committed rank assignment and the reporter's
-persisted acknowledgement succeeded for the same agent incarnation and flushed
-step while naming the event's exact canonical digest. Missing or failed
-acknowledgements, foreign topology or rank identity, candidate/verified events,
-and reused event IDs with different bytes are not latest-preparation evidence.
-This value does not select a manifest or recovery fallback.</p>
-<p>For a crashed or unreachable node, no preparation is assumed.</p>
-<h2 id="api-lm-resiliency-to-the-framework">API: lm-resiliency to the Framework<a class="headerlink" href="#api-lm-resiliency-to-the-framework" title="Permanent link">&para;</a></h2>
-<p>The framework receives a platform-neutral recovery request. It does not receive
-quarantine or placement policy.</p>
-<pre><code class="language-python">@dataclass(frozen=True)
-class FrameworkRecoveryRequest:
-    run_id: str
-    generation: int
-    recovery_mode: RecoveryMode
-    checkpoint_source: Literal[&quot;gemini&quot;, &quot;durable&quot;]
-    checkpoint_step: int
-    checkpoint_id: str | None
-    expected_world_size: int
-    topology_digest: str
-
-
-class FrameworkRecoveryAdapter(Protocol):
-    def validate_restart(self, request: FrameworkRecoveryRequest) -&gt; None: ...
-    def load_durable(self, request: FrameworkRecoveryRequest) -&gt; int | None: ...
-</code></pre>
-<p>The proposed activation API is additive:</p>
-<pre><code class="language-python">from lm_resiliency import enable_resiliency
-from lm_resiliency.integrations.torchrun import (
-    RestartContext,
-    TorchrunOrchestrationClient,
-)
-
-restart = RestartContext.from_env()
-control = TorchrunOrchestrationClient.connect(restart)
-
-resiliency = enable_resiliency(
-    trainer,
-    orchestration=control.hooks(),
-    restart_context=restart,
-)
-trainer.train()
-</code></pre>
-<p><code>restart_context=None</code> preserves the current behavior. Existing
-<code>load_fallback: Callable[[], int | None]</code> remains supported. A new
-context-aware durable loader can be added without changing the old callback.</p>
-<p>For TorchTitan, the existing adapter already captures:</p>
-<ul>
-<li>model state;</li>
-<li>optimizer state;</li>
-<li>LR scheduler state;</li>
-<li>trainer state;</li>
-<li>dataloader position; and</li>
-<li>the recovered training step.</li>
-</ul>
-<p>The adapter must additionally validate that the relaunched
-<code>ParallelDims/world_size</code> produces the committed topology digest before any
-checkpoint is loaded.</p>
-<h2 id="torchrun-rendezvous-integration">Torchrun Rendezvous Integration<a class="headerlink" href="#torchrun-rendezvous-integration" title="Permanent link">&para;</a></h2>
-<h3 id="node-states">Node states<a class="headerlink" href="#node-states" title="Permanent link">&para;</a></h3>
-<pre><code class="language-text">STANDBY -&gt; ADMITTED -&gt; ACTIVE -&gt; PREPARING -&gt; RESTARTING
-     \          \         \          \-&gt; FAILED
-      \----------&gt; REJECTED             \-&gt; QUARANTINED
-</code></pre>
-<ul>
-<li><code>STANDBY</code>: agent is registered; no trainer process is running.</li>
-<li><code>ADMITTED</code>: coordinator assigned a logical slot for the next generation.</li>
-<li><code>ACTIVE</code>: local workers are running for the committed generation.</li>
-<li><code>PREPARING</code>: workers observed an intent, quiesced, and are performing bounded
-  checkpoint preparation; the stock agent still sees healthy worker processes.</li>
-<li><code>RESTARTING</code>: the plan is committed and torchrun is stopping, rendezvousing,
-  or relaunching the worker group.</li>
-<li><code>QUARANTINED</code>: node cannot enter another generation for this run.</li>
-<li><code>FAILED</code>: agent or node is unreachable; its slot may be reassigned.</li>
-</ul>
-<h3 id="job-states">Job states<a class="headerlink" href="#job-states" title="Permanent link">&para;</a></h3>
-<pre><code class="language-text">RUNNING
-  -&gt; DECIDING
-  -&gt; PREPARING
-  -&gt; COMMITTING
-  -&gt; STOPPING
-  -&gt; RENDEZVOUS
-  -&gt; RECOVERING
-  -&gt; RUNNING
-</code></pre>
-<p>Any state may transition to <code>FAILED</code> when there are too few eligible nodes, no
-complete trusted checkpoint, a conflicting plan, or an unrecoverable topology
-mismatch.</p>
-<h3 id="coordinator">Coordinator<a class="headerlink" href="#coordinator" title="Permanent link">&para;</a></h3>
-<p>The <code>RestartCoordinator</code> is the single writer for:</p>
-<ul>
-<li>current generation;</li>
-<li>current restart intent;</li>
-<li>active slot leases;</li>
-<li>standby eligibility;</li>
-<li>quarantine records;</li>
-<li>checkpoint manifest selection; and</li>
-<li>committed restart plans.</li>
-</ul>
-<p>The writer may be lease-elected rather than a fixed process. All authoritative
-state must be in the strongly consistent store so another coordinator can take
-over after the lease expires without changing or duplicating an already
-committed plan.</p>
-<p>It may be implemented over the rendezvous store for a prototype, but control
-keys must be namespaced separately from worker-group bootstrap keys. Production
-deployments should use a durable external service if the rendezvous endpoint is
-not sufficiently available or persistent.</p>
-<p>The internal control-store boundary exposes opaque byte values with per-key
-compare-and-set revisions. Creation requires the key to be absent; replacement
-and deletion require the exact current revision. Revisions never repeat for a
-key, including after deletion and recreation, so a delayed coordinator cannot
-mistake a recreated record for an older value with identical bytes. Higher
-coordinator records add lease fencing and run/schema namespaces in subsequent
-layers rather than weakening this storage primitive. The store also retains a
-durable <code>has_history(key)</code> bit after deletion, allowing readers to distinguish a
-never-created authoritative key from one that was removed. <code>get_history(key)</code>
-returns every committed value entry in mutation order, including overwritten
-values and values from earlier key lifetimes. Deletes do not invent a payload;
-their revision, mutation, transaction, and lifetime effects remain visible as
-gaps between adjacent immutable entries. Failed operations append nothing.
-Each retained coordinator-lease value is decoded into an immutable authority
-record only after validating canonical run-scoped lease bytes, authoritative
-commit time, unguarded lease storage, and possible mutation/value/lifetime
-sequence lineage. A lease key's mutation count also cannot exceed the
-store-global transaction sequence. Complete history traversal and
-adjacent-transition validation build on this strict value boundary.
-The history reader obtains a stable immutable snapshot, requires the live value
-to be its final retained entry, requires empty/nonempty values to agree with the
-durable history marker, and validates every adjacent renewal, replacement, and
-delete/recreate transition. A never-created lease has empty history; retained
-history with no live lease fails closed because the current store contract has
-no authoritative tombstone proving which retained value was deleted last.
-Renewals must commit before expiry, in-place replacements cannot overlap, no
-value or lifetime may be skipped, and lease identities and fencing tokens
-cannot recur after replacement. Higher layers can therefore reconstruct live
-coordinator authority after process loss without trusting process-local
-observations.</p>
-<p>Coordinator state that spans multiple keys uses one guarded store transaction.
-The transaction first checks the coordinator lease revision, then any
-side-effect-free revision conditions, every target revision, and one
-authoritative store-time window under the same lock. Condition keys cannot also
-be the guard or transaction targets. It publishes all target values with the
-same commit timestamp and store-stamped guard key, guard revision, guard-value
-digest, ordered guard mutation and value sequences, guard-key lifetime sequence,
-authoritative guard commit time, and one store-global transaction sequence, or
-publishes none. All values in one atomic transaction share that sequence.
-Successful single-key mutations receive their own sequence, deletes consume a
-sequence, and rejected operations consume none. Readers use this ordering to
-prove cross-key causality when multiple commits have the same millisecond
-timestamp. The value sequence changes whenever the guarded bytes change or the
-key is recreated, but remains stable across same-value renewals. Store entries
-also reject mutation, value, and lifetime sequence combinations that cannot
-arise from create, update, delete, and recreate operations. This is the
-primitive used to create an immutable generation snapshot and advance the
-generation head without allowing a stale or expired coordinator to commit
-either half alone. Revision conditions also let later components prove that the
-generation head did not advance while publishing an intent, without rewriting
-the head or weakening its immutable history checks.
-Create-once transaction targets may additionally require that the key has no
-prior committed history, not merely that it is currently absent. This prevents
-a deleted immutable quarantine or snapshot key from being recreated inside an
-otherwise valid atomic commit.</p>
-<p>Persisted generation state uses strict versioned records.
-<code>GenerationSnapshotRecord</code> schema version 2 contains the immutable
-<code>RankAssignment</code>, the previous snapshot digest, and the complete coordinator
-lease identity, duration, and opaque fencing token that committed it. Version 1
-is rejected explicitly rather than being interpreted as the expanded layout.
-Generation zero must not name a predecessor, while every later generation must
-carry a lowercase SHA-256 predecessor digest. A <code>GenerationHeadRecord</code> contains
-only the run, generation, and canonical snapshot digest. Both records reject
-missing, unknown, duplicate, or unsupported fields.</p>
-<p>The generation-state reader derives snapshot, head, and coordinator-lease keys
-from one run-scoped namespace. It requires the head and snapshot to agree on
-generation, digest, authoritative commit time, and store-stamped guard
-provenance, then verifies the complete predecessor digest, timestamp,
-guard-mutation, and lease-identity chain back to generation zero. Lease
-identities cannot reappear after a different acquisition, and one acquisition
-cannot change coordinator identity, lease duration, or store-stamped guard-key
-lifetime. Every snapshot entry must retain store-stamped mutation, value, and
-lifetime sequence <code>1</code>, while the head mutation and value sequences must equal
-<code>generation + 1</code>; this rejects replacement, recreation, extra rewrites, and
-rollback. The mutable head and referenced snapshot must share one store-global
-transaction sequence, and snapshot transaction sequences must advance strictly
-through the predecessor chain. Every generation commit must fall within the
-stamped lease grant and duration. The head must remain in its first store-key
-lifetime, and a stable immediate successor snapshot beyond the head is
-contradictory state for every read API. Replacing a lease in place must not
-overlap the prior lease's stamped
-expiry, and one fencing token cannot identify multiple guard mutations. Fencing
-revisions are compared only for equality; ordering comes from the store-stamped
-guard mutation sequence. Each guard-key lifetime increase requires at least one
-delete and one create mutation, including before the first persisted generation.
-Because deletion advances mutation sequence without advancing value sequence,
-every entry and adjacent transition must also satisfy the corresponding
-value-sequence upper bound. When generations omit intervening renewals of one
-lease, the mutation distance bounds the latest grant time that a valid renewal
-chain could reach, so skipped valid renewals are accepted while resurrection
-after expiry is rejected. A same-key takeover with unobserved intervening
-mutations is ambiguous and rejected. An older generation commit cannot postdate
-the next guard mutation that fences it. Opaque fencing tokens cannot reappear
-after another guard mutation. One lease identity must retain one guard value
-sequence, so changing A to B and back to A cannot be misread as skipped
-renewals. The durable history of the generation-head key is the run
-initialization marker, so deleting both the head and generation zero cannot make
-an initialized run appear empty. Grant times, guard mutation/value sequences,
-and key-lifetime sequences cannot move backward. Missing or contradictory
-history is corruption, not an empty or partially usable assignment.</p>
-<p>The generation-state manager initializes generation zero only after the reader
-proves the run has no committed or deleted head history. It commits the mutable
-head and one create-only immutable snapshot in the same lease-guarded
-transaction. A successor must name the exact current head, advance by one
-generation, preserve active-node count, local world size, logical rank ranges,
-topology digest, and the logical slot of every surviving node, and link to the
-predecessor's canonical snapshot digest. Concurrent initializers or successor
-writers therefore produce one committed winner; stale leases, stale heads,
-expired store-time windows, partial target conflicts, and unexpected
-transaction results fail closed.</p>
-<p>Coordinator ownership is stored under a schema-versioned, run-scoped lease key.
-The lease record binds the run, a unique coordinator-process incarnation, a
-unique lease acquisition, and the lease duration. The control store attaches
-its authoritative commit time to every timed mutation. A held lease expires at
-that commit time plus the persisted duration, so network delay before the CAS
-cannot consume the granted lifetime. The record's opaque control-store revision
-is the fencing token; acquisition, renewal, expiry takeover, release, and
-reacquisition therefore produce distinct tokens, while the store's mutation
-sequence supplies ordering. Every later authoritative coordinator mutation must
-carry the currently held token and fail closed when it is stale.</p>
-<p>Lease time comes from one authoritative, nondecreasing control-plane clock
-shared by all contenders. A clock that moves backward aborts lease operations.
-Every lease mutation atomically requires store time to be no earlier than the
-coordinator's observation, preventing a client-side timestamp from committing
-future-dated ownership after a backward clock step. The client also rejects an
-acquisition or renewal response if the commit-time-derived lease expired while
-the response was in flight.
-Expiry is inclusive: at <code>expires_at_unix_ms</code> the old holder may no longer renew,
-and a contender may take over. Renewal uses a deadline-guarded compare-and-set
-whose time predicate is evaluated atomically by that authoritative store; a
-client-side precheck alone cannot resurrect a lease after network delay.
-Takeover uses one store-time sample and is permitted only after the old lease's
-derived expiry; the replacement then receives a full duration from that commit
-time. Release uses the same guarded store-time window and cannot delete an
-expired lease or mutate ownership after a clock regression. Retrying acquisition
-with the same active <code>coordinator_id</code> revalidates and renews the existing record
-at store time while preserving its lease ID, so the coordinator ID must uniquely
-identify one live process incarnation and must not be reused after process
-restart.</p>
-<h3 id="slot-aware-rendezvous">Slot-aware rendezvous<a class="headerlink" href="#slot-aware-rendezvous" title="Permanent link">&para;</a></h3>
-<p><code>SlotAwareRendezvousHandler</code> implements the existing <code>RendezvousHandler</code>
-interface and is registered through <code>torchrun.handlers</code>. It admits only nodes
-named by the committed plan:</p>
-<ul>
-<li><code>next_rendezvous()</code> blocks standby agents without creating trainers;</li>
-<li>blocked standbys maintain a registration lease or heartbeat;</li>
-<li>quarantined nodes remain blocked or receive a terminal rejection according to
-  deployment cleanup policy, but are never admitted;</li>
-<li>a replacement node receives the failed node's logical slot;</li>
-<li>exactly <code>min_nodes</code> slots complete the rendezvous; and</li>
-<li>returned group rank is derived from logical slot, not arrival order.</li>
-</ul>
-<p>The first runtime slice admits only the immutable generation-zero assignment.
-It registers every agent, renews that registration while the handler is alive,
-returns active nodes by logical slot, keeps unassigned agents blocked without
-reporting them as waiting, and propagates one immutable run-scoped closure that
-wakes parked standbys and releases registrations. It also clears any stale
-node-local restart context before the initial generation starts. The join
-timeout bounds initial generation formation and worker bootstrap only; after
-generation zero exists, passive standbys remain parked until assignment,
-explicit shared closure, local shutdown, cancellation, or registration failure.
-Local <code>shutdown()</code> releases only that handler's resources; only <code>set_closed()</code>
-publishes the run-scoped terminal closure. Registration heartbeats schedule
-each renewal from the returned lease's remaining lifetime rather than from a
-fixed interval. An assigned node ID is admitted only when its retained
-registration history has the same local worker count and environment digest as
-the current handler, so an incompatible process cannot reuse an expired node
-registration. The first assigned node commits one immutable run-scoped workload
-compatibility identity, and every other assigned node must match it; unassigned
-standbys cannot create or replace that record. Initial registration backend I/O
-does not hold the handler's ownership lock, so local shutdown remains bounded
-while registration is stalled. A registration response arriving after local
-shutdown is not installed or heartbeated; a daemon performs an explicit
-best-effort release, with lease expiry as the conservative fallback. Initial
-registration and the initial closure-state observation are bounded by the
-formation deadline. A stalled closure backend cannot defeat that timeout, and
-local shutdown interrupts a handler waiting on the daemonized closure read.</p>
-<p>Before publishing readiness, each assigned handler clears only a node-local
-restart context from another run. An initial-generation handler refuses to
-remove a current-run replacement context, so a stale incarnation cannot erase
-newer recovery state. Slot zero owns one durable, generation-scoped attempt head,
-while all assigned slots publish attempt-scoped arrivals tied to their live
-registration. Slot zero validates the complete registration set once and
-atomically publishes one immutable completion proof conditioned on the shared
-attempt head plus every arrival and registration revision. Other slots wait on
-that proof instead of rereading every registration history, keeping control
-store work linear in the active node count. Slot zero reloads its current
-renewed registration immediately before each guarded completion attempt, so
-heartbeat renewal cannot strand an otherwise complete barrier on a stale
-fencing token. After bootstrap and generation revalidation, every assigned
-handler publishes one immutable, registration-incarnation-scoped consumption
-record for the completed attempt. The guarded publication reloads the current
-registration after heartbeat renewal and atomically conditions on the
-completion proof, generation head, immutable generation snapshot, and absence
-of terminal closure. An incomplete attempt remains usable when a handler
-incarnation is replaced. A stale consumption from an incarnation that failed
-before returning does not satisfy its replacement; the replacement publishes
-its own consumption for the same completed attempt. For a replacement
-generation, a consumption record is a locally validated readiness claim rather
-than permission to return. Slot zero atomically commits one immutable
-group-admission proof only after every assigned slot has published readiness.
-That guarded transaction conditions on every readiness and live registration
-revision, the attempt and completion records, the generation head and immutable
-snapshot, and absence of terminal closure, and it must commit before the plan's
-exclusive restart deadline. Every replacement handler observes and validates
-the same admission proof before returning. The proof must name that handler's
-exact live registration and its exact consumption entry; a replacement
-incarnation must publish new readiness and cannot reuse the old decision. A
-temporarily absent or expired peer registration remains incomplete readiness
-until the deadline, while corrupt retained registration history still fails
-closed. After all blocking plan/context,
-registration-history, and attempt-head reads complete, the handler samples
-authoritative control-store time once and uses that observation to recheck both
-the exclusive restart deadline and the exact registration's lease window. The
-shared attempt head must still name the admitted attempt. A completed
-replacement attempt advances only after every assigned slot enters a subsequent
-<code>next_rendezvous()</code> call and durably acknowledges the prior admission and
-consumption. The acknowledgement is slot-scoped and guarded by the entering
-handler's live registration, so a normal heartbeat renewal is retried and a
-replacement incarnation can acknowledge its slot before joining a fresh
-attempt. A descheduled peer that has not re-entered therefore keeps the shared
-attempt head fixed; initial attempts retain the consumption-only advancement
-rule. Guarded barrier transactions pin their registration revision in retained
-history. Missing, unprepared, late, or superseded assigned nodes therefore fail
-instead of allowing an early or stale incarnation to launch a partial worker
-group.</p>
-<p>Registration release is best effort and bounded during local shutdown. If the
-backend remains unavailable, cleanup returns without waiting indefinitely and
-the registration expires under its existing lease. Global closure publication
-also runs through a bounded daemon operation; local heartbeat and registration
-cleanup still proceeds when the control store is unavailable.</p>
-<p>For a replacement generation, the handler reads and reauthorizes the exact
-persisted restart-plan publication before admitting any assigned node. It
-requires the plan assignment to equal the committed generation, enforces the
-replacement budget and exclusive restart deadline, and writes the exact
-node-local <code>RestartContext</code> before the assigned node participates in the shared
-arrival barrier. Each assigned node revalidates the plan, generation, deadline,
-and persisted context before publishing readiness; the immutable group-admission
-proof is the final shared decision observed before <code>next_rendezvous()</code> returns.
-A failed admission first durably invalidates the exact cryptographic cleanup
-token published by that handler incarnation, then attempts bounded physical
-removal. If the directory lock is unavailable, the stale file remains
-unreadable; every outstanding token has its own fixed-length, digest-named
-durable invalidation marker, so delayed cleanup from an older handler cannot
-revalidate a newer failed context, long valid context basenames cannot overflow
-the filesystem component limit, and a later replacement context with a
-different token remains valid. An invalidation marker remains durable after
-physical context deletion, so a crash cannot resurrect a deleted context pair
-without its fence. The worker-visible file remains canonical root
-<code>RestartContext</code> JSON. The cleanup token and the context digest are stored in a
-hidden owner-only sidecar under the same directory lock. The sidecar also binds
-publication to the writer's verified registration ID and store-stamped
-registration mutation sequence. An older registration cannot overwrite a
-context published by a later registration, while a normal heartbeat renewal of
-the same immutable registration may advance the mutation sequence. Final
-admission requires the exact token published by that handler incarnation. A
-normal heartbeat renewal may advance the registration fencing token, but
-admission accepts it only when retained authority history proves uninterrupted
-ownership by the same immutable registration and agent incarnation. Context
-cleanup also removes and directory-syncs an orphaned sidecar when a crash
-leaves metadata without its root context. Context
-publication and cleanup acquire the parent
-directory lock nonblocking under the admission or bounded-cleanup deadline, so
-a stale process cannot strand replacement admission. The replacement deadline
-is derived and revalidated from authoritative, nondecreasing control-store time
-rather than an agent wall clock. Passive standbys and removed nodes remain
-parked. The positive <code>num_nodes_waiting()</code> restart edge remains disabled until
-the following signaling slice.</p>
-<p>All handler incarnations use one immutable generation-scoped <code>PrefixStore</code> for
-PyTorch's worker bootstrap keys. Slot zero publishes one address/port pair and
-later retries or replacement agent incarnations reuse it, so no process-local
-attempt counter can split the worker group across namespaces. Bootstrap reads
-are bounded by the remaining join deadline, so a missing slot-zero publisher
-cannot strand other agents on the underlying store timeout. When the deployment
-supplies an already running agent-owned bootstrap endpoint, the handler reports
-<code>use_agent_store=True</code>; a generated endpoint reports <code>False</code> so the stock agent
-creates the worker-side TCP store. After bounded bootstrap reads complete, every
-returned store is restored to the shared configured join timeout so later stock
-agent coordination does not inherit rank-specific remaining-deadline values.</p>
-<p>Passive standbys are not reported by <code>num_nodes_waiting()</code>. In the following
-signaling slice, after a plan commits, the selected replacement becomes the only
-newly waiting node visible to active agents. This is the restart edge: a random
-late node must not trigger scale-up. The mechanism is used only when the next
-plan admits at least one standby; it is not a generic restart signal for
-unchanged membership.</p>
-<p>Before returning an admitted node from <code>next_rendezvous()</code>, the handler:</p>
-<ol>
-<li>validates that the assignment belongs to the latest committed generation;</li>
-<li>writes the node-local <code>RestartContext</code>;</li>
-<li>returns the logical slot as the rendezvous group rank; and</li>
-<li>returns exactly <code>min_nodes</code> as the group world size.</li>
-</ol>
-<h3 id="stock-elastic-agent-behavior">Stock elastic agent behavior<a class="headerlink" href="#stock-elastic-agent-behavior" title="Permanent link">&para;</a></h3>
-<p>No custom elastic agent is required. The existing agent behavior is used in two
-ways:</p>
-<ol>
-<li>a worker failure follows torchrun's normal failure-restart path; and</li>
-<li>while workers are healthy, a positive <code>num_nodes_waiting()</code> result causes
-   the agent to stop and re-rendezvous its local worker group.</li>
-</ol>
-<p>For an accessible replacement, workers first quiesce and acknowledge the
-<code>RestartIntent</code>. Only after the coordinator commits the plan does the handler
-expose the selected replacement as waiting. Each active agent then observes the
-same membership change and enters its standard restart path. A worker that
-missed the preparation deadline is treated as unavailable and cannot influence
-the committed checkpoint manifest. Correctness does not depend on agents
-stopping in the same polling instant because the plan is already immutable and
-the new rendezvous cannot complete without its assignments.</p>
-<p>For an inaccessible node, surviving workers eventually fail or their agents
-observe the normal failure path.
-<code>SlotAwareRendezvousHandler.next_rendezvous()</code> blocks the survivors until the
-coordinator commits a conservative plan and assigns a standby. A node-local
-SCOUT report never directly manipulates <code>num_nodes_waiting()</code> or chooses the
-next membership.</p>
-<p>The handler cannot customize torchrun's worker-stop signal or timeout for an
-individual incident. Version 1 therefore requires workers to quiesce before a
-planned membership restart, relies on the agent's configured bounded shutdown,
-and treats failure to complete the next rendezvous before the plan deadline as
-a failed restart. If a supported torchrun version cannot satisfy those
-constraints, that version requires an out-of-tree agent fallback.</p>
-<p>On successful job completion or terminal failure, the coordinator closes the
-handler generation. Blocked standbys observe closure, release their leases, and
-exit without starting trainers.</p>
-<h2 id="control-plane-integrity">Control-Plane Integrity<a class="headerlink" href="#control-plane-integrity" title="Permanent link">&para;</a></h2>
-<ul>
-<li>Create the local control directory with owner-only permissions and verify Unix
-  peer credentials where supported.</li>
-<li>Write intent, context, and acknowledgement files with atomic replace.</li>
-<li>Provision <code>node_id</code> and agent credentials outside the training worker.</li>
-<li>Namespace every store key by run ID and schema version.</li>
-<li>Protect the external store with deployment authentication and authorization.</li>
-<li>Include the plan ID and generation in every mutable operation.</li>
-<li>Reject path traversal and never expand <code>location_token</code> as a raw filesystem
-  path without resolving it through the trusted control client.</li>
-<li>Treat malformed, unauthenticated, or conflicting input as unavailable
-  evidence, not as permission to continue.</li>
-</ul>
-<h2 id="healthy-path-cost">Healthy-Path Cost<a class="headerlink" href="#healthy-path-cost" title="Permanent link">&para;</a></h2>
-<p>The integration must not add a global synchronization to normal optimizer
-steps.</p>
-<ul>
-<li>Fault and recovery events are emitted only when SCOUT produces actionable
-  evidence.</li>
-<li>Checkpoint inventory contains metadata only and is published asynchronously
-  after a completed checkpoint transition.</li>
-<li>Control-client intent polling is bounded.</li>
-<li>The stock agent's existing rendezvous wait-count polling is unchanged.</li>
-<li>Standby agents do not allocate model state or join training collectives.</li>
-<li>Checkpoint flush and transfer happen only after a restart intent.</li>
-<li>Control delivery backpressure must not block the training thread
-  indefinitely.</li>
-</ul>
-<h2 id="recovery-policy">Recovery Policy<a class="headerlink" href="#recovery-policy" title="Permanent link">&para;</a></h2>
+<p>Publication uses same-directory atomic replacement. Workers reject malformed,
+noncanonical, oversized, nonregular, non-owner-only, or locally expired files.
+The handler creates a missing parent directory with owner-only permissions.
+An existing directory with different ownership or group/other access is
+rejected rather than modified.</p>
+<p>The framework consumes the context before training resumes. GEMINI then
+restores model, optimizer, caller-owned state, and RNG from the selected step.</p>
+<h2 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">&para;</a></h2>
+<p>The integration is registered through the supported <code>torchrun.handlers</code>
+entry-point group as rendezvous backend <code>lm_resiliency</code>.</p>
+<p>Required per-agent rendezvous configuration:</p>
 <table>
 <thead>
 <tr>
-<th>Incident</th>
-<th>Node action</th>
-<th>Recovery mode</th>
+<th>Key</th>
+<th>Meaning</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>Attributed SDC on one node/GPU</td>
-<td>Quarantine affected node conservatively</td>
-<td><code>RECOVERY_VERIFIED</code></td>
-</tr>
-<tr>
-<td>Inconclusive exact replay</td>
-<td>Do not over-attribute; replace only a policy-defined conservative scope or fail closed</td>
-<td><code>RECOVERY_VERIFIED</code></td>
-</tr>
-<tr>
-<td>Required node inaccessible</td>
-<td>Mark failed and replace its slot</td>
-<td><code>RECOVERY_VERIFIED</code></td>
-</tr>
-<tr>
-<td>Confirmed accessible compute or communication straggler</td>
-<td>Drain and replace when policy threshold is met</td>
-<td><code>LATEST_GEMINI</code> if a complete generation is prepared; otherwise verified</td>
-</tr>
-<tr>
-<td>Hang with complete clean emergency replay and all ranks accessible</td>
-<td>Replace a policy-selected scope</td>
-<td><code>LATEST_GEMINI</code></td>
-</tr>
-<tr>
-<td>Hang with missing, stale, incomplete, or contradictory evidence</td>
-<td>Replace a conservative policy-defined scope or fail closed</td>
-<td><code>RECOVERY_VERIFIED</code></td>
-</tr>
-<tr>
-<td>Operator-initiated healthy migration</td>
-<td>Drain source and replace slot</td>
-<td><code>LATEST_GEMINI</code> if preparation succeeds</td>
+<td><code>lm_resiliency_restart_context_path</code></td>
+<td>Absolute node-local context path</td>
 </tr>
 </tbody>
 </table>
-<h3 id="aggregation-rules">Aggregation rules<a class="headerlink" href="#aggregation-rules" title="Permanent link">&para;</a></h3>
-<p>The coordinator uses all available events for the incident:</p>
-<ul>
-<li>any SDC or inconclusive exact evidence forces verified recovery;</li>
-<li>any inaccessible required rank forces verified recovery;</li>
-<li>a latest proposal is accepted only if the checkpoint manifest proves every
-  required logical-rank shard is complete at one step;</li>
-<li>conflicting steps are not merged;</li>
-<li>after plan commit, workers load the exact selected step rather than
-  independently choosing a newer local generation;</li>
-<li>missing reporter events do not count as agreement;</li>
-<li>a checksum failure makes that copy unavailable;</li>
-<li>checksum success does not prove the original GPU state was numerically
-  correct; and</li>
-<li>one comparison group cannot certify the job if another group found SDC.</li>
-</ul>
-<h2 id="checkpoint-placement-and-transfer">Checkpoint Placement and Transfer<a class="headerlink" href="#checkpoint-placement-and-transfer" title="Permanent link">&para;</a></h2>
-<p>Stable logical slots are required for the fast path. GEMINI checkpoints are
-rank-sharded and peer replicas preserve the original owner rank. If torchrun
-arbitrarily renumbers ranks after replacement, a new framework topology may not
-match those shards even when <code>WORLD_SIZE</code> is unchanged.</p>
-<p>For each selected checkpoint, the coordinator builds one immutable manifest:</p>
-<pre><code class="language-python">class RankCheckpointCopies(TypedDict):
-    owner_global_rank: int
-    copies: list[CheckpointCopy]
-
-
-class RecoveryManifest(TypedDict):
-    manifest_id: str
-    run_id: str
-    source_generation: int
-    step: int
-    trust: Literal[&quot;latest&quot;, &quot;recovery_verified&quot;]
-    topology_digest: str
-    rank_copies: list[RankCheckpointCopies]
-</code></pre>
-<p>The persisted <code>RecoveryManifestRecord</code> contains the canonical manifest and the
-digest of its immutable source-generation snapshot. This record is create-once
-and exposes its own canonical digest for the later restart-plan envelope.
-Resolving the source snapshot and validating inventory, certification,
-acknowledgement, assignment, and copy eligibility remain separate admission
-steps; constructing the record alone does not make a manifest safe to commit.
-<code>ResolvedRecoveryManifest</code> binds the record to one verified immutable
-generation snapshot and requires exact run, source-generation, topology, and
-snapshot-digest agreement. It still does not establish completeness or trust.</p>
-<p>The manifest is usable only when every required rank has at least one copy and
-every included copy is eligible for the manifest's exact positive step and the
-plan's selected source. The coordinator must omit rejected alternatives before
-commit; an immutable committed manifest cannot advertise an incomplete,
-wrong-source, or unproven fallback. GEMINI plans use owner or peer copies;
-durable plans use durable copies. Only shared or remote storage is independent
-of holder-node availability. The manifest's trust label is not
-self-authenticating: every selected copy must match its referenced inventory
-record, and <code>RECOVERY_VERIFIED</code> manifests may use only recovery-verified
-inventory evidence. Durable recovery always requires a recovery-verified
-manifest and recovery-verified inventory, even if the originating intent
-allowed latest recovery.</p>
-<p>An in-memory or node-local copy is selectable only when its holder remains in
-the next assignment. Process-memory copies are never selectable because stock
-elastic restart destroys every worker address space, including workers on
-retained nodes. Successful preparation must publish new node-local inventory
-for the flushed bytes. A departing node's transfer counters in <code>RestartAck</code> do
-not by themselves prove that a destination has the bytes. Version 1 requires
-such transfers to materialize as authenticated shared or remote copy
-provenance before plan commit; a future local-destination transfer record may
-extend this without weakening the holder rule.</p>
-<p>The coordinator resolves every rank through the immutable <code>RankAssignment</code> for
-the manifest's <code>source_generation</code>. An <code>owner</code> copy must be held by the node
-that owned that rank in that generation; a <code>peer</code> copy must be held elsewhere.
-The source assignment's run, generation, topology digest, and world size must
-match the manifest and plan. When source and current generations are equal,
-their assignments must be identical rather than merely share metadata.</p>
-<p>Preferred source order:</p>
-<ol>
-<li>completed owner copy on an accessible healthy node;</li>
-<li>completed peer replica on a different healthy node;</li>
-<li>previously mirrored restart storage; or</li>
-<li>framework durable recovery-verified checkpoint.</li>
-</ol>
-<p>For an SDC incident, the selected generation must already be
-<code>RECOVERY_VERIFIED</code>. The current suspect state is never promoted. A stored
-verified copy on a suspect machine should be transferred only when policy
-allows it and integrity verification succeeds; a healthy peer or durable copy
-is preferred.</p>
-<p>The current <code>CheckpointTransfer</code> interface can move shards after the
-coordinator chooses source and destination endpoints. The transport never
-chooses the checkpoint or replacement node.</p>
-<p>If a failed node and every holder of its peer replicas are unavailable, GEMINI
-cannot reconstruct that rank's fast checkpoint. Recovery falls back to the
-framework durable checkpoint.</p>
-<h2 id="end-to-end-flows">End-to-End Flows<a class="headerlink" href="#end-to-end-flows" title="Permanent link">&para;</a></h2>
-<h3 id="initial-launch">Initial launch<a class="headerlink" href="#initial-launch" title="Permanent link">&para;</a></h3>
-<ol>
-<li>All <code>max_nodes</code> agents register stable node identities.</li>
-<li>The coordinator validates compatibility and selects exactly <code>min_nodes</code>.</li>
-<li>Selected nodes receive logical slots; the rest enter <code>STANDBY</code>.</li>
-<li>Slot-aware rendezvous assigns deterministic rank ranges; parked standbys
-   remain blocked in <code>next_rendezvous()</code>.</li>
-<li>Agents start workers with generation <code>0</code>.</li>
-<li><code>lm-resiliency</code> registers the worker identity and framework topology digest.</li>
-</ol>
-<h3 id="accessible-straggler-replacement">Accessible straggler replacement<a class="headerlink" href="#accessible-straggler-replacement" title="Permanent link">&para;</a></h3>
-<ol>
-<li>SCOUT emits a confirmed straggler report and latest-checkpoint proposal.</li>
-<li>The coordinator maps the reported rank to its generation and node.</li>
-<li>The coordinator opens a restart intent and provisionally reserves a
-   compatible standby for the affected logical slot.</li>
-<li>Every accessible worker enters <code>PREPARING</code>, quiesces at a safe boundary, and
-   acknowledges the intent.</li>
-<li>Workers flush eligible GEMINI state and report transfer results.</li>
-<li>The coordinator commits a restart plan using the newest complete allowed
-   generation, or falls back to verified recovery.</li>
-<li><code>SlotAwareRendezvousHandler</code> exposes the selected standby through
-   <code>num_nodes_waiting()</code>.</li>
-<li>Stock elastic agents observe the membership change and restart their local
-   worker groups.</li>
-<li>The source node becomes quarantined or standby according to policy.</li>
-<li>The replacement and surviving nodes rendezvous with the same slots/ranks.</li>
-<li>Relaunched workers validate the restart context and load exactly the
-    committed rank-consistent step.</li>
-<li>TorchTitan restores the complete state and resumes.</li>
-</ol>
-<h3 id="inaccessible-node">Inaccessible node<a class="headerlink" href="#inaccessible-node" title="Permanent link">&para;</a></h3>
-<ol>
-<li>The agent or infrastructure marks one node unavailable.</li>
-<li>The coordinator opens an intent so surviving nodes can expose their
-   completed peer replicas.</li>
-<li>The coordinator selects <code>RECOVERY_VERIFIED</code>.</li>
-<li>The committed manifest uses peer replicas or the durable verified
-   checkpoint.</li>
-<li>A standby inherits the failed logical slot.</li>
-<li>Surviving agents follow torchrun's failure-restart path and block in
-   slot-aware rendezvous until the plan is committed.</li>
-<li>If any required shard is unavailable, the job fails rather than mixing
-   checkpoint generations.</li>
-</ol>
-<h3 id="sdc">SDC<a class="headerlink" href="#sdc" title="Permanent link">&para;</a></h3>
-<ol>
-<li>SCOUT rejects the current candidate and emits attributed or inconclusive
-   evidence.</li>
-<li>The coordinator selects only <code>RECOVERY_VERIFIED</code>.</li>
-<li>The affected node is quarantined only to the scope supported by evidence and
-   deployment policy.</li>
-<li>No current or candidate checkpoint is copied into the restart manifest.</li>
-<li>The fixed-size group relaunches and loads the verified generation.</li>
-</ol>
-<h2 id="failure-handling">Failure Handling<a class="headerlink" href="#failure-handling" title="Permanent link">&para;</a></h2>
-<ul>
-<li><strong>Coordinator unavailable:</strong> do not autonomously form a new generation.</li>
-<li><strong>Coordinator unavailable with an open intent:</strong> remain quiesced and fail
-  after the control-plane deadline; do not resume training without an explicit
-  safe abort.</li>
-<li><strong>Conflicting committed plans:</strong> fail the run; never choose locally.</li>
-<li><strong>Stale event:</strong> ignore it and record the rejection.</li>
-<li><strong>Missing preparation acknowledgement:</strong> treat the node's latest state as
-  unavailable.</li>
-<li><strong>Standby fails admission health checks:</strong> select another standby or fail.</li>
-<li><strong>Too few eligible nodes:</strong> wait within policy or fail; do not silently shrink
-  the training world.</li>
-<li><strong>Restart context mismatch:</strong> exit before framework checkpoint loading.</li>
-<li><strong>Checkpoint manifest incomplete:</strong> use a complete verified durable
-  checkpoint or fail.</li>
-<li><strong>Transfer timeout or checksum failure:</strong> mark that copy unavailable and
-  re-plan only from the same or a more conservative trust state.</li>
-<li><strong>Agent crash after plan commit:</strong> another agent cannot rewrite the plan; the
-  same generation may be retried idempotently.</li>
-<li><strong>Job closes while standbys are parked:</strong> close the rendezvous generation and
-  wake blocked standby agents so they exit without spawning workers.</li>
-</ul>
-<h2 id="packaging-and-compatibility">Packaging and Compatibility<a class="headerlink" href="#packaging-and-compatibility" title="Permanent link">&para;</a></h2>
-<ul>
-<li>Keep the public neutral payloads in <code>lm_resiliency.manager_api</code>.</li>
-<li>Put torchrun-specific code under <code>lm_resiliency.integrations.torchrun</code>.</li>
-<li>Keep TorchTitan imports lazy.</li>
-<li>Importing <code>lm_resiliency</code> must not import TorchTitan or CUDA-only packages.</li>
-<li>Version every wire payload independently from the Python package version.</li>
-<li>Reject unknown required fields or unsupported schema versions.</li>
-<li>Implement standby admission through the documented <code>RendezvousHandler</code>
-  interface and <code>torchrun.handlers</code> registration mechanism.</li>
-<li>Do not subclass protected elastic-agent methods.</li>
-<li>Qualify the handler against every supported PyTorch minor because the stock
-  agent's membership-restart behavior remains a runtime compatibility
-  dependency.</li>
-<li>Preserve the existing <code>OrchestrationHooks</code>, <code>RecoveryDecision</code>,
-  <code>SCOUTFaultReport</code>, and framework entry points.</li>
-<li>Use PyTorch 2.13 as the initial prototype baseline, then separately qualify
-  the other PyTorch minors in the supported compatibility range.</li>
-</ul>
-<h3 id="proposed-command">Proposed command<a class="headerlink" href="#proposed-command" title="Permanent link">&para;</a></h3>
-<p>The custom rendezvous backend makes replacement-only semantics explicit without
-changing torchrun's default behavior:</p>
-<pre><code class="language-toml"># /shared/lm-resiliency/torchrun.toml
-schema_version = 1
-control_endpoint = &quot;control.internal:443&quot;
-replacement_only = true
-max_replacement_generations = 1
-registration_lease_duration_ms = 30000
-poll_interval_ms = 1000
-join_timeout_ms = 300000
-</code></pre>
-<p>The shared policy file contains no node identity or credentials. Every agent
-loads the file, applies any explicitly supplied shared <code>--rdzv-conf</code>
-overrides, and registers the canonical runtime digest over the resolved policy,
-run ID, rendezvous endpoint, and <code>min_nodes</code>/<code>max_nodes</code> range. Drift in
-whitespace or node-local settings does not matter, while drift in effective
-shared settings or fleet-size semantics fails closed.
-Node-specific <code>node_id</code> and <code>restart_context_path</code> values come from
-<code>--rdzv-conf</code> or <code>LM_RESILIENCY_NODE_ID</code> and
-<code>LM_RESILIENCY_RESTART_CONTEXT</code>; conflicting sources are rejected. Credentials
-and other secrets remain in deployment-provided environment or credential
-providers and are not included in the policy file or digest.
-Because PyTorch does not include <code>nproc_per_node</code> in
-<code>RendezvousParameters</code>, the agent also requires <code>local_world_size</code> and the
-deployment-generated workload <code>environment_digest</code> through <code>--rdzv-conf</code> or
-<code>LM_RESILIENCY_LOCAL_WORLD_SIZE</code> and
-<code>LM_RESILIENCY_ENVIRONMENT_DIGEST</code>. The scheduler or deployment integration
-must also provide the node's trusted GPU, NIC, HCA, and link identifiers as a
-semicolon-delimited <code>resource_ids</code> value or <code>LM_RESILIENCY_RESOURCE_IDS</code>; use
-<code>[]</code> for an explicitly empty inventory. These per-node IDs are stored in the
-immutable <code>AgentIdentity</code> used to authenticate SCOUT hardware reports, but are
-excluded from the shared compatibility digest because each node owns different
-resources. The registered runtime digest includes the local worker count. The
-immutable agent environment digest combines that runtime digest with the
-deployment workload digest, so either runtime or software/capability drift
-produces a different agent identity.</p>
-<pre><code class="language-bash">export LM_RESILIENCY_NODE_ID=&quot;${SCHEDULER_NODE_ID}&quot;
-export LM_RESILIENCY_LOCAL_WORLD_SIZE=8
-export LM_RESILIENCY_ENVIRONMENT_DIGEST=&quot;${WORKLOAD_ENVIRONMENT_DIGEST}&quot;
-export LM_RESILIENCY_RESOURCE_IDS=&quot;${GPU_UUIDS_SEMICOLON_DELIMITED}&quot;
-export LM_RESILIENCY_RESTART_CONTEXT=&quot;/run/lm-resiliency/${JOB_ID}/restart-context.json&quot;
-
-torchrun \
-  --nnodes=8:10 \
-  --nproc-per-node=8 \
+<p>Optional settings:</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th style="text-align: right;">Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>lm_resiliency_join_timeout_ms</code></td>
+<td style="text-align: right;"><code>300000</code></td>
+<td>Bounded formation/bootstrap window</td>
+</tr>
+<tr>
+<td><code>lm_resiliency_poll_interval_ms</code></td>
+<td style="text-align: right;"><code>250</code></td>
+<td>Store polling interval</td>
+</tr>
+<tr>
+<td><code>lm_resiliency_heartbeat_timeout_ms</code></td>
+<td style="text-align: right;"><code>10000</code></td>
+<td>Standby/agent liveness window</td>
+</tr>
+<tr>
+<td><code>lm_resiliency_worker_config</code></td>
+<td style="text-align: right;">unset</td>
+<td>Absolute path to the strict worker policy; enables automatic framework instrumentation</td>
+</tr>
+</tbody>
+</table>
+<p>The values are supplied through <code>--rdzv-conf</code>. The <code>lm_resiliency_</code> namespace
+prevents collisions with c10d and future torchrun rendezvous options.</p>
+<p>Physical node identity and initial admission are automatic. Production agents
+read <code>/etc/machine-id</code>. <code>LM_RESILIENCY_MACHINE_ID_PATH</code> can select another
+absolute machine-ID file for containerized deployments or test harnesses.</p>
+<p>Example agent command for a user module with no LM Resiliency imports:</p>
+<pre><code class="language-bash">torchrun \
+  --nnodes=1:1 \
+  --nproc-per-node=1 \
+  --max-restarts=4 \
   --rdzv-backend=lm_resiliency \
-  --rdzv-endpoint=&quot;${RDZV_ENDPOINT}&quot; \
-  --rdzv-id=&quot;${JOB_ID}&quot; \
-  --rdzv-conf=&quot;config=/shared/lm-resiliency/torchrun.toml&quot; \
-  --module torchtitan.train ...
+  --rdzv-endpoint=&quot;$STORE_ENDPOINT&quot; \
+  --rdzv-id=&quot;$RUN_ID&quot; \
+  --rdzv-conf=&quot;store_type=tcp,is_host=false,read_timeout=120,\
+lm_resiliency_restart_context_path=$CONTEXT_PATH,\
+lm_resiliency_worker_config=/absolute/path/worker.toml&quot; \
+  --module your_training.module \
+  [application arguments...]
 </code></pre>
-<p>The command runs on all <code>max_nodes</code> machines. The backend interprets
-<code>min_nodes</code> as the exact active-slot count and <code>max_nodes</code> as the registered
-fleet limit. Selecting <code>--rdzv-backend=lm_resiliency</code> is the explicit opt-in;
-the built-in rendezvous backends retain their existing elastic semantics.</p>
-<h2 id="validation-plan">Validation Plan<a class="headerlink" href="#validation-plan" title="Permanent link">&para;</a></h2>
-<h3 id="contract-tests">Contract tests<a class="headerlink" href="#contract-tests" title="Permanent link">&para;</a></h3>
+<p>For a file-backed single-host run, set <code>store_type=file</code> and use a private
+local rendezvous path. Multi-host validation uses an orchestrator-owned
+<code>TCPStore</code>.</p>
+<p>When <code>lm_resiliency_worker_config</code> is set, the rendezvous plugin installs framework-import
+monitoring before Python executes the user module. Native PyTorch is tentative;
+an import of TorchTitan, Megatron Core, or DeepSpeed selects the corresponding
+more specific adapter before attachment. Multiple higher-level supported
+frameworks fail closed. After the default process group initializes, every rank
+agrees on the inferred framework before a built-in adapter can enter GEMINI or
+SCOUT collectives. Missing or conflicting framework evidence fails all ranks
+before attachment. The user module still owns the ordinary framework training
+loop.
+If the default process group uses NCCL, framework agreement runs on a temporary
+Gloo group and destroys that group immediately afterward. Agreement therefore
+does not require user code to bind <code>LOCAL_RANK</code> to a CUDA device before
+<code>init_process_group()</code>.</p>
+<p>Torchrun supplies <code>LOCAL_WORLD_SIZE</code> to every worker from
+<code>--nproc-per-node</code>. Replacement workers compare that value with the
+manager-selected rank range before framework initialization, so the same
+topology invariant is preserved without duplicating worker width in
+<code>--rdzv-conf</code>.
+Bootstrap exposes the manager-selected resume position as
+<code>LM_RESILIENCY_TORCHRUN_CHECKPOINT_STEP</code>; generation-zero workers receive <code>0</code>.
+Applications can use it for deterministic sampler or token positioning without
+importing LM Resiliency.</p>
+<p>Adapters select a framework, not a parallelism strategy. Each adapter passes the
+same objects accepted by that framework's existing <code>enable_resiliency()</code> API,
+and the existing integration discovers supported DDP/FSDP/HSDP/TP/PP/EP/ZeRO
+topology exactly as it does for explicit activation. Framework-object discovery
+is intentionally fail-closed; stacks with custom trainers, multiple optimizers,
+sharded optimizers, or caller-owned loop state provide a custom adapter rather
+than relying on process-wide object scanning.</p>
+<p>Distributed native PyTorch attachment requires a recognized DDP or FSDP
+construction boundary that all participating ranks cross. At the first
+recognized distributed forward, every rank collectively proves that it has
+exactly one valid model/optimizer pair before any rank starts LM Resiliency
+attachment collectives. Rank-local warmup forwards cannot initiate those
+collectives.</p>
+<p>After attachment, built-in adapters bind cleanup to the framework's normal
+distributed teardown boundary. The resiliency handle closes before process
+groups are destroyed, so asynchronous checkpoint and replay work completes
+before the application reports a clean exit.
+On generation zero, DeepSpeed may call <code>engine.load_checkpoint()</code> before its
+first resiliency-managed training step; a successful load seeds the resiliency
+counter from <code>engine.global_steps</code>. Successor generations reject framework
+loads after the manager-selected GEMINI state has been restored.</p>
+<p>The worker policy is schema-versioned and strict even for disabled features.
+Every assigned node publishes a digest of the exact policy bytes, rendezvous
+requires one cohort-wide value, and worker bootstrap revalidates the digest
+before parsing or installing an adapter.
+<code>checkpoint.replication_jump</code> must be <code>-1</code> or positive,
+<code>checkpoint.replication_chunk_size</code> must be positive, and
+<code>checkpoint.disk_flush_interval</code> must be nonnegative; zero disables periodic
+disk persistence.
+Custom stacks set <code>adapter = "package.module:factory"</code> in that policy; built-in
+frameworks omit <code>adapter</code> and use import inference.
+GEMINI topology settings remain deployment-owned: for example,
+<code>replication_jump</code> must divide the checkpoint world according to the pairing
+contract documented in <a href="../gemini/#peer-replication">GEMINI</a>.</p>
+<h2 id="manager-interface">Manager Interface<a class="headerlink" href="#manager-interface" title="Permanent link">&para;</a></h2>
+<p>The public <code>TorchrunRecoveryCoordinator</code> wraps the canonical store protocol:</p>
+<pre><code class="language-python">import time
+
+from lm_resiliency.integrations.torchrun import (
+    TorchrunRecoveryCoordinator,
+    TorchrunRecoveryRequest,
+)
+
+coordinator = TorchrunRecoveryCoordinator(store, run_id=run_id)
+initial = coordinator.initial_placement(
+    active_node_count=8,
+    allocated_node_count=16,
+)
+assert initial is not None
+
+successor = coordinator.publish_successor(
+    generation=0,
+    active_node_ids=initial.active_node_ids,
+    quarantined_node_ids=(),
+    request=TorchrunRecoveryRequest(...),
+    local_world_size=1,
+    replacement=(faulty_slot, selected_standby),
+)
+
+# Deployment-owned evidence determines when the successor group is running.
+while not successor_admitted(successor):
+    coordinator.check_health()
+    time.sleep(0.1)
+
+coordinator.close()
+</code></pre>
+<p><code>publish_successor()</code> is called only after SCOUT localization, GEMINI checkpoint
+selection/flush, quarantine, and standby placement succeed. Omitting
+<code>replacement</code> restarts the same assignments. Supplying <code>(logical_slot,
+standby_node_id)</code> replaces exactly one physical node while preserving its
+logical rank range. The coordinator must remain alive through successor
+admission so it can renew the store lease. Managers call <code>check_health()</code> while
+waiting for admission. Transient store errors are retried, while persistent
+renewal failure is latched and raised by health checks and later coordinator
+operations. <code>close()</code> stops renewal and wakes parked standbys after successful
+completion.</p>
+<p><code>TorchrunLaunchConfig</code> constructs the framework-neutral torchrun argument list.
+It deliberately does not launch subprocesses, select GPUs, invoke SSH, or
+implement scheduler policy.</p>
+<h2 id="safety-properties">Safety Properties<a class="headerlink" href="#safety-properties" title="Permanent link">&para;</a></h2>
 <ul>
-<li>JSON round-trip and schema-version rejection for every event and plan.</li>
-<li>Stale generation, duplicate event, and conflicting-plan rejection.</li>
-<li>Conservative recovery lattice across missing and conflicting proposals.</li>
-<li>Rank-to-node mapping through immutable generation snapshots.</li>
-<li>Quarantine by stable node ID, never by rank alone.</li>
-<li>Plan validation for intent fencing, unexpired deadlines, exact active and
-  worker counts, unique slots, topology digest, source-compatible copies, and a
-  complete single-step checkpoint manifest.</li>
+<li>active world size remains fixed;</li>
+<li>generation-zero placement is immutable after the first <code>min_nodes</code>
+  registrations are committed;</li>
+<li>duplicate physical machine identities fail closed;</li>
+<li>logical slots and global-rank ranges remain stable;</li>
+<li>a plan is immutable and generation-fenced;</li>
+<li>plan eligibility is proven through a manager-renewed store lease and
+  host-local monotonic time rather than cross-host wall clocks;</li>
+<li>only manager-selected replacements become visible to healthy agents;</li>
+<li>an expired plan cannot admit a worker;</li>
+<li>unselected and quarantined nodes are absent from the successor assignment;</li>
+<li>restart context is written before replacement workers train;</li>
+<li>worker generation, rank ranges, world size, and local lease deadline must match
+  the rendezvous decision before framework initialization;</li>
+<li>malformed plan/context state fails closed;</li>
+<li>heartbeat loss suppresses restart signaling; and</li>
+<li>transient control-store contention does not create a false restart edge.</li>
 </ul>
-<h3 id="cpu-multi-process-tests">CPU multi-process tests<a class="headerlink" href="#cpu-multi-process-tests" title="Permanent link">&para;</a></h3>
+<h2 id="validation">Validation<a class="headerlink" href="#validation" title="Permanent link">&para;</a></h2>
+<p>Source-owned tests cover handler construction, generation-zero admission,
+duplicate-identity rejection, standby parking, same-node successor plans,
+slot-preserving replacement, context publication, worker-width fencing,
+zero-import bootstrap, framework inference, exact recovery-step verification,
+and bounded shutdown.</p>
+<p>Distributed validation used one torchrun agent per A100 and exercised eight
+active agents with eight standbys. The manager published sixteen same-node
+successor generations and eight SCOUT-localized replacements while preserving
+the fixed eight-rank world. Every successor rank restored the selected
+recovery-verified GEMINI checkpoint before training resumed. Native PyTorch,
+DeepSpeed, Megatron Core, and TorchTitan also completed a focused
+restart-and-replacement campaign through their framework-owned training
+boundaries.</p>
+<h2 id="current-boundaries">Current Boundaries<a class="headerlink" href="#current-boundaries" title="Permanent link">&para;</a></h2>
 <ul>
-<li>Standby agents do not spawn trainer workers.</li>
-<li>A new standby does not cause scale-up.</li>
-<li>Parked standbys do not contribute to <code>num_nodes_waiting()</code>.</li>
-<li>A committed plan exposes only the selected replacement as waiting.</li>
-<li>The stock agent membership path restarts every active local worker group.</li>
-<li>A replacement inherits the same logical slot and rank range.</li>
-<li>A quarantined node cannot rejoin.</li>
-<li>Closing the job wakes parked standbys and starts no trainer processes.</li>
-<li>The node-local <code>RestartContext</code> is written before <code>next_rendezvous()</code> returns.</li>
-<li>Restart context mismatch aborts before user code initializes recovery.</li>
-<li>Agent/coordinator restart preserves idempotent generation state.</li>
-</ul>
-<h3 id="focused-gpu-and-multi-node-tests">Focused GPU and multi-node tests<a class="headerlink" href="#focused-gpu-and-multi-node-tests" title="Permanent link">&para;</a></h3>
-<p>Start with <code>min_nodes=2</code>, <code>max_nodes=3</code>, and the smallest topology that
-exercises peer replication:</p>
-<ol>
-<li>kill one active node and recover its rank shards from peer replicas;</li>
-<li>replace an accessible straggler after bounded flush and transfer;</li>
-<li>inject SDC and verify rollback to the prior recovery-verified generation;</li>
-<li>make one rank's newest shard unavailable and verify global step selection
-   falls back consistently;</li>
-<li>verify bitwise model, optimizer, scheduler, RNG, and data-position recovery;</li>
-<li>repeat with TorchTitan and native PyTorch;</li>
-<li>exercise one HSDP or FSDP2 topology with stable shard coordinates; and</li>
-<li>document the remaining hardware-dependent coverage.</li>
-</ol>
-<p>The test must assert that no quarantined node runs a trainer process in the new
-generation and that the active world size remains exactly <code>min_nodes</code>.</p>
-<h2 id="alternatives-considered">Alternatives Considered<a class="headerlink" href="#alternatives-considered" title="Permanent link">&para;</a></h2>
-<h3 id="use-stock-nnodesminmax-and-callbacks-only">Use stock <code>--nnodes=min:max</code> and callbacks only<a class="headerlink" href="#use-stock-nnodesminmax-and-callbacks-only" title="Permanent link">&para;</a></h3>
-<p>Insufficient. It cannot keep extra nodes standby-only, preserve stable rank
-slots, or exclude a localized bad node from later rendezvous.</p>
-<h3 id="use-a-custom-rendezvous-handler-without-a-recovery-coordinator">Use a custom rendezvous handler without a recovery coordinator<a class="headerlink" href="#use-a-custom-rendezvous-handler-without-a-recovery-coordinator" title="Permanent link">&para;</a></h3>
-<p>Insufficient. The handler provides standby admission, stable ranks, and the
-membership-restart edge, but it does not evaluate SCOUT evidence, prepare
-GEMINI state, select a complete checkpoint manifest, or decide quarantine.</p>
-<h3 id="add-a-custom-elastic-agent">Add a custom elastic agent<a class="headerlink" href="#add-a-custom-elastic-agent" title="Permanent link">&para;</a></h3>
-<p>Not selected for version 1. PyTorch exposes agent extension points, but the
-existing membership-change path already provides the required full-group
-restart after the rendezvous handler reveals a selected replacement. A custom
-agent would add version coupling without removing the need for the coordinator
-and worker preparation protocol.</p>
-<h3 id="add-a-new-upstream-torchrun-resiliency-policy-interface">Add a new upstream torchrun resiliency-policy interface<a class="headerlink" href="#add-a-new-upstream-torchrun-resiliency-policy-interface" title="Permanent link">&para;</a></h3>
-<p>Not required. The existing <code>RendezvousHandler</code> interface and stock elastic
-agent cover admission and restart mechanics. Reconsider an upstream change only
-if focused validation finds a correctness requirement that those interfaces
-cannot satisfy.</p>
-<h3 id="allow-the-active-world-to-shrink-after-a-failure">Allow the active world to shrink after a failure<a class="headerlink" href="#allow-the-active-world-to-shrink-after-a-failure" title="Permanent link">&para;</a></h3>
-<p>Deferred. It changes framework parallelism, checkpoint sharding, batch size,
-optimizer semantics, and potentially the training trajectory. It requires a
-separate elastic-topology and resharding contract.</p>
-<h3 id="put-placement-policy-inside-scout-or-gemini">Put placement policy inside SCOUT or GEMINI<a class="headerlink" href="#put-placement-policy-inside-scout-or-gemini" title="Permanent link">&para;</a></h3>
-<p>Rejected. SCOUT and GEMINI do not own scheduler state, leases, or physical
-resource lifecycle. They should provide evidence and recovery state to a
-coordinator or infrastructure manager.</p>
-<h3 id="delegate-replacement-decisions-to-an-external-scheduler">Delegate replacement decisions to an external scheduler<a class="headerlink" href="#delegate-replacement-decisions-to-an-external-scheduler" title="Permanent link">&para;</a></h3>
-<p>Viable for production, and the neutral manager API should continue supporting
-it. The reference design still adds value by defining the rendezvous and
-recovery contracts needed for local standby replacement.</p>
-<h2 id="phased-implementation">Phased Implementation<a class="headerlink" href="#phased-implementation" title="Permanent link">&para;</a></h2>
-<h3 id="phase-0-agree-on-contracts">Phase 0: agree on contracts<a class="headerlink" href="#phase-0-agree-on-contracts" title="Permanent link">&para;</a></h3>
-<ul>
-<li>Decide stable node identity and logical-slot semantics.</li>
-<li>Agree on the event, inventory, manifest, plan, and restart-context schemas.</li>
-<li>Decide where the single-writer coordinator runs.</li>
-</ul>
-<h3 id="phase-1-manager-neutral-data-model">Phase 1: manager-neutral data model<a class="headerlink" href="#phase-1-manager-neutral-data-model" title="Permanent link">&para;</a></h3>
-<ul>
-<li>Add versioned event envelopes and <code>RestartContext</code>.</li>
-<li>Extend checkpoint inventory without changing current callback behavior.</li>
-<li>Add contract tests and conservative aggregation tests.</li>
-</ul>
-<h3 id="phase-2-reference-torchrun-integration">Phase 2: reference torchrun integration<a class="headerlink" href="#phase-2-reference-torchrun-integration" title="Permanent link">&para;</a></h3>
-<ul>
-<li>Add the local orchestration client.</li>
-<li>Add the coordinator and quarantine store.</li>
-<li>Add the <code>torchrun.handlers</code> rendezvous plugin.</li>
-<li>Add standby-only admission, stable slot assignment, and restart-context
-  publication.</li>
-<li>Use the stock <code>LocalElasticAgent</code> membership-restart path.</li>
-</ul>
-<h3 id="phase-3-framework-validation">Phase 3: framework validation<a class="headerlink" href="#phase-3-framework-validation" title="Permanent link">&para;</a></h3>
-<ul>
-<li>Validate native PyTorch and TorchTitan end to end.</li>
-<li>Add Megatron Core and DeepSpeed after the neutral contract is stable.</li>
-</ul>
-<h3 id="phase-4-production-hardening">Phase 4: production hardening<a class="headerlink" href="#phase-4-production-hardening" title="Permanent link">&para;</a></h3>
-<ul>
-<li>Validate handler and agent behavior across every supported PyTorch minor.</li>
-<li>Add durable coordinator failover and scheduler integration.</li>
-<li>Exercise repeated replacement generations and bounded shutdown failures.</li>
-</ul>
-<h2 id="open-questions">Open Questions<a class="headerlink" href="#open-questions" title="Permanent link">&para;</a></h2>
-<p>Recommended defaults for the first prototype:</p>
-<ul>
-<li>pre-launch standby agents in the same allocation;</li>
-<li>require stable logical slots and exact rank-range inheritance;</li>
-<li>quarantine the whole node when one full-node torchrun local worker group is
-  the scheduling unit;</li>
-<li>prefer healthy peer or durable verified copies over a suspect node;</li>
-<li>keep framework durable checkpoint IDs opaque;</li>
-<li>use a separate replacement-generation budget; and</li>
-<li>
-<p>use the existing rendezvous plugin and stock agent before considering any
-  torchrun change.</p>
-</li>
-<li>
-<p><strong>Coordinator placement:</strong> should the first prototype use a namespaced c10d
-   rendezvous store, etcd, or a separate manager service?</p>
-</li>
-<li><strong>Stable slots:</strong> can all target deployments guarantee that a standby can
-   inherit the failed node's exact rank range and local device count?</li>
-<li><strong>Quarantine scope:</strong> when SCOUT identifies one GPU but torchrun launches a
-   homogeneous full-node local worker group, should policy always quarantine
-   the whole node in version 1?</li>
-<li><strong>Verified copies on suspect hardware:</strong> may a previously certified
-   checkpoint be transferred from a now-suspect node when its checksum passes,
-   or must recovery use only a healthy peer/durable copy?</li>
-<li><strong>Replacement budget:</strong> should repeated replacement generations be bounded
-   separately by incident type, node, and whole job?</li>
-<li><strong>Standby lifecycle:</strong> are standby agents pre-launched in the same scheduler
-   allocation, or must the coordinator request a new host on demand?</li>
-<li><strong>Durable checkpoint handoff:</strong> should <code>checkpoint_id</code> remain framework
-   opaque, or should the restart manifest expose a common durable-checkpoint
-   URI contract?</li>
-<li><strong>Compatibility fallback:</strong> if a supported PyTorch minor changes the stock
-   membership-restart behavior, should that minor be excluded or supported by
-   a version-specific out-of-tree <code>SimpleElasticAgent</code> launcher?</li>
-</ul>
-<h2 id="references">References<a class="headerlink" href="#references" title="Permanent link">&para;</a></h2>
-<ul>
-<li><a href="../gemini/">GEMINI operational contract</a></li>
-<li><a href="../scout/">SCOUT operational contract</a></li>
-<li><a href="../api/">LM Resiliency API guide</a></li>
-<li><a href="../compatibility/">Compatibility policy</a></li>
-<li><a href="https://docs.pytorch.org/docs/2.13/elastic/run.html">PyTorch torchrun elastic launch documentation</a></li>
-<li><a href="https://docs.pytorch.org/docs/2.13/elastic/agent.html">PyTorch elastic agent documentation</a></li>
-<li><a href="https://docs.pytorch.org/docs/2.13/elastic/rendezvous.html">PyTorch rendezvous documentation</a></li>
+<li>fixed-size replacement only; no scale-up or scale-down;</li>
+<li>stable topology and local worker count across generations;</li>
+<li>standbys must already be allocated and running;</li>
+<li>one torchrun agent per unique <code>/etc/machine-id</code> is required outside the
+  synthetic validation harness;</li>
+<li>the manager, not torchrun, owns evidence evaluation and quarantine policy;</li>
+<li>one shared control-store endpoint is required;</li>
+<li>built-in injected adapters support exact manager-selected GEMINI recovery;
+  the selected step and checkpoint-topology digest are validated before load;
+  durable-source replacement requires a custom adapter with a framework loader;</li>
+<li>replacement does not repair hardware or allocate new hosts; and</li>
+<li>the production campaign uses DDP and tiny deterministic workloads, not
+  publication-scale convergence.</li>
 </ul>
               
             </div>
