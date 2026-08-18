@@ -231,7 +231,7 @@ def cleanup_agents(
     *,
     remote_run_id: str,
 ) -> None:
-    active_error = sys.exception()
+    active_error = sys.exc_info()[1]
     failures: list[BaseException] = []
     for agent in agents:
         try:
