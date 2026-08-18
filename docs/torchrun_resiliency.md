@@ -74,7 +74,9 @@ closed. The coordinator converts the manager's absolute deadline into a
 renewing store lease containing a sequence and remaining duration. Agents
 require locally observed lease progress and translate the remaining duration
 to their own monotonic clocks; they never compare wall-clock timestamps from
-different hosts.
+different hosts. Lease freshness remains bounded by the heartbeat cadence, but
+the restart context carries the full manager window so worker startup is not
+limited to one heartbeat timeout.
 
 For GEMINI recovery the plan carries:
 

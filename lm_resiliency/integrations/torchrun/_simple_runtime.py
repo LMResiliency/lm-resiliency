@@ -597,7 +597,10 @@ class SimpleRendezvousHandler(RendezvousHandler):
         self._last_assignment: tuple[_NodeAssignment, ...] = ()
         self._heartbeat_observations: dict[str, tuple[str, int, float, bool]] = {}
         self._heartbeat_observation_lock = threading.Lock()
-        self._plan_lease_observations: dict[tuple[int, str], tuple[int, float, bool]] = {}
+        self._plan_lease_observations: dict[
+            tuple[int, str],
+            tuple[int, float, float, bool],
+        ] = {}
         self._plan_lease_observation_lock = threading.Lock()
         self._heartbeat.start()
 
@@ -841,31 +844,42 @@ class SimpleRendezvousHandler(RendezvousHandler):
         key = (plan.to_generation, plan.plan_id)
         with self._plan_lease_observation_lock:
             previous = self._plan_lease_observations.get(key)
-            deadline = float(now) + min(
+            freshness_deadline = float(now) + min(
                 remaining_ms / 1_000,
                 max(
                     self._config.heartbeat_timeout_ms / 1_000,
                     _PLAN_LEASE_RENEW_INTERVAL_SECONDS * 3,
                 ),
             )
+            manager_deadline = float(now) + remaining_ms / 1_000
             if previous is None:
-                self._plan_lease_observations[key] = (sequence, deadline, False)
+                self._plan_lease_observations[key] = (
+                    sequence,
+                    freshness_deadline,
+                    manager_deadline,
+                    False,
+                )
                 return False
             if sequence < previous[0]:
                 raise RendezvousStateError("recovery plan lease sequence moved backwards")
             if sequence > previous[0]:
-                live = remaining_ms > 0 and deadline > float(now)
-                self._plan_lease_observations[key] = (sequence, deadline, live)
+                live = remaining_ms > 0 and freshness_deadline > float(now)
+                self._plan_lease_observations[key] = (
+                    sequence,
+                    freshness_deadline,
+                    manager_deadline,
+                    live,
+                )
                 return live
-            return previous[2] and float(now) < previous[1]
+            return previous[3] and float(now) < previous[1]
 
     def _plan_lease_deadline_ns(self, plan: RestartPlan) -> int:
         key = (plan.to_generation, plan.plan_id)
         with self._plan_lease_observation_lock:
             observation = self._plan_lease_observations.get(key)
-        if observation is None or not observation[2]:
+        if observation is None or not observation[3]:
             raise RendezvousStateError("recovery plan lease was not observed as live")
-        return int(observation[1] * 1_000_000_000)
+        return int(observation[2] * 1_000_000_000)
 
     def _heartbeat_loop(self) -> None:
         interval = max(self._config.heartbeat_timeout_ms / 3_000, 0.1)

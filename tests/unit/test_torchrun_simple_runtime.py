@@ -1001,6 +1001,34 @@ def test_plan_lease_liveness_uses_local_remaining_duration(tmp_path: Path) -> No
     assert handler.shutdown()
 
 
+def test_plan_lease_context_deadline_preserves_manager_remaining_duration(
+    tmp_path: Path,
+) -> None:
+    store = HashStore()
+    handler = SimpleRendezvousHandler(
+        replace(
+            _config(tmp_path, "node-a"),
+            heartbeat_timeout_ms=50,
+        ),
+        store=store,
+        local_addr="127.0.0.1",
+        monotonic_clock=iter((10.0, 10.01)).__next__,
+    )
+    plans = SimpleRecoveryPlanStore(store, run_id=RUN_ID)
+    plan = _plan()
+    plans.publish(plan)
+
+    plans.renew_plan_lease(plan, remaining_ms=60_000)
+    assert not handler._plan_lease_is_live(plan)
+    plans.renew_plan_lease(plan, remaining_ms=59_000)
+    assert handler._plan_lease_is_live(plan)
+
+    deadline_ns = handler._plan_lease_deadline_ns(plan)
+    assert deadline_ns == pytest.approx(69.01 * 1_000_000_000)
+    assert deadline_ns > 10.01 * 1_000_000_000 + 50_000_000
+    assert handler.shutdown()
+
+
 def test_unleased_plan_does_not_signal_job_restart(tmp_path: Path) -> None:
     store = HashStore()
     active_a = _handler(tmp_path, store, "node-a")
