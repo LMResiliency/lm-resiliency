@@ -1480,7 +1480,7 @@
   ],
   "metadata": {
     "purpose": "Systematic built-in local fault and SCOUT localization matrix",
-    "workload": "examples.fault_injection.pytorch",
+    "workload": "tests.validation.fault_injection.pytorch",
     "world_size": 8
   },
   "name": "pytorch-8gpu-systematic-faults",

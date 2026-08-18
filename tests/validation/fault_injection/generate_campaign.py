@@ -355,7 +355,7 @@ def build_campaign() -> FaultCampaign:
         incidents=tuple(incidents),
         metadata={
             "world_size": 8,
-            "workload": "examples.fault_injection.pytorch",
+            "workload": "tests.validation.fault_injection.pytorch",
             "purpose": "Systematic built-in local fault and SCOUT localization matrix",
         },
     )

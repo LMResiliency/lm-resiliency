@@ -16,7 +16,6 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 
-from examples.fault_injection.compare import compare_artifacts
 from examples.production_loops.pytorch import TinyCausalLM, _tokens
 from lm_resiliency import (
     FaultCampaign,
@@ -29,6 +28,7 @@ from lm_resiliency import (
     enable_resiliency,
 )
 from lm_resiliency.fault_injection.injector import _probability_selected
+from tests.validation.fault_injection.compare import compare_artifacts
 
 
 @dataclass
@@ -339,7 +339,7 @@ def _validate_call_bounded_lifetimes(campaign: FaultCampaign) -> None:
         for incident in campaign.incidents
     ):
         raise ValueError(
-            "the evaluation example supports matching_calls=1 only because "
+            "the validation campaign supports matching_calls=1 only because "
             "framework call multiplicity cannot be inferred from optimizer iterations"
         )
 
@@ -461,13 +461,13 @@ def _state_reset_offset(incident: FaultIncident) -> int:
     if incident.lifetime.matching_calls is not None:
         if incident.lifetime.matching_calls != 1:
             raise ValueError(
-                "the evaluation example supports matching_calls=1 for gradient-affecting incidents"
+                "the validation campaign supports matching_calls=1 for gradient-affecting incidents"
             )
         return 0
     if incident.lifetime.until in {"recovery", "replacement"}:
         return 0
     raise ValueError(
-        "the evaluation example does not support campaign_end lifetimes for "
+        "the validation campaign does not support campaign_end lifetimes for "
         "gradient-affecting incidents"
     )
 
@@ -528,7 +528,7 @@ def _teardown(
 
     if active_error is not None:
         for error in cleanup_errors:
-            _add_exception_note(active_error, f"example teardown also failed: {error}")
+            _add_exception_note(active_error, f"validation teardown also failed: {error}")
         return
     if cleanup_errors:
         first_error = cleanup_errors[0]

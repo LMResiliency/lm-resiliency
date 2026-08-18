@@ -1,14 +1,14 @@
-# Fault Injection and SCOUT Localization
+# Manual Fault Injection and SCOUT Localization Validation
 
-This example runs a real PyTorch DDP training loop, injects a systematic failure
-campaign through `enable_fault_injection()`, and uses `enable_resiliency()` to
-detect and localize every occurrence with SCOUT.
+This manual qualification campaign runs a real PyTorch DDP training loop,
+injects a systematic failure campaign through `enable_fault_injection()`, and
+uses `enable_resiliency()` to detect and localize every occurrence with SCOUT.
 
 Run the systematic campaign on eight GPUs:
 
 ```bash
 torchrun --standalone --nproc-per-node=8 --module \
-  examples.fault_injection.pytorch \
+  tests.validation.fault_injection.pytorch \
   --artifact-dir /tmp/lm-resiliency-fault-evaluation
 ```
 
@@ -20,7 +20,7 @@ The checked-in [campaign.json](campaign.json) distributes 46 incident
 definitions across all eight global ranks. They produce 48 scheduled
 occurrences and 53 rank-local fault actions.
 See the
-[campaign field reference](../../docs/fault_injection.md#campaign-field-reference)
+[campaign field reference](../../../docs/fault_injection.md#campaign-field-reference)
 for every manifest field, allowed value, default, and validation rule.
 
 The campaign covers every failure-type/surface pair supported by the built-in
@@ -54,12 +54,12 @@ explicitly skipped occurrence never restores or holds evaluation state. If one
 incident expires while another state-affecting window remains active, the hold
 window takes precedence and defers the full model/optimizer reset until the
 later window also expires. This isolates each case; it is not a replacement for
-production checkpoint recovery. The example rejects `campaign_end` lifetimes
+production checkpoint recovery. The campaign rejects `campaign_end` lifetimes
 for gradient-affecting incidents because they cannot produce a clean
 certification iteration before shutdown. It requires `matching_calls=1` for
 every incident because framework call multiplicity cannot be converted
 portably into optimizer-iteration run length or certification boundaries.
-These reset-policy constraints are validated before the example initializes
+These reset-policy constraints are validated before the campaign initializes
 distributed process groups, GEMINI, or SCOUT, so an unsupported manifest cannot
 leave runtime resources outside the teardown boundary.
 
@@ -68,7 +68,7 @@ cleanup, and process-group destruction independently. A cleanup failure is
 reported without skipping later cleanup, and an active training exception
 remains the primary error.
 
-The example writes:
+The campaign writes:
 
 | Artifact | Contents |
 |---|---|
@@ -89,7 +89,7 @@ Probability selection is recomputed from the manifest seed, incident ID, and
 iteration. A skipped occurrence must contain every manifest action and match
 the deterministic selection result.
 SCOUT reports currently carry a training iteration but no campaign occurrence
-ID, so this example also rejects two distinct occurrences scheduled at the same
+ID, so this campaign also rejects two distinct occurrences scheduled at the same
 iteration instead of crediting one report to both.
 
 The process exits unsuccessfully unless every selected action is injected
@@ -120,7 +120,7 @@ Aggregate straggler reports are tied to the configured replay catalog.
 Re-run the comparison independently with:
 
 ```bash
-python -m examples.fault_injection.compare \
+python -m tests.validation.fault_injection.compare \
   --artifact-dir /tmp/lm-resiliency-fault-evaluation
 ```
 
@@ -137,7 +137,7 @@ the fault scheduler retires it at the optimizer boundary.
 Regenerate the manifest after changing the matrix definition:
 
 ```bash
-python -m examples.fault_injection.generate_campaign
+python -m tests.validation.fault_injection.generate_campaign
 ```
 
 The campaign intentionally excludes destructive process, storage, collective,
