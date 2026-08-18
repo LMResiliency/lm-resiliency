@@ -76,7 +76,7 @@ lm_resiliency_worker_config=/absolute/path/worker.toml" \
 
 Set the context path with the
 `lm_resiliency_restart_context_path` rendezvous option. The runtime creates the
-parent with owner-only permissions when it first publishes a restart context.
+parent with owner-only permissions while constructing the rendezvous handler.
 If the directory already exists with different ownership or group/other access,
 startup fails closed instead of changing administrator-provisioned permissions.
 
@@ -173,9 +173,13 @@ duplicating them as application arguments. Workers obtain their local width from
 Managers use `TorchrunRecoveryCoordinator` with the same c10d store used by the
 rendezvous backend. It exposes committed initial placement, publishes immutable
 same-node or replacement successor generations, and closes the run to wake
-parked standbys. `TorchrunLaunchConfig` constructs the common LM Resiliency
-torchrun arguments without owning subprocess, scheduler, SSH, or GPU placement
-behavior.
+parked standbys. After successor publication, the coordinator renews a
+generation-specific store lease until the manager deadline. Agents combine its
+sequence and remaining duration with host-local monotonic time, so restart
+eligibility does not depend on synchronized wall clocks. Keep the coordinator
+alive through successor admission. `TorchrunLaunchConfig` constructs the common
+LM Resiliency torchrun arguments without owning subprocess, scheduler, SSH, or
+GPU placement behavior.
 
 Custom stacks set `adapter = "package.module:factory"` in the worker TOML. The
 factory receives `TorchrunWorkerContext` and returns an object implementing

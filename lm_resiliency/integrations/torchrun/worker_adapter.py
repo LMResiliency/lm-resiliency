@@ -75,7 +75,7 @@ class TorchrunWorkerContext:
     checkpoint_source: str | None = None
     recovery_mode: str | None = None
     topology_digest: str | None = None
-    restart_deadline_unix_ms: int | None = None
+    restart_deadline_monotonic_ns: int | None = None
 
     def __post_init__(self) -> None:
         _nonempty(self.run_id, "run_id")
@@ -110,12 +110,12 @@ class TorchrunWorkerContext:
             or self.checkpoint_step < 1
         ):
             raise ValueError("checkpoint_step must be a positive integer")
-        if self.restart_deadline_unix_ms is not None and (
-            isinstance(self.restart_deadline_unix_ms, bool)
-            or not isinstance(self.restart_deadline_unix_ms, int)
-            or self.restart_deadline_unix_ms < 1
+        if self.restart_deadline_monotonic_ns is not None and (
+            isinstance(self.restart_deadline_monotonic_ns, bool)
+            or not isinstance(self.restart_deadline_monotonic_ns, int)
+            or self.restart_deadline_monotonic_ns < 1
         ):
-            raise ValueError("restart_deadline_unix_ms must be a positive integer")
+            raise ValueError("restart_deadline_monotonic_ns must be a positive integer")
         if self.checkpoint_id is not None:
             _nonempty(self.checkpoint_id, "checkpoint_id")
         if self.checkpoint_source not in {None, "gemini", "durable"}:
@@ -131,7 +131,7 @@ class TorchrunWorkerContext:
             self.checkpoint_source,
             self.recovery_mode,
             self.topology_digest,
-            self.restart_deadline_unix_ms,
+            self.restart_deadline_monotonic_ns,
         )
         if self.generation == 0 and (
             self.checkpoint_id is not None or any(value is not None for value in recovery_fields)
@@ -784,7 +784,6 @@ class MegatronWorkerAdapter(_SingleAttachAdapter):
             **_recovery_options(self._context),
         )
         holder["handle"] = handle
-        args.iteration = handle.step_count
         return handle
 
     def _install_cleanup_hook(self, *objects: Any) -> Callable[[], None]:
@@ -1530,7 +1529,7 @@ def _context_from_environment(environment: Mapping[str, str]) -> TorchrunWorkerC
             raise TorchrunWorkerAdapterError("restart context changes GROUP_RANK")
         if restart.first_global_rank + local_rank != global_rank:
             raise TorchrunWorkerAdapterError("restart context changes RANK")
-        if time.time_ns() // 1_000_000 >= restart.restart_deadline_unix_ms:
+        if time.monotonic_ns() >= restart.restart_deadline_monotonic_ns:
             raise TorchrunWorkerAdapterError("restart context deadline elapsed")
         context_fields = {
             "logical_node_slot": restart.logical_node_slot,
@@ -1540,7 +1539,7 @@ def _context_from_environment(environment: Mapping[str, str]) -> TorchrunWorkerC
             "checkpoint_source": restart.checkpoint_source,
             "recovery_mode": restart.recovery_mode,
             "topology_digest": restart.topology_digest,
-            "restart_deadline_unix_ms": restart.restart_deadline_unix_ms,
+            "restart_deadline_monotonic_ns": restart.restart_deadline_monotonic_ns,
         }
     return TorchrunWorkerContext(
         run_id=run_id,

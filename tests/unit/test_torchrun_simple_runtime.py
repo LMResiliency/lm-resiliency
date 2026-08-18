@@ -111,9 +111,50 @@ def _plan() -> RestartPlan:
     )
 
 
+def _restart_context(
+    plan: RestartPlan,
+    node_id: str,
+    *,
+    deadline_ns: int | None = None,
+) -> RestartContext:
+    return RestartContext.from_plan(
+        plan,
+        node_id,
+        restart_deadline_monotonic_ns=(
+            time.monotonic_ns() + 60_000_000_000 if deadline_ns is None else deadline_ns
+        ),
+    )
+
+
+def _start_plan_lease(
+    plans: SimpleRecoveryPlanStore,
+    plan: RestartPlan,
+    *,
+    interval_seconds: float = 0.01,
+    remaining_ms: int = 60_000,
+) -> tuple[threading.Event, threading.Thread]:
+    plans.publish(plan)
+    plans.renew_plan_lease(plan, remaining_ms=remaining_ms)
+    stop = threading.Event()
+
+    def renew() -> None:
+        while not stop.wait(interval_seconds):
+            plans.renew_plan_lease(plan, remaining_ms=remaining_ms)
+
+    thread = threading.Thread(target=renew, daemon=True)
+    thread.start()
+    return stop, thread
+
+
+def _stop_plan_lease(stop: threading.Event, thread: threading.Thread) -> None:
+    stop.set()
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+
+
 def test_restart_context_write_creates_private_parent(tmp_path: Path) -> None:
     path = tmp_path / "missing-context-directory" / "restart-context.json"
-    context = RestartContext.from_plan(_plan(), "node-a")
+    context = _restart_context(_plan(), "node-a")
     context_file = SimpleRestartContextFile(path)
 
     context_file.write(context)
@@ -420,6 +461,22 @@ def test_plan_store_is_create_once_and_advances_generation() -> None:
         plans.publish(replace(plan, plan_id="other-plan"))
 
 
+def test_plan_store_renews_only_committed_plan_lease() -> None:
+    store = HashStore()
+    plans = SimpleRecoveryPlanStore(store, run_id=RUN_ID)
+    plan = _plan()
+
+    with pytest.raises(RecoveryPlanConflict, match="uncommitted"):
+        plans.renew_plan_lease(plan, remaining_ms=60_000)
+
+    plans.publish(plan)
+
+    assert plans.read_plan_lease(plan) is None
+    assert plans.renew_plan_lease(plan, remaining_ms=60_000) == 1
+    assert plans.renew_plan_lease(plan, remaining_ms=59_000) == 2
+    assert plans.read_plan_lease(plan) == (2, 59_000)
+
+
 def test_plan_store_rejects_stale_publish_before_writing_plan() -> None:
     store = HashStore()
     plans = SimpleRecoveryPlanStore(store, run_id=RUN_ID)
@@ -497,7 +554,7 @@ def test_registration_schema_rejects_float_version() -> None:
 
 def test_plan_and_context_have_canonical_round_trips() -> None:
     plan = _plan()
-    context = RestartContext.from_plan(plan, "node-c")
+    context = _restart_context(plan, "node-c")
 
     assert RestartPlan.from_json(plan.to_json()) == plan
     assert RestartContext.from_json(context.to_json()) == context
@@ -519,7 +576,7 @@ def test_plan_decoder_rejects_duplicate_fields() -> None:
 
 
 def test_restart_context_rejects_generation_zero() -> None:
-    payload = RestartContext.from_plan(_plan(), "node-a").to_dict()
+    payload = _restart_context(_plan(), "node-a").to_dict()
     payload["generation"] = 0
 
     with pytest.raises(ProtocolValidationError, match="expected a value >= 1"):
@@ -563,22 +620,42 @@ def test_automatic_initial_nodes_and_selected_standby_replace_failed_node(
     assert standby_thread.is_alive()
 
     plan = _plan()
-    SimpleRecoveryPlanStore(store, run_id=RUN_ID).publish(plan)
-    _wait_for_nodes_waiting(active_a, 1)
+    lease_stop, lease_thread = _start_plan_lease(
+        SimpleRecoveryPlanStore(store, run_id=RUN_ID),
+        plan,
+    )
+    try:
+        _wait_for_nodes_waiting(active_a, 1)
 
-    replacement_thread, replacement_result = _start(active_a)
-    second_a = _result(replacement_thread, replacement_result)
-    second_c = _result(standby_thread, standby_result)
+        replacement_thread, replacement_result = _start(active_a)
+        second_a = _result(replacement_thread, replacement_result)
+        second_c = _result(standby_thread, standby_result)
 
-    assert (second_a.rank, second_a.world_size) == (0, 2)
-    assert (second_c.rank, second_c.world_size) == (1, 2)
-    assert active_a.num_nodes_waiting() == 0
-    assert SimpleRestartContextFile(
-        _config(tmp_path, "node-a").restart_context_path
-    ).read() == RestartContext.from_plan(plan, "node-a")
-    assert SimpleRestartContextFile(
-        _config(tmp_path, "node-c").restart_context_path
-    ).read() == RestartContext.from_plan(plan, "node-c")
+        assert (second_a.rank, second_a.world_size) == (0, 2)
+        assert (second_c.rank, second_c.world_size) == (1, 2)
+        assert active_a.num_nodes_waiting() == 0
+        context_a = SimpleRestartContextFile(
+            _config(tmp_path, "node-a").restart_context_path
+        ).read()
+        context_c = SimpleRestartContextFile(
+            _config(tmp_path, "node-c").restart_context_path
+        ).read()
+        assert context_a is not None
+        assert context_c is not None
+        assert context_a == _restart_context(
+            plan,
+            "node-a",
+            deadline_ns=context_a.restart_deadline_monotonic_ns,
+        )
+        assert context_c == _restart_context(
+            plan,
+            "node-c",
+            deadline_ns=context_c.restart_deadline_monotonic_ns,
+        )
+        assert context_a.restart_deadline_monotonic_ns > time.monotonic_ns()
+        assert context_c.restart_deadline_monotonic_ns > time.monotonic_ns()
+    finally:
+        _stop_plan_lease(lease_stop, lease_thread)
 
     assert active_a.shutdown()
     assert active_b.shutdown()
@@ -615,17 +692,22 @@ def test_same_node_successor_plan_signals_job_restart(
         ),
         quarantined_node_ids=(),
     )
-    SimpleRecoveryPlanStore(store, run_id=RUN_ID).publish(plan)
+    lease_stop, lease_thread = _start_plan_lease(
+        SimpleRecoveryPlanStore(store, run_id=RUN_ID),
+        plan,
+    )
+    try:
+        _wait_for_nodes_waiting(active_a, 1)
+        second_a_thread, second_a_result = _start(active_a)
+        second_b_thread, second_b_result = _start(active_b)
+        second_a = _result(second_a_thread, second_a_result)
+        second_b = _result(second_b_thread, second_b_result)
 
-    assert active_a.num_nodes_waiting() == 1
-    second_a_thread, second_a_result = _start(active_a)
-    second_b_thread, second_b_result = _start(active_b)
-    second_a = _result(second_a_thread, second_a_result)
-    second_b = _result(second_b_thread, second_b_result)
-
-    assert (second_a.rank, second_b.rank) == (0, 1)
-    assert os.environ["LM_RESILIENCY_TORCHRUN_EXPECTED_GENERATION"] == "1"
-    assert active_a.num_nodes_waiting() == 0
+        assert (second_a.rank, second_b.rank) == (0, 1)
+        assert os.environ["LM_RESILIENCY_TORCHRUN_EXPECTED_GENERATION"] == "1"
+        assert active_a.num_nodes_waiting() == 0
+    finally:
+        _stop_plan_lease(lease_stop, lease_thread)
     assert active_a.shutdown()
     assert active_b.shutdown()
 
@@ -762,6 +844,8 @@ def test_recovery_plan_expiry_during_bootstrap_rejects_generation(
             min_nodes=1,
             max_nodes=1,
             join_timeout_ms=1_000,
+            poll_interval_ms=5,
+            heartbeat_timeout_ms=50,
         ),
         store=store,
         local_addr="127.0.0.1",
@@ -772,18 +856,26 @@ def test_recovery_plan_expiry_during_bootstrap_rejects_generation(
         slot_assignments=(SlotAssignment(0, "node-a", 0, 1),),
         quarantined_node_ids=(),
         expected_world_size=1,
-        restart_deadline_unix_ms=150,
     )
-    SimpleRecoveryPlanStore(store, run_id=RUN_ID).publish(plan)
-    timestamps = iter((100, 100, 200))
-    handler._clock = lambda: next(timestamps)
+    lease_stop, lease_thread = _start_plan_lease(
+        SimpleRecoveryPlanStore(store, run_id=RUN_ID),
+        plan,
+        interval_seconds=0.005,
+        remaining_ms=50,
+    )
+
+    def build_bootstrap(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        _stop_plan_lease(lease_stop, lease_thread)
+        time.sleep(0.06)
+        return SimpleNamespace()
+
     monkeypatch.setattr(
         handler,
         "_build_bootstrap",
-        lambda *_args, **_kwargs: SimpleNamespace(),
+        build_bootstrap,
     )
 
-    with pytest.raises(RendezvousTimeoutError, match="deadline elapsed"):
+    with pytest.raises(RendezvousTimeoutError, match="lease elapsed"):
         handler.next_rendezvous()
 
     assert handler.shutdown()
@@ -847,7 +939,27 @@ def test_heartbeat_liveness_uses_locally_observed_sequence(tmp_path: Path) -> No
     assert handler.shutdown()
 
 
-def test_expired_plan_does_not_signal_job_restart(tmp_path: Path) -> None:
+def test_plan_lease_liveness_uses_local_remaining_duration(tmp_path: Path) -> None:
+    store = HashStore()
+    handler = SimpleRendezvousHandler(
+        _config(tmp_path, "node-a"),
+        store=store,
+        local_addr="127.0.0.1",
+        monotonic_clock=iter((10.0, 10.01, 10.06)).__next__,
+    )
+    plans = SimpleRecoveryPlanStore(store, run_id=RUN_ID)
+    plan = _plan()
+    plans.publish(plan)
+
+    plans.renew_plan_lease(plan, remaining_ms=50)
+    assert not handler._plan_lease_is_live(plan)
+    plans.renew_plan_lease(plan, remaining_ms=40)
+    assert handler._plan_lease_is_live(plan)
+    assert not handler._plan_lease_is_live(plan)
+    assert handler.shutdown()
+
+
+def test_unleased_plan_does_not_signal_job_restart(tmp_path: Path) -> None:
     store = HashStore()
     active_a = _handler(tmp_path, store, "node-a")
     active_b = _handler(tmp_path, store, "node-b")
@@ -855,16 +967,15 @@ def test_expired_plan_does_not_signal_job_restart(tmp_path: Path) -> None:
     first_b_thread, first_b_result = _start(active_b)
     _result(first_a_thread, first_a_result)
     _result(first_b_thread, first_b_result)
-    expired = replace(
+    plan = replace(
         _plan(),
         slot_assignments=(
             SlotAssignment(0, "node-a", 0, 1),
             SlotAssignment(1, "node-b", 1, 1),
         ),
         quarantined_node_ids=(),
-        restart_deadline_unix_ms=1,
     )
-    SimpleRecoveryPlanStore(store, run_id=RUN_ID).publish(expired)
+    SimpleRecoveryPlanStore(store, run_id=RUN_ID).publish(plan)
 
     assert active_a.num_nodes_waiting() == 0
     assert active_a.shutdown()

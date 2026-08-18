@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import math
+import threading
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 from torch.distributed import Store
 
 from ._protocol import RestartPlan, SlotAssignment
-from ._simple_runtime import SimpleRecoveryPlanStore, _node_id_from_machine_id
+from ._simple_runtime import (
+    _PLAN_LEASE_RENEW_INTERVAL_SECONDS,
+    SimpleRecoveryPlanStore,
+    _node_id_from_machine_id,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +57,9 @@ class TorchrunRecoveryCoordinator:
     def __init__(self, store: Store, *, run_id: str) -> None:
         self._run_id = run_id
         self._plans = SimpleRecoveryPlanStore(store, run_id=run_id)
+        self._lease_lock = threading.Lock()
+        self._lease_stop: threading.Event | None = None
+        self._lease_thread: threading.Thread | None = None
 
     @property
     def current_generation(self) -> int:
@@ -147,6 +157,9 @@ class TorchrunRecoveryCoordinator:
             raise RuntimeError("active_node_ids do not match the committed placement")
         if tuple(quarantined) != committed_quarantined:
             raise RuntimeError("quarantined_node_ids do not match the committed quarantine history")
+        remaining_seconds = (request.restart_deadline_unix_ms - time.time_ns() // 1_000_000) / 1_000
+        if remaining_seconds <= 0:
+            raise ValueError("restart deadline must be in the future")
         if replacement is not None:
             slot, replacement_node_id = replacement
             if isinstance(slot, bool) or not isinstance(slot, int):
@@ -191,6 +204,7 @@ class TorchrunRecoveryCoordinator:
             restart_deadline_unix_ms=request.restart_deadline_unix_ms,
         )
         self._plans.publish(plan)
+        self._start_plan_lease(plan, remaining_seconds=remaining_seconds)
         return TorchrunSuccessorPlacement(
             generation=plan.to_generation,
             active_node_ids=tuple(active),
@@ -200,7 +214,64 @@ class TorchrunRecoveryCoordinator:
     def close(self) -> None:
         """Wake parked agents and prevent further rendezvous."""
 
+        self._stop_plan_lease()
         self._plans.close_run()
+
+    def _start_plan_lease(
+        self,
+        plan: RestartPlan,
+        *,
+        remaining_seconds: float,
+    ) -> None:
+        self._stop_plan_lease()
+        stop = threading.Event()
+        deadline = time.monotonic() + remaining_seconds
+        plans = self._plans
+
+        def publish_remaining(remaining: float) -> None:
+            plans.renew_plan_lease(
+                plan,
+                remaining_ms=0 if remaining <= 0 else math.ceil(remaining * 1_000),
+            )
+
+        publish_remaining(remaining_seconds)
+
+        def renew() -> None:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    try:
+                        publish_remaining(0)
+                    except Exception:
+                        pass
+                    return
+                if stop.wait(min(_PLAN_LEASE_RENEW_INTERVAL_SECONDS, remaining)):
+                    return
+                try:
+                    publish_remaining(deadline - time.monotonic())
+                except Exception:
+                    return
+
+        thread = threading.Thread(
+            target=renew,
+            name=f"lm-resiliency-plan-lease-{plan.to_generation}",
+            daemon=True,
+        )
+        with self._lease_lock:
+            self._lease_stop = stop
+            self._lease_thread = thread
+        thread.start()
+
+    def _stop_plan_lease(self) -> None:
+        with self._lease_lock:
+            stop = self._lease_stop
+            thread = self._lease_thread
+            self._lease_stop = None
+            self._lease_thread = None
+        if stop is not None:
+            stop.set()
+        if thread is not None:
+            thread.join(timeout=max(_PLAN_LEASE_RENEW_INTERVAL_SECONDS * 2, 0.1))
 
 
 def derive_torchrun_node_id(machine_id: str) -> str:

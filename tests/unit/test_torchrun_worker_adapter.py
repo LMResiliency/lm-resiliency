@@ -10,6 +10,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 import types
 from dataclasses import replace
 from pathlib import Path
@@ -48,6 +49,10 @@ def _context(tmp_path: Path) -> TorchrunWorkerContext:
     )
 
 
+def _restart_deadline_ns() -> int:
+    return time.monotonic_ns() + 60_000_000_000
+
+
 def _recovery_context(
     tmp_path: Path,
     *,
@@ -67,7 +72,7 @@ def _recovery_context(
         checkpoint_source=checkpoint_source,
         recovery_mode="recovery_verified",
         topology_digest="topology",
-        restart_deadline_unix_ms=9_999_999_999_999,
+        restart_deadline_monotonic_ns=_restart_deadline_ns(),
     )
 
 
@@ -1322,7 +1327,7 @@ def test_megatron_adapter_delegates_exact_setup_result_without_parallelism(
     monkeypatch.setitem(sys.modules, "megatron.core.parallel_state", parallel_state)
     calls: list[tuple[Any, Any, Any, dict[str, Any]]] = []
     sentinel = SimpleNamespace(
-        step_count=17,
+        step_count=4,
         close=lambda: teardown_events.append("close"),
     )
 
@@ -1333,6 +1338,16 @@ def test_megatron_adapter_delegates_exact_setup_result_without_parallelism(
         **kwargs: Any,
     ) -> Any:
         calls.append((passed_model, passed_optimizer, passed_scheduler, kwargs))
+        kwargs["load_extra_state_fn"](
+            {
+                "torchrun_megatron_loop": {
+                    "iteration": 11,
+                    "consumed_train_samples": 22,
+                    "skipped_train_samples": 1,
+                    "scheduler": {"num_steps": 11},
+                }
+            }
+        )
         return sentinel
 
     monkeypatch.setattr(
@@ -1345,7 +1360,7 @@ def test_megatron_adapter_delegates_exact_setup_result_without_parallelism(
             "enable_detection": False,
         }
     )
-    adapter.install(_context(tmp_path))
+    adapter.install(_recovery_context(tmp_path))
     try:
         result = training_module.setup_model_and_optimizer()
         assert result == (model, optimizer, scheduler)
@@ -1353,7 +1368,12 @@ def test_megatron_adapter_delegates_exact_setup_result_without_parallelism(
         assert calls[0][1] is optimizer
         assert calls[0][2] is scheduler
         assert "parallelism_info" not in calls[0][3]
-        assert arguments.iteration == 17
+        assert (
+            arguments.iteration,
+            arguments.consumed_train_samples,
+            arguments.skipped_train_samples,
+        ) == (11, 22, 1)
+        assert scheduler.restored == {"num_steps": 11}
         assert adapter.handle is sentinel
         capture = calls[0][3]["extra_state_fn"]
         restore = calls[0][3]["load_extra_state_fn"]
@@ -1361,18 +1381,18 @@ def test_megatron_adapter_delegates_exact_setup_result_without_parallelism(
         assert capture() == {
             "torchrun_megatron_loop": {
                 "iteration": 19,
-                "consumed_train_samples": 34,
-                "skipped_train_samples": 2,
+                "consumed_train_samples": 22,
+                "skipped_train_samples": 1,
                 "scheduler": {"num_steps": 17},
             }
         }
         restore(
             {
                 "torchrun_megatron_loop": {
-                    "iteration": 11,
-                    "consumed_train_samples": 22,
-                    "skipped_train_samples": 1,
-                    "scheduler": {"num_steps": 11},
+                    "iteration": 12,
+                    "consumed_train_samples": 24,
+                    "skipped_train_samples": 2,
+                    "scheduler": {"num_steps": 12},
                 }
             }
         )
@@ -1380,8 +1400,8 @@ def test_megatron_adapter_delegates_exact_setup_result_without_parallelism(
             arguments.iteration,
             arguments.consumed_train_samples,
             arguments.skipped_train_samples,
-        ) == (11, 22, 1)
-        assert scheduler.restored == {"num_steps": 11}
+        ) == (12, 24, 2)
+        assert scheduler.restored == {"num_steps": 12}
         parallel_state.destroy_model_parallel()  # type: ignore[attr-defined]
         assert teardown_events == ["close", "destroy"]
     finally:
@@ -1466,7 +1486,7 @@ def test_megatron_adapter_delegates_manual_train_objects_without_parallelism(
         assert calls[0][1] is optimizer
         assert calls[0][2] is scheduler
         assert "parallelism_info" not in calls[0][3]
-        assert arguments.iteration == 19
+        assert arguments.iteration == 0
         assert adapter.handle is sentinel
     finally:
         adapter.close()
@@ -1726,7 +1746,7 @@ def test_worker_context_rejects_stale_restart_handoff(
         checkpoint_id=None,
         checkpoint_manifest_id="manifest-4",
         reason_code="attributed_sdc",
-        restart_deadline_unix_ms=9_999_999_999_999,
+        restart_deadline_monotonic_ns=_restart_deadline_ns(),
     )
     environment = {
         "GROUP_RANK": "0",
@@ -1787,7 +1807,7 @@ def test_successor_worker_preserves_manager_topology_digest(tmp_path: Path) -> N
         checkpoint_id=None,
         checkpoint_manifest_id="manifest-4",
         reason_code="attributed_sdc",
-        restart_deadline_unix_ms=9_999_999_999_999,
+        restart_deadline_monotonic_ns=_restart_deadline_ns(),
     )
     SimpleRestartContextFile(context_path).write(restart)
     environment = {
@@ -1841,7 +1861,7 @@ def test_successor_worker_rejects_rank_topology_mismatch(
         checkpoint_id=None,
         checkpoint_manifest_id="manifest-4",
         reason_code="attributed_sdc",
-        restart_deadline_unix_ms=9_999_999_999_999,
+        restart_deadline_monotonic_ns=_restart_deadline_ns(),
     )
     if context_changes:
         restart = replace(restart, **context_changes)
@@ -1882,7 +1902,7 @@ def test_successor_worker_rejects_expired_restart_context(tmp_path: Path) -> Non
             checkpoint_id=None,
             checkpoint_manifest_id="manifest-4",
             reason_code="attributed_sdc",
-            restart_deadline_unix_ms=1,
+            restart_deadline_monotonic_ns=1,
         )
     )
     environment = {
@@ -1920,7 +1940,7 @@ def test_initial_worker_rejects_stale_restart_context(tmp_path: Path) -> None:
             checkpoint_id=None,
             checkpoint_manifest_id="manifest-4",
             reason_code="attributed_sdc",
-            restart_deadline_unix_ms=9_999_999_999_999,
+            restart_deadline_monotonic_ns=_restart_deadline_ns(),
         )
     )
     environment = {

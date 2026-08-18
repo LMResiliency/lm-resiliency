@@ -70,7 +70,11 @@ The plan contains the information torchrun needs:
 
 The runtime stores one create-once plan per successor generation. Publication
 advances the current generation by compare-and-set, so conflicting plans fail
-closed.
+closed. The coordinator converts the manager's absolute deadline into a
+renewing store lease containing a sequence and remaining duration. Agents
+require locally observed lease progress and translate the remaining duration
+to their own monotonic clocks; they never compare wall-clock timestamps from
+different hosts.
 
 For GEMINI recovery the plan carries:
 
@@ -109,16 +113,18 @@ synthetic machine-ID file for each agent.
 
 After the manager publishes generation `N + 1`:
 
-1. healthy active agents observe one live plan-selected replacement through
+1. the coordinator renews the generation lease until the manager deadline;
+2. healthy active agents observe one live plan-selected replacement through
    `num_nodes_waiting()`;
-2. stock torchrun performs its normal full-worker-group restart;
-3. the selected standby is admitted at the failed node's logical slot;
-4. every admitted node receives the same generation and world size;
-5. the handler writes a node-local canonical `RestartContext`; and
-6. workers enable LM Resiliency with the plan's recovery mode and restore the
+3. stock torchrun performs its normal full-worker-group restart;
+4. the selected standby is admitted at the failed node's logical slot;
+5. every admitted node receives the same generation and world size;
+6. the handler writes a node-local canonical `RestartContext`; and
+7. workers enable LM Resiliency with the plan's recovery mode and restore the
    selected GEMINI or durable checkpoint.
 
-Random late agents and unselected standbys never create a restart signal.
+Random late agents, unselected standbys, and plans without a progressing
+manager lease never create a restart signal.
 
 ### Completion
 
@@ -133,10 +139,10 @@ The handler writes one owner-only JSON file per node. The file contains:
 - logical node slot and global-rank range;
 - recovery mode and checkpoint selection;
 - world size and topology digest; and
-- restart deadline.
+- a node-local monotonic lease deadline.
 
 Publication uses same-directory atomic replacement. Workers reject malformed,
-noncanonical, oversized, nonregular, or non-owner-only files.
+noncanonical, oversized, nonregular, non-owner-only, or locally expired files.
 The handler creates a missing parent directory with owner-only permissions.
 An existing directory with different ownership or group/other access is
 rejected rather than modified.
@@ -272,7 +278,9 @@ coordinator.close()
 selection/flush, quarantine, and standby placement succeed. Omitting
 `replacement` restarts the same assignments. Supplying `(logical_slot,
 standby_node_id)` replaces exactly one physical node while preserving its
-logical rank range. `close()` wakes parked standbys after successful completion.
+logical rank range. The coordinator must remain alive through successor
+admission so it can renew the store lease. `close()` stops renewal and wakes
+parked standbys after successful completion.
 
 `TorchrunLaunchConfig` constructs the framework-neutral torchrun argument list.
 It deliberately does not launch subprocesses, select GPUs, invoke SSH, or
@@ -286,11 +294,13 @@ implement scheduler policy.
 - duplicate physical machine identities fail closed;
 - logical slots and global-rank ranges remain stable;
 - a plan is immutable and generation-fenced;
+- plan eligibility is proven through a manager-renewed store lease and
+  host-local monotonic time rather than cross-host wall clocks;
 - only manager-selected replacements become visible to healthy agents;
 - an expired plan cannot admit a worker;
 - unselected and quarantined nodes are absent from the successor assignment;
 - restart context is written before replacement workers train;
-- worker generation, rank ranges, world size, and restart deadline must match
+- worker generation, rank ranges, world size, and local lease deadline must match
   the rendezvous decision before framework initialization;
 - malformed plan/context state fails closed;
 - heartbeat loss suppresses restart signaling; and

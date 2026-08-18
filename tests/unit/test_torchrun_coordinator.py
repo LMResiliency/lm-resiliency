@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -58,31 +59,34 @@ def test_coordinator_publishes_same_node_and_replacement_generations() -> None:
     assert plans.ensure_initial_nodes(min_nodes=2, max_nodes=3) == ("node-a", "node-b")
     coordinator = TorchrunRecoveryCoordinator(store, run_id="run")
 
-    first = coordinator.publish_successor(
-        generation=0,
-        active_node_ids=("node-a", "node-b"),
-        quarantined_node_ids=(),
-        request=_request(generation=0),
-        local_world_size=2,
-    )
-    second = coordinator.publish_successor(
-        generation=1,
-        active_node_ids=first.active_node_ids,
-        quarantined_node_ids=first.quarantined_node_ids,
-        request=_request(generation=1, mode="recovery_verified"),
-        local_world_size=2,
-        replacement=(1, "node-c"),
-    )
+    try:
+        first = coordinator.publish_successor(
+            generation=0,
+            active_node_ids=("node-a", "node-b"),
+            quarantined_node_ids=(),
+            request=_request(generation=0),
+            local_world_size=2,
+        )
+        second = coordinator.publish_successor(
+            generation=1,
+            active_node_ids=first.active_node_ids,
+            quarantined_node_ids=first.quarantined_node_ids,
+            request=_request(generation=1, mode="recovery_verified"),
+            local_world_size=2,
+            replacement=(1, "node-c"),
+        )
 
-    assert first.active_node_ids == ("node-a", "node-b")
-    assert first.quarantined_node_ids == ()
-    assert second.generation == 2
-    assert second.active_node_ids == ("node-a", "node-c")
-    assert second.quarantined_node_ids == ("node-b",)
-    plan = SimpleRecoveryPlanStore(store, run_id="run").read(2)
-    assert plan is not None
-    assert plan.expected_world_size == 4
-    assert plan.slot_assignments[1].first_global_rank == 2
+        assert first.active_node_ids == ("node-a", "node-b")
+        assert first.quarantined_node_ids == ()
+        assert second.generation == 2
+        assert second.active_node_ids == ("node-a", "node-c")
+        assert second.quarantined_node_ids == ("node-b",)
+        plan = SimpleRecoveryPlanStore(store, run_id="run").read(2)
+        assert plan is not None
+        assert plan.expected_world_size == 4
+        assert plan.slot_assignments[1].first_global_rank == 2
+    finally:
+        coordinator.close()
 
 
 def test_coordinator_rejects_stale_or_uncommitted_manager_state() -> None:
@@ -94,64 +98,127 @@ def test_coordinator_rejects_stale_or_uncommitted_manager_state() -> None:
     assert plans.ensure_initial_nodes(min_nodes=2, max_nodes=3) == ("node-a", "node-b")
     coordinator = TorchrunRecoveryCoordinator(store, run_id="run")
 
-    with pytest.raises(RuntimeError, match="active_node_ids"):
-        coordinator.publish_successor(
-            generation=0,
-            active_node_ids=("node-b", "node-a"),
-            quarantined_node_ids=(),
-            request=_request(generation=0),
-            local_world_size=1,
-        )
-    first = coordinator.publish_successor(
-        generation=0,
-        active_node_ids=("node-a", "node-b"),
-        quarantined_node_ids=(),
-        request=_request(generation=0),
-        local_world_size=1,
-        replacement=(1, "node-c"),
-    )
-
-    with pytest.raises(ValueError, match="not registered"):
-        coordinator.publish_successor(
-            generation=1,
-            active_node_ids=first.active_node_ids,
-            quarantined_node_ids=first.quarantined_node_ids,
-            request=_request(generation=1),
-            local_world_size=1,
-            replacement=(0, "node-unregistered"),
-        )
-    with pytest.raises(RuntimeError, match="stale"):
-        coordinator.publish_successor(
+    try:
+        with pytest.raises(RuntimeError, match="active_node_ids"):
+            coordinator.publish_successor(
+                generation=0,
+                active_node_ids=("node-b", "node-a"),
+                quarantined_node_ids=(),
+                request=_request(generation=0),
+                local_world_size=1,
+            )
+        first = coordinator.publish_successor(
             generation=0,
             active_node_ids=("node-a", "node-b"),
             quarantined_node_ids=(),
             request=_request(generation=0),
             local_world_size=1,
+            replacement=(1, "node-c"),
         )
-    with pytest.raises(RuntimeError, match="quarantine history"):
+
+        with pytest.raises(ValueError, match="not registered"):
+            coordinator.publish_successor(
+                generation=1,
+                active_node_ids=first.active_node_ids,
+                quarantined_node_ids=first.quarantined_node_ids,
+                request=_request(generation=1),
+                local_world_size=1,
+                replacement=(0, "node-unregistered"),
+            )
+        with pytest.raises(RuntimeError, match="stale"):
+            coordinator.publish_successor(
+                generation=0,
+                active_node_ids=("node-a", "node-b"),
+                quarantined_node_ids=(),
+                request=_request(generation=0),
+                local_world_size=1,
+            )
+        with pytest.raises(RuntimeError, match="quarantine history"):
+            coordinator.publish_successor(
+                generation=1,
+                active_node_ids=first.active_node_ids,
+                quarantined_node_ids=(),
+                request=_request(generation=1),
+                local_world_size=1,
+            )
+        with pytest.raises(RuntimeError, match="local_world_size"):
+            coordinator.publish_successor(
+                generation=1,
+                active_node_ids=first.active_node_ids,
+                quarantined_node_ids=first.quarantined_node_ids,
+                request=_request(generation=1),
+                local_world_size=2,
+            )
+        with pytest.raises(RuntimeError, match="topology_digest"):
+            coordinator.publish_successor(
+                generation=1,
+                active_node_ids=first.active_node_ids,
+                quarantined_node_ids=first.quarantined_node_ids,
+                request=replace(_request(generation=1), topology_digest="different-topology"),
+                local_world_size=1,
+            )
+    finally:
+        coordinator.close()
+
+
+def test_coordinator_renews_plan_lease_until_close() -> None:
+    store = HashStore()
+    plans = SimpleRecoveryPlanStore(store, run_id="run")
+    plans.register_node("node-a", "agent-a", max_nodes=2)
+    plans.register_node("node-b", "agent-b", max_nodes=2)
+    assert plans.ensure_initial_nodes(min_nodes=2, max_nodes=2) == ("node-a", "node-b")
+    coordinator = TorchrunRecoveryCoordinator(store, run_id="run")
+
+    coordinator.publish_successor(
+        generation=0,
+        active_node_ids=("node-a", "node-b"),
+        quarantined_node_ids=(),
+        request=replace(
+            _request(generation=0),
+            restart_deadline_unix_ms=time.time_ns() // 1_000_000 + 5_000,
+        ),
+        local_world_size=1,
+    )
+    plan = plans.read(1)
+    assert plan is not None
+    initial_lease = plans.read_plan_lease(plan)
+    assert initial_lease is not None
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        lease = plans.read_plan_lease(plan)
+        if lease is not None and lease[0] > initial_lease[0]:
+            break
+        time.sleep(0.02)
+    else:
+        pytest.fail("coordinator did not renew the plan lease")
+
+    coordinator.close()
+    stopped_lease = plans.read_plan_lease(plan)
+    time.sleep(0.15)
+    assert plans.read_plan_lease(plan) == stopped_lease
+
+
+def test_coordinator_rejects_expired_request_before_publish() -> None:
+    store = HashStore()
+    plans = SimpleRecoveryPlanStore(store, run_id="run")
+    plans.register_node("node-a", "agent-a", max_nodes=1)
+    assert plans.ensure_initial_nodes(min_nodes=1, max_nodes=1) == ("node-a",)
+    coordinator = TorchrunRecoveryCoordinator(store, run_id="run")
+
+    with pytest.raises(ValueError, match="deadline must be in the future"):
         coordinator.publish_successor(
-            generation=1,
-            active_node_ids=first.active_node_ids,
+            generation=0,
+            active_node_ids=("node-a",),
             quarantined_node_ids=(),
-            request=_request(generation=1),
+            request=replace(
+                _request(generation=0),
+                restart_deadline_unix_ms=time.time_ns() // 1_000_000 - 1,
+            ),
             local_world_size=1,
         )
-    with pytest.raises(RuntimeError, match="local_world_size"):
-        coordinator.publish_successor(
-            generation=1,
-            active_node_ids=first.active_node_ids,
-            quarantined_node_ids=first.quarantined_node_ids,
-            request=_request(generation=1),
-            local_world_size=2,
-        )
-    with pytest.raises(RuntimeError, match="topology_digest"):
-        coordinator.publish_successor(
-            generation=1,
-            active_node_ids=first.active_node_ids,
-            quarantined_node_ids=first.quarantined_node_ids,
-            request=replace(_request(generation=1), topology_digest="different-topology"),
-            local_world_size=1,
-        )
+
+    assert plans.read(1) is None
+    coordinator.close()
 
 
 def test_launch_config_builds_namespaced_framework_neutral_command(tmp_path: Path) -> None:

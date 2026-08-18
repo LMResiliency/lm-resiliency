@@ -39,6 +39,7 @@ _PREFIX = "lm_resiliency/simple/v1"
 _MAX_CONTEXT_BYTES = 1 << 20
 _MAX_REGISTRATION_BYTES = 1 << 20
 _MAX_WORKER_CONFIG_BYTES = 1 << 20
+_PLAN_LEASE_RENEW_INTERVAL_SECONDS = 0.1
 _MACHINE_ID_PATH_ENV = "LM_RESILIENCY_MACHINE_ID_PATH"
 _DEFAULT_MACHINE_ID_PATH = Path("/etc/machine-id")
 _ALLOWED_CONFIG = {
@@ -397,12 +398,73 @@ class SimpleRecoveryPlanStore:
                 f"current generation is {observed}"
             )
 
+    def renew_plan_lease(self, plan: RestartPlan, *, remaining_ms: int) -> int:
+        """Advance the manager-owned liveness lease for one committed plan."""
+        if not isinstance(plan, RestartPlan):
+            raise TypeError("plan must be RestartPlan")
+        if plan.run_id != self._run_id:
+            raise ValueError("plan belongs to another run")
+        if isinstance(remaining_ms, bool) or not isinstance(remaining_ms, int) or remaining_ms < 0:
+            raise ValueError("remaining_ms must be a non-negative integer")
+        if self.read(plan.to_generation) != plan:
+            raise RecoveryPlanConflict("cannot renew an uncommitted recovery plan")
+        sequence = self._store.add(self._plan_lease_sequence_key(plan), 1)
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1:
+            raise RecoveryPlanCorrupt("recovery plan lease sequence is invalid")
+        self._store.set(
+            self._plan_lease_key(plan),
+            _canonical_json(
+                {
+                    "remaining_ms": remaining_ms,
+                    "schema_version": 1,
+                    "sequence": sequence,
+                }
+            ),
+        )
+        return sequence
+
+    def read_plan_lease(self, plan: RestartPlan) -> tuple[int, int] | None:
+        """Return ``(sequence, remaining_ms)`` for the current manager lease."""
+        if not isinstance(plan, RestartPlan):
+            raise TypeError("plan must be RestartPlan")
+        if plan.run_id != self._run_id:
+            raise ValueError("plan belongs to another run")
+        key = self._plan_lease_key(plan)
+        if not self._store.check([key]):
+            return None
+        encoded = self._store.get(key)
+        try:
+            value = json.loads(encoded, object_pairs_hook=_reject_duplicate_fields)
+        except (TypeError, ValueError, UnicodeError) as error:
+            raise RecoveryPlanCorrupt("recovery plan lease is malformed") from error
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != {"remaining_ms", "schema_version", "sequence"}
+            or type(value.get("schema_version")) is not int
+            or value.get("schema_version") != 1
+            or isinstance(value.get("sequence"), bool)
+            or not isinstance(value.get("sequence"), int)
+            or value["sequence"] < 1
+            or isinstance(value.get("remaining_ms"), bool)
+            or not isinstance(value.get("remaining_ms"), int)
+            or value["remaining_ms"] < 0
+            or _canonical_json(dict(value)) != encoded
+        ):
+            raise RecoveryPlanCorrupt("recovery plan lease has invalid fields")
+        return value["sequence"], value["remaining_ms"]
+
     def close_run(self) -> None:
         """Wake parked agents and prevent further rendezvous."""
         self._store.set(f"{self._prefix}/closed", b"1")
 
     def _plan_key(self, generation: int) -> str:
         return f"{self._prefix}/plans/{generation}"
+
+    def _plan_lease_key(self, plan: RestartPlan) -> str:
+        return f"{self._prefix}/leases/{plan.to_generation}/{_key(plan.plan_id)}"
+
+    def _plan_lease_sequence_key(self, plan: RestartPlan) -> str:
+        return f"{self._plan_lease_key(plan)}/sequence"
 
     def _decode_registrations(
         self,
@@ -508,13 +570,11 @@ class SimpleRendezvousHandler(RendezvousHandler):
         *,
         store: Store,
         local_addr: str | None,
-        clock: Callable[[], int] = lambda: time.time_ns() // 1_000_000,
         monotonic_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._config = config
         self._store = store
         self._local_addr = local_addr
-        self._clock = clock
         self._monotonic_clock = monotonic_clock
         self._context = SimpleRestartContextFile(config.restart_context_path)
         self._context.prepare()
@@ -537,6 +597,8 @@ class SimpleRendezvousHandler(RendezvousHandler):
         self._last_assignment: tuple[_NodeAssignment, ...] = ()
         self._heartbeat_observations: dict[str, tuple[str, int, float, bool]] = {}
         self._heartbeat_observation_lock = threading.Lock()
+        self._plan_lease_observations: dict[tuple[int, str], tuple[int, float, bool]] = {}
+        self._plan_lease_observation_lock = threading.Lock()
         self._heartbeat.start()
 
     @property
@@ -588,11 +650,8 @@ class SimpleRendezvousHandler(RendezvousHandler):
                     raise RendezvousStateError("failed to clear stale restart context") from error
             else:
                 assert plan is not None
-                self._check_plan_deadline(plan)
-                try:
-                    self._context.write(RestartContext.from_plan(plan, self._config.node_id))
-                except (ProtocolValidationError, SimpleRuntimeError) as error:
-                    raise RendezvousStateError("failed to publish restart context") from error
+                if not self._wait_for_plan_lease(plan, deadline):
+                    continue
             self._store.set(
                 self._ready_key(generation, self._config.node_id),
                 _canonical_json(
@@ -603,12 +662,12 @@ class SimpleRendezvousHandler(RendezvousHandler):
                     }
                 ),
             )
-            if not self._wait_for_group(generation, assignment, deadline):
+            if not self._wait_for_group(generation, assignment, deadline, plan=plan):
                 continue
             if self._plans.current_generation() != generation:
                 continue
             if plan is not None:
-                self._check_plan_deadline(plan)
+                self._check_plan_lease(plan)
             group_store = PrefixStore(
                 f"{self._plans.prefix}/bootstrap/{generation}/",
                 self._store,
@@ -617,7 +676,17 @@ class SimpleRendezvousHandler(RendezvousHandler):
             self._last_assignment = assignment
             bootstrap = self._build_bootstrap(slot, group_store, deadline)
             if plan is not None:
-                self._check_plan_deadline(plan)
+                self._check_plan_lease(plan)
+                try:
+                    self._context.write(
+                        RestartContext.from_plan(
+                            plan,
+                            self._config.node_id,
+                            restart_deadline_monotonic_ns=self._plan_lease_deadline_ns(plan),
+                        )
+                    )
+                except (ProtocolValidationError, SimpleRuntimeError) as error:
+                    raise RendezvousStateError("failed to publish restart context") from error
             from .worker_adapter import configure_worker_generation_environment
 
             configure_worker_generation_environment(generation)
@@ -638,9 +707,7 @@ class SimpleRendezvousHandler(RendezvousHandler):
             plan = self._plans.read(generation)
             if plan is None:
                 return 0
-            try:
-                self._check_plan_deadline(plan)
-            except RendezvousTimeoutError:
+            if not self._plan_lease_is_live(plan):
                 return 0
             previous = {item.node_id for item in self._last_assignment}
             selected = {item.node_id for item in plan.slot_assignments} - previous
@@ -700,6 +767,8 @@ class SimpleRendezvousHandler(RendezvousHandler):
         generation: int,
         assignment: tuple[_NodeAssignment, ...],
         deadline: float,
+        *,
+        plan: RestartPlan | None = None,
     ) -> bool:
         keys = [self._ready_key(generation, item.node_id) for item in assignment]
         while True:
@@ -707,6 +776,8 @@ class SimpleRendezvousHandler(RendezvousHandler):
             self._raise_heartbeat_error()
             if self._plans.current_generation() != generation:
                 return False
+            if plan is not None:
+                self._check_plan_lease(plan)
             if self._store.check(keys):
                 records = [
                     self._ready_agent_record(generation, item.node_id) for item in assignment
@@ -742,12 +813,58 @@ class SimpleRendezvousHandler(RendezvousHandler):
         except Exception as error:
             raise RendezvousConnectionError("failed to build worker bootstrap store") from error
 
-    def _check_plan_deadline(self, plan: RestartPlan) -> None:
-        now = self._clock()
-        if isinstance(now, bool) or not isinstance(now, int) or now < 1:
-            raise RendezvousStateError("clock returned an invalid unix time")
-        if now >= plan.restart_deadline_unix_ms:
-            raise RendezvousTimeoutError("recovery plan deadline elapsed")
+    def _wait_for_plan_lease(self, plan: RestartPlan, deadline: float) -> bool:
+        while True:
+            self._raise_if_closed()
+            self._raise_heartbeat_error()
+            if self._plans.current_generation() != plan.to_generation:
+                return False
+            if self._plan_lease_is_live(plan):
+                return True
+            if self._monotonic_clock() >= deadline:
+                raise RendezvousTimeoutError("timed out waiting for recovery plan lease")
+            self._closed.wait(self._config.poll_interval_ms / 1_000)
+
+    def _check_plan_lease(self, plan: RestartPlan) -> None:
+        if not self._plan_lease_is_live(plan):
+            raise RendezvousTimeoutError("recovery plan lease elapsed")
+
+    def _plan_lease_is_live(self, plan: RestartPlan) -> bool:
+        lease = self._plans.read_plan_lease(plan)
+        if lease is None:
+            return False
+        sequence, remaining_ms = lease
+        now = self._monotonic_clock()
+        if isinstance(now, bool) or not isinstance(now, (int, float)) or now < 0:
+            raise RendezvousStateError("monotonic clock returned an invalid value")
+        key = (plan.to_generation, plan.plan_id)
+        with self._plan_lease_observation_lock:
+            previous = self._plan_lease_observations.get(key)
+            deadline = float(now) + min(
+                remaining_ms / 1_000,
+                max(
+                    self._config.heartbeat_timeout_ms / 1_000,
+                    _PLAN_LEASE_RENEW_INTERVAL_SECONDS * 3,
+                ),
+            )
+            if previous is None:
+                self._plan_lease_observations[key] = (sequence, deadline, False)
+                return False
+            if sequence < previous[0]:
+                raise RendezvousStateError("recovery plan lease sequence moved backwards")
+            if sequence > previous[0]:
+                live = remaining_ms > 0 and deadline > float(now)
+                self._plan_lease_observations[key] = (sequence, deadline, live)
+                return live
+            return previous[2] and float(now) < previous[1]
+
+    def _plan_lease_deadline_ns(self, plan: RestartPlan) -> int:
+        key = (plan.to_generation, plan.plan_id)
+        with self._plan_lease_observation_lock:
+            observation = self._plan_lease_observations.get(key)
+        if observation is None or not observation[2]:
+            raise RendezvousStateError("recovery plan lease was not observed as live")
+        return int(observation[1] * 1_000_000_000)
 
     def _heartbeat_loop(self) -> None:
         interval = max(self._config.heartbeat_timeout_ms / 3_000, 0.1)
