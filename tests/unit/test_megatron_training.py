@@ -74,6 +74,10 @@ class FakeScheduler:
     def __init__(self):
         self._step_count = 0
 
+    def step(self, increment=1):
+        self._step_count += increment
+        return self._step_count
+
     def state_dict(self):
         return {"step_count": self._step_count}
 
@@ -124,6 +128,73 @@ class TestOptimizerWrapping:
         # After close, step no longer increments resiliency count
         optimizer.step()
         assert resiliency.step_count == 0
+
+    @patch("torch.distributed.is_initialized", return_value=False)
+    @patch("torch.distributed.get_world_size", return_value=1)
+    @patch("torch.distributed.get_rank", return_value=0)
+    def test_scheduler_is_completed_step_boundary(self, *mocks):
+        model = FakeModel()
+        optimizer = FakeOptimizer()
+        scheduler = FakeScheduler()
+        resiliency = MegatronResiliency(
+            model=[model],
+            optimizer=optimizer,
+            opt_param_scheduler=scheduler,
+            ckpt_config=InMemoryCkptConfig(enable=False),
+        )
+        certification = MagicMock()
+        resiliency._certification = certification
+
+        optimizer.step()
+        assert resiliency.step_count == 0
+        certification.post_step.assert_not_called()
+
+        assert scheduler.step(increment=4) == 4
+        assert resiliency.step_count == 1
+        certification.post_step.assert_called_once_with(
+            1,
+            optimizer_step_tensors=None,
+        )
+        resiliency.close()
+
+    @patch("torch.distributed.is_initialized", return_value=False)
+    @patch("torch.distributed.get_world_size", return_value=1)
+    @patch("torch.distributed.get_rank", return_value=0)
+    def test_close_restores_scheduler_step(self, *mocks):
+        model = FakeModel()
+        optimizer = FakeOptimizer()
+        scheduler = FakeScheduler()
+        original_step = scheduler.step
+        resiliency = MegatronResiliency(
+            model=[model],
+            optimizer=optimizer,
+            opt_param_scheduler=scheduler,
+            ckpt_config=InMemoryCkptConfig(enable=False),
+        )
+
+        resiliency.close()
+
+        assert scheduler.step == original_step
+
+    @patch("torch.distributed.is_initialized", return_value=False)
+    @patch("torch.distributed.get_world_size", return_value=1)
+    @patch("torch.distributed.get_rank", return_value=0)
+    def test_close_preserves_later_scheduler_wrapper(self, *mocks):
+        model = FakeModel()
+        optimizer = FakeOptimizer()
+        scheduler = FakeScheduler()
+        resiliency = MegatronResiliency(
+            model=[model],
+            optimizer=optimizer,
+            opt_param_scheduler=scheduler,
+            ckpt_config=InMemoryCkptConfig(enable=False),
+        )
+        later_wrapper = MagicMock(return_value=17)
+        scheduler.step = later_wrapper
+
+        resiliency.close()
+
+        assert scheduler.step is later_wrapper
 
     @patch("torch.distributed.is_initialized", return_value=False)
     @patch("torch.distributed.get_world_size", return_value=1)

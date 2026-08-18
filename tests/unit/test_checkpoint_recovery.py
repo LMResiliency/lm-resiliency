@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 
 from lm_resiliency.api import enable_resiliency
+from lm_resiliency.checkpointing import disk as disk_module
 from lm_resiliency.checkpointing.config import InMemoryCkptConfig
 from lm_resiliency.checkpointing.disk import (
     CheckpointFormatError,
@@ -51,6 +52,73 @@ def test_flush_for_restart_own_shard_round_trip(tmp_path):
     assert step == 7
     assert torch.allclose(recovered["model"]["w"], state["model"]["w"])
     reloaded_manager.close()
+
+
+def test_exact_manager_selected_step_never_falls_forward(tmp_path):
+    config = InMemoryCkptConfig(
+        enable=True,
+        interval=1,
+        disk_flush_interval=0,
+        disk_folder=str(tmp_path),
+        run_id="exact-step-run",
+    )
+    manager = InMemoryCheckpointManager(config)
+    manager.save({"w": torch.full((2,), 7.0)}, step=7)
+    manager.maybe_wait()
+    assert manager.flush_for_restart() == 7
+    manager.save({"w": torch.full((2,), 8.0)}, step=8)
+    manager.maybe_wait()
+    assert manager.flush_for_restart() == 8
+    manager.close()
+
+    resumed = InMemoryCheckpointManager(config)
+    exact = resumed.load(mode="latest", step=7)
+    assert exact is not None
+    assert exact[1] == 7
+    assert torch.equal(exact[0]["w"], torch.full((2,), 7.0))
+    assert resumed.load(mode="latest", step=6) is None
+    resumed.close()
+
+
+@pytest.mark.parametrize("load_method", ["load", "load_tensors"])
+def test_exact_recovery_collectively_rejects_activation_failure(
+    tmp_path,
+    load_method,
+):
+    manager = InMemoryCheckpointManager(
+        InMemoryCkptConfig(
+            enable=True,
+            interval=1,
+            disk_flush_interval=0,
+            disk_folder=str(tmp_path),
+        )
+    )
+    with (
+        patch.object(
+            manager,
+            "_activate_recovery_mode",
+            side_effect=RuntimeError("status unavailable"),
+        ),
+        patch.object(manager, "_collective_min_step", return_value=0) as collective,
+        patch.object(manager, "_load_exact_collectively_validated_shard") as load_exact,
+    ):
+        assert getattr(manager, load_method)(mode="recovery_verified", step=7) is None
+
+    collective.assert_called_once_with(0)
+    load_exact.assert_not_called()
+    manager.close()
+
+
+def test_checkpoint_manager_rejects_manager_topology_mismatch(tmp_path):
+    with pytest.raises(RuntimeError, match="manager-selected checkpoint topology"):
+        InMemoryCheckpointManager(
+            InMemoryCkptConfig(
+                enable=True,
+                disk_folder=str(tmp_path),
+                run_id="topology-run",
+            ),
+            expected_topology_id="not-the-live-topology",
+        )
 
 
 def test_fresh_run_cannot_discover_stale_node_local_checkpoint(tmp_path):
@@ -175,13 +243,26 @@ def test_disk_save_does_not_publish_partial_replacement(tmp_path):
 def test_disk_save_cleans_temp_file_from_dead_writer(tmp_path):
     step_dir = tmp_path / "step-3"
     step_dir.mkdir()
-    stale = step_dir / ".rank-0.pt.pid-999999999.stale.tmp"
+    path = step_dir / "rank-0.pt"
+    stale = step_dir / (f"{disk_module._temporary_prefix(path)}999999999.stale.tmp")
     stale.write_bytes(b"partial checkpoint")
     metadata, tensors = flatten({"w": torch.ones(2)})
 
     DiskSerializer(str(tmp_path), rank=0).save_sync(metadata, tensors, step=3)
 
     assert not stale.exists()
+
+
+def test_disk_save_preserves_temp_file_from_foreign_writer_scope(tmp_path):
+    step_dir = tmp_path / "step-3"
+    step_dir.mkdir()
+    stale = step_dir / ".rank-0.pt.scope-foreign.pid-999999999.stale.tmp"
+    stale.write_bytes(b"live remote checkpoint")
+    metadata, tensors = flatten({"w": torch.ones(2)})
+
+    DiskSerializer(str(tmp_path), rank=0).save_sync(metadata, tensors, step=3)
+
+    assert stale.read_bytes() == b"live remote checkpoint"
 
 
 def test_atomic_copy_does_not_publish_partial_replacement(tmp_path):

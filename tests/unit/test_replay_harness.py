@@ -20,6 +20,7 @@ from lm_resiliency.detection.optimizer_step import (
 from lm_resiliency.detection.replay_harness import (
     ModelReplayHarness,
     ReplayHarnessConfig,
+    _optimizer_evidence_contract,
     find_embedding_layer,
     find_output_layer,
     find_repeated_layers,
@@ -32,6 +33,18 @@ def _c3_result(bitmap: list[int]) -> C3Result:
         bitmap,
         list(range(len(bitmap))),
     )
+
+
+def test_optimizer_evidence_contract_ignores_rank_local_capture_length():
+    parameter = nn.Parameter(torch.ones(1))
+    optimizer = torch.optim.AdamW([parameter])
+    short = MagicMock(optimizer=optimizer, status=0, capture=MagicMock(length=1))
+    long = MagicMock(optimizer=optimizer, status=0, capture=MagicMock(length=1024))
+
+    short_contract = _optimizer_evidence_contract(OptimizerReplayBatch((short,)))
+    long_contract = _optimizer_evidence_contract(OptimizerReplayBatch((long,)))
+
+    assert short_contract == long_contract
 
 
 # ──────────────────────────────────────────────────────────────────────────────

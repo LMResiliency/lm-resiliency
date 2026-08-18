@@ -17,6 +17,7 @@ class RecoveryDecision(TypedDict):
     checkpoint_source: RecoveryCheckpointSource
     checkpoint_step: int
     checkpoint_id: str | None
+    topology_digest: str | None
     all_ranks_accessible: bool
     available: bool
     reason: str
@@ -39,9 +40,13 @@ def build_recovery_decision(
     mode = RecoveryMode(recovery_mode)
     checkpoint_step = -1
     checkpoint_id: str | None = None
+    topology_digest: str | None = None
     source: RecoveryCheckpointSource = "none"
 
     if checkpoint_manager is not None:
+        candidate_topology = getattr(checkpoint_manager, "topology_id", None)
+        if isinstance(candidate_topology, str) and candidate_topology:
+            topology_digest = candidate_topology
         if allow_collective:
             checkpoint_step = int(checkpoint_manager.find_latest(mode))  # type: ignore[attr-defined]
         elif hasattr(checkpoint_manager, "local_recovery_step"):
@@ -58,6 +63,9 @@ def build_recovery_decision(
             checkpoint_step = int(record.step)
             checkpoint_id = str(record.checkpoint_id)
             source = "durable"
+            durable_topology = getattr(durable_checkpoint, "topology_digest", None)
+            if isinstance(durable_topology, str) and durable_topology:
+                topology_digest = durable_topology
 
     return RecoveryDecision(
         failure_kind=str(failure_kind),
@@ -65,6 +73,7 @@ def build_recovery_decision(
         checkpoint_source=source,
         checkpoint_step=checkpoint_step,
         checkpoint_id=checkpoint_id,
+        topology_digest=topology_digest,
         all_ranks_accessible=bool(all_ranks_accessible),
         available=checkpoint_step > 0,
         reason=reason,

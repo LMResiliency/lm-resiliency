@@ -24,6 +24,17 @@ Correctness under partial failure is more important than convenience. Prefer con
 
 Use Codex review in batches rather than after every revision commit.
 
+Do not begin editing when the first review comment arrives.
+
+For the current PR head SHA:
+
+1. Wait until the Codex GitHub review has been submitted.
+2. Read every unresolved review thread.
+3. Run a complete independent review of the branch diff against the base branch.
+4. Combine and deduplicate all findings.
+5. Fix every accepted finding in one revision, run the relevant tests, and push once.
+6. Do not request another broad review until this revision is complete.
+
 - The native Codex GitHub integration handles the initial review when a pull request is opened for review or moved from draft to ready.
 - When addressing review feedback, first inspect **all unresolved Codex review threads** and treat the complete set of actionable findings as one fix batch.
 - Implement the whole batch, add or update focused regression tests, run the relevant deterministic checks, and inspect the resulting diff before asking for another review.

@@ -160,10 +160,22 @@ SDC. An SDC in one group therefore rejects the candidate on every rank.
 GEMINI serializes only completed slots.
 Each shard is written to a same-directory temporary file, flushed, and atomically renamed before it becomes visible to recovery.
 Restart mirrors use the same publication rule.
-Temporary files left by a terminated writer are ignored and removed before the next write to that shard, while latest-mode recovery walks older generations until it finds the newest shard set that every rank can load and validate.
+Temporary files carry a boot and PID-namespace ownership scope. Files left by a
+terminated writer in the same scope are removed before the next write to that
+shard; temporary files from another host or PID namespace are never reaped using
+local PID checks. Latest-mode recovery walks older generations until it finds the
+newest shard set that every rank can load and validate.
 At a dense accepted boundary, it persists the latest local CPU checkpoint and received peer replica as recovery-verified.
 At a dynamic recipe-cycle boundary, it persists them as the new candidate and records candidate and recovery-verified steps separately.
 Each rank owns its status sidecar; several workers on one node never update the same mutable trust record.
+The sidecar retains verified-generation history, and exact recovery additionally
+requires the selected shard to remain present. A manager-selected step therefore
+remains eligible after a newer generation advances the current recovery pointer.
+The sidecar is also published by same-directory replacement. Remote filesystem
+clients can briefly observe incomplete bytes while another client replaces the
+file, so readers retry only byte, UTF-8, and JSON visibility failures for a
+bounded interval. A persistently malformed sidecar, or any decoded identity,
+schema, or trust mismatch, still fails closed.
 A persisted peer shard carries the corresponding peer status so recovery can reconstruct the verified generation after node loss.
 If newer status cannot be established, recovery selects the common verified step conservatively.
 With `verify_integrity=True`, it stores a CRC-32 for each shard and treats a checksum failure or missing checksum metadata as an unavailable shard.
@@ -174,9 +186,12 @@ node-local checkpoints written earlier with `verify_integrity=False` are not eli
 Node-local files use checkpoint format version 3. Files and status sidecars live
 under an opaque run/topology namespace. Every shard also records the exact run
 ID, topology fingerprint, owner rank, and step; the loader checks all four before
-recovery can apply state. The topology fingerprint covers world size, checkpoint
-group ranks, and the replication assignment, and all checkpoint ranks agree on
-the run/topology contract collectively during manager construction.
+recovery can apply state. Each checkpoint group first agrees on its group ranks
+and replication assignment. All training ranks then derive one job-wide
+fingerprint from the ordered per-rank group fingerprints, so disjoint
+checkpoint groups share one manager-facing topology identity without discarding
+group membership. All ranks also agree on the run identity during manager
+construction.
 
 Tensors are loaded through PyTorch's `weights_only=True` path, while reconstruction metadata is represented by a schema-constrained JSON document. The metadata schema supports the built-in containers and scalar types used by framework state, NumPy RNG values, and dense CPU tensors such as PyTorch RNG state. GEMINI validates the payload fields, metadata types, tensor count, shapes, dtypes, reconstruction paths, identity, and optional CRC values before recovery can apply state. Unsupported caller-owned metadata fails the checkpoint write instead of falling back to unrestricted pickle deserialization.
 

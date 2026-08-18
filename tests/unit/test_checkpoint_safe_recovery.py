@@ -6,7 +6,7 @@ import datetime as dt
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -18,7 +18,7 @@ from lm_resiliency.checkpointing._disk_format import CheckpointFormatError
 from lm_resiliency.checkpointing.buffer import SlotState
 from lm_resiliency.checkpointing.config import InMemoryCkptConfig
 from lm_resiliency.checkpointing.disk import DiskSerializer
-from lm_resiliency.checkpointing.manager import InMemoryCheckpointManager
+from lm_resiliency.checkpointing.manager import InMemoryCheckpointManager, RecoveryMode
 from lm_resiliency.checkpointing.state_dict import FlatStateDictMetadata, flatten
 
 
@@ -103,6 +103,44 @@ def test_memory_lookup_never_uses_peer_replica_as_local_state():
 
     assert manager._memory_slot_by_step(23) is None
     assert manager._memory_slot_by_step(24) is own_slot
+
+
+def test_exact_memory_clone_failure_still_reaches_collective_vote():
+    manager = object.__new__(InMemoryCheckpointManager)
+    tensor = MagicMock()
+    tensor.clone.side_effect = RuntimeError("host allocation failed")
+    slot = SimpleNamespace(tensors=[tensor])
+
+    with (
+        patch.object(manager, "_memory_slot_by_step", return_value=slot),
+        patch.object(manager, "_slot_metadata", return_value=FlatStateDictMetadata()),
+        patch.object(manager, "_collective_min_step", return_value=0) as vote,
+    ):
+        loaded = manager._load_exact_collectively_validated_shard(
+            23,
+            RecoveryMode.LATEST_GEMINI,
+        )
+
+    assert loaded is None
+    vote.assert_called_once_with(0)
+
+
+def test_verified_status_failure_still_reaches_collective_vote():
+    manager = object.__new__(InMemoryCheckpointManager)
+    manager._checkpoint_status = MagicMock()
+    manager._checkpoint_status.read.side_effect = RuntimeError("status unreadable")
+    manager._disk = MagicMock()
+    manager._rank = 0
+
+    with patch.object(manager, "_collective_min_step", return_value=0) as vote:
+        loaded = manager._load_exact_collectively_validated_shard(
+            23,
+            RecoveryMode.RECOVERY_VERIFIED,
+        )
+
+    assert loaded is None
+    vote.assert_called_once_with(0)
+    manager._disk.has_rank.assert_not_called()
 
 
 def _gloo_recovery_worker(
@@ -195,6 +233,114 @@ def _gloo_identity_worker(
         dist.destroy_process_group()
 
 
+def _gloo_disjoint_topology_worker(
+    rank: int,
+    world_size: int,
+    rendezvous: str,
+    checkpoint_dir: str,
+    result_dir: str,
+) -> None:
+    dist.init_process_group(
+        "gloo",
+        init_method=f"file://{rendezvous}",
+        rank=rank,
+        world_size=world_size,
+        timeout=dt.timedelta(seconds=30),
+    )
+    first_group = dist.new_group(ranks=[0, 1], backend="gloo")
+    second_group = dist.new_group(ranks=[2, 3], backend="gloo")
+    checkpoint_group = first_group if rank < 2 else second_group
+    config = InMemoryCkptConfig(
+        disk_flush_interval=0,
+        disk_folder=checkpoint_dir,
+        replication_jump=1,
+        run_id="disjoint-topology-run",
+    )
+    parallelism = SimpleNamespace(has_natural_replicas=True)
+    first = None
+    resumed = None
+    try:
+        first = InMemoryCheckpointManager(
+            config,
+            parallelism_info=parallelism,
+            process_group=checkpoint_group,
+        )
+        topology_id = first.topology_id
+        selected = [topology_id if rank == 0 else None]
+        dist.broadcast_object_list(selected, src=0)
+        selected_topology_id = selected[0]
+        assert isinstance(selected_topology_id, str)
+        first.close()
+        first = None
+        dist.barrier()
+
+        resumed = InMemoryCheckpointManager(
+            config,
+            parallelism_info=parallelism,
+            process_group=checkpoint_group,
+            expected_topology_id=selected_topology_id,
+        )
+        Path(result_dir, f"topology-rank-{rank}.json").write_text(
+            json.dumps(
+                {
+                    "accepted": resumed.topology_id == selected_topology_id,
+                    "topology_id": topology_id,
+                }
+            )
+        )
+    finally:
+        if first is not None:
+            first.close()
+        if resumed is not None:
+            resumed.close()
+        dist.destroy_process_group()
+
+
+def _gloo_exact_request_worker(
+    rank: int,
+    world_size: int,
+    rendezvous: str,
+    result_dir: str,
+) -> None:
+    dist.init_process_group(
+        "gloo",
+        init_method=f"file://{rendezvous}",
+        rank=rank,
+        world_size=world_size,
+        timeout=dt.timedelta(seconds=30),
+    )
+    try:
+        manager = object.__new__(InMemoryCheckpointManager)
+        manager.config = SimpleNamespace(enable=True)
+        manager._world_size = world_size
+        manager._process_group = None
+
+        rejected: list[bool] = []
+        requests = (
+            ("load", 7 + rank, RecoveryMode.LATEST_GEMINI),
+            (
+                "load_tensors",
+                7,
+                RecoveryMode.LATEST_GEMINI if rank == 0 else RecoveryMode.RECOVERY_VERIFIED,
+            ),
+        )
+        for method, step, mode in requests:
+            try:
+                getattr(manager, method)(mode=mode, step=step)
+            except RuntimeError as error:
+                rejected.append(
+                    "disagree on the manager-selected recovery step or mode" in str(error)
+                )
+            else:
+                rejected.append(False)
+
+        Path(result_dir, f"exact-request-rank-{rank}.json").write_text(
+            json.dumps({"rejected": rejected})
+        )
+    finally:
+        dist.destroy_process_group()
+
+
 @pytest.mark.skipif(not dist.is_gloo_available(), reason="PyTorch Gloo backend is unavailable")
 def test_cpu_gloo_recovery_consensus(tmp_path):
     world_size = 2
@@ -239,3 +385,50 @@ def test_cpu_gloo_requires_exact_run_identity_agreement(tmp_path):
         for rank in range(world_size)
     ]
     assert results == [{"rejected": True}, {"rejected": True}]
+
+
+@pytest.mark.skipif(not dist.is_gloo_available(), reason="PyTorch Gloo backend is unavailable")
+def test_cpu_gloo_disjoint_checkpoint_groups_share_job_topology(tmp_path):
+    world_size = 4
+    rendezvous = tmp_path / "disjoint-topology-rendezvous"
+    checkpoint_dir = tmp_path / "disjoint-topology-checkpoints"
+    result_dir = tmp_path / "disjoint-topology-results"
+    result_dir.mkdir()
+
+    mp.spawn(
+        _gloo_disjoint_topology_worker,
+        args=(world_size, str(rendezvous), str(checkpoint_dir), str(result_dir)),
+        nprocs=world_size,
+        join=True,
+    )
+
+    results = [
+        json.loads((result_dir / f"topology-rank-{rank}.json").read_text())
+        for rank in range(world_size)
+    ]
+    assert all(result["accepted"] for result in results)
+    assert len({result["topology_id"] for result in results}) == 1
+
+
+@pytest.mark.skipif(not dist.is_gloo_available(), reason="PyTorch Gloo backend is unavailable")
+def test_cpu_gloo_exact_recovery_requires_request_agreement(tmp_path):
+    world_size = 2
+    rendezvous = tmp_path / "exact-request-rendezvous"
+    result_dir = tmp_path / "exact-request-results"
+    result_dir.mkdir()
+
+    mp.spawn(
+        _gloo_exact_request_worker,
+        args=(world_size, str(rendezvous), str(result_dir)),
+        nprocs=world_size,
+        join=True,
+    )
+
+    results = [
+        json.loads((result_dir / f"exact-request-rank-{rank}.json").read_text())
+        for rank in range(world_size)
+    ]
+    assert results == [
+        {"rejected": [True, True]},
+        {"rejected": [True, True]},
+    ]

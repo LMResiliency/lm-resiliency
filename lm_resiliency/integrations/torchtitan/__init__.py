@@ -33,6 +33,36 @@ from lm_resiliency.integrations.torchtitan.adapter import TorchTitanAdapter
 from lm_resiliency.orchestration import OrchestrationHooks
 
 
+class _SchedulerStepHook:
+    """Run a PyTorch-style post-step callback after TorchTitan's LR scheduler."""
+
+    def __init__(
+        self,
+        scheduler: Any,
+        optimizer: Any,
+        callback: Callable[[Any, Any, Any], None],
+    ) -> None:
+        self._scheduler = scheduler
+        self._optimizer = optimizer
+        self._callback = callback
+        self._original_step = scheduler.step
+        self._removed = False
+        self._installed_step = self._wrapped_step
+        scheduler.step = self._installed_step
+
+    def _wrapped_step(self, *args: Any, **kwargs: Any) -> Any:
+        result = self._original_step(*args, **kwargs)
+        self._callback(self._optimizer, args, kwargs)
+        return result
+
+    def remove(self) -> None:
+        if self._removed:
+            return
+        self._removed = True
+        if self._scheduler.step is self._installed_step:
+            self._scheduler.step = self._original_step
+
+
 def enable_resiliency(
     model: nn.Module | Any,
     optimizer: torch.optim.Optimizer | None = None,
@@ -50,6 +80,8 @@ def enable_resiliency(
     parallelism_info: Any | None = None,
     durable_checkpoint: DurableCheckpointConfig | None = None,
     recovery_mode: RecoveryMode | str | None = None,
+    _recovery_step: int | None = None,
+    _expected_topology_id: str | None = None,
 ) -> Any:
     """Enable GEMINI + SCOUT for a torchtitan training job. One call.
 
@@ -123,6 +155,19 @@ def enable_resiliency(
         load_extra_state_fn=adapter.load_extra_state_dict if adapter is not None else None,
         durable_checkpoint=durable_checkpoint,
         recovery_mode=recovery_mode,
+        _recovery_step=_recovery_step,
+        _expected_topology_id=_expected_topology_id,
+        _step_hook_registrar=(
+            (
+                lambda callback: _SchedulerStepHook(
+                    trainer.lr_schedulers,
+                    optimizer,
+                    callback,
+                )
+            )
+            if trainer is not None
+            else None
+        ),
     )
     if trainer is not None:
         _bind_trainer_checkpoint_load(trainer, handle)
@@ -152,7 +197,8 @@ def _bind_trainer_checkpoint_load(trainer: Any, handle: Any) -> None:
         if handle.recovered_step >= 0:
             return True
         result = original_load(*args, **kwargs)
-        handle._restore_step(int(trainer.step))
+        if result:
+            handle._restore_step(int(trainer.step))
         return result
 
     trainer.checkpointer.load = load

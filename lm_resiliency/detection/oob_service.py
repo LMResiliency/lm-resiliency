@@ -380,7 +380,13 @@ def _init_daemon_process_group(
 def _group_port(peer_ranks: list[int]) -> int:
     base = int(os.environ.get("LM_SCOUT_OOB_PORT", int(os.environ.get("MASTER_PORT", 29500)) + 100))
     group_hash = sum((index + 1) * (rank + 1) for index, rank in enumerate(peer_ranks))
-    return 1024 + ((base - 1024 + group_hash) % (65535 - 1024))
+    generation = int(os.environ.get("LM_RESILIENCY_GENERATION", "0"))
+    run_id = os.environ.get("TORCHELASTIC_RUN_ID") or os.environ.get("LM_RUN_ID") or ""
+    run_hash = int.from_bytes(
+        hashlib.blake2s(run_id.encode("utf-8"), digest_size=2).digest(),
+        byteorder="big",
+    )
+    return 1024 + ((base - 1024 + run_hash + group_hash + generation * 257) % (65535 - 1024))
 
 
 def _tracker_channel_name(global_rank: int, peer_ranks: list[int]) -> str:
@@ -390,7 +396,10 @@ def _tracker_channel_name(global_rank: int, peer_ranks: list[int]) -> str:
         or os.environ.get("SLURM_JOB_ID")
         or f"{os.environ.get('MASTER_ADDR', 'local')}:{os.environ.get('MASTER_PORT', 'none')}"
     )
-    generation = os.environ.get("TORCHELASTIC_RESTART_COUNT", "0")
+    generation = os.environ.get(
+        "LM_RESILIENCY_GENERATION",
+        os.environ.get("TORCHELASTIC_RESTART_COUNT", "0"),
+    )
     identity = "|".join(
         (
             run_id,

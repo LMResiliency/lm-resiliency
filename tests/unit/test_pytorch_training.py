@@ -18,6 +18,7 @@ from lm_resiliency.integrations._common import recover_with_fallback
 from lm_resiliency.integrations.pytorch import enable_resiliency
 from lm_resiliency.integrations.pytorch.fsdp import (
     PyTorchFSDPResiliency,
+    _effective_replay_config,
     _fsdp_communication_ranks,
     _is_hsdp_model,
     _materialize_pure_fsdp_evidence,
@@ -56,6 +57,25 @@ def _replay_result(sdc_bitmap: list[int]) -> ReplayResult:
         peer_ranks=list(range(len(sdc_bitmap))),
         sdc_source_bitmaps={"output": [0] * len(sdc_bitmap)},
     )
+
+
+def test_pure_fsdp_disables_optimizer_recipe_without_replica_oracle():
+    config = ReplayHarnessConfig(
+        check_interval=3,
+        compare_parameter_state=True,
+        optimizer_check_interval=None,
+    )
+
+    effective = _effective_replay_config(
+        config,
+        has_fsdp=True,
+        is_hsdp=False,
+        compare_updated_weights=False,
+    )
+
+    assert effective.compare_parameter_state is False
+    assert effective.optimizer_check_interval == 0
+    assert effective.hidden_check_interval is None
 
 
 def test_replicated_and_ddp_models_use_common_feature_wiring():

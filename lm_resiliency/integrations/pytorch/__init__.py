@@ -54,6 +54,9 @@ def enable_resiliency(
     load_fallback: Callable[[], Any] | None = None,
     durable_checkpoint: DurableCheckpointConfig | None = None,
     recovery_mode: RecoveryMode | str | None = None,
+    _recovery_step: int | None = None,
+    _expected_topology_id: str | None = None,
+    _step_hook_registrar: Callable[[Callable[[Any, Any, Any], None]], Any] | None = None,
 ) -> ResiliencyHandle:
     """Enable resiliency for replicated, DDP, FSDP2, or HSDP training."""
     checkpoint, replay = _normalize_feature_configs(
@@ -84,6 +87,9 @@ def enable_resiliency(
             load_extra_state_fn=load_extra_state_fn,
             durable_checkpoint=durable_checkpoint,
             recovery_mode=recovery_mode,
+            recovery_step=_recovery_step,
+            expected_topology_id=_expected_topology_id,
+            step_hook_registrar=_step_hook_registrar,
         )
         register_automatic_cleanup(handle)
         return handle
@@ -109,6 +115,9 @@ def enable_resiliency(
         load_fallback=load_fallback,
         durable_checkpoint=durable_checkpoint,
         recovery_mode=recovery_mode,
+        recovery_step=_recovery_step,
+        expected_topology_id=_expected_topology_id,
+        step_hook_registrar=_step_hook_registrar,
     )
     _bind_orchestration(orchestration, handle)
     register_automatic_cleanup(handle)

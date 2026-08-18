@@ -128,6 +128,7 @@ class MegatronResiliency:
         extra_state_fn: Callable[[], dict[str, Any]] | None = None,
         load_extra_state_fn: Callable[[dict[str, Any]], None] | None = None,
         durable_checkpoint: DurableCheckpointConfig | None = None,
+        expected_topology_id: str | None = None,
     ) -> None:
         self._model = model
         self._optimizer = optimizer
@@ -139,6 +140,8 @@ class MegatronResiliency:
         self._closed = False
         self._recovery_decision_callback: RecoveryDecisionCallback | None = None
         self._last_recovery_decision: RecoveryDecision | None = None
+        self._pending_optimizer_step_tensors: OptimizerStepEvidence | None = None
+        self._optimizer_step_pending = False
 
         self._fault_callback = fault_callback
 
@@ -165,6 +168,7 @@ class MegatronResiliency:
             manager_factory=InMemoryCheckpointManager,
             parallelism_info_fn=self._adapter.get_parallelism_info,
             process_group=self._checkpoint_gloo_group,
+            expected_topology_id=expected_topology_id,
         )
         # SCOUT: layer replay detection
         self._replay_harness: ModelReplayHarness | None = None
@@ -197,6 +201,7 @@ class MegatronResiliency:
         self._durable_checkpoint = build_durable_checkpoint(
             durable_checkpoint,
             self._replay_harness,
+            topology_digest=expected_topology_id,
         )
         self._optimizer_replays = self._build_optimizer_replays()
         self._certification = CheckpointCertificationCoordinator(
@@ -213,9 +218,22 @@ class MegatronResiliency:
         # Wrap optimizer step
         self._original_step = optimizer.step
         optimizer.step = self._wrapped_step
+        self._original_scheduler_step = None
+        self._installed_scheduler_step = None
+        if opt_param_scheduler is not None:
+            self._original_scheduler_step = opt_param_scheduler.step
+            self._installed_scheduler_step = self._wrapped_scheduler_step
+            opt_param_scheduler.step = self._installed_scheduler_step
 
     def _wrapped_step(self, *args, **kwargs) -> Any:
-        """Wraps optimizer.step() to inject post-step hooks."""
+        """Capture optimizer evidence and defer completion to Megatron's scheduler."""
+        if self._optimizer_step_pending:
+            logger.warning(
+                "Megatron scheduler did not advance after the previous optimizer step; "
+                "discarding incomplete SCOUT optimizer evidence"
+            )
+            self._pending_optimizer_step_tensors = None
+            self._optimizer_step_pending = False
         if self._optimizer_replay_due():
             for replay in self._optimizer_replays:
                 replay.arm()
@@ -226,7 +244,27 @@ class MegatronResiliency:
                 replay.cancel()
             raise
         optimizer_step_tensors = collect_optimizer_replays(self._optimizer_replays)
-        self._post_step(optimizer_step_tensors)
+        if self._original_scheduler_step is None:
+            self._post_step(optimizer_step_tensors)
+        else:
+            self._pending_optimizer_step_tensors = optimizer_step_tensors
+            self._optimizer_step_pending = True
+        return result
+
+    def _wrapped_scheduler_step(self, *args, **kwargs) -> Any:
+        """Complete one coherent Megatron step after scheduler state advances."""
+        assert self._original_scheduler_step is not None
+        try:
+            result = self._original_scheduler_step(*args, **kwargs)
+        except Exception:
+            self._pending_optimizer_step_tensors = None
+            self._optimizer_step_pending = False
+            raise
+        if self._optimizer_step_pending:
+            optimizer_step_tensors = self._pending_optimizer_step_tensors
+            self._pending_optimizer_step_tensors = None
+            self._optimizer_step_pending = False
+            self._post_step(optimizer_step_tensors)
         return result
 
     def _post_step(
@@ -240,7 +278,12 @@ class MegatronResiliency:
             optimizer_step_tensors=optimizer_step_tensors,
         )
 
-    def try_recover(self, mode: RecoveryMode | str | None = None) -> int:
+    def try_recover(
+        self,
+        mode: RecoveryMode | str | None = None,
+        *,
+        step: int | None = None,
+    ) -> int:
         """Attempt fast recovery from in-memory checkpoint.
 
         All ranks must call this collectively. Returns the recovered step
@@ -252,7 +295,7 @@ class MegatronResiliency:
         if self._ckpt_manager is None:
             return -1
 
-        result = self._ckpt_manager.load_tensors(mode=mode)
+        result = self._ckpt_manager.load_tensors(mode=mode, step=step)
         if result is None:
             return -1
 
@@ -428,6 +471,13 @@ class MegatronResiliency:
         self._closed = True
         unregister_automatic_cleanup(self)
         self._optimizer.step = self._original_step
+        if (
+            self._original_scheduler_step is not None
+            and self._opt_param_scheduler.step is self._installed_scheduler_step
+        ):
+            self._opt_param_scheduler.step = self._original_scheduler_step
+        self._pending_optimizer_step_tensors = None
+        self._optimizer_step_pending = False
         for replay in self._optimizer_replays:
             replay.remove()
         if self._ckpt_manager is not None:
@@ -497,6 +547,8 @@ def enable_resiliency(
     load_fallback: Callable[[], int | None] | None = None,
     durable_checkpoint: DurableCheckpointConfig | None = None,
     recovery_mode: RecoveryMode | str | None = None,
+    _recovery_step: int | None = None,
+    _expected_topology_id: str | None = None,
 ) -> MegatronResiliency:
     """Enable GEMINI + SCOUT for a megatron-core training job. One call.
 
@@ -565,10 +617,11 @@ def enable_resiliency(
         extra_state_fn=extra_state_fn,
         load_extra_state_fn=load_extra_state_fn,
         durable_checkpoint=durable_checkpoint,
+        expected_topology_id=_expected_topology_id,
     )
     _bind_orchestration(orchestration, resiliency)
 
-    recover_with_fallback(resiliency, load_fallback, recovery_mode)
+    recover_with_fallback(resiliency, load_fallback, recovery_mode, _recovery_step)
 
     register_automatic_cleanup(resiliency)
     return resiliency

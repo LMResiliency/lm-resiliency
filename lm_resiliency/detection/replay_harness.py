@@ -1859,7 +1859,6 @@ def _optimizer_evidence_contract(
                     ),
                     "status": recipe.status,
                     "capture": recipe.capture is not None,
-                    "length": None if recipe.capture is None else recipe.capture.length,
                 }
                 for recipe in evidence.recipes
             ],

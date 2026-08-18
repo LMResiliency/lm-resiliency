@@ -29,6 +29,7 @@ Example:
 
 from __future__ import annotations
 
+import copy
 import logging
 from dataclasses import replace
 from pathlib import Path
@@ -90,6 +91,7 @@ from lm_resiliency.recovery import (
 
 logger = logging.getLogger(__name__)
 _UNSET = object()
+_DEEPSPEED_LR_SCHEDULER_KEY = "deepspeed_lr_scheduler"
 
 
 class DeepSpeedResiliency:
@@ -119,6 +121,7 @@ class DeepSpeedResiliency:
         fault_callback: Callable[[ReplayResult], None] | None = None,
         oob_fault_callback: SCOUTFaultCallback | None = None,
         durable_checkpoint: DurableCheckpointConfig | None = None,
+        expected_topology_id: str | None = None,
     ) -> None:
         self._engine = engine
         self._device = device or torch.device("cuda")
@@ -152,6 +155,7 @@ class DeepSpeedResiliency:
             manager_factory=InMemoryCheckpointManager,
             parallelism_info_fn=self._adapter.get_parallelism_info,
             process_group=self._dp_gloo_group,
+            expected_topology_id=expected_topology_id,
         )
         # SCOUT: layer replay detection
         self._replay_harness: ModelReplayHarness | None = None
@@ -190,6 +194,7 @@ class DeepSpeedResiliency:
         self._durable_checkpoint = build_durable_checkpoint(
             durable_checkpoint,
             self._replay_harness,
+            topology_digest=expected_topology_id,
         )
         self._optimizer_replays = self._build_optimizer_replays()
         self._certification = CheckpointCertificationCoordinator(
@@ -244,7 +249,12 @@ class DeepSpeedResiliency:
         finally:
             self._release_zero3_replay_parameters()
 
-    def try_recover(self, mode: RecoveryMode | str | None = None) -> int:
+    def try_recover(
+        self,
+        mode: RecoveryMode | str | None = None,
+        *,
+        step: int | None = None,
+    ) -> int:
         """Attempt fast recovery from in-memory checkpoint.
 
         All ranks must call this collectively. Returns the recovered step
@@ -256,7 +266,7 @@ class DeepSpeedResiliency:
         if self._ckpt_manager is None:
             return -1
 
-        result = self._ckpt_manager.load_tensors(mode=mode)
+        result = self._ckpt_manager.load_tensors(mode=mode, step=step)
         if result is None:
             return -1
 
@@ -265,7 +275,11 @@ class DeepSpeedResiliency:
         self._adapter.load_checkpoint_tensors(saved_tensors)
         self._step_count = step
         self._engine.global_steps = step
-        restore_checkpoint_extra(extra, self._replay_harness)
+        restore_checkpoint_extra(
+            extra,
+            self._replay_harness,
+            self._restore_framework_extra_state,
+        )
         logger.info(f"GEMINI: recovered from in-memory checkpoint at step {step}")
         return step
 
@@ -283,7 +297,40 @@ class DeepSpeedResiliency:
         return self._ckpt_tensors
 
     def _checkpoint_extra(self) -> dict[str, Any]:
-        return checkpoint_extra(self._replay_harness)
+        return checkpoint_extra(
+            self._replay_harness,
+            self._capture_framework_extra_state,
+        )
+
+    def _capture_framework_extra_state(self) -> dict[str, Any]:
+        scheduler = getattr(self._engine, "lr_scheduler", None)
+        if scheduler is None:
+            return {}
+        state_dict = getattr(scheduler, "state_dict", None)
+        if not callable(state_dict):
+            raise RuntimeError("DeepSpeed lr_scheduler does not provide state_dict()")
+        state = state_dict()
+        if not isinstance(state, dict):
+            raise RuntimeError("DeepSpeed lr_scheduler.state_dict() must return a dictionary")
+        return {_DEEPSPEED_LR_SCHEDULER_KEY: copy.deepcopy(state)}
+
+    def _restore_framework_extra_state(self, state: dict[str, Any]) -> None:
+        scheduler = getattr(self._engine, "lr_scheduler", None)
+        saved = state.get(_DEEPSPEED_LR_SCHEDULER_KEY, _UNSET)
+        if scheduler is None:
+            if saved is not _UNSET:
+                raise RuntimeError(
+                    "checkpoint contains DeepSpeed scheduler state but the engine has no scheduler"
+                )
+            return
+        if saved is _UNSET:
+            raise RuntimeError("checkpoint is missing DeepSpeed lr_scheduler state")
+        if not isinstance(saved, dict):
+            raise RuntimeError("checkpoint DeepSpeed lr_scheduler state must be a dictionary")
+        load_state_dict = getattr(scheduler, "load_state_dict", None)
+        if not callable(load_state_dict):
+            raise RuntimeError("DeepSpeed lr_scheduler does not provide load_state_dict()")
+        load_state_dict(copy.deepcopy(saved))
 
     def check_now(self) -> ReplayResult | None:
         """Force an immediate SCOUT detection check."""
@@ -534,6 +581,8 @@ def enable_resiliency(
     load_fallback: Callable[[], int | None] | None = None,
     durable_checkpoint: DurableCheckpointConfig | None = None,
     recovery_mode: RecoveryMode | str | None = None,
+    _recovery_step: int | None = None,
+    _expected_topology_id: str | None = None,
 ) -> DeepSpeedResiliency:
     """Enable GEMINI + SCOUT for a DeepSpeed training job. One call.
 
@@ -595,10 +644,11 @@ def enable_resiliency(
         fault_callback=fault_callback,
         oob_fault_callback=oob_fault_callback,
         durable_checkpoint=durable_checkpoint,
+        expected_topology_id=_expected_topology_id,
     )
     _bind_orchestration(orchestration, resiliency)
 
-    recover_with_fallback(resiliency, load_fallback, recovery_mode)
+    recover_with_fallback(resiliency, load_fallback, recovery_mode, _recovery_step)
 
     register_automatic_cleanup(resiliency)
     return resiliency
