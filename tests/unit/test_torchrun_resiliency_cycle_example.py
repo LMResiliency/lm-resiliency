@@ -48,6 +48,7 @@ from examples.torchrun.resiliency_cycle.harness.worker import (
     _validate_worker_context,
 )
 from examples.torchrun.resiliency_cycle.pressure import (
+    _cleanup_controller,
     _validate_replacement_coverage,
 )
 from lm_resiliency import FaultCampaign
@@ -368,6 +369,40 @@ def test_partial_managed_launch_is_cleaned_up(
         )
 
     assert cleaned == [first]
+
+
+def test_agent_cleanup_runs_when_coordinator_close_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleaned: list[LaunchedAgent] = []
+    options = PressureLaunchOptions(
+        fault_campaign_dir=tmp_path,
+        framework="pytorch",
+        run_id="close-failure",
+        timeout=10,
+    )
+    agent = LaunchedAgent(process=SimpleNamespace(), log=io.BytesIO())
+    coordinator = SimpleNamespace(close=lambda: (_ for _ in ()).throw(RuntimeError("store failed")))
+
+    def cleanup(
+        _options: PressureLaunchOptions,
+        agents: list[LaunchedAgent],
+        *,
+        remote_run_id: str,
+    ) -> None:
+        assert remote_run_id == "close-failure"
+        cleaned.extend(agents)
+
+    monkeypatch.setattr(
+        "examples.torchrun.resiliency_cycle.pressure.cleanup_agents",
+        cleanup,
+    )
+
+    with pytest.raises(RuntimeError, match="store failed"):
+        _cleanup_controller(coordinator, options=options, agents=[agent])
+
+    assert cleaned == [agent]
 
 
 def test_megatron_extra_state_restores_sample_counters() -> None:

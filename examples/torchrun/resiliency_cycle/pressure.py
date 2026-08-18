@@ -32,6 +32,7 @@ from .harness.campaign import (
     require_fresh_campaign_run,
 )
 from .harness.launch import (
+    LaunchedAgent,
     PressureLaunchOptions,
     cleanup_agents,
     create_tcp_store,
@@ -130,6 +131,19 @@ def _validate_replacement_coverage(
         raise AssertionError("pressure campaign replaced an unexpected number of initial GPU-nodes")
 
 
+def _cleanup_controller(
+    coordinator: TorchrunRecoveryCoordinator | None,
+    *,
+    options: PressureLaunchOptions,
+    agents: Sequence[LaunchedAgent],
+) -> None:
+    try:
+        if coordinator is not None:
+            coordinator.close()
+    finally:
+        cleanup_agents(options, agents, remote_run_id=options.run_id)
+
+
 def _orchestrate(args: argparse.Namespace) -> None:
     campaign_dir = args.fault_campaign_dir.resolve()
     options = PressureLaunchOptions(
@@ -203,11 +217,12 @@ def _orchestrate(args: argparse.Namespace) -> None:
     )
     processes = [agent.process for agent in agents]
     artifacts = campaign_dir / "campaign-artifacts"
-    coordinator = TorchrunRecoveryCoordinator(control_store, run_id=options.run_id)
     expected_nodes = frozenset(
         synthetic_node_id(placement.node_label) for placement in topology.placements
     )
+    coordinator: TorchrunRecoveryCoordinator | None = None
     try:
+        coordinator = TorchrunRecoveryCoordinator(control_store, run_id=options.run_id)
         initial = _wait_for_initial_admission(
             coordinator,
             expected_nodes=expected_nodes,
@@ -306,6 +321,7 @@ def _orchestrate(args: argparse.Namespace) -> None:
             replacement_failures=replacement_failures,
         )
         coordinator.close()
+        coordinator = None
         for process in processes:
             process.wait(timeout=options.timeout)
             if process.returncode != 0:
@@ -349,8 +365,7 @@ def _orchestrate(args: argparse.Namespace) -> None:
             },
         )
     finally:
-        coordinator.close()
-        cleanup_agents(options, agents, remote_run_id=options.run_id)
+        _cleanup_controller(coordinator, options=options, agents=agents)
 
 
 def _parser() -> argparse.ArgumentParser:
