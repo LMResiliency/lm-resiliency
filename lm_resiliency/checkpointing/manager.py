@@ -700,16 +700,16 @@ class InMemoryCheckpointManager:
         slot = self._memory_slot_by_step(step)
         loaded: tuple[FlatStateDictMetadata, list[torch.Tensor]] | None = None
         local_error: Exception | None = None
-        if slot is not None:
-            loaded = (
-                self._slot_metadata(slot),
-                [tensor.clone() for tensor in slot.tensors],
-            )
-        else:
-            try:
+        try:
+            if slot is not None:
+                loaded = (
+                    self._slot_metadata(slot),
+                    [tensor.clone() for tensor in slot.tensors],
+                )
+            else:
                 loaded = self._disk.load(step)
-            except Exception as error:  # noqa: BLE001 - every rank must vote
-                local_error = error
+        except Exception as error:  # noqa: BLE001 - every rank must vote
+            local_error = error
         if self._collective_min_step(int(loaded is not None)) == 1:
             return loaded
         if local_error is not None:

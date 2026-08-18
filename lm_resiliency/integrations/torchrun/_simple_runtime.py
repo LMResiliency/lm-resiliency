@@ -616,6 +616,8 @@ class SimpleRendezvousHandler(RendezvousHandler):
             self._last_generation = generation
             self._last_assignment = assignment
             bootstrap = self._build_bootstrap(slot, group_store, deadline)
+            if plan is not None:
+                self._check_plan_deadline(plan)
             from .worker_adapter import configure_worker_generation_environment
 
             configure_worker_generation_environment(generation)

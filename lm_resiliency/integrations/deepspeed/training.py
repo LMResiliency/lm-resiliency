@@ -29,6 +29,7 @@ Example:
 
 from __future__ import annotations
 
+import copy
 import logging
 from dataclasses import replace
 from pathlib import Path
@@ -90,6 +91,7 @@ from lm_resiliency.recovery import (
 
 logger = logging.getLogger(__name__)
 _UNSET = object()
+_DEEPSPEED_LR_SCHEDULER_KEY = "deepspeed_lr_scheduler"
 
 
 class DeepSpeedResiliency:
@@ -272,7 +274,11 @@ class DeepSpeedResiliency:
         self._adapter.load_checkpoint_tensors(saved_tensors)
         self._step_count = step
         self._engine.global_steps = step
-        restore_checkpoint_extra(extra, self._replay_harness)
+        restore_checkpoint_extra(
+            extra,
+            self._replay_harness,
+            self._restore_framework_extra_state,
+        )
         logger.info(f"GEMINI: recovered from in-memory checkpoint at step {step}")
         return step
 
@@ -290,7 +296,40 @@ class DeepSpeedResiliency:
         return self._ckpt_tensors
 
     def _checkpoint_extra(self) -> dict[str, Any]:
-        return checkpoint_extra(self._replay_harness)
+        return checkpoint_extra(
+            self._replay_harness,
+            self._capture_framework_extra_state,
+        )
+
+    def _capture_framework_extra_state(self) -> dict[str, Any]:
+        scheduler = getattr(self._engine, "lr_scheduler", None)
+        if scheduler is None:
+            return {}
+        state_dict = getattr(scheduler, "state_dict", None)
+        if not callable(state_dict):
+            raise RuntimeError("DeepSpeed lr_scheduler does not provide state_dict()")
+        state = state_dict()
+        if not isinstance(state, dict):
+            raise RuntimeError("DeepSpeed lr_scheduler.state_dict() must return a dictionary")
+        return {_DEEPSPEED_LR_SCHEDULER_KEY: copy.deepcopy(state)}
+
+    def _restore_framework_extra_state(self, state: dict[str, Any]) -> None:
+        scheduler = getattr(self._engine, "lr_scheduler", None)
+        saved = state.get(_DEEPSPEED_LR_SCHEDULER_KEY, _UNSET)
+        if scheduler is None:
+            if saved is not _UNSET:
+                raise RuntimeError(
+                    "checkpoint contains DeepSpeed scheduler state but the engine has no scheduler"
+                )
+            return
+        if saved is _UNSET:
+            raise RuntimeError("checkpoint is missing DeepSpeed lr_scheduler state")
+        if not isinstance(saved, dict):
+            raise RuntimeError("checkpoint DeepSpeed lr_scheduler state must be a dictionary")
+        load_state_dict = getattr(scheduler, "load_state_dict", None)
+        if not callable(load_state_dict):
+            raise RuntimeError("DeepSpeed lr_scheduler does not provide load_state_dict()")
+        load_state_dict(copy.deepcopy(saved))
 
     def check_now(self) -> ReplayResult | None:
         """Force an immediate SCOUT detection check."""

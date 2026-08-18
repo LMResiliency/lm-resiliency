@@ -6,7 +6,7 @@ import datetime as dt
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -18,7 +18,7 @@ from lm_resiliency.checkpointing._disk_format import CheckpointFormatError
 from lm_resiliency.checkpointing.buffer import SlotState
 from lm_resiliency.checkpointing.config import InMemoryCkptConfig
 from lm_resiliency.checkpointing.disk import DiskSerializer
-from lm_resiliency.checkpointing.manager import InMemoryCheckpointManager
+from lm_resiliency.checkpointing.manager import InMemoryCheckpointManager, RecoveryMode
 from lm_resiliency.checkpointing.state_dict import FlatStateDictMetadata, flatten
 
 
@@ -103,6 +103,26 @@ def test_memory_lookup_never_uses_peer_replica_as_local_state():
 
     assert manager._memory_slot_by_step(23) is None
     assert manager._memory_slot_by_step(24) is own_slot
+
+
+def test_exact_memory_clone_failure_still_reaches_collective_vote():
+    manager = object.__new__(InMemoryCheckpointManager)
+    tensor = MagicMock()
+    tensor.clone.side_effect = RuntimeError("host allocation failed")
+    slot = SimpleNamespace(tensors=[tensor])
+
+    with (
+        patch.object(manager, "_memory_slot_by_step", return_value=slot),
+        patch.object(manager, "_slot_metadata", return_value=FlatStateDictMetadata()),
+        patch.object(manager, "_collective_min_step", return_value=0) as vote,
+    ):
+        loaded = manager._load_exact_collectively_validated_shard(
+            23,
+            RecoveryMode.LATEST_GEMINI,
+        )
+
+    assert loaded is None
+    vote.assert_called_once_with(0)
 
 
 def _gloo_recovery_worker(

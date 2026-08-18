@@ -6,6 +6,7 @@ import tempfile
 from types import MethodType
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -60,6 +61,17 @@ class FakeDeepSpeedEngine:
     def step(self, lr_kwargs=None):
         self._step_called = True
         self.global_steps += 1
+
+
+class FakeScheduler:
+    def __init__(self, state: dict[str, int]):
+        self.state = dict(state)
+
+    def state_dict(self) -> dict[str, int]:
+        return dict(self.state)
+
+    def load_state_dict(self, state: dict[str, int]) -> None:
+        self.state = dict(state)
 
 
 class OptimizerStep:
@@ -290,6 +302,47 @@ class TestDeepSpeedResiliencyInit:
 
 
 class TestDeepSpeedResiliencyCheckpoint:
+    def test_exact_recovery_restores_scheduler_state(self):
+        engine = FakeDeepSpeedEngine()
+        engine.lr_scheduler = FakeScheduler({"last_epoch": 7})
+        with patch("torch.distributed.is_initialized", return_value=False):
+            resiliency = DeepSpeedResiliency(
+                engine=engine,
+                ckpt_config=InMemoryCkptConfig(enable=False),
+            )
+
+        extra = resiliency._checkpoint_extra()
+        engine.lr_scheduler.state["last_epoch"] = 99
+        manager = MagicMock()
+        manager.load_tensors.return_value = ([], 7, extra)
+        resiliency._ckpt_manager = manager
+        resiliency._adapter = MagicMock()
+        resiliency._adapter.collect_checkpoint_tensors.return_value = []
+
+        assert resiliency.try_recover(step=7) == 7
+        assert engine.lr_scheduler.state == {"last_epoch": 7}
+        manager.load_tensors.assert_called_once_with(mode=None, step=7)
+        resiliency.close()
+
+    def test_exact_recovery_rejects_missing_scheduler_state(self):
+        engine = FakeDeepSpeedEngine()
+        engine.lr_scheduler = FakeScheduler({"last_epoch": 0})
+        with patch("torch.distributed.is_initialized", return_value=False):
+            resiliency = DeepSpeedResiliency(
+                engine=engine,
+                ckpt_config=InMemoryCkptConfig(enable=False),
+            )
+
+        manager = MagicMock()
+        manager.load_tensors.return_value = ([], 7, {})
+        resiliency._ckpt_manager = manager
+        resiliency._adapter = MagicMock()
+        resiliency._adapter.collect_checkpoint_tensors.return_value = []
+
+        with pytest.raises(RuntimeError, match="missing DeepSpeed lr_scheduler state"):
+            resiliency.try_recover(step=7)
+        resiliency.close()
+
     def test_save_tensors_called_at_interval(self):
         engine = FakeDeepSpeedEngine()
 

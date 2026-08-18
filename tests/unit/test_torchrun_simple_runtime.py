@@ -11,6 +11,7 @@ import threading
 import time
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from torch.distributed import HashStore
@@ -745,6 +746,44 @@ def test_failed_bootstrap_consumes_generation_until_successor(
     with pytest.raises(RendezvousConnectionError, match="bootstrap failed"):
         handler.next_rendezvous()
     with pytest.raises(RendezvousTimeoutError, match="successor generation"):
+        handler.next_rendezvous()
+
+    assert handler.shutdown()
+
+
+def test_recovery_plan_expiry_during_bootstrap_rejects_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = HashStore()
+    handler = SimpleRendezvousHandler(
+        replace(
+            _config(tmp_path, "node-a"),
+            min_nodes=1,
+            max_nodes=1,
+            join_timeout_ms=1_000,
+        ),
+        store=store,
+        local_addr="127.0.0.1",
+    )
+    handler.next_rendezvous()
+    plan = replace(
+        _plan(),
+        slot_assignments=(SlotAssignment(0, "node-a", 0, 1),),
+        quarantined_node_ids=(),
+        expected_world_size=1,
+        restart_deadline_unix_ms=150,
+    )
+    SimpleRecoveryPlanStore(store, run_id=RUN_ID).publish(plan)
+    timestamps = iter((100, 100, 200))
+    handler._clock = lambda: next(timestamps)
+    monkeypatch.setattr(
+        handler,
+        "_build_bootstrap",
+        lambda *_args, **_kwargs: SimpleNamespace(),
+    )
+
+    with pytest.raises(RendezvousTimeoutError, match="deadline elapsed"):
         handler.next_rendezvous()
 
     assert handler.shutdown()
