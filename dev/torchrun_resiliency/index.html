@@ -491,6 +491,10 @@ recovery-verified GEMINI checkpoint before training resumed. Native PyTorch,
 DeepSpeed, Megatron Core, and TorchTitan also completed a focused
 restart-and-replacement campaign through their framework-owned training
 boundaries.</p>
+<p>Runnable bootstrap and manager-driven end-to-end programs live under
+<a href="https://github.com/LMResiliency/lm-resiliency/blob/2d51d8ed383f8845e8d813bbfa08e1173e4a2412/examples/torchrun/README.md"><code>examples/torchrun</code></a>. The
+resiliency-cycle controller launches torchrun agents and is not itself a
+training worker.</p>
 <h2 id="current-boundaries">Current Boundaries<a class="headerlink" href="#current-boundaries" title="Permanent link">&para;</a></h2>
 <ul>
 <li>fixed-size replacement only; no scale-up or scale-down;</li>
