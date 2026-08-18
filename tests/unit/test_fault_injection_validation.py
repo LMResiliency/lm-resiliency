@@ -8,10 +8,11 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from examples.fault_injection import pytorch as fault_injection_example
-from examples.fault_injection.compare import compare_artifacts, compare_payloads
-from examples.fault_injection.generate_campaign import build_campaign
-from examples.fault_injection.pytorch import (
+from lm_resiliency import FaultCampaign, InjectionStatus, enable_fault_injection
+from tests.validation.fault_injection import pytorch as fault_injection_validation
+from tests.validation.fault_injection.compare import compare_artifacts, compare_payloads
+from tests.validation.fault_injection.generate_campaign import build_campaign
+from tests.validation.fault_injection.pytorch import (
     EvaluationStateReset,
     _last_scheduled_iteration,
     _state_hold_iterations,
@@ -20,9 +21,8 @@ from examples.fault_injection.pytorch import (
     _validate_run,
     _validate_target_ranks,
 )
-from lm_resiliency import FaultCampaign, InjectionStatus, enable_fault_injection
 
-CAMPAIGN_PATH = Path("examples/fault_injection/campaign.json")
+CAMPAIGN_PATH = Path("tests/validation/fault_injection/campaign.json")
 BASE_MANIFEST = {
     "incidents": [
         {
@@ -425,8 +425,8 @@ def test_teardown_attempts_every_cleanup_and_preserves_active_error() -> None:
 
     assert events == ["state-reset", "faults", "resiliency", "process-group"]
     assert getattr(active_error, "__notes__", []) == [
-        "example teardown also failed: state cleanup failed",
-        "example teardown also failed: fault cleanup failed",
+        "validation teardown also failed: state cleanup failed",
+        "validation teardown also failed: fault cleanup failed",
     ]
 
 
@@ -1390,7 +1390,7 @@ def test_comparison_rejects_ambiguous_same_iteration_occurrences() -> None:
         compare_payloads(injection, _localization_payload())
 
 
-def test_example_rejects_missing_post_fault_iteration_and_rank() -> None:
+def test_validation_rejects_missing_post_fault_iteration_and_rank() -> None:
     campaign = FaultCampaign.from_json(CAMPAIGN_PATH)
 
     with pytest.raises(ValueError, match="clean post-fault"):
@@ -1400,7 +1400,7 @@ def test_example_rejects_missing_post_fault_iteration_and_rank() -> None:
         _validate_target_ranks(campaign, world_size=7)
 
 
-def test_example_clean_boundary_includes_bounded_incident_lifetime() -> None:
+def test_validation_clean_boundary_includes_bounded_incident_lifetime() -> None:
     campaign = FaultCampaign.from_dict(
         {
             "schema_version": 1,
@@ -1554,7 +1554,7 @@ def test_state_reset_ignores_deterministically_skipped_occurrences() -> None:
     assert 6 not in hold_iterations
 
 
-def test_example_rejects_campaign_end_state_reset() -> None:
+def test_validation_rejects_campaign_end_state_reset() -> None:
     campaign = FaultCampaign.from_dict(
         {
             "schema_version": 1,
@@ -1588,7 +1588,7 @@ def test_example_rejects_campaign_end_state_reset() -> None:
         _state_reset_iterations(campaign)
 
 
-def test_example_validates_reset_policy_before_distributed_setup(
+def test_validation_validates_reset_policy_before_distributed_setup(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1624,7 +1624,7 @@ def test_example_validates_reset_policy_before_distributed_setup(
     campaign.to_json(campaign_path)
     init_process_group = MagicMock()
     monkeypatch.setattr(
-        fault_injection_example.dist,
+        fault_injection_validation.dist,
         "init_process_group",
         init_process_group,
     )
@@ -1640,12 +1640,12 @@ def test_example_validates_reset_policy_before_distributed_setup(
     )
 
     with pytest.raises(ValueError, match="does not support campaign_end"):
-        fault_injection_example.main()
+        fault_injection_validation.main()
 
     init_process_group.assert_not_called()
 
 
-def test_example_destroys_process_group_after_topology_validation_failure(
+def test_validation_destroys_process_group_after_topology_validation_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1653,14 +1653,14 @@ def test_example_destroys_process_group_after_topology_validation_failure(
     monkeypatch.setenv("LOCAL_RANK", "0")
     monkeypatch.setattr(torch.cuda, "set_device", lambda _rank: None)
     monkeypatch.setattr(
-        fault_injection_example.dist,
+        fault_injection_validation.dist,
         "init_process_group",
         lambda **_kwargs: events.append("init"),
     )
-    monkeypatch.setattr(fault_injection_example.dist, "get_rank", lambda: 0)
-    monkeypatch.setattr(fault_injection_example.dist, "get_world_size", lambda: 7)
+    monkeypatch.setattr(fault_injection_validation.dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(fault_injection_validation.dist, "get_world_size", lambda: 7)
     monkeypatch.setattr(
-        fault_injection_example.dist,
+        fault_injection_validation.dist,
         "destroy_process_group",
         lambda: events.append("destroy"),
     )
@@ -1674,12 +1674,12 @@ def test_example_destroys_process_group_after_topology_validation_failure(
     )
 
     with pytest.raises(RuntimeError, match="requires exactly eight"):
-        fault_injection_example.main()
+        fault_injection_validation.main()
 
     assert events == ["init", "destroy"]
 
 
-def test_example_rejects_multi_call_gradient_affecting_reset() -> None:
+def test_validation_rejects_multi_call_gradient_affecting_reset() -> None:
     campaign = FaultCampaign.from_dict(
         {
             "schema_version": 1,
@@ -1713,7 +1713,7 @@ def test_example_rejects_multi_call_gradient_affecting_reset() -> None:
         _state_reset_iterations(campaign)
 
 
-def test_example_rejects_multi_call_non_state_fault_run_length() -> None:
+def test_validation_rejects_multi_call_non_state_fault_run_length() -> None:
     campaign = FaultCampaign.from_dict(
         {
             "schema_version": 1,

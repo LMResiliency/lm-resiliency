@@ -7,6 +7,7 @@ The test tree is organized by execution contract.
 | `unit/` | Fast CPU contracts for public APIs and internal components | Yes |
 | `integration/core/` | Focused distributed GEMINI and SCOUT component tests | No |
 | `integration/frameworks/` | Real framework engines and distributed topology lifecycles | No |
+| `validation/fault_injection/` | Eight-GPU fault-injection and SCOUT localization qualification | No |
 | `validation/moe/` | Expensive GPU qualification and MoE regime campaigns | No |
 | `support/` | Shared models and validation helpers | N/A |
 
@@ -18,7 +19,8 @@ python -m pytest -q
 
 Distributed programs document their required `torchrun` command in the module docstring.
 Production-loop integration is exercised through `examples/production_loops/`.
-Destructive injection is covered separately by `examples/fault_injection/`.
+Systematic fault injection and localization are covered by
+`validation/fault_injection/`.
 The public fault injection evaluation kit is covered by `unit/test_fault_injection.py`.
 MoE validation is manual because it depends on specific GPU, Triton, Megatron Core, and Transformer Engine environments.
 Reproducible healthy-path performance commands and regression thresholds are documented in [benchmarks](../benchmarks/README.md).

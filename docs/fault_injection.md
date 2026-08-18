@@ -8,8 +8,10 @@ depending on SCOUT, GEMINI, or another resiliency system.
 Campaigns describe observable failure effects.
 Built-in hooks execute safe model and optimizer faults; callback executors connect
 the same schema to isolated process, storage, communication, and cluster controls.
-See the [fault injection and SCOUT localization example](../examples/fault_injection/README.md)
-for a production DDP loop that compares injection and localization JSON artifacts.
+See the
+[manual fault injection and SCOUT localization campaign](../tests/validation/fault_injection/README.md)
+for an eight-GPU DDP qualification run that compares injection and localization
+JSON artifacts.
 
 ## Enable a Campaign
 
@@ -291,7 +293,7 @@ Such an incident must have one trigger candidate, and a later incident on the
 same resolved target is treated as potentially overlapping. Repeated
 `matching_calls=1` candidates retain the established one-call contract for
 each scheduled iteration.
-The eight-GPU evaluation example accepts only `matching_calls=1`, even for
+The eight-GPU validation campaign accepts only `matching_calls=1`, even for
 non-state faults. Framework call multiplicity is not portable enough to infer a
 multi-call effect's expiration or its required post-fault optimizer iteration.
 Closing a session normally completes a verified `campaign_end` effect. Closing
