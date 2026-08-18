@@ -107,8 +107,10 @@ depending on SCOUT, GEMINI, or another resiliency system.</p>
 <p>Campaigns describe observable failure effects.
 Built-in hooks execute safe model and optimizer faults; callback executors connect
 the same schema to isolated process, storage, communication, and cluster controls.
-See the <a href="https://github.com/LMResiliency/lm-resiliency/blob/71ef504cccaa49d35b34851f1ea22fcaff441931/examples/fault_injection/README.md">fault injection and SCOUT localization example</a>
-for a production DDP loop that compares injection and localization JSON artifacts.</p>
+See the
+<a href="https://github.com/LMResiliency/lm-resiliency/blob/ce0b827496a633978000301aa28a511f5923b1a2/tests/validation/fault_injection/README.md">manual fault injection and SCOUT localization campaign</a>
+for an eight-GPU DDP qualification run that compares injection and localization
+JSON artifacts.</p>
 <h2 id="enable-a-campaign">Enable a Campaign<a class="headerlink" href="#enable-a-campaign" title="Permanent link">&para;</a></h2>
 <p>Enable the campaign once after framework initialization and before training:</p>
 <pre><code class="language-python">from lm_resiliency import enable_fault_injection
@@ -528,7 +530,7 @@ Such an incident must have one trigger candidate, and a later incident on the
 same resolved target is treated as potentially overlapping. Repeated
 <code>matching_calls=1</code> candidates retain the established one-call contract for
 each scheduled iteration.
-The eight-GPU evaluation example accepts only <code>matching_calls=1</code>, even for
+The eight-GPU validation campaign accepts only <code>matching_calls=1</code>, even for
 non-state faults. Framework call multiplicity is not portable enough to infer a
 multi-call effect's expiration or its required post-fault optimizer iteration.
 Closing a session normally completes a verified <code>campaign_end</code> effect. Closing
