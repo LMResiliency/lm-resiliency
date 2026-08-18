@@ -1,0 +1,76 @@
+{
+  "clock": {
+    "origin": "training_run",
+    "type": "training_iteration"
+  },
+  "incidents": [
+    {
+      "faults": [
+        {
+          "fault_id": "restart-01-process-stall",
+          "parameters": {},
+          "target": {
+            "model_part": 0,
+            "operation": "manager_restart",
+            "rank": 0,
+            "surface": "process"
+          },
+          "type": "hang"
+        }
+      ],
+      "incident_id": "restart-01",
+      "lifetime": {
+        "matching_calls": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          1
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "replacement-01-replay-sdc",
+          "parameters": {
+            "operation": "sign_flip",
+            "scope": "100%"
+          },
+          "target": {
+            "component": "transformer_block",
+            "index": 0,
+            "metadata": {
+              "injection_mode": "scout_replay_only"
+            },
+            "model_part": 0,
+            "rank": 0,
+            "surface": "output"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "replacement-01",
+      "lifetime": {
+        "matching_calls": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          2
+        ],
+        "probability": 1.0
+      }
+    }
+  ],
+  "metadata": {
+    "active_nodes": 4,
+    "profile": "torchrun_pressure",
+    "standby_nodes": 1,
+    "total_steps": 4
+  },
+  "name": "torchrun-framework-restart-replacement",
+  "schema_version": 1,
+  "seed": 23
+}

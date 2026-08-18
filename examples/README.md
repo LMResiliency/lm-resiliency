@@ -1,9 +1,18 @@
 # Examples
 
+The examples are organized by use case:
+
+| Path | Purpose |
+|---|---|
+| [`quickstart.py`](quickstart.py) | Single-process CPU training and GEMINI recovery |
+| [`production_loops/`](production_loops/) | Framework-native PyTorch, DeepSpeed, Megatron Core, and TorchTitan training loops |
+| [`torchrun/`](torchrun/README.md) | Native torchrun adapter bootstrap, restart, and standby replacement |
+
 ## Quick Start
 
-After installing `lm-resiliency`, run its packaged command to train a tiny causal LM on CPU.
-The example executes the complete forward, backward, optimizer, and GEMINI checkpoint lifecycle without requiring a GPU.
+After installing `lm-resiliency`, run its packaged command to train a tiny
+causal LM on CPU. The command executes the forward, backward, optimizer, and
+GEMINI checkpoint lifecycle without requiring a GPU:
 
 ```bash
 lm-resiliency-quickstart \
@@ -20,10 +29,9 @@ lm-resiliency-quickstart \
   --run-id my-quickstart
 ```
 
-The installed command and library come from the same wheel.
-Developers working from a source checkout can use the equivalent [quickstart.py](quickstart.py) wrapper.
-The single-process example validates training-loop integration and recovery.
-Use the distributed examples below to exercise SCOUT replay and multi-rank localization.
+The installed command and library come from the same wheel. Developers working
+from a source checkout can use the equivalent
+[`quickstart.py`](quickstart.py) wrapper.
 
 ## Production Loops
 
@@ -68,3 +76,11 @@ Each framework example runs ten steps by default; set `--steps` to change the
 duration. Rank zero writes a framework summary under
 `--validation-output-dir`; the directory is example validation output and is
 not used for restart contexts or GEMINI checkpoints.
+
+## Torchrun Workflows
+
+See the [torchrun guide](torchrun/README.md) for:
+
+- a CPU adapter-bootstrap smoke test;
+- clean automatic-adapter checks across all four frameworks; and
+- manager-driven same-node restart and SCOUT-localized standby replacement.

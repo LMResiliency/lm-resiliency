@@ -21,6 +21,8 @@ Distributed programs document their required `torchrun` command in the module do
 Production-loop integration is exercised through `examples/production_loops/`.
 Systematic fault injection and localization are covered by
 `validation/fault_injection/`.
+Native torchrun bootstrap, restart, and replacement workflows are documented
+under `examples/torchrun/`.
 The public fault injection evaluation kit is covered by `unit/test_fault_injection.py`.
 MoE validation is manual because it depends on specific GPU, Triton, Megatron Core, and Transformer Engine environments.
 Reproducible healthy-path performance commands and regression thresholds are documented in [benchmarks](../benchmarks/README.md).
