@@ -87,7 +87,7 @@ lm_resiliency_worker_config=${WORKER_CONFIG}" \
   --validation-output-dir "/tmp/lm-resiliency-${framework}"
 ```
 
-See [Examples](examples/README.md) for the framework loops, adapter-bootstrap checks, and additional commands.
+See [Torchrun Resiliency](docs/torchrun_resiliency.md) to understand how LM Resiliency provides closed-loop recovery for the training loop.
 
 ### Resiliency cycle
 
@@ -135,8 +135,6 @@ campaign configuration details.
 The package-root `enable_resiliency` entry point selects dense or expert replay peers from framework topology metadata.
 See the [API guide](docs/api.md) for framework invocation, configuration, recovery, callbacks, and lifecycle management.
 See the [compatibility policy](docs/compatibility.md) for supported and tested versions.
-Every [production-loop example](examples/README.md#production-loops) uses the
-native torchrun backend and leaves the framework-owned training loop unchanged.
 
 ## Documentation
 
