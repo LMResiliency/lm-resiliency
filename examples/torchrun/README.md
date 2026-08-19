@@ -98,7 +98,7 @@ The outer `pressure.py` controller:
 1. runs an uninterrupted baseline;
 2. launches one torchrun agent per supplied GPU;
 3. waits for automatic active/standby admission;
-4. injects scheduled restart or replay-only SDC incidents;
+4. injects the scheduled failure type through the public fault-injection API;
 5. publishes manager-selected successor generations; and
 6. compares the final managed state with the baseline.
 
@@ -155,6 +155,15 @@ and eight replacements.
 Fault injection is configured only through the campaign bundle. It is not a
 worker-policy or `--rdzv-conf` setting. Replacement incidents must run at step
 2 or later so a clean recovery-verified checkpoint exists before corruption.
+
+The checked-in `single_node_pressure.json` profile uses one eight-GPU host:
+four active GPU-agents form a training world size of four and four GPU-agents
+remain parked as standbys. It schedules every canonical fault-injection type
+once. Four replacement-class incidents consume the standbys; the remaining
+seventeen incidents use same-node restart and exact recovery. Destructive
+process, storage, resource, and communication effects are executed against
+disposable rank-local sandbox resources. Only replay tensor corruption claims
+real SCOUT rank localization in this single-host profile.
 
 ### Multi-Host Run
 

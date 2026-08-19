@@ -140,6 +140,9 @@ class TorchTitanDriver:
             "trainer_step": int(self.trainer.step),
         }
 
+    def fault_injection_objects(self) -> tuple[Any, None]:
+        return self.trainer, None
+
     def close(self) -> None:
         def restore_loss() -> None:
             self.trainer.loss_fn = self._original_loss

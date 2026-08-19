@@ -7,13 +7,18 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
-from lm_resiliency import FaultCampaign
+from lm_resiliency import (
+    FaultCampaign,
+    JsonCampaignStateStore,
+    enable_fault_injection,
+)
 from lm_resiliency.integrations.torchrun import (
     TorchrunWorkerContext,
     get_torchrun_worker_context,
 )
 
 from .campaign import CAMPAIGN_FILENAME, pressure_events
+from .faults import isolated_fault_executor
 from .replay_fault import ReplayFaultCampaign
 from .runtime import (
     CampaignRuntime,
@@ -79,7 +84,7 @@ def run_worker(
         raise RuntimeError("fault-injection validation requires an even world of at least four")
     total_steps = int(manifest.metadata["total_steps"])
     event = None if mode == "baseline" or generation >= len(events) else events[generation]
-    replacement_event = event is not None and event.kind == "replacement"
+    replacement_event = event is not None and event.kind == "replacement" and event.scout_localized
     replay_campaign = ReplayFaultCampaign(
         steps=total_steps,
         rank=rank,
@@ -119,6 +124,21 @@ def run_worker(
         )
     )
     try:
+        if mode == "campaign" and any(event.injection_executor is not None for event in events):
+            target, optimizer = driver.fault_injection_objects()
+            fault_session = enable_fault_injection(
+                target,
+                optimizer,
+                campaign=manifest,
+                completed_iterations=driver.handle.step_count,
+                state_store=JsonCampaignStateStore(
+                    fault_campaign_dir / "fault-state" / f"rank-{rank}.json"
+                ),
+                executors=(
+                    isolated_fault_executor(fault_campaign_dir / "fault-sandbox" / f"rank-{rank}"),
+                ),
+            )
+            runtime.bind_fault_session(fault_session)
         runtime.initialize(driver)
         driver.run(
             before_step=runtime.before_step,

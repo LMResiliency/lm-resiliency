@@ -1,0 +1,658 @@
+{
+  "clock": {
+    "origin": "training_run",
+    "type": "training_iteration"
+  },
+  "incidents": [
+    {
+      "faults": [
+        {
+          "fault_id": "01-hang-fault",
+          "parameters": {},
+          "target": {
+            "metadata": {
+              "executor": "isolated_validation",
+              "recovery_action": "restart"
+            },
+            "model_part": 0,
+            "operation": "manager_restart",
+            "rank": 0,
+            "resource": "resiliency-cycle:hang",
+            "surface": "resource"
+          },
+          "type": "hang"
+        }
+      ],
+      "incident_id": "01-hang",
+      "lifetime": {
+        "matching_calls": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          1
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "03-tensor_corruption-fault",
+          "parameters": {
+            "operation": "sign_flip",
+            "scope": "100%"
+          },
+          "target": {
+            "metadata": {
+              "checkpoint_step": 2,
+              "executor": "isolated_validation",
+              "injection_mode": "scout_replay_only",
+              "recovery_action": "replacement"
+            },
+            "model_part": 0,
+            "rank": 0,
+            "resource": "resiliency-cycle:tensor_corruption",
+            "surface": "resource"
+          },
+          "type": "tensor_corruption"
+        }
+      ],
+      "incident_id": "03-tensor_corruption",
+      "lifetime": {
+        "matching_calls": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          3
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "05-stale_state-fault",
+          "parameters": {},
+          "target": {
+            "metadata": {
+              "executor": "isolated_validation",
+              "recovery_action": "restart"
+            },
+            "model_part": 0,
+            "rank": 0,
+            "resource": "resiliency-cycle:stale_state",
+            "surface": "resource"
+          },
+          "type": "stale_state"
+        }
+      ],
+      "incident_id": "05-stale_state",
+      "lifetime": {
+        "matching_calls": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          5
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "07-drop-fault",
+          "parameters": {},
+          "target": {
+            "metadata": {
+              "executor": "isolated_validation",
+              "recovery_action": "restart"
+            },
+            "model_part": 0,
+            "rank": 2,
+            "resource": "resiliency-cycle:drop",
+            "surface": "resource"
+          },
+          "type": "drop"
+        }
+      ],
+      "incident_id": "07-drop",
+      "lifetime": {
+        "matching_calls": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          7
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "09-duplicate-fault",
+          "parameters": {},
+          "target": {
+            "metadata": {
+              "executor": "isolated_validation",
+              "recovery_action": "restart"
+            },
+            "model_part": 0,
+            "rank": 0,
+            "resource": "resiliency-cycle:duplicate",
+            "surface": "resource"
+          },
+          "type": "duplicate"
+        }
+      ],
+      "incident_id": "09-duplicate",
+      "lifetime": {
+        "matching_calls": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          9
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "11-reorder-fault",
+          "parameters": {},
+          "target": {
+            "metadata": {
+              "executor": "isolated_validation",
+              "recovery_action": "restart"
+            },
+            "model_part": 0,
+            "rank": 2,
+            "resource": "resiliency-cycle:reorder",
+            "surface": "resource"
+          },
+          "type": "reorder"
+        }
+      ],
+      "incident_id": "11-reorder",
+      "lifetime": {
+        "matching_calls": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          11
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "13-delay-fault",
+          "parameters": {
+            "delay_ms": 5.0
+          },
+          "target": {
+            "metadata": {
+              "executor": "isolated_validation",
+              "recovery_action": "restart"
+            },
+            "model_part": 0,
+            "rank": 0,
+            "resource": "resiliency-cycle:delay",
+            "surface": "resource"
+          },
+          "type": "delay"
+        }
+      ],
+      "incident_id": "13-delay",
+      "lifetime": {
+        "matching_calls": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          13
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "15-timeout-fault",
+          "parameters": {},
+          "target": {
+            "metadata": {
+              "executor": "isolated_validation",
+              "recovery_action": "restart"
+            },
+            "model_part": 0,
+            "rank": 2,
+            "resource": "resiliency-cycle:timeout",
+            "surface": "resource"
+          },
+          "type": "timeout"
+        }
+      ],
+      "incident_id": "15-timeout",
+      "lifetime": {
+        "matching_calls": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          15
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "17-resource_unavailable-fault",
+          "parameters": {},
+          "target": {
+            "metadata": {
+              "checkpoint_step": 15,
+              "executor": "isolated_validation",
+              "recovery_action": "replacement"
+            },
+            "model_part": 0,
+            "rank": 1,
+            "resource": "resiliency-cycle:resource_unavailable",
+            "surface": "resource"
+          },
+          "type": "resource_unavailable"
+        }
+      ],
+      "incident_id": "17-resource_unavailable",
+      "lifetime": {
+        "matching_calls": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          17
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "19-exception-fault",
+          "parameters": {},
+          "target": {
+            "metadata": {
+              "executor": "isolated_validation",
+              "recovery_action": "restart"
+            },
+            "model_part": 0,
+            "rank": 2,
+            "resource": "resiliency-cycle:exception",
+            "surface": "resource"
+          },
+          "type": "exception"
+        }
+      ],
+      "incident_id": "19-exception",
+      "lifetime": {
+        "matching_calls": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          19
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "21-resource_exhaustion-fault",
+          "parameters": {},
+          "target": {
+            "metadata": {
+              "executor": "isolated_validation",
+              "recovery_action": "restart"
+            },
+            "model_part": 0,
+            "rank": 0,
+            "resource": "resiliency-cycle:resource_exhaustion",
+            "surface": "resource"
+          },
+          "type": "resource_exhaustion"
+        }
+      ],
+      "incident_id": "21-resource_exhaustion",
+      "lifetime": {
+        "matching_calls": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          21
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "23-process_termination-fault",
+          "parameters": {},
+          "target": {
+            "metadata": {
+              "executor": "isolated_validation",
+              "recovery_action": "restart"
+            },
+            "model_part": 0,
+            "rank": 2,
+            "resource": "resiliency-cycle:process_termination",
+            "surface": "resource"
+          },
+          "type": "process_termination"
+        }
+      ],
+      "incident_id": "23-process_termination",
+      "lifetime": {
+        "matching_calls": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          23
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "25-checkpoint_corruption-fault",
+          "parameters": {},
+          "target": {
+            "metadata": {
+              "executor": "isolated_validation",
+              "recovery_action": "restart"
+            },
+            "model_part": 0,
+            "rank": 0,
+            "resource": "resiliency-cycle:checkpoint_corruption",
+            "surface": "resource"
+          },
+          "type": "checkpoint_corruption"
+        }
+      ],
+      "incident_id": "25-checkpoint_corruption",
+      "lifetime": {
+        "matching_calls": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          25
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "27-checkpoint_truncation-fault",
+          "parameters": {},
+          "target": {
+            "metadata": {
+              "executor": "isolated_validation",
+              "recovery_action": "restart"
+            },
+            "model_part": 0,
+            "rank": 2,
+            "resource": "resiliency-cycle:checkpoint_truncation",
+            "surface": "resource"
+          },
+          "type": "checkpoint_truncation"
+        }
+      ],
+      "incident_id": "27-checkpoint_truncation",
+      "lifetime": {
+        "matching_calls": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          27
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "29-checkpoint_missing-fault",
+          "parameters": {},
+          "target": {
+            "metadata": {
+              "executor": "isolated_validation",
+              "recovery_action": "restart"
+            },
+            "model_part": 0,
+            "rank": 0,
+            "resource": "resiliency-cycle:checkpoint_missing",
+            "surface": "resource"
+          },
+          "type": "checkpoint_missing"
+        }
+      ],
+      "incident_id": "29-checkpoint_missing",
+      "lifetime": {
+        "matching_calls": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          29
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "31-io_error-fault",
+          "parameters": {},
+          "target": {
+            "metadata": {
+              "executor": "isolated_validation",
+              "recovery_action": "restart"
+            },
+            "model_part": 0,
+            "rank": 2,
+            "resource": "resiliency-cycle:io_error",
+            "surface": "resource"
+          },
+          "type": "io_error"
+        }
+      ],
+      "incident_id": "31-io_error",
+      "lifetime": {
+        "matching_calls": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          31
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "33-payload_corruption-fault",
+          "parameters": {},
+          "target": {
+            "metadata": {
+              "executor": "isolated_validation",
+              "recovery_action": "restart"
+            },
+            "model_part": 0,
+            "rank": 0,
+            "resource": "resiliency-cycle:payload_corruption",
+            "surface": "resource"
+          },
+          "type": "payload_corruption"
+        }
+      ],
+      "incident_id": "33-payload_corruption",
+      "lifetime": {
+        "matching_calls": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          33
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "35-collective_desync-fault",
+          "parameters": {},
+          "target": {
+            "metadata": {
+              "checkpoint_step": 33,
+              "executor": "isolated_validation",
+              "recovery_action": "replacement"
+            },
+            "model_part": 0,
+            "rank": 2,
+            "resource": "resiliency-cycle:collective_desync",
+            "surface": "resource"
+          },
+          "type": "collective_desync"
+        }
+      ],
+      "incident_id": "35-collective_desync",
+      "lifetime": {
+        "matching_calls": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          35
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "37-message_drop-fault",
+          "parameters": {},
+          "target": {
+            "metadata": {
+              "executor": "isolated_validation",
+              "recovery_action": "restart"
+            },
+            "model_part": 0,
+            "rank": 0,
+            "resource": "resiliency-cycle:message_drop",
+            "surface": "resource"
+          },
+          "type": "message_drop"
+        }
+      ],
+      "incident_id": "37-message_drop",
+      "lifetime": {
+        "matching_calls": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          37
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "39-network_partition-fault",
+          "parameters": {},
+          "target": {
+            "metadata": {
+              "checkpoint_step": 37,
+              "executor": "isolated_validation",
+              "recovery_action": "replacement"
+            },
+            "model_part": 0,
+            "rank": 3,
+            "resource": "resiliency-cycle:network_partition",
+            "surface": "resource"
+          },
+          "type": "network_partition"
+        }
+      ],
+      "incident_id": "39-network_partition",
+      "lifetime": {
+        "matching_calls": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          39
+        ],
+        "probability": 1.0
+      }
+    },
+    {
+      "faults": [
+        {
+          "fault_id": "41-config_drift-fault",
+          "parameters": {},
+          "target": {
+            "metadata": {
+              "executor": "isolated_validation",
+              "recovery_action": "restart"
+            },
+            "model_part": 0,
+            "rank": 0,
+            "resource": "resiliency-cycle:config_drift",
+            "surface": "resource"
+          },
+          "type": "config_drift"
+        }
+      ],
+      "incident_id": "41-config_drift",
+      "lifetime": {
+        "matching_calls": 1
+      },
+      "retrigger": "once",
+      "trigger": {
+        "at": [
+          41
+        ],
+        "probability": 1.0
+      }
+    }
+  ],
+  "metadata": {
+    "active_nodes": 4,
+    "profile": "torchrun_pressure",
+    "standby_nodes": 4,
+    "total_steps": 42
+  },
+  "name": "torchrun-resiliency-cycle-all-failure-types",
+  "schema_version": 1,
+  "seed": 29
+}

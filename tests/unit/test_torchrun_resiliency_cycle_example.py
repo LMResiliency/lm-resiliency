@@ -25,7 +25,9 @@ from examples.torchrun.resiliency_cycle.harness.campaign import (
     load_campaign_bundle,
     pressure_events,
     require_fresh_campaign_run,
+    single_node_pressure_campaign,
 )
+from examples.torchrun.resiliency_cycle.harness.faults import isolated_fault_executor
 from examples.torchrun.resiliency_cycle.harness.frameworks.megatron import (
     MegatronDriver,
 )
@@ -54,7 +56,12 @@ from examples.torchrun.resiliency_cycle.pressure import (
     _cleanup_controller,
     _validate_replacement_coverage,
 )
-from lm_resiliency import FaultCampaign
+from lm_resiliency import (
+    FailureType,
+    FaultCampaign,
+    FaultExecutionRequest,
+    IncidentLifetime,
+)
 
 
 class _CheckpointManager:
@@ -102,6 +109,74 @@ def test_sixteen_gpu_layout_treats_every_gpu_as_one_node() -> None:
     assert sum(placement.remote for placement in topology.placements) == 8
     assert topology.world_size == 8
     assert topology.replication_jump == 4
+
+
+def test_single_node_pressure_campaign_uses_all_eight_gpus() -> None:
+    manifest = (
+        Path(__file__).parents[2]
+        / "examples"
+        / "torchrun"
+        / "resiliency_cycle"
+        / "campaigns"
+        / "single_node_pressure.json"
+    )
+    campaign = FaultCampaign.from_json(manifest)
+    assert campaign == single_node_pressure_campaign()
+    events = pressure_events(campaign)
+    topology = campaign_layout(
+        gpus="0,1,2,3,4,5,6,7",
+        remote_gpus="",
+        remote_enabled=False,
+        campaign=campaign,
+        events=events,
+    )
+
+    assert topology.world_size == 4
+    assert len(topology.placements) == 8
+    assert len(events) == len(FailureType) == 21
+    assert [event.step for event in events] == list(range(1, 42, 2))
+    assert {event.failure_type for event in events} == set(FailureType)
+    assert sum(event.kind == "restart" for event in events) == 17
+    assert sum(event.kind == "replacement" for event in events) == 4
+    assert [event.fault_rank for event in events if event.kind == "replacement"] == [
+        0,
+        1,
+        2,
+        3,
+    ]
+    replacements = [event for event in events if event.kind == "replacement"]
+    assert replacements[0].failure_type is FailureType.TENSOR_CORRUPTION
+    assert replacements[0].checkpoint_step == replacements[0].step - 1
+    assert all(
+        event.checkpoint_step == events[events.index(event) - 1].step for event in replacements[1:]
+    )
+    assert campaign.metadata["total_steps"] == 42
+
+
+def test_isolated_executor_verifies_every_failure_type(tmp_path: Path) -> None:
+    campaign = single_node_pressure_campaign()
+    executor = isolated_fault_executor(tmp_path)
+
+    for incident in campaign.incidents:
+        fault = incident.faults[0]
+        request = FaultExecutionRequest(
+            campaign=campaign.name,
+            seed=campaign.seed,
+            occurrence_id=f"{incident.incident_id}@{incident.trigger.at[0]}#1",
+            incident_id=incident.incident_id,
+            iteration=incident.trigger.at[0],
+            attempt=1,
+            temporal_behavior="transient",
+            lifetime=IncidentLifetime(matching_calls=1),
+            fault=fault,
+        )
+        executor.validate(request)
+        result = executor.activate(request)
+
+        assert executor.supports(fault)
+        assert result.verified
+        assert not result.active
+        assert result.evidence["failure_type"] == fault.type.value
 
 
 def test_campaign_bundle_creates_only_manifest_before_execution(tmp_path: Path) -> None:

@@ -16,7 +16,7 @@ Extend the project's core capabilities across the model lifecycle:
 
 The current release focuses on distributed LLM pre-training.
 It provides SCOUT replay-based fault localization, GEMINI in-memory checkpointing,
-framework integrations, and platform-neutral manager handoff.
+automatic framework adapters, and native torchrun restart and standby replacement.
 See [SCOUT](docs/scout.md), [GEMINI](docs/gemini.md), and the current
 [validation report](docs/validation.md) for the implemented contract and its
 boundaries.
@@ -40,68 +40,37 @@ boundaries.
 
 | Horizon | Initiative | Intended outcome |
 |---|---|---|
-| Near term | Training manager integration | Automated launch, restart, quarantine, replacement, and recovery coordination |
-| Near term | Fault injection evaluation kit | Framework-aware fault campaigns with localization ground truth |
+| Mid term | Environment-backed fault campaign expansion | Broader framework, process, storage, communication, and infrastructure fault coverage |
 | Near term | Large-scale evaluation | Evidence beyond the current 16-GPU, two-host validation boundary |
 | Mid term | Post-training resiliency | Trusted recovery for SFT, preference optimization, and distributed RL |
-| Mid term | Inference fleet resiliency | Detection, quarantine, rerouting, and request-state recovery for serving fleets |
+| Near term | Inference fleet resiliency | Detection, quarantine, rerouting, and request-state recovery for serving fleets |
 | Mid term | Expanded SCOUT coverage | Independent evidence for single-owner shards and additional execution backends |
-
-## Training Manager Integration
-
-Integrate worker-local detection and recovery state with an external training
-manager that can act on faults across the job and cluster.
-
-### Planned Capabilities
-
-- Add high-performance checkpoint replication and replacement transfer backends.
-- Provide a reference training manager integration built on `OrchestrationHooks`.
-- Launch and restart distributed jobs with an explicit recovery decision.
-- Map logical ranks and fault reports to GPUs, hosts, and other cluster resources.
-- Demonstrate worker drain, quarantine, placement, and replacement flows.
-- Coordinate checkpoint transfer before restart or replacement when the source
-  remains accessible.
-- Integrate normalized events with common metrics, tracing, and alerting systems.
-- Add stable fault and recovery reason codes for dashboards and automation.
-- Correlate SCOUT evidence with GPU telemetry, NCCL diagnostics, and deployment
-  resource maps.
-- Validate complete framework durable fallback after fail-stop recovery.
-
-SCOUT remains responsible for detecting and localizing suspected faults.
-GEMINI remains responsible for exposing recoverable checkpoint state.
-The training manager owns job launch, restart, placement, resource quarantine,
-and replacement coordination. Physical hardware repair or replacement remains an
-infrastructure operator responsibility.
-
-See the draft [torchrun native resiliency design](docs/torchrun_resiliency.md)
-for a fixed-size active fleet, standby-node admission, stable logical rank
-slots, and checkpoint-aware restart APIs.
 
 ## Fault Injection Evaluation Kit
 
-Create an independently enabled feature within `lm-resiliency` for injecting
-faults through supported training frameworks. The kit records the exact injected
-fault as ground truth, then a campaign evaluates whether the resiliency system
-under test detects and localizes that fault correctly.
+The independently enabled fault-injection kit injects faults through supported
+training frameworks. It records the exact injected fault as ground truth, then
+a campaign evaluates whether the resiliency system under test detects and
+localizes that fault correctly.
 
-The injector should not depend on SCOUT or GEMINI being enabled, and it should
-not require adapters for individual resiliency systems.
+The injector does not depend on SCOUT or GEMINI being enabled and does not
+require adapters for individual resiliency systems.
 
-### Initial Implementation
+### Implemented Foundation
 
-- Provide framework-aware model targeting for PyTorch, TorchTitan, Megatron Core,
+- Framework-aware model targeting for PyTorch, TorchTitan, Megatron Core,
   and DeepSpeed.
-- Provide versioned incident manifests with arbitrary training-iteration
+- Versioned incident manifests with arbitrary training-iteration
   triggers, bounded or permanent lifetimes, deterministic probability, and
   restart-stable retrigger policy.
-- Represent common numerical, state-flow, performance, storage, process,
+- Representation of common numerical, state-flow, performance, storage, process,
   communication, cluster, and configuration failures.
-- Execute safe model, gradient, optimizer-state, and delay faults through a
+- Safe model, gradient, optimizer-state, and delay faults through a
   built-in local backend.
-- Connect destructive process, storage, communication, and cluster effects
-  through capability-checked executors and explicit safety ceilings.
-- Verify each local injection before recording it as ground truth.
-- Accept neutral localization results and emit comparable JSON reports.
+- Capability-checked executors and explicit safety ceilings for destructive
+  process, storage, communication, and cluster effects.
+- Verification of each local injection before it is recorded as ground truth.
+- Neutral localization-result input and comparable JSON reports.
 
 See [Fault injection evaluation](docs/fault_injection.md) for the implemented
 API, fault matrix, and safety boundaries.
@@ -110,8 +79,8 @@ API, fault matrix, and safety boundaries.
 
 - Add built-in framework instrumentation for RNG, sampler, input-pipeline,
   checkpoint-I/O, and public collective surfaces.
-- Provide reference process, storage, communication, and training-manager
-  executors for isolated evaluation environments.
+- Extend the reference isolated executors into environment-backed process,
+  storage, communication, and infrastructure fault implementations.
 - Extend logical target resolution and ground truth to devices, nodes, links,
   ports, switches, and other deployment resource identifiers.
 - Record the software, hardware, topology, model, workload, seed, and injection
@@ -160,8 +129,8 @@ replay-only production-loop injection.
 
 ### Failure and Recovery Coverage
 
-- Exercise actual worker termination, process-group failure, scheduler relaunch,
-  node replacement, and framework durable fallback.
+- Exercise actual worker termination and process-group failure through native
+  torchrun relaunch and node replacement, including framework durable fallback.
 - Validate recovery after simultaneous compute and storage failures.
 - Evaluate recurring intermittent faults, not only permanent or deterministic
   faults.
@@ -170,6 +139,13 @@ replay-only production-loop injection.
 
 ### Runtime and Transport Coverage
 
+- Add high-performance checkpoint replication and replacement-transfer backends.
+- Provide scheduler-specific deployment templates that allocate active and
+  standby agents while retaining the standard torchrun command.
+- Map logical ranks and fault reports to GPUs, hosts, racks, and other cluster
+  resources supplied by deployment metadata.
+- Integrate normalized events with common metrics, tracing, and alerting systems.
+- Add stable fault and recovery reason codes for dashboards and automation.
 - Qualify RDMA-capable checkpoint replication and transfer implementations,
   including deployment-specific EFA or NIXL paths where available.
 - Evaluate FP8, Transformer Engine, CUDA Graphs, compilation, communication
