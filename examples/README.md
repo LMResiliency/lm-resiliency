@@ -27,42 +27,11 @@ from the user module's imports.
 | Megatron Core | [megatron.py](production_loops/megatron.py) | `training.train()` and `train_step()` |
 | DeepSpeed | [deepspeed.py](production_loops/deepspeed.py) | `DeepSpeedEngine.backward()` and `DeepSpeedEngine.step()` |
 
-Run one example on two eight-GPU hosts from the repository root. Start the same
-command on both hosts and set `RDZV_HOST` to a hostname or IP address reachable
-from both:
-
-```bash
-RDZV_HOST=node-a
-
-# --nnodes=1:2 keeps one node active and parks a second node as standby.
-# --nproc-per-node=8 launches eight training workers only on the active node.
-# --max-restarts=4 allows each torchrun agent to restart its workers four times.
-# --rdzv-backend=lm_resiliency enables active/standby admission and recovery.
-torchrun \
-  --nnodes=1:2 \
-  --nproc-per-node=8 \
-  --max-restarts=4 \
-  --rdzv-backend=lm_resiliency \
-  --rdzv-endpoint="${RDZV_HOST}:29400" \
-  --rdzv-id=torchtitan-production \
-  --rdzv-conf="store_type=tcp,read_timeout=120,\
-lm_resiliency_restart_context_path=/tmp/lm-resiliency-torchtitan-context/context.json,\
-lm_resiliency_worker_config=$PWD/examples/production_loops/policies/resiliency.toml" \
-  --module \
-  examples.production_loops.torchtitan \
-  --validation-output-dir /tmp/torchtitan-production-loop
-```
-
-The first registered host receives the eight logical training ranks. The other
-host remains parked as a standby until torchrun selects it to replace a faulty
-host. Use `--nnodes=1:1` only for a single-host run without standby
-replacement.
-
-Replace the module, rendezvous paths, and validation output directory for
-PyTorch, Megatron Core, or DeepSpeed. The worker infers the framework from
-imports. The checked-in worker policy uses
-`replication_jump=4` for this eight-rank topology. Other world layouts must use
-a policy with a valid deployment-specific GEMINI pairing.
+See the [torchrun resiliency guide](../docs/torchrun_resiliency.md) for the
+integrated launch command and the [torchrun workflows](torchrun/README.md) for
+runnable bootstrap, framework-matrix, and recovery campaigns. Select the
+corresponding module under `examples.production_loops`; the worker infers the
+framework from its imports.
 
 Each framework example runs ten steps by default; set `--steps` to change the
 duration. Rank zero writes a framework summary under
