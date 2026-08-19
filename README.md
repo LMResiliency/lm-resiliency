@@ -28,7 +28,7 @@
 
 - **SDC-safe recovery-verified checkpoint:** SCOUT certifies recovery checkpoints and excludes candidates affected by recurring SDC.
 - **Localize latent and permanent failures at runtime:** SCOUT identifies affected ranks, GPUs, nodes, communication endpoints, peer groups, or telemetry-reported physical devices.
-- **Native `torchrun` integration:** `lm_resiliency` works as a `torchrun` rendezvous backend to automatically detect and localize failures, replace faulty nodes with standbys, and restart training from recovery-verified checkpoint.
+- **Native `torchrun` integration with Closed-Loop Recovery:** `lm_resiliency` works as a `torchrun` rendezvous backend to automatically detect and localize failures, replace faulty nodes with standbys, and restart training from recovery-verified checkpoint.
 - **Minimize rollback and checkpoint retrieve:** GEMINI saves training states to CPU memory at high frequency, reducing lost computation and checkpoint retrieval overhead after a failure.
 - **No training-loop rewrite:** `lm-resiliency` attaches hooks at framework initialization and leaves the existing training loop unchanged.
 - **Keep protection lightweight:** `lm_resiliency` incurs less than 1% amortized overhead to the training throughput.
