@@ -5,7 +5,7 @@ type: software
 authors:
   - family-names: "Wang"
     given-names: "Zhuang"
-version: 0.1.0
+version: 0.2.0
 license: BSD-3-Clause
 repository-code: "https://github.com/LMResiliency/lm-resiliency"
 url: "https://github.com/LMResiliency/lm-resiliency"

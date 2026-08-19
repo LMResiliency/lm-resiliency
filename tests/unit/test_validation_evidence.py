@@ -72,7 +72,7 @@ def test_seal_and_verify_revision_bound_bundle(tmp_path):
     verified = validation_evidence.verify_bundle(bundle, expected_commit=_COMMIT)
 
     assert verified == manifest
-    assert manifest["project"]["version"] == "0.1.0"
+    assert manifest["project"]["version"] == "0.2.0"
     assert manifest["campaign"]["command_ids"] == ["smoke"]
     assert manifest["qualification"]["boundaries"] == ["CPU only."]
     assert {record["path"] for record in manifest["files"]} == {
