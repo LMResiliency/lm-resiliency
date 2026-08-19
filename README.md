@@ -15,7 +15,7 @@
 [![arXiv](https://img.shields.io/badge/arXiv-2608.11034-b31b1b.svg)](https://arxiv.org/abs/2608.11034)
 [![SOSP](https://img.shields.io/badge/SOSP-2023-violet.svg)](https://doi.org/10.1145/3600006.3613145)
 
-[Quick Start](#quick-start) · [API Guide](docs/api.md) · [Frameworks](#framework-support) · [Validation](docs/validation.md) · [Roadmap](ROADMAP.md)
+[Installation](#installation) · [Examples](#examples) · [API Guide](docs/api.md) · [Frameworks](#framework-support) · [Validation](docs/validation.md) · [Roadmap](ROADMAP.md)
 
 </div>
 
@@ -23,97 +23,109 @@
 
 | | Protects against | What you gain |
 |---|---|---|
-| **SCOUT** | Latent SDC; selection of recovery checkpoints corrupted by SDC; compute, input-pipeline, and communication stragglers; collective desynchronization (hangs); process stalls; uncorrectable ECC, row-remap exhaustion, fatal XIDs, device loss, severe NVLink errors, and imminent thermal shutdown | Pinpoint faulty ranks, GPUs, nodes, communication endpoints, or telemetry-reported physical devices, and exclude checkpoints affected by recurring SDC from recovery; see the [coverage contract](docs/scout.md#coverage-contract) |
+| **SCOUT** | Latent and recurring SDC, contaminated recovery state, compute/input/communication stragglers, collective hangs, process stalls, and supported hardware failures | Pinpoint faulty ranks, GPUs, nodes, or communication endpoints; certify safe recovery state; and trigger automatic restart or standby replacement through torchrun |
 | **GEMINI** | Slow, infrequent durable checkpoints | Frequent asynchronous in-memory checkpoints, peer replication, and fast recovery from nearby state |
 
 ## Why LM Resiliency
 
-- **SDC-safe recovery-verified checkpoint:** SCOUT certifies recovery checkpoints and excludes candidates affected by recurring SDC, preventing corrupted state from being selected during recovery.
-- **Localize latent and permanent failures at runtime:** SCOUT identifies affected ranks, GPUs, nodes, communication endpoints, peer groups, or telemetry-reported physical devices, including failures observed while the training job is blocked.
-- **Minimize rollback:** Historical validation measured no training-throughput loss from GEMINI in its published workload. GEMINI saves complete training state to CPU memory at high frequency, reducing lost computation after a failure; see the [benchmark methodology](benchmarks/README.md).
-- **Retrieve checkpoints quickly:** GEMINI restores nearby state from memory, a surviving peer, or node-local storage, minimizing checkpoint retrieval time and global-storage reads.
-- **Keep protection lightweight:** Historical validation measured less than 1% amortized SCOUT overhead in its published workload; scheduled current-package regressions are guarded by the [benchmark methodology](benchmarks/README.md) and its qualification boundaries.
-- **No framework fork:** `lm-resiliency` integrates with PyTorch, TorchTitan, Megatron Core, and DeepSpeed through automatic adapters and one public entry point.
+- **SDC-safe recovery-verified checkpoint:** SCOUT certifies recovery checkpoints and excludes candidates affected by recurring SDC.
+- **Localize latent and permanent failures at runtime:** SCOUT identifies affected ranks, GPUs, nodes, communication endpoints, peer groups, or telemetry-reported physical devices.
+- **Native `torchrun` integration:** `lm_resiliency` works as a `torchrun` rendezvous backend to automatically detect and localize failures, replace faulty nodes with standbys, and restart training from recovery-verified checkpoint.
+- **Minimize rollback and checkpoint retrieve:** GEMINI saves training states to CPU memory at high frequency, reducing lost computation and checkpoint retrieval overhead after a failure.
 - **No training-loop rewrite:** `lm-resiliency` attaches hooks at framework initialization and leaves the existing training loop unchanged.
-- **Evaluate localization independently:** Run reproducible framework-aware fault campaigns and score neutral localization results without coupling the injector to SCOUT.
-- **Bring your own launcher:** Users can integrate `lm-resiliency` with `torchrun`, Slurm, Kubernetes, or custom managers through platform-neutral APIs.
+- **Keep protection lightweight:** `lm_resiliency` incurs less than 1% amortized overhead to the training throughput.
 
-## Quick Start
+## Installation
 
-The runnable example is newer than the current `0.1.0` release, so keep the package source and example on the same repository revision for this Quick Start:
+LM Resiliency can be installed from source or from a stable release.
+
+### From source
 
 ```bash
 git clone https://github.com/LMResiliency/lm-resiliency.git
 cd lm-resiliency
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
 python -m pip install -e .
-python examples/quickstart.py \
-  --checkpoint-dir /tmp/lm-resiliency-quickstart/checkpoints \
-  --run-id my-quickstart
 ```
 
-The example trains a tiny causal LM through a complete forward, backward, and optimizer loop while GEMINI saves recovery state.
-Run it again with the same `--run-id` and `--steps 6` to resume from the saved checkpoint.
-See [Examples](examples/README.md) for the recovery command and distributed production loops that exercise SCOUT.
-
-For integrations that do not need the repository examples, install the latest published package directly with `python -m pip install lm-resiliency`, adding `[torchtitan]`, `[megatron]`, `[deepspeed]`, or `[all]` as needed.
-
-### Add resiliency to Megatron Core
-
-Attach resiliency after Megatron creates its model chunks, optimizer, and scheduler.
-Then resume the existing `train()` loop from the recovered iteration.
+### Stable releases
 
 ```bash
-python -m pip install "lm-resiliency[megatron]"
+python -m pip install lm-resiliency
 ```
 
-```python
-from megatron.training import get_args
+Append `[deepspeed]`, `[megatron]`, `[torchtitan]`, or `[all]` to either
+installation command when the corresponding optional framework integration is
+needed.
 
-from lm_resiliency import enable_resiliency
+## Examples
 
+### Production loop
 
-def attach_resiliency(model_chunks, optimizer, scheduler):
-    resiliency = enable_resiliency(
-        model_chunks,
-        optimizer,
-        opt_param_scheduler=scheduler,
-        interval=10,
-    )
-    get_args().iteration = resiliency.step_count
-    return resiliency
-
-
-# Call attach_resiliency(...) after Megatron setup, then enter train() unchanged.
-```
-
-See the [Megatron Core production-loop example](examples/production_loops/megatron.py) for a complete tiny-GPT job.
-
-### Add resiliency to TorchTitan
-
-Pass the initialized TorchTitan `Trainer` before entering its existing training loop.
-The adapter discovers the model, optimizer, scheduler, dataloader, topology, and checkpoint state.
+From a source checkout, select a framework and launch its unchanged training
+loop on two eight-GPU hosts. Run the same command on both hosts and set
+`RDZV_HOST` to a hostname or IP address reachable from both:
 
 ```bash
-python -m pip install "lm-resiliency[torchtitan]"
+framework=pytorch  # pytorch, deepspeed, megatron, or torchtitan
+RDZV_HOST=node-a
+WORKER_CONFIG="examples/production_loops/policies/resiliency.toml"
+RESTART_CONTEXT="/tmp/lm-resiliency-${framework}-context/context.json"
+
+# Keep one eight-GPU node active and park a second eight-GPU node as standby.
+# Allow each torchrun agent to restart its worker group up to four times.
+# Use LM Resiliency for active/standby admission and recovery coordination.
+torchrun \
+  --nnodes=1:2 \
+  --nproc-per-node=8 \
+  --max-restarts=4 \
+  --rdzv-backend=lm_resiliency \
+  --rdzv-endpoint="${RDZV_HOST}:29400" \
+  --rdzv-id="${framework}-example" \
+  --rdzv-conf="store_type=tcp,read_timeout=120,\
+lm_resiliency_restart_context_path=${RESTART_CONTEXT},\
+lm_resiliency_worker_config=${WORKER_CONFIG}" \
+  --module \
+  "examples.production_loops.${framework}" \
+  --validation-output-dir "/tmp/lm-resiliency-${framework}"
 ```
 
-```python
-from torchtitan.train import Trainer
-from lm_resiliency import enable_resiliency
+See [Examples](examples/README.md) for the framework loops, adapter-bootstrap checks, and additional commands.
 
+### Resiliency cycle
 
-class MyTrainer(Trainer):
-    def train(self):
-        enable_resiliency(self, interval=10)
-        super().train()
+The resiliency-cycle example pressure-tests the complete torchrun recovery
+workflow under repeated failures. It compares a managed run with an
+uninterrupted baseline and verifies that every restart and replacement restores
+the selected checkpoint without changing the final training state.
+
+This campaign uses one eight-GPU host and treats each GPU as one synthetic
+torchrun node. Four active GPU-agents form a training world size of four, while
+the other four GPU-agents remain parked as standbys. The `--gpus` option lists
+all eight allocated GPUs. The campaign injects all 21 canonical failure types:
+17 incidents exercise same-node restart and exact recovery, while four incidents
+consume the four standbys and replace one active GPU-agent each. Tensor
+corruption uses SCOUT replay localization. Process-, storage-, resource-, and
+network-destructive effects run in disposable rank-local sandboxes so the
+single-host example does not damage the host or production network:
+
+```bash
+campaign_dir=$(mktemp -d /tmp/lm-resiliency-cycle.XXXXXX)
+cp examples/torchrun/resiliency_cycle/campaigns/single_node_pressure.json \
+  "$campaign_dir/campaign.json"
+
+python -m examples.torchrun.resiliency_cycle.pressure orchestrate \
+  --framework pytorch \
+  --fault-campaign-dir "$campaign_dir" \
+  --gpus 0,1,2,3,4,5,6,7
 ```
 
-See the [TorchTitan production-loop example](examples/production_loops/torchtitan.py) for a complete Llama debug-model job.
+The command succeeds only after all 21 incidents complete, every successor
+generation restores the coordinator-selected checkpoint step and topology, and
+the final managed state matches the uninterrupted baseline. See the
+[torchrun workflow guide](examples/torchrun/README.md) for multi-host and
+campaign configuration details.
 
-### Framework support
+## Framework Support
 
 | Framework | SCOUT parallelism |
 |---|---|
@@ -125,20 +137,16 @@ See the [TorchTitan production-loop example](examples/production_loops/torchtita
 The package-root `enable_resiliency` entry point selects dense or expert replay peers from framework topology metadata.
 See the [API guide](docs/api.md) for framework invocation, configuration, recovery, callbacks, and lifecycle management.
 See the [compatibility policy](docs/compatibility.md) for supported and tested versions.
-See the [PyTorch production-loop example](examples/production_loops/pytorch.py) for a complete DDP causal-LM job.
-See the [DeepSpeed production-loop example](examples/production_loops/deepspeed.py) for a complete ZeRO-2 causal-LM job.
-
-## Manager Integration
-
-External launchers and cluster managers can consume normalized SCOUT reports and checkpoint `RecoveryDecision` records, preserve GEMINI state before worker replacement, and coordinate checkpoint transfer through platform-neutral APIs.
-Launcher-specific retry, placement, and replacement policy remains external. See [Manager Integration](docs/api.md#manager-integration) in the API guide.
+Every [production-loop example](examples/README.md#production-loops) uses the
+native torchrun backend and leaves the framework-owned training loop unchanged.
 
 ## Documentation
 
 | Topic | Guide |
 |---|---|
-| Public APIs and manager integration | [API guide](docs/api.md) |
-| Runnable framework integrations | [Production-loop examples](examples/README.md) |
+| Public APIs and automatic framework adapters | [API guide](docs/api.md) |
+| Native torchrun restart and replacement | [Torchrun Resiliency](docs/torchrun_resiliency.md) |
+| Runnable torchrun framework integrations | [Examples](examples/README.md) |
 | Reproducible fault campaigns and localization scoring | [Fault injection evaluation](docs/fault_injection.md) |
 | Supported Python and framework versions | [Compatibility](docs/compatibility.md) |
 | GEMINI checkpoint tiers, recovery, and cadence | [GEMINI guide](docs/gemini.md) |
@@ -146,21 +154,6 @@ Launcher-specific retry, placement, and replacement policy remains external. See
 | MoE regime discovery, qualification, and measured results | [MoE execution regimes](docs/moe_execution_regimes.md) |
 | Revision-bound evidence format, results, and limitations | [Validation report](docs/validation.md) |
 | Planned project direction and priorities | [Roadmap](ROADMAP.md) |
-
-## Development
-
-```bash
-git clone https://github.com/LMResiliency/lm-resiliency.git
-cd lm-resiliency
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
-CUDA_VISIBLE_DEVICES="" python -m pytest -q
-```
-
-GPU and distributed tests are opt-in and document their required `torchrun` command in each test file.
-See the [test guide](tests/README.md) for the integration and validation layout.
 
 ## Contributing
 

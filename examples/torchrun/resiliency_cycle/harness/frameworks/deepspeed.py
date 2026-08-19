@@ -89,6 +89,9 @@ class DeepSpeedDriver:
             "step_count": int(self.handle.step_count),
         }
 
+    def fault_injection_objects(self) -> tuple[Any, None]:
+        return self.engine, None
+
     def close(self) -> None:
         close_resources(
             ("resiliency handle", self.handle.close),

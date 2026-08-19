@@ -89,6 +89,9 @@ class PyTorchDriver:
             "step_count": int(self.handle.step_count),
         }
 
+    def fault_injection_objects(self) -> tuple[Any, Any]:
+        return self.model, self.optimizer
+
     def close(self) -> None:
         close_resources(
             ("resiliency handle", self.handle.close),

@@ -58,6 +58,7 @@ def validate_fault_reports(
     expected_checkpoint_step: int,
     fault_rank: int,
     world_size: int,
+    require_injection: bool = False,
 ) -> None:
     expected_bitmap = [int(rank == fault_rank) for rank in range(world_size)]
     topology_digest = checkpoint_topology_digest(reports)
@@ -66,6 +67,8 @@ def validate_fault_reports(
             raise AssertionError("fault report generation mismatch")
         if report["sdc_bitmap"] != expected_bitmap:
             raise AssertionError(f"SCOUT localization mismatch: {report}")
+        if require_injection:
+            _validate_injection(report)
         decision = report["decision"]
         if not isinstance(decision, dict):
             raise AssertionError("fault report recovery decision is malformed")
@@ -77,6 +80,25 @@ def validate_fault_reports(
             or not decision["available"]
         ):
             raise AssertionError(f"invalid recovery decision: {decision}")
+
+
+def validate_isolated_replacement_reports(
+    reports: Sequence[dict[str, object]],
+    *,
+    event: PressureEvent,
+    expected_generation: int,
+) -> None:
+    for report in reports:
+        if report["generation"] != expected_generation:
+            raise AssertionError("replacement report generation mismatch")
+        if report["incident_id"] != event.incident_id:
+            raise AssertionError("replacement report incident mismatch")
+        if report["checkpoint_step"] != event.checkpoint_step:
+            raise AssertionError("replacement report checkpoint mismatch")
+        if report.get("replacement_rank") != event.fault_rank:
+            raise AssertionError("replacement report target-rank mismatch")
+        if event.injection_executor is not None:
+            _validate_injection(report)
 
 
 def validate_restart_reports(
@@ -92,6 +114,21 @@ def validate_restart_reports(
             raise AssertionError("restart report incident mismatch")
         if report["checkpoint_step"] != event.checkpoint_step:
             raise AssertionError("restart report checkpoint mismatch")
+        if event.injection_executor is not None:
+            _validate_injection(report)
+
+
+def _validate_injection(report: dict[str, object]) -> None:
+    injection = report.get("injection")
+    if not isinstance(injection, dict):
+        raise AssertionError("incident report injection evidence is malformed")
+    if (
+        injection.get("failure_type") != report.get("failure_type")
+        or injection.get("status") != "completed"
+        or injection.get("verified") is not True
+        or injection.get("injection_succeeded") is not True
+    ):
+        raise AssertionError(f"incident report injection evidence is invalid: {injection}")
 
 
 def compare_baseline(

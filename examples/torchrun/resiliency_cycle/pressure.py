@@ -48,6 +48,7 @@ from .harness.verify import (
     loss_difference_limit,
     optimizer_difference_limit,
     validate_fault_reports,
+    validate_isolated_replacement_reports,
     validate_restart_reports,
 )
 
@@ -95,10 +96,10 @@ def _publish_plan(
             raise AssertionError("replacement event requires a target rank and standby")
         replacement = (event.fault_rank, replacement_node)
         recovery_mode = "recovery_verified"
-        reason_code = "sdc_detected"
+        reason_code = event.failure_type.value
     else:
         recovery_mode = "latest"
-        reason_code = "process_stall"
+        reason_code = event.failure_type.value
     return coordinator.publish_successor(
         generation=generation,
         active_node_ids=current_nodes,
@@ -257,13 +258,21 @@ def _orchestrate(args: argparse.Namespace) -> None:
             replacement_node = None
             if event.kind == "replacement":
                 assert event.fault_rank is not None
-                validate_fault_reports(
-                    reports,
-                    expected_generation=generation,
-                    expected_checkpoint_step=event.checkpoint_step,
-                    fault_rank=event.fault_rank,
-                    world_size=topology.world_size,
-                )
+                if event.scout_localized:
+                    validate_fault_reports(
+                        reports,
+                        expected_generation=generation,
+                        expected_checkpoint_step=event.checkpoint_step,
+                        fault_rank=event.fault_rank,
+                        world_size=topology.world_size,
+                        require_injection=event.injection_executor is not None,
+                    )
+                else:
+                    validate_isolated_replacement_reports(
+                        reports,
+                        event=event,
+                        expected_generation=generation,
+                    )
                 replacement_node = next(replacements)
             else:
                 validate_restart_reports(
@@ -348,6 +357,7 @@ def _orchestrate(args: argparse.Namespace) -> None:
                 "campaign_manifest_identity": campaign.manifest_identity,
                 "checkpoint_topology_digest": observed_topology_digest,
                 "framework": options.framework,
+                "failure_types": [event.failure_type.value for event in events],
                 "final_nodes": current_nodes,
                 "final_step": total_steps,
                 "gpu_nodes": [
@@ -360,7 +370,16 @@ def _orchestrate(args: argparse.Namespace) -> None:
                     for placement in topology.placements
                 ],
                 "initial_nodes": list(initial.active_node_ids),
-                "localization": "exact",
+                "localization": {
+                    "scout_exact": [
+                        event.failure_type.value for event in events if event.scout_localized
+                    ],
+                    "sandbox_verified": [
+                        event.failure_type.value
+                        for event in events
+                        if event.injection_executor is not None
+                    ],
+                },
                 "replacement_failures": replacement_failures,
                 "replication_jump": topology.replication_jump,
                 "recoveries": "bitwise exact",

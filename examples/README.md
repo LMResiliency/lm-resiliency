@@ -1,37 +1,16 @@
 # Examples
 
+All distributed training examples use the native `lm_resiliency` torchrun
+backend. User training modules do not import `lm_resiliency`; the rendezvous
+plugin validates the worker policy and installs the inferred framework adapter
+before user code runs.
+
 The examples are organized by use case:
 
 | Path | Purpose |
 |---|---|
-| [`quickstart.py`](quickstart.py) | Single-process CPU training and GEMINI recovery |
 | [`production_loops/`](production_loops/) | Framework-native PyTorch, DeepSpeed, Megatron Core, and TorchTitan training loops |
 | [`torchrun/`](torchrun/README.md) | Native torchrun adapter bootstrap, restart, and standby replacement |
-
-## Quick Start
-
-After installing `lm-resiliency`, run its packaged command to train a tiny
-causal LM on CPU. The command executes the forward, backward, optimizer, and
-GEMINI checkpoint lifecycle without requiring a GPU:
-
-```bash
-lm-resiliency-quickstart \
-  --checkpoint-dir /tmp/lm-resiliency-quickstart/checkpoints \
-  --run-id my-quickstart
-```
-
-Run it again with a larger step target to resume from the saved GEMINI checkpoint:
-
-```bash
-lm-resiliency-quickstart \
-  --steps 6 \
-  --checkpoint-dir /tmp/lm-resiliency-quickstart/checkpoints \
-  --run-id my-quickstart
-```
-
-The installed command and library come from the same wheel. Developers working
-from a source checkout can use the equivalent
-[`quickstart.py`](quickstart.py) wrapper.
 
 ## Production Loops
 
@@ -48,23 +27,36 @@ from the user module's imports.
 | Megatron Core | [megatron.py](production_loops/megatron.py) | `training.train()` and `train_step()` |
 | DeepSpeed | [deepspeed.py](production_loops/deepspeed.py) | `DeepSpeedEngine.backward()` and `DeepSpeedEngine.step()` |
 
-Run one example on a single eight-GPU host from the repository root:
+Run one example on two eight-GPU hosts from the repository root. Start the same
+command on both hosts and set `RDZV_HOST` to a hostname or IP address reachable
+from both:
 
 ```bash
+RDZV_HOST=node-a
+
+# --nnodes=1:2 keeps one node active and parks a second node as standby.
+# --nproc-per-node=8 launches eight training workers only on the active node.
+# --max-restarts=4 allows each torchrun agent to restart its workers four times.
+# --rdzv-backend=lm_resiliency enables active/standby admission and recovery.
 torchrun \
-  --nnodes=1:1 \
+  --nnodes=1:2 \
   --nproc-per-node=8 \
   --max-restarts=4 \
   --rdzv-backend=lm_resiliency \
-  --rdzv-endpoint=/tmp/lm-resiliency-torchtitan-rdzv \
+  --rdzv-endpoint="${RDZV_HOST}:29400" \
   --rdzv-id=torchtitan-production \
-  --rdzv-conf="store_type=file,\
+  --rdzv-conf="store_type=tcp,read_timeout=120,\
 lm_resiliency_restart_context_path=/tmp/lm-resiliency-torchtitan-context/context.json,\
 lm_resiliency_worker_config=$PWD/examples/production_loops/policies/resiliency.toml" \
   --module \
   examples.production_loops.torchtitan \
   --validation-output-dir /tmp/torchtitan-production-loop
 ```
+
+The first registered host receives the eight logical training ranks. The other
+host remains parked as a standby until torchrun selects it to replace a faulty
+host. Use `--nnodes=1:1` only for a single-host run without standby
+replacement.
 
 Replace the module, rendezvous paths, and validation output directory for
 PyTorch, Megatron Core, or DeepSpeed. The worker infers the framework from
@@ -83,4 +75,4 @@ See the [torchrun guide](torchrun/README.md) for:
 
 - a CPU adapter-bootstrap smoke test;
 - clean automatic-adapter checks across all four frameworks; and
-- manager-driven same-node restart and SCOUT-localized standby replacement.
+- coordinator-driven same-node restart and SCOUT-localized standby replacement.

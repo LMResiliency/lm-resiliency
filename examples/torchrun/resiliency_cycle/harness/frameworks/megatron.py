@@ -164,6 +164,9 @@ class MegatronDriver:
             "step_count": int(self.handle.step_count),
         }
 
+    def fault_injection_objects(self) -> tuple[list[Any], Any]:
+        return [self.model], self.optimizer
+
     def close(self) -> None:
         def destroy_model_parallel() -> None:
             if not dist.is_initialized():

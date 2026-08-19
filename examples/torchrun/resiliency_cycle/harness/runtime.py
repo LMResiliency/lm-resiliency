@@ -15,6 +15,8 @@ import torch
 import torch.distributed as dist
 
 from lm_resiliency import (
+    FaultInjectionSession,
+    InjectionStatus,
     InMemoryCkptConfig,
     OrchestrationHooks,
     RecoveryDecision,
@@ -48,6 +50,8 @@ class FrameworkDriver(Protocol):
     def verification_state(self) -> dict[str, list[torch.Tensor]]: ...
 
     def framework_state(self) -> dict[str, Any]: ...
+
+    def fault_injection_objects(self) -> tuple[Any, Any | None]: ...
 
     def close(self) -> None: ...
 
@@ -235,6 +239,10 @@ class CampaignRuntime:
         self.losses: dict[str, float] = {}
         self.faults: list[Any] = []
         self.decisions: list[RecoveryDecision] = []
+        self.fault_session: FaultInjectionSession | None = None
+
+    def bind_fault_session(self, session: FaultInjectionSession) -> None:
+        self.fault_session = session
 
     def record_fault(self, result: Any) -> None:
         self.faults.append(result)
@@ -299,6 +307,7 @@ class CampaignRuntime:
         if checkpoint_manager is None:
             raise AssertionError("GEMINI did not create a checkpoint manager")
         checkpoint_manager.maybe_wait()
+        injection = self._collect_injection(step)
         if checkpoint_manager.checkpoint_status.recovery_verified_step == step:
             atomic_json(
                 self.artifact_dir / "checkpoints" / f"step-{step}-rank-{self.rank}.json",
@@ -315,10 +324,19 @@ class CampaignRuntime:
                 "restart",
                 checkpoint_step=self.event.checkpoint_step,
                 topology_digest=checkpoint_topology_digest(driver.handle),
+                extra={"injection": injection},
             )
             self._wait_for_restart()
         if self.faults:
-            self._validate_and_report_fault(driver, checkpoint_manager)
+            self._validate_and_report_fault(driver, checkpoint_manager, injection)
+            self._wait_for_restart()
+        if (
+            self.event is not None
+            and self.event.kind == "replacement"
+            and not self.event.scout_localized
+            and step == self.event.step
+        ):
+            self._validate_and_report_isolated_replacement(driver, injection)
             self._wait_for_restart()
 
     def finish(self, driver: FrameworkDriver) -> None:
@@ -352,7 +370,14 @@ class CampaignRuntime:
         dist.barrier()
 
     def close(self) -> None:
-        self.replay_campaign.close()
+        close_resources(
+            *(
+                (("fault injection session", self.fault_session.close),)
+                if self.fault_session is not None
+                else ()
+            ),
+            ("replay fault campaign", self.replay_campaign.close),
+        )
 
     def _snapshot(self, driver: FrameworkDriver, step: int) -> dict[str, Any]:
         state = driver.verification_state()
@@ -369,6 +394,7 @@ class CampaignRuntime:
         self,
         driver: FrameworkDriver,
         checkpoint_manager: Any,
+        injection: Mapping[str, Any],
     ) -> None:
         if len(self.faults) != 1 or len(self.decisions) != 1:
             raise AssertionError("SCOUT emitted an unexpected fault/decision count")
@@ -441,8 +467,81 @@ class CampaignRuntime:
                 "peer_ranks": list(fault.peer_ranks),
                 "sdc_bitmap": list(fault.sdc_bitmap),
                 "sdc_sources": list(fault.sdc_sources),
+                "injection": injection,
             },
         )
+
+    def _validate_and_report_isolated_replacement(
+        self,
+        driver: FrameworkDriver,
+        injection: Mapping[str, Any],
+    ) -> None:
+        if self.event is None or self.event.fault_rank is None:
+            raise AssertionError("isolated replacement requires a target rank")
+        if self.faults or self.decisions:
+            raise AssertionError(
+                "isolated replacement unexpectedly produced a SCOUT recovery decision"
+            )
+        checkpoint_manager = _checkpoint_manager(driver.handle)
+        if checkpoint_manager is None:
+            raise AssertionError("GEMINI did not create a checkpoint manager")
+        status = checkpoint_manager.checkpoint_status
+        disk = getattr(checkpoint_manager, "_disk", None)
+        selected_available = (
+            status.is_recovery_verified(self.event.checkpoint_step)
+            and disk is not None
+            and disk.has_rank(self.event.checkpoint_step, driver.rank)
+        )
+        _assert_all(
+            selected_available,
+            "isolated replacement did not preserve the selected clean checkpoint",
+            driver.device,
+        )
+        self._write_incident(
+            "fault",
+            checkpoint_step=self.event.checkpoint_step,
+            topology_digest=checkpoint_topology_digest(driver.handle),
+            extra={
+                "failure_type": self.event.failure_type.value,
+                "injection": injection,
+                "replacement_rank": self.event.fault_rank,
+            },
+        )
+
+    def _collect_injection(self, step: int) -> dict[str, Any]:
+        if self.event is None or step != self.event.step:
+            return {}
+        if self.event.injection_executor is None:
+            return {}
+        if self.fault_session is None:
+            raise AssertionError("campaign incident requires a fault injection session")
+        local_records = [
+            record.to_dict()
+            for record in self.fault_session.records
+            if record.incident_id == self.event.incident_id and record.iteration == step
+        ]
+        gathered: list[list[dict[str, Any]] | None] = [None] * dist.get_world_size()
+        dist.all_gather_object(gathered, local_records)
+        records = [
+            record
+            for rank_records in gathered
+            if rank_records is not None
+            for record in rank_records
+        ]
+        if len(records) != 1:
+            raise AssertionError(
+                f"expected one verified injection record for {self.event.incident_id}, "
+                f"got {len(records)}"
+            )
+        record = records[0]
+        if (
+            record["failure_type"] != self.event.failure_type.value
+            or record["status"] != InjectionStatus.COMPLETED.value
+            or not record["verified"]
+            or not record["injection_succeeded"]
+        ):
+            raise AssertionError(f"fault injection evidence is invalid: {record}")
+        return record
 
     def _write_incident(
         self,
@@ -456,6 +555,7 @@ class CampaignRuntime:
             raise AssertionError("incident report requires an active event")
         report = {
             "checkpoint_step": checkpoint_step,
+            "failure_type": self.event.failure_type.value,
             "framework": self.framework,
             "generation": self.generation,
             "incident_id": self.event.incident_id,
