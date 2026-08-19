@@ -99,7 +99,7 @@ Contract tests require every declared Python and PyTorch minor series to appear 
 
 Stable exports from `lm_resiliency`, `lm_resiliency.manager_api`, explicit
 framework integration entry points, and `lm_resiliency.integrations.torchrun`
-remain backward compatible across `0.1.x` patch releases.
+remain backward compatible across `0.2.x` patch releases.
 The documented `lm-resiliency-quickstart` and `lm-resiliency-discover-moe-regimes` commands and their existing options follow the same patch-release compatibility policy.
 Removing or changing a stable interface requires a new minor release and migration notes.
 Objects under `lm_resiliency.experimental` and unlisted module paths may change in any `0.x` release.

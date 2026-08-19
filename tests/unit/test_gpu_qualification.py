@@ -48,7 +48,7 @@ def test_gpu_qualification_writes_failure_evidence_without_required_gpus(tmp_pat
                 "cuda_available": False,
                 "cuda_runtime": None,
                 "nccl": None,
-                "frameworks": {"lm-resiliency": "0.1.0", "pytorch": "2.13.0"},
+                "frameworks": {"lm-resiliency": "0.2.0", "pytorch": "2.13.0"},
             },
             "runner": {"name": None, "os": None, "arch": None},
         },

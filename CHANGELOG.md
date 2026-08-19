@@ -5,8 +5,13 @@ The project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-19
+
 ### Added
 
+- A native `torchrun` rendezvous backend that provides closed-loop recovery through active/standby admission, same-node restart, faulty-node replacement, and exact manager-selected GEMINI recovery.
+- Automatic zero-import worker adapters for native PyTorch, DeepSpeed, Megatron Core, and TorchTitan while preserving each framework's training loop and recovery state.
+- Runnable production-loop, adapter-bootstrap, and resiliency-cycle examples, including a single-host campaign covering all 21 canonical fault types.
 - A runnable CPU quick-start example with a complete native PyTorch training loop and GEMINI checkpoint resume.
 - A scheduled and maintainer-dispatched two-GPU qualification workflow with machine-readable revision, environment, topology, command, log, and checksum evidence.
 - A framework-neutral fault injection evaluation kit with incident schedules, automatic training-iteration hooks, verified ground truth, capability-checked executors, neutral localization scoring, and a systematic eight-GPU DDP/SCOUT evaluation matrix.
