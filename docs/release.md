@@ -17,9 +17,9 @@ Production releases use one identified wheel and source distribution from build 
 5. The workflow reruns the pinned primary CPU suite, builds with a pinned toolchain, and writes `release-manifest.json` and `SHA256SUMS` for the wheel and source distribution.
 6. The exact downloaded artifacts pass manifest verification, clean installation, Quick Start, `pip check`, dependency audit, and GitHub build-provenance verification.
 7. After protected-environment approval, the workflow re-resolves the remote tag against the identified commit and publishes the same artifact bundle to PyPI.
-8. The workflow rechecks the tag again, creates a draft GitHub release, attaches every artifact plus its manifest and checksums, publishes it, then verifies the immutable release and each local asset.
+8. The workflow rechecks the tag again, creates a draft GitHub release, attaches every artifact plus its manifest and checksums, publishes it, then polls for the immutable release attestation and verifies each local asset. A rerun reuses a matching draft or published release instead of attempting to recreate it.
 
-The workflow blocks PyPI publication when any source, tag, revision, version, digest, artifact-membership, validation, audit, provenance, or environment-approval check fails. GitHub release creation and immutable-asset verification necessarily follow PyPI publication; a failure in that final job leaves the workflow failed and requires operator intervention because published PyPI files cannot be rolled back.
+The workflow blocks PyPI publication when any source, tag, revision, version, digest, artifact-membership, validation, audit, provenance, or environment-approval check fails. GitHub release creation and immutable-asset verification necessarily follow PyPI publication; a failure in that final job leaves the workflow failed and requires operator intervention because published PyPI files cannot be rolled back. If release documentation was staged successfully but its normal deployment dependency failed, a trusted maintainer can manually dispatch the Pages workflow after verifying the exact release and `gh-pages` contents.
 
 ## TestPyPI
 

@@ -92,3 +92,9 @@ def test_production_release_jobs_require_tag_push_and_recheck_target():
     production_condition = "if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')"
     assert workflow.count(production_condition) == 2
     assert workflow.count("- name: Recheck release tag target") == 2
+    assert '"repos/$GITHUB_REPOSITORY/releases?per_page=100"' in workflow
+    assert "select(.tag_name == env.GITHUB_REF_NAME)" in workflow
+    assert 'gh release upload "$GITHUB_REF_NAME" dist/*' in workflow
+    assert workflow.count("for attempt in $(seq 1 12)") >= 3
+    assert "Release attestation was not available" in workflow
+    assert "Asset attestation was not available" in workflow

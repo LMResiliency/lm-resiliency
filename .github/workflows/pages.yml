@@ -1,6 +1,7 @@
 name: Deploy GitHub Pages
 
 on:
+  workflow_dispatch:
   workflow_run:
     workflows:
       - Documentation
@@ -19,8 +20,11 @@ jobs:
   deploy:
     name: Deploy staged documentation
     if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push'
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push'
+      )
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

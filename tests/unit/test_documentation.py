@@ -65,11 +65,12 @@ def test_deployment_contracts_cover_every_destination():
     assert "--offline" not in online_links
 
     assert "workflow_run:" in pages
+    assert "workflow_dispatch:" in pages
     assert "- Documentation" in pages
     assert "- Release" in pages
     assert "github.event.workflow_run.conclusion == 'success'" in pages
     assert "github.event.workflow_run.event == 'push'" in pages
-    assert "workflow_dispatch" not in pages
+    assert "github.event_name == 'workflow_dispatch'" in pages
     assert "ref: gh-pages" in pages
     assert "group: pages-deploy" in pages
     assert "cancel-in-progress: true" in pages

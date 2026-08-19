@@ -364,25 +364,69 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           version=$(jq -r '.version' dist/release-manifest.json)
           release_flags=()
           if [[ "$(python scripts/release_versions.py is-prerelease "$version")" == "true" ]]; then
             release_flags+=(--prerelease)
           fi
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --draft \
-            --title "lm-resiliency $GITHUB_REF_NAME" \
-            --generate-notes \
-            "${release_flags[@]}"
-          gh release edit "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --draft=false
-          gh release verify "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
+
+          release_json=$(
+            gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq '.[] | select(.tag_name == env.GITHUB_REF_NAME)'
+          )
+          if [[ -n "$release_json" ]]; then
+            test "$(jq -r '.tag_name' <<<"$release_json")" = "$GITHUB_REF_NAME"
+            expected_prerelease=false
+            if [[ "${#release_flags[@]}" -gt 0 ]]; then
+              expected_prerelease=true
+            fi
+            test "$(jq -r '.prerelease' <<<"$release_json")" = "$expected_prerelease"
+            if [[ "$(jq -r '.draft' <<<"$release_json")" == "true" ]]; then
+              gh release upload "$GITHUB_REF_NAME" dist/* \
+                --repo "$GITHUB_REPOSITORY" \
+                --clobber
+              gh release edit "$GITHUB_REF_NAME" \
+                --repo "$GITHUB_REPOSITORY" \
+                --draft=false
+            fi
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --draft \
+              --title "lm-resiliency $GITHUB_REF_NAME" \
+              --generate-notes \
+              "${release_flags[@]}"
+            gh release edit "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft=false
+          fi
+
+          for attempt in $(seq 1 12); do
+            if gh release verify "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"; then
+              break
+            fi
+            if test "$attempt" -eq 12; then
+              echo "Release attestation was not available after $attempt attempts" >&2
+              exit 1
+            fi
+            sleep 5
+          done
+
           for artifact in dist/*; do
-            gh release verify-asset "$GITHUB_REF_NAME" "$artifact" \
-              --repo "$GITHUB_REPOSITORY"
+            for attempt in $(seq 1 12); do
+              if gh release verify-asset "$GITHUB_REF_NAME" "$artifact" \
+                --repo "$GITHUB_REPOSITORY"; then
+                break
+              fi
+              if test "$attempt" -eq 12; then
+                echo "Asset attestation was not available for $artifact after $attempt attempts" >&2
+                exit 1
+              fi
+              sleep 5
+            done
           done
 
   build-release-docs:
