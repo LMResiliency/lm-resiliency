@@ -1,0 +1,1303 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Fault Injection Evaluation Kit - LM Resiliency</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Fault Injection Evaluation Kit";
+        var mkdocs_page_input_path = "fault_injection.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> LM Resiliency
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../api/">API Guide</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../compatibility/">Compatibility</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../gemini/">GEMINI</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../scout/">SCOUT</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../torchrun_resiliency/">Torchrun Resiliency</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../moe_execution_regimes/">MoE Execution Regimes</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../validation/">Validation</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../release/">Release Process</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">LM Resiliency</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">Fault Injection Evaluation Kit</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/LMResiliency/lm-resiliency/edit/main/docs/fault_injection.md">Edit on LMResiliency/lm-resiliency</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="fault-injection-evaluation-kit">Fault Injection Evaluation Kit<a class="headerlink" href="#fault-injection-evaluation-kit" title="Permanent link">&para;</a></h1>
+<p>The fault injection evaluation kit runs reproducible failure campaigns against
+PyTorch, TorchTitan, Megatron Core, and DeepSpeed pre-training workloads.
+It records verified ground truth and accepts neutral localization results, without
+depending on SCOUT, GEMINI, or another resiliency system.</p>
+<p>Campaigns describe observable failure effects.
+Built-in hooks execute safe model and optimizer faults; callback executors connect
+the same schema to isolated process, storage, communication, and cluster controls.
+See the
+<a href="https://github.com/LMResiliency/lm-resiliency/blob/f591cb1c28d86437665d332c900eb313162e2d3f/tests/validation/fault_injection/README.md">manual fault injection and SCOUT localization campaign</a>
+for an eight-GPU DDP qualification run that compares injection and localization
+JSON artifacts.</p>
+<h2 id="enable-a-campaign">Enable a Campaign<a class="headerlink" href="#enable-a-campaign" title="Permanent link">&para;</a></h2>
+<p>Enable the campaign once after framework initialization and before training:</p>
+<pre><code class="language-python">from lm_resiliency import enable_fault_injection
+
+faults = enable_fault_injection(
+    model,
+    optimizer,
+    campaign=campaign,
+)
+
+train()
+</code></pre>
+<p>No per-iteration trigger is required.
+The integration observes framework optimizer boundaries and arms incidents at the
+arbitrary training iterations specified by the campaign.
+In a distributed job, every rank completes campaign preparation and capability
+validation before any current-iteration incident is armed. Preparation rejects
+target ranks outside the process-group world size and requires every rank to
+report the same canonical manifest and <code>current_iteration</code>. This prevents an
+iteration-one process, communication, or cluster fault from interrupting
+enablement consensus or running with divergent schedules.
+Later scheduled safe incidents use the same rank-consistent preflight and arming
+consensus at their optimizer boundary. Iterations without a scheduled campaign
+candidate add no distributed synchronization. The optional <code>rank=</code> override is
+reserved for non-distributed testing; in an initialized distributed job it must
+match the process's global rank. Overrides must be non-boolean integers;
+coercible strings and fractional values are rejected.
+Framework integration wraps the optimizer boundary itself rather than relying
+on a success-only post-step hook. When an optimizer attempt fails on one rank,
+every rank that attempted that scheduled boundary participates in failure
+consensus before cleanup; the failed attempt does not advance the campaign
+clock. The failing rank then re-raises its original optimizer error.</p>
+<p>The first arguments match the framework lifecycle:</p>
+<table>
+<thead>
+<tr>
+<th>Framework</th>
+<th>Enablement</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PyTorch</td>
+<td><code>enable_fault_injection(model, optimizer, campaign=...)</code></td>
+</tr>
+<tr>
+<td>TorchTitan</td>
+<td><code>enable_fault_injection(trainer, campaign=...)</code></td>
+</tr>
+<tr>
+<td>Megatron Core</td>
+<td><code>enable_fault_injection(model_chunks, optimizer, campaign=...)</code></td>
+</tr>
+<tr>
+<td>DeepSpeed</td>
+<td><code>enable_fault_injection(engine, campaign=...)</code></td>
+</tr>
+</tbody>
+</table>
+<p>Framework selection is automatic and is not stored in the campaign.</p>
+<h2 id="training-iterations">Training Iterations<a class="headerlink" href="#training-iterations" title="Permanent link">&para;</a></h2>
+<p>A <code>training_iteration</code> is one logical global training step that normally ends at
+an optimizer update.
+It may contain multiple microbatches, forward calls, backward calls, pipeline
+stages, or gradient-accumulation passes.</p>
+<p>An incident at iteration 100 is armed after iteration 99 completes and applies to
+the training work that produces optimizer update 100.
+Forward-call counts and SCOUT check cadence do not affect this clock.</p>
+<p>The default clock uses absolute training-run iterations:</p>
+<pre><code class="language-json">{
+  &quot;type&quot;: &quot;training_iteration&quot;,
+  &quot;origin&quot;: &quot;training_run&quot;
+}
+</code></pre>
+<p>TorchTitan and DeepSpeed progress is discovered from their training objects.
+Pass <code>completed_iterations=</code> when native PyTorch or Megatron is enabled after an
+externally managed resume.
+The value must be a non-negative integer; booleans, strings, and fractional
+values are rejected rather than coerced.
+Megatron optimizers commonly return an <code>update_successful</code> boolean as the first
+tuple element. A false value represents an overflow or otherwise skipped
+optimizer update and does not advance <code>training_iteration</code>.
+Use <code>"origin": "campaign_start"</code> when iteration numbers should be relative to
+enablement instead.</p>
+<h2 id="incident-manifest">Incident Manifest<a class="headerlink" href="#incident-manifest" title="Permanent link">&para;</a></h2>
+<p>The versioned JSON format separates the incident schedule from its correlated
+failure effects:</p>
+<pre><code class="language-json">{
+  &quot;schema_version&quot;: 1,
+  &quot;name&quot;: &quot;mixed-production-failures&quot;,
+  &quot;seed&quot;: 17,
+  &quot;clock&quot;: {
+    &quot;type&quot;: &quot;training_iteration&quot;,
+    &quot;origin&quot;: &quot;training_run&quot;
+  },
+  &quot;incidents&quot;: [
+    {
+      &quot;incident_id&quot;: &quot;sporadic-sdc&quot;,
+      &quot;trigger&quot;: {
+        &quot;at&quot;: [37, 203, 911],
+        &quot;probability&quot;: 1.0
+      },
+      &quot;lifetime&quot;: {
+        &quot;matching_calls&quot;: 1
+      },
+      &quot;retrigger&quot;: &quot;once&quot;,
+      &quot;faults&quot;: [
+        {
+          &quot;fault_id&quot;: &quot;hidden-output&quot;,
+          &quot;type&quot;: &quot;tensor_corruption&quot;,
+          &quot;target&quot;: {
+            &quot;rank&quot;: 3,
+            &quot;component&quot;: &quot;transformer_block&quot;,
+            &quot;index&quot;: 12,
+            &quot;surface&quot;: &quot;output&quot;
+          },
+          &quot;parameters&quot;: {
+            &quot;operation&quot;: &quot;sign_flip&quot;,
+            &quot;scope&quot;: &quot;1%&quot;
+          }
+        }
+      ]
+    },
+    {
+      &quot;incident_id&quot;: &quot;intermittent-straggler&quot;,
+      &quot;trigger&quot;: {
+        &quot;range&quot;: {
+          &quot;start&quot;: 300,
+          &quot;end&quot;: 500,
+          &quot;every&quot;: 20
+        },
+        &quot;probability&quot;: 0.25
+      },
+      &quot;lifetime&quot;: {
+        &quot;iterations&quot;: 3
+      },
+      &quot;retrigger&quot;: &quot;once&quot;,
+      &quot;faults&quot;: [
+        {
+          &quot;fault_id&quot;: &quot;collective-delay&quot;,
+          &quot;type&quot;: &quot;delay&quot;,
+          &quot;target&quot;: {
+            &quot;rank&quot;: 5,
+            &quot;surface&quot;: &quot;collective&quot;,
+            &quot;operation&quot;: &quot;all_reduce&quot;
+          },
+          &quot;parameters&quot;: {
+            &quot;delay_ms&quot;: 500
+          }
+        }
+      ]
+    }
+  ],
+  &quot;metadata&quot;: {
+    &quot;workload&quot;: &quot;llama-pretraining&quot;,
+    &quot;topology&quot;: &quot;dp=8,tp=2&quot;
+  }
+}
+</code></pre>
+<p>Load and write manifests with <code>FaultCampaign.from_json(...)</code> and
+<code>FaultCampaign.to_json(...)</code>.
+The versioned parser rejects unknown fields at every executable schema level,
+including misspelled trigger fields. Arbitrary user data remains allowed only
+inside <code>metadata</code> and executor-defined <code>parameters</code>.</p>
+<h2 id="campaign-field-reference">Campaign Field Reference<a class="headerlink" href="#campaign-field-reference" title="Permanent link">&para;</a></h2>
+<p>A campaign has four nested levels:</p>
+<pre><code class="language-text">campaign
+  incidents[]
+    faults[]
+      target
+      parameters
+</code></pre>
+<p>One campaign contains scheduled incidents. An incident may contain multiple
+correlated fault actions, and every action has its own target and executor
+parameters.</p>
+<h3 id="campaign">Campaign<a class="headerlink" href="#campaign" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th style="text-align: right;">Required</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>schema_version</code></td>
+<td style="text-align: right;">No</td>
+<td><code>1</code></td>
+<td>Manifest compatibility version. Serialized campaigns always include it; unsupported versions are rejected.</td>
+</tr>
+<tr>
+<td><code>name</code></td>
+<td style="text-align: right;">Yes</td>
+<td>-</td>
+<td>Non-empty campaign identifier included in reports and state-store records.</td>
+</tr>
+<tr>
+<td><code>seed</code></td>
+<td style="text-align: right;">No</td>
+<td><code>0</code></td>
+<td>Signed 128-bit seed used for deterministic probability selection and fault randomness.</td>
+</tr>
+<tr>
+<td><code>clock</code></td>
+<td style="text-align: right;">No</td>
+<td><code>{"type": "training_iteration", "origin": "training_run"}</code></td>
+<td>Defines how incident trigger positions are interpreted.</td>
+</tr>
+<tr>
+<td><code>incidents</code></td>
+<td style="text-align: right;">Yes</td>
+<td>-</td>
+<td>Non-empty array of incident objects. <code>incident_id</code> values must be unique in the campaign.</td>
+</tr>
+<tr>
+<td><code>metadata</code></td>
+<td style="text-align: right;">No</td>
+<td><code>{}</code></td>
+<td>User-defined experiment metadata such as model, workload, topology, or ticket ID. It does not change execution.</td>
+</tr>
+</tbody>
+</table>
+<p>Integer fields use JSON integers only. Booleans and fractional numbers are not
+coerced into iteration, rank, index, lifetime, retry, seed, or schema values.
+The campaign <code>name</code>, every <code>incident_id</code>, and every <code>fault_id</code> must be
+non-empty strings. Nulls, booleans, and numeric identifiers are rejected rather
+than converted to strings because identifiers participate in manifest hashes,
+probability selection, occurrence IDs, and persistent journal keys.
+Campaign metadata, target metadata, and fault parameters are validated as
+finite JSON values and captured as deeply immutable snapshots. Mutating the
+caller's source dictionaries after construction cannot change scheduling or the
+manifest identity.</p>
+<h3 id="clock">Clock<a class="headerlink" href="#clock" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Values</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>type</code></td>
+<td><code>training_iteration</code></td>
+<td>Schedule incidents at logical training iterations, not forward calls or microbatches.</td>
+</tr>
+<tr>
+<td><code>origin</code></td>
+<td><code>training_run</code>, <code>campaign_start</code></td>
+<td>Use absolute training-run progress or count relative to campaign enablement.</td>
+</tr>
+</tbody>
+</table>
+<p>With <code>training_run</code>, an incident at iteration 100 still refers to iteration 100
+after a restart. With <code>campaign_start</code>, iteration 1 is the first iteration after
+<code>enable_fault_injection()</code>.</p>
+<h3 id="incident">Incident<a class="headerlink" href="#incident" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th style="text-align: right;">Required</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>incident_id</code></td>
+<td style="text-align: right;">Yes</td>
+<td>-</td>
+<td>Non-empty identifier unique within the campaign.</td>
+</tr>
+<tr>
+<td><code>trigger</code></td>
+<td style="text-align: right;">Yes</td>
+<td>-</td>
+<td>Candidate training iterations and optional selection probability.</td>
+</tr>
+<tr>
+<td><code>lifetime</code></td>
+<td style="text-align: right;">Yes</td>
+<td>-</td>
+<td>How long each selected occurrence remains active.</td>
+</tr>
+<tr>
+<td><code>retrigger</code></td>
+<td style="text-align: right;">No</td>
+<td><code>once</code></td>
+<td>Whether the same candidate may fire again after rollback or restart.</td>
+</tr>
+<tr>
+<td><code>max_occurrences</code></td>
+<td style="text-align: right;">Conditional</td>
+<td>-</td>
+<td>Positive retry limit; valid only when <code>retrigger</code> is <code>max_occurrences</code>.</td>
+</tr>
+<tr>
+<td><code>faults</code></td>
+<td style="text-align: right;">Yes</td>
+<td>-</td>
+<td>Non-empty array of correlated fault actions. <code>fault_id</code> values must be unique within the incident.</td>
+</tr>
+</tbody>
+</table>
+<p>All actions in <code>faults</code> share the incident trigger, lifetime, occurrence ID, and
+temporal classification. For example, one incident can delay three ranks at the
+same iteration. That is one occurrence containing three fault actions.</p>
+<p>The runtime generates an occurrence ID as <code>&lt;incident_id&gt;@&lt;iteration&gt;</code>. A repeated
+attempt is suffixed with <code>#&lt;attempt&gt;</code>, for example <code>network-delay@500#2</code>.</p>
+<h3 id="trigger">Trigger<a class="headerlink" href="#trigger" title="Permanent link">&para;</a></h3>
+<p>Use exactly one of <code>at</code> or <code>range</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th style="text-align: right;">Required</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>at</code></td>
+<td style="text-align: right;">One of <code>at</code>/<code>range</code></td>
+<td>-</td>
+<td>Sorted, unique array of positive iteration numbers. Exact candidates use binary lookup, so healthy-step work remains bounded for large lists.</td>
+</tr>
+<tr>
+<td><code>range.start</code></td>
+<td style="text-align: right;">For <code>range</code></td>
+<td>-</td>
+<td>First candidate iteration; must be positive.</td>
+</tr>
+<tr>
+<td><code>range.end</code></td>
+<td style="text-align: right;">For <code>range</code></td>
+<td>-</td>
+<td>Last candidate iteration, inclusive. Range schedules are evaluated lazily and do not allocate one entry per candidate. Campaign incidents are held in lazy heap cursors, so healthy iterations do not scan every incident.</td>
+</tr>
+<tr>
+<td><code>range.every</code></td>
+<td style="text-align: right;">No</td>
+<td><code>1</code></td>
+<td>Positive spacing between range candidates.</td>
+</tr>
+<tr>
+<td><code>probability</code></td>
+<td style="text-align: right;">No</td>
+<td><code>1.0</code></td>
+<td>Selection probability for each candidate, from <code>0.0</code> through <code>1.0</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>Probability does not make a campaign irreproducible. Selection is derived from
+<code>seed</code>, <code>incident_id</code>, and the candidate iteration, so the same manifest selects
+the same occurrences.</p>
+<h3 id="lifetime">Lifetime<a class="headerlink" href="#lifetime" title="Permanent link">&para;</a></h3>
+<p>Use exactly one lifetime field:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Value</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>matching_calls</code></td>
+<td>Positive integer</td>
+<td>Apply the fault to that many matching target operations, then remove it. Not valid for <code>weight</code>, <code>bias</code>, or <code>optimizer_state</code>; use <code>iterations</code> or <code>until</code> so state mutations remain active through backward and the optimizer boundary.</td>
+</tr>
+<tr>
+<td><code>iterations</code></td>
+<td>Positive integer</td>
+<td>Keep the fault active for that many training iterations, including its trigger iteration.</td>
+</tr>
+<tr>
+<td><code>until</code></td>
+<td><code>recovery</code></td>
+<td>Keep it active until <code>FaultInjectionSession.notify_recovery()</code>.</td>
+</tr>
+<tr>
+<td><code>until</code></td>
+<td><code>replacement</code></td>
+<td>Keep it active until <code>FaultInjectionSession.notify_replacement()</code>.</td>
+</tr>
+<tr>
+<td><code>until</code></td>
+<td><code>campaign_end</code></td>
+<td>Keep it active until the session closes.</td>
+</tr>
+</tbody>
+</table>
+<p>An <code>until</code> lifetime is permanent and therefore requires a single trigger
+candidate. Multiple bounded candidates or probabilistic bounded candidates are
+classified as intermittent; one bounded candidate is transient.
+For an <code>iterations</code> lifetime, candidate spacing must be at least the configured
+duration. Exact or ranged candidates whose active windows would overlap are
+rejected when the manifest is constructed.
+Separate incidents that can overlap on the same resolved local target are also
+rejected during enablement. Probability-zero incidents are ignored; for other
+probabilistic incidents the validator conservatively treats a candidate as
+potentially selected. Large ranged schedules are checked without materializing
+every candidate.
+Correlated actions inside one incident must also resolve to distinct local
+targets. Selector aliases that identify the same parameter, gradient, or
+optimizer-state entry are rejected during enablement instead of failing at the
+scheduled activation boundary.
+For built-in local effects, a <code>matching_calls</code> lifetime greater than one may
+span optimizer iterations because framework call multiplicity is not portable.
+Such an incident must have one trigger candidate, and a later incident on the
+same resolved target is treated as potentially overlapping. Repeated
+<code>matching_calls=1</code> candidates retain the established one-call contract for
+each scheduled iteration.
+The eight-GPU validation campaign accepts only <code>matching_calls=1</code>, even for
+non-state faults. Framework call multiplicity is not portable enough to infer a
+multi-call effect's expiration or its required post-fault optimizer iteration.
+Closing a session normally completes a verified <code>campaign_end</code> effect. Closing
+before a <code>matching_calls</code> or <code>iterations</code> lifetime finishes cancels that effect,
+so a partial-duration injection cannot be certified as successful. Error-path
+cleanup cancels every still-active effect, including <code>campaign_end</code> effects.</p>
+<h3 id="retrigger-policy">Retrigger Policy<a class="headerlink" href="#retrigger-policy" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>once</code></td>
+<td>Fire a candidate at most once. This is restart-stable when the campaign state store survives worker replacement.</td>
+</tr>
+<tr>
+<td><code>every_attempt</code></td>
+<td>Fire whenever execution reaches the candidate again after rollback.</td>
+</tr>
+<tr>
+<td><code>max_occurrences</code></td>
+<td>Fire at most <code>max_occurrences</code> times for the candidate.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="fault-action">Fault Action<a class="headerlink" href="#fault-action" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th style="text-align: right;">Required</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>fault_id</code></td>
+<td style="text-align: right;">Yes</td>
+<td>Non-empty action identifier unique within its incident.</td>
+</tr>
+<tr>
+<td><code>type</code></td>
+<td style="text-align: right;">Yes</td>
+<td>Canonical observable failure effect, such as <code>tensor_corruption</code>, <code>delay</code>, or <code>process_termination</code>.</td>
+</tr>
+<tr>
+<td><code>target</code></td>
+<td style="text-align: right;">Yes</td>
+<td>Framework-neutral location where the effect is applied.</td>
+</tr>
+<tr>
+<td><code>parameters</code></td>
+<td style="text-align: right;">No</td>
+<td>Type- and executor-specific settings. Defaults to <code>{}</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>The runtime generates an injection ID as
+<code>&lt;occurrence_id&gt;/&lt;fault_id&gt;</code>. Correlated actions therefore have different
+injection IDs but the same occurrence ID.</p>
+<h3 id="target">Target<a class="headerlink" href="#target" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th style="text-align: right;">Required</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>surface</code></td>
+<td style="text-align: right;">Yes</td>
+<td>-</td>
+<td>Training surface: <code>input</code>, <code>output</code>, <code>weight</code>, <code>bias</code>, <code>gradient</code>, <code>optimizer_state</code>, <code>rng_state</code>, <code>sampler_state</code>, <code>data</code>, <code>checkpoint</code>, <code>compute</code>, <code>collective</code>, <code>process</code>, <code>resource</code>, or <code>config</code>.</td>
+</tr>
+<tr>
+<td><code>rank</code></td>
+<td style="text-align: right;">No</td>
+<td><code>0</code></td>
+<td>Global rank that executes the action.</td>
+</tr>
+<tr>
+<td><code>model_part</code></td>
+<td style="text-align: right;">No</td>
+<td><code>0</code></td>
+<td>TorchTitan model-part or Megatron model-chunk index.</td>
+</tr>
+<tr>
+<td><code>component</code></td>
+<td style="text-align: right;">For logical module targets</td>
+<td>-</td>
+<td>Non-empty logical component string such as <code>transformer_block</code>, <code>embedding</code>, <code>output</code>, or <code>expert</code>.</td>
+</tr>
+<tr>
+<td><code>index</code></td>
+<td style="text-align: right;">For indexed components</td>
+<td>-</td>
+<td>Global layer or expert index.</td>
+</tr>
+<tr>
+<td><code>module_path</code></td>
+<td style="text-align: right;">For explicit module targets</td>
+<td>-</td>
+<td>Non-empty exact path from the user model's <code>named_modules()</code>, such as <code>model.layers.12.mlp</code>. It is attempted before logical component resolution.</td>
+</tr>
+<tr>
+<td><code>operation</code></td>
+<td style="text-align: right;">Executor-specific</td>
+<td>-</td>
+<td>Non-empty runtime operation such as <code>all_reduce</code> for a collective fault.</td>
+</tr>
+<tr>
+<td><code>resource</code></td>
+<td style="text-align: right;">Executor-specific</td>
+<td>-</td>
+<td>Non-empty string identifying a GPU, NIC, worker, node, or other resource.</td>
+</tr>
+<tr>
+<td><code>path</code></td>
+<td style="text-align: right;">Executor-specific</td>
+<td>-</td>
+<td>Non-empty checkpoint or storage path.</td>
+</tr>
+<tr>
+<td><code>metadata</code></td>
+<td style="text-align: right;">No</td>
+<td><code>{}</code></td>
+<td>Additional selector data consumed by framework resolution or a custom executor.</td>
+</tr>
+</tbody>
+</table>
+<p>Module surfaces (<code>input</code>, <code>output</code>, <code>weight</code>, <code>bias</code>, <code>gradient</code>,
+<code>optimizer_state</code>, and <code>compute</code>) require either <code>module_path</code> or <code>component</code>.
+Only layer and expert logical components accept <code>index</code>; non-indexed selectors
+such as <code>embedding</code> and <code>output</code> reject it.
+Supplying both is useful when the exact framework path refines a logical
+component for localization comparison. The explicit module must be the logical
+module itself or one of its descendants; contradictory selectors are rejected
+before injection.
+For pipeline-sharded Megatron, TorchTitan, or DeepSpeed models, logical
+transformer-layer indices are resolved through global module metadata such as
+<code>layer_number</code> or <code>global_layer_index</code>. The injector rejects ambiguous
+stage-local numbering instead of binding the same local suffix on every stage.
+Megatron's <code>layer_number</code> is interpreted as one-based. Other pipeline
+implementations using <code>layer_number</code> must set <code>metadata.layer_number_base</code> to
+<code>0</code> or <code>1</code>, or expose an unambiguous <code>global_layer_index</code> or
+<code>global_layer_idx</code>.</p>
+<p>Expert indices are global. An expert module may expose <code>global_expert_index</code> or
+<code>global_expert_id</code>. Otherwise the target or model must provide
+<code>expert_parallel_rank</code> and <code>num_local_experts</code>; the injector maps the local
+module suffix through that topology and rejects ambiguous local numbering.
+Logical <code>embedding</code> targets prefer an unambiguous token, word, or vocabulary
+embedding. If only multiple generic embedding paths are available, enablement
+fails and the campaign must specify an exact <code>module_path</code>.</p>
+<h3 id="built-in-parameters">Built-In Parameters<a class="headerlink" href="#built-in-parameters" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Applies to</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>operation</code></td>
+<td><code>tensor_corruption</code></td>
+<td>Required</td>
+<td><code>single_bitflip</code>, <code>multi_bitflip</code>, <code>set_value</code>, <code>scale</code>, <code>noise</code>, or <code>sign_flip</code>.</td>
+</tr>
+<tr>
+<td><code>scope</code></td>
+<td>Local tensor and state-flow faults except <code>reorder</code></td>
+<td><code>single</code></td>
+<td>Elements selected by the effect: <code>single</code>, <code>row</code>, <code>1%</code>, <code>10%</code>, or <code>100%</code>. <code>reorder</code> accepts no scope and always reorders the full leading dimension.</td>
+</tr>
+<tr>
+<td><code>magnitude</code></td>
+<td>Bit flip, scale, or noise corruption</td>
+<td><code>medium</code></td>
+<td><code>catastrophic</code>, <code>large</code>, <code>medium</code>, <code>subtle</code>, or <code>near_invisible</code>; selects bit position or the default scale/noise strength.</td>
+</tr>
+<tr>
+<td><code>value</code></td>
+<td><code>set_value</code></td>
+<td>Required</td>
+<td>Numeric value, or <code>nan</code>, <code>inf</code>, or <code>-inf</code>.</td>
+</tr>
+<tr>
+<td><code>factor</code></td>
+<td><code>scale</code></td>
+<td>Derived from <code>magnitude</code></td>
+<td>Explicit multiplication factor.</td>
+</tr>
+<tr>
+<td><code>std</code></td>
+<td><code>noise</code></td>
+<td>Derived from <code>magnitude</code></td>
+<td>Gaussian-noise standard deviation.</td>
+</tr>
+<tr>
+<td><code>parameter</code></td>
+<td>Parameter, gradient, or optimizer-state target</td>
+<td>Surface-dependent</td>
+<td>Exact parameter attribute, commonly <code>weight</code> or <code>bias</code>.</td>
+</tr>
+<tr>
+<td><code>state_key</code></td>
+<td><code>optimizer_state</code></td>
+<td>First suitable tensor</td>
+<td>Exact optimizer-state entry, such as <code>exp_avg</code> or <code>exp_avg_sq</code>.</td>
+</tr>
+<tr>
+<td><code>delay_ms</code></td>
+<td><code>delay</code></td>
+<td>Required</td>
+<td>Finite positive JSON number in milliseconds that fits the platform timer. Strings, booleans, NaN, infinity, and unrepresentable durations are rejected.</td>
+</tr>
+</tbody>
+</table>
+<p>Built-in local parameters are validated when the manifest is constructed.
+Unknown keys and keys that do not apply to the selected operation are rejected;
+for example, <code>factor</code> is valid only for <code>scale</code> and <code>std</code> only for <code>noise</code>.
+<code>factor</code> and <code>std</code> must be finite numbers, <code>std</code> must be positive, <code>set_value</code>
+accepts only a number or <code>nan</code>/<code>inf</code> sentinel, and state-flow <code>scope</code> values
+must be one of the documented selectors. Invalid values never survive until a
+model hook executes. A finite <code>set_value</code> must also fit the dtype observed at
+runtime; otherwise the action is recorded as failed and the hook returns the
+unmodified tensor. Built-in hook transforms also require a strided layout.
+Sparse or otherwise non-strided tensors are returned unchanged and recorded as
+unsupported instead of raising from one distributed rank.
+History observers apply the same rule: an unsupported sparse gradient or module
+value is remembered as unavailable history, and the later stale/duplicate
+occurrence fails locally without raising from the observer hook.
+Empty local tensors are also unsupported. A rejected observation invalidates
+that history slot, so a later dense value cannot reuse evidence from before the
+unsupported iteration. This includes empty module inputs and outputs; history
+selection does not silently skip them in favor of older evidence.
+Weight and bias collision detection is keyed by the resolved parameter storage,
+not by the selector spelling. A <code>weight</code> surface with <code>parameter: "bias"</code> and a
+direct <code>bias</code> surface therefore cannot overlap on the same tensor.
+Parameter-state selectors must name registered model parameters. Registered
+buffers such as BatchNorm running statistics are rejected because checkpoint
+replacement tracking and optimizer ownership apply only to parameters.
+Gradient targets must resolve to a parameter with <code>requires_grad=True</code>;
+otherwise enablement fails before the training loop installs a hook.</p>
+<p>Stale and duplicate faults retain two observed values only during their
+scheduled collection window. Module and gradient observation starts one
+training iteration before a candidate and is removed at the optimizer boundary
+after the occurrence. Input, output, gradient, and state histories retain only
+the values selected by <code>scope</code>, rather than cloning the complete tensor for a
+narrow fault. A stale or duplicate incident scheduled for the first iteration
+fails verification because no prior value exists. For model and optimizer state,
+that missing history produces a failed ground-truth record during activation;
+it does not abort campaign enablement. Unsupported targets and no-op mutations
+remain hard validation failures.
+Optimizer entries such as Adam moments may not exist until the first optimizer
+step. History setup defers those unresolved entries and retries at later
+optimizer boundaries instead of rejecting campaign enablement prematurely.
+Megatron mixed-precision and distributed optimizers key those entries by FP32
+main parameters rather than the model FP16/BF16 parameters. The framework
+adapter resolves the corresponding main parameter, including members of a
+chained optimizer, before selecting optimizer state.
+For state surfaces, an incident at iteration N is armed after iteration N-1
+completes. It applies the snapshot from before iteration N-1, making the target
+one completed optimizer update behind its current state. The latest snapshot is
+the current state at arming time and would therefore be a no-op.</p>
+<p>Weight, bias, and optimizer-state faults with bounded iteration lifetimes are
+retired by removing the injected finite delta from the current tensor. This
+preserves optimizer updates made during the active window. A bounded state fault
+whose injected delta is non-finite is rejected before mutation; represent such
+corruption with an <code>until</code> lifetime and recover the workload afterward.
+If the target still equals the injected value at retirement, the executor
+copies the original selected values exactly instead of subtracting a rounded
+low-precision delta. Delta subtraction is reserved for values changed by
+training while the effect was active.
+Megatron optimizers may replace a model FP16/BF16 parameter from its distinct
+FP32 main parameter after the update. That resynchronized value is preserved at
+retirement instead of having the injected delta subtracted a second time.
+DeepSpeed ZeRO-3 applies the same rule to a rank-owned <code>ds_tensor</code> partition
+that is replaced from its FP32 master partition during the optimizer step.
+FSDP2/HSDP <code>DTensor</code> state is mutated and verified through the rank-local shard.
+Model <code>load_state_dict()</code> marks only active weight and bias state as externally
+replaced; optimizer <code>load_state_dict()</code> marks only optimizer-state effects.
+This prevents an unrelated partial checkpoint load from suppressing cleanup of
+another state family.
+If a model load copies an active target and then fails on another key, the
+copied target is still marked as replaced before the original load error is
+re-raised. Recovery cleanup therefore preserves the partially restored value
+instead of subtracting an obsolete injection delta.
+Megatron and DeepSpeed GEMINI recovery copy checkpoint tensors directly rather
+than calling framework <code>load_state_dict()</code> methods. Those successful direct
+loads notify the same replacement tracker before <code>notify_recovery()</code> retires
+active state faults, so a recovered value equal to the injected value is not
+mistaken for a still-live fault and overwritten with pre-fault state.
+A bounded state effect replaced before its configured expiration is recorded as
+failed because the requested lifetime was not executed. Replacement at the
+normal post-update expiration boundary remains successful and preserves the
+restored state. Replacement is compared with the last completed optimizer
+iteration, so loading clean state after activation but before that iteration's
+optimizer boundary fails even a one-iteration occurrence.</p>
+<p>Custom executors receive the full <code>target</code> and <code>parameters</code> objects unchanged.
+They may define additional fields, but should validate those fields before the
+training loop begins.
+All string selectors are validated before training and captured in the
+campaign's immutable manifest snapshot. Non-string or whitespace-only
+<code>module_path</code>, <code>operation</code>, and <code>path</code> values are rejected instead of being
+coerced by a framework adapter or executor.</p>
+<h2 id="schedule-examples">Schedule Examples<a class="headerlink" href="#schedule-examples" title="Permanent link">&para;</a></h2>
+<p>Exact arbitrary iterations:</p>
+<pre><code class="language-json">{&quot;at&quot;: [37, 203, 911], &quot;probability&quot;: 1.0}
+</code></pre>
+<p>Inclusive periodic range:</p>
+<pre><code class="language-json">{
+  &quot;range&quot;: {&quot;start&quot;: 100, &quot;end&quot;: 500, &quot;every&quot;: 20},
+  &quot;probability&quot;: 0.25
+}
+</code></pre>
+<p>Permanent fault beginning at one exact iteration:</p>
+<pre><code class="language-json">{
+  &quot;trigger&quot;: {&quot;at&quot;: [1200]},
+  &quot;lifetime&quot;: {&quot;until&quot;: &quot;replacement&quot;}
+}
+</code></pre>
+<h2 id="failure-model">Failure Model<a class="headerlink" href="#failure-model" title="Permanent link">&para;</a></h2>
+<p>The canonical types cover common observable LLM pre-training failures:</p>
+<table>
+<thead>
+<tr>
+<th>Family</th>
+<th>Types</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Numerical and state</td>
+<td><code>tensor_corruption</code>, <code>stale_state</code>, <code>drop</code>, <code>duplicate</code>, <code>reorder</code>, <code>config_drift</code></td>
+</tr>
+<tr>
+<td>Performance and liveness</td>
+<td><code>delay</code>, <code>hang</code>, <code>timeout</code></td>
+</tr>
+<tr>
+<td>Runtime and availability</td>
+<td><code>exception</code>, <code>resource_exhaustion</code>, <code>process_termination</code>, <code>resource_unavailable</code></td>
+</tr>
+<tr>
+<td>Checkpoint and storage</td>
+<td><code>checkpoint_corruption</code>, <code>checkpoint_truncation</code>, <code>checkpoint_missing</code>, <code>io_error</code></td>
+</tr>
+<tr>
+<td>Communication</td>
+<td><code>payload_corruption</code>, <code>collective_desync</code>, <code>message_drop</code>, <code>network_partition</code></td>
+</tr>
+</tbody>
+</table>
+<p>The built-in local executor supports:</p>
+<ul>
+<li>numerical corruption of module inputs, outputs, weights, biases, gradients,
+  and optimizer-state tensors;</li>
+<li>stale or duplicated inputs, outputs, parameters, gradients, and optimizer state;</li>
+<li>dropped or reordered inputs, outputs, and gradients; and</li>
+<li>delays on logical module or compute targets.</li>
+</ul>
+<p>Tensor corruption operations are <code>single_bitflip</code>, <code>multi_bitflip</code>, <code>set_value</code>,
+<code>scale</code>, <code>noise</code>, and <code>sign_flip</code>.
+Scopes are <code>single</code>, <code>row</code>, <code>1%</code>, <code>10%</code>, and <code>100%</code>.
+Bit flips support <code>float16</code>, <code>bfloat16</code>, <code>float32</code>, and <code>float64</code>.</p>
+<h2 id="logical-targets">Logical Targets<a class="headerlink" href="#logical-targets" title="Permanent link">&para;</a></h2>
+<p>Prefer framework-neutral targets:</p>
+<pre><code class="language-json">{
+  &quot;rank&quot;: 3,
+  &quot;component&quot;: &quot;transformer_block&quot;,
+  &quot;index&quot;: 12,
+  &quot;surface&quot;: &quot;gradient&quot;
+}
+</code></pre>
+<p>The built-in resolver recognizes transformer blocks, embeddings, output heads,
+and experts.
+Use <code>module_path</code> as an explicit escape hatch:</p>
+<pre><code class="language-json">{
+  &quot;rank&quot;: 3,
+  &quot;module_path&quot;: &quot;model.layers.12.mlp&quot;,
+  &quot;surface&quot;: &quot;output&quot;
+}
+</code></pre>
+<p>Other target fields identify an operation, resource, or storage path.
+The execution rank applies the action and records rank-local ground truth.
+For a resource-only action, that execution rank is not automatically an
+expected failed rank. Localization should report the resource through
+<code>failed_resources</code> and include a failed rank only when the campaign also
+targets that rank directly. <code>FaultInjectionRecord.expected_rank</code> likewise
+returns <code>None</code> when the target has a resource but no explicit rank.
+When a target explicitly supplies both <code>rank</code> and <code>resource</code>, localization must
+report both dimensions; neither the rank-only nor resource-only result is
+complete attribution. The standalone example comparator applies the same rule
+and never substitutes an action's executor rank for a resource-only target.</p>
+<h2 id="destructive-and-environment-specific-failures">Destructive and Environment-Specific Failures<a class="headerlink" href="#destructive-and-environment-specific-failures" title="Permanent link">&para;</a></h2>
+<p>Process, checkpoint, storage, communication, node, and network effects require an
+executor with explicit capabilities:</p>
+<pre><code class="language-python">from lm_resiliency import (
+    CallbackFaultExecutor,
+    FailureType,
+    FaultExecutionResult,
+    SafetyClass,
+)
+
+executor = CallbackFaultExecutor(
+    name=&quot;cluster-manager&quot;,
+    supported_types={
+        FailureType.PROCESS_TERMINATION,
+        FailureType.RESOURCE_UNAVAILABLE,
+        FailureType.NETWORK_PARTITION,
+    },
+    max_safety=SafetyClass.CLUSTER_DESTRUCTIVE,
+    activate=lambda request: FaultExecutionResult(
+        verified=manager.apply_fault(request.to_dict()),
+        active=True,
+        token=request.occurrence_id,
+    ),
+    deactivate=lambda request, result: manager.clear_fault(result.token),
+)
+
+faults = enable_fault_injection(
+    model,
+    optimizer,
+    campaign=campaign,
+    executors=(executor,),
+)
+</code></pre>
+<p>Safety classes are:</p>
+<ul>
+<li><code>safe_in_process</code>;</li>
+<li><code>isolated_destructive</code>; and</li>
+<li><code>cluster_destructive</code>.</li>
+</ul>
+<p>Campaign enablement fails before training when no configured executor supports a
+local fault or when an executor's safety ceiling is insufficient.
+Collective desynchronization expects SCOUT <code>hang</code> localization. <code>drop</code>,
+<code>duplicate</code>, and <code>reorder</code> actions on the <code>collective</code> surface are
+cluster-destructive and also expect <code>hang</code>, so they cannot use a safe-in-process
+executor or participate in an in-band post-activation collective. The same
+operations on tensor and data-flow surfaces retain their normal local semantics.
+Unsupported effects are never silently skipped.
+At execution time, the selected executor must return verified evidence.
+An unverifiable activation is marked failed, deactivated when necessary, and is
+not accepted as campaign ground truth.
+The executor result's <code>verified</code> and <code>active</code> fields must be JSON booleans;
+truthy strings and integers are rejected.
+Activation and deactivation evidence must be strictly JSON-serializable; invalid
+evidence fails the action immediately and active effects are deactivated.
+If deactivation is interrupted, the record is failed before the interrupt is
+re-raised and the session retains cleanup ownership until a retry succeeds.
+An executor that returns an active effect must provide a deactivation callback.
+A callback executor without deactivation must declare <code>one_shot=True</code>, which is
+an explicit promise that activation returns <code>active=false</code>. This capability is
+validated before the callback runs; returning an active result from a one-shot
+executor is still rejected.
+An external executor used with a <code>matching_calls</code> lifetime must declare
+<code>completes_inline=True</code> and return <code>active=false</code>. This capability is checked
+before activation so an unsupported destructive effect is never started.
+For an <code>iterations</code> lifetime greater than one, or any <code>until</code> lifetime, the
+executor must return <code>active=true</code> and support deactivation. An inline,
+inactive result cannot prove that a persistent effect remained present for its
+configured lifetime. Executors declared <code>one_shot=True</code> are therefore rejected
+for those lifetimes during preflight.
+Executor activation and deactivation evidence is captured as a deep JSON
+snapshot, so later mutation of callback-owned dictionaries or lists cannot
+change campaign ground truth.</p>
+<p>Distributed preflight and attempt persistence complete on every rank before any
+executor runs. After activation begins, an in-band post-activation consensus is
+used only when every selected action is <code>safe_in_process</code>. A successful process
+termination, hang, resource loss, or network partition may make its execution
+rank unable to enter another training-process collective, so destructive
+executors must report activation and failures through their training manager or
+other out-of-band control plane. Their later expiration also avoids in-band
+consensus for the same reason.
+If any runtime preparation, preflight, persistence, rollback, or safe-activation
+collective itself raises, the surviving rank performs bounded local cleanup
+before propagating the collective failure.
+This includes interrupt-class failures raised by the collective operation
+itself: active effects and framework callbacks are cleaned before the original
+interrupt is re-raised.
+An interrupt-class failure raised during safe activation participates in that
+same all-rank failure consensus. Newly armed effects are rolled back on every
+rank before the interrupted rank re-raises its original exception.
+If one correlated effect's rollback raises an interrupt-class error, rollback
+continues through every earlier effect. The original activation failure remains
+primary and the first cleanup failure is attached as secondary context.
+Single-rank and intentionally non-consensus preparation failures follow the
+same cleanup rule.</p>
+<p>Built-in delays use an interruptible wait. Recovery or session cleanup signals
+that wait before acquiring the effect lock, so shutdown does not wait for the
+configured delay duration.</p>
+<p>The kit injects observable effects, not physical defects.
+For example, an ECC event is represented as tensor corruption or resource loss;
+a failed cable is represented as delay, message loss, or network partition.</p>
+<h2 id="restart-and-retrigger-behavior">Restart and Retrigger Behavior<a class="headerlink" href="#restart-and-retrigger-behavior" title="Permanent link">&para;</a></h2>
+<p>Each candidate occurrence is preflighted and then journaled before activation.
+This ordering applies to both distributed and single-rank future iterations, so
+an invalid target or executor does not consume a retry attempt.
+If a later single-rank preflight fails, the session closes and restores every
+effect already active from an earlier iteration before propagating the error.
+Distributed journal-binding consensus failures follow the same rule: the
+deferred session removes its callbacks before the collective exception escapes.
+The default <code>retrigger: "once"</code> prevents the same occurrence from firing again
+after rollback when a persistent state store is used.</p>
+<pre><code class="language-python">from lm_resiliency import JsonCampaignStateStore
+
+faults = enable_fault_injection(
+    model,
+    optimizer,
+    campaign=campaign,
+    state_store=JsonCampaignStateStore(f&quot;/manager-state/campaign-rank-{rank}.json&quot;),
+)
+</code></pre>
+<p>Supported policies are:</p>
+<ul>
+<li><code>once</code>;</li>
+<li><code>every_attempt</code>; and</li>
+<li><code>max_occurrences</code>, with a positive <code>max_occurrences</code> field.</li>
+</ul>
+<p>The state file must survive worker replacement for restart-stable behavior.
+Use one JSON state file per rank, or provide a manager-backed
+<code>CampaignStateStore</code> implementing atomic <code>compare_and_swap(expected, updated)</code>
+claims across workers. A plain load-modify-save sequence is insufficient when
+old and replacement workers overlap: only one worker may claim a
+<code>retrigger: "once"</code> occurrence. <code>JsonCampaignStateStore</code> uses an interprocess
+file lock, atomic replacement, and a parent-directory <code>fsync</code> before
+acknowledging a claim; <code>MemoryCampaignStateStore</code> provides the same contract
+within one process.
+The exact <code>state_store</code> object passed by the caller is retained even when the
+object defines falsey truth-value semantics; only <code>None</code> selects the default
+in-memory store.
+Both journals passed to <code>compare_and_swap</code> must name the same campaign;
+cross-campaign updates are rejected before storage is modified.
+For a distributed enablement, the initial manifest binding is persisted only
+after every rank agrees on the manifest, training iteration, and persisted
+attempt journal. Divergent per-rank attempt histories fail enablement before any
+new occurrence is armed.
+Interrupt-class preparation failures participate in the same rank consensus
+before the original interrupt is re-raised. Cleanup preserves the first
+interrupt or error while continuing through every active effect, observer, and
+framework restoration.
+The same rule applies at later optimizer boundaries: interrupt-class preflight,
+attempt-persistence, and safe-effect expiration failures enter rank consensus
+before the interrupted rank re-raises the original signal. If an interrupt
+arrives after a built-in local mutation or hook registration begins, the
+partially constructed effect restores or removes that state before the
+interrupt escapes.
+Recovery and replacement notifications attempt every matching effect cleanup
+before returning. An ordinary cleanup failure is reported with its lifecycle
+boundary; an interrupt-class failure is re-raised unchanged after the remaining
+effects have been finalized and discarded.
+The journal stores the canonical manifest identity. Reusing a campaign name with
+changed triggers, targets, parameters, or metadata requires a new state file;
+stale attempts are never applied to an edited manifest.
+Attempt entries use canonical <code>&lt;incident_id&gt;@&lt;positive_iteration&gt;</code> keys and
+strictly positive integer counts. Iterations have no leading zeroes. Malformed,
+boolean, fractional, zero, or negative restart evidence is rejected rather than
+normalized.
+Deterministic probability skips are reported as <code>skipped_probability</code> but are
+not persisted as attempts. Reaching a dense range with unselected candidates
+therefore does not grow or repeatedly copy the restart journal.
+Artifact evaluation recomputes selection from the authenticated manifest seed,
+incident ID, and iteration. A skipped occurrence must include every manifest
+action, and a selected occurrence cannot claim a skipped status.
+The journal object requires exactly <code>campaign</code>, <code>manifest_identity</code>, and
+<code>attempts</code>; missing or unknown fields are rejected.</p>
+<h2 id="ground-truth-and-evaluation">Ground Truth and Evaluation<a class="headerlink" href="#ground-truth-and-evaluation" title="Permanent link">&para;</a></h2>
+<p>An occurrence ID identifies one incident candidate, such as
+<code>sporadic-sdc@203</code>.
+Correlated faults share the same occurrence ID and have individual injection IDs.</p>
+<pre><code class="language-python">from lm_resiliency import LocalizationResult
+
+report = faults.evaluate(
+    [
+        LocalizationResult(
+            occurrence_id=&quot;sporadic-sdc@203&quot;,
+            detected=True,
+            failed_ranks=(3,),
+            kind=&quot;sdc&quot;,
+            components=(&quot;transformer_block&quot;,),
+            latency_ms=8.4,
+        )
+    ]
+)
+report.to_json(&quot;campaign-report.json&quot;)
+</code></pre>
+<p>A correlated occurrence may submit multiple <code>LocalizationResult</code> objects with
+the same <code>occurrence_id</code>. This is required when one incident contains different
+failure kinds or when the resiliency system emits separate reports for its
+actions. Each expected kind must correlate with its injected rank or resource;
+matching only the aggregate sets is insufficient.
+When a kind contains actions that specify both rank and resource, the exact
+<code>(rank, resource)</code> pairs must also match within that kind. Correct rank and
+resource projections with the pairs swapped are not successful attribution.
+Neutral localization results may include <code>scope</code>. A <code>peer_group</code> result counts
+as detection evidence but is inconclusive for rank or resource localization, so
+its targets, kind, and components receive no attribution credit.</p>
+<p>Reports contain:</p>
+<ul>
+<li>the canonical manifest identity;</li>
+<li>the complete versioned manifest;</li>
+<li>actual iteration and attempt numbers;</li>
+<li>temporal behavior and safety class;</li>
+<li>executor and verification evidence;</li>
+<li>expected ranks, resources, and components;</li>
+<li>submitted neutral localization results; and</li>
+<li>attribution accuracy and latency.</li>
+</ul>
+<p>An occurrence is <code>localized</code> only when injection succeeded, detection was
+reported, and the reported rank and resource sets exactly match the expected
+sets. Extra targets are attribution errors, not successful localization. If a
+localization result also supplies <code>kind</code> or <code>components</code>, that evidence must
+match the injected fault; omit optional evidence when the resiliency system does
+not report it.
+When an action explicitly identifies both a rank and a resource, localization
+must preserve that rank-resource association. Correct aggregate rank and
+resource sets with the pairs swapped are not successful attribution.
+The standalone comparator applies the same association per failure kind.
+Positive SCOUT <code>layer_id</code> evidence is also associated with the failed ranks and
+resources in the same report, including exact rank-resource pairs. Swapping
+correct pair sets between layers is not successful localization even when each
+layer has the correct independent rank and resource projections.
+For embedding, output-head, resource, and other non-layer targets, any positive
+<code>layer_id</code> is contradictory evidence and fails localization; an omitted layer
+or the aggregate <code>-1</code> sentinel remains valid.
+<code>kind</code>, when supplied, must be a non-empty string. Supplying component evidence
+for an occurrence whose injected targets have no expected component is an
+overclaim and fails attribution.
+<code>failed_resources</code> and <code>components</code> must be arrays of non-empty strings; scalar
+strings and coercible non-string values are rejected.
+When component evidence is supplied, it must exactly match the expected
+component set; extra components are attribution errors. Component evidence is
+also correlated with the exact <code>(rank, resource)</code> target association in each
+localization result. Swapping correct component names between two target pairs
+is therefore an attribution failure even when every component has the same
+independent rank and resource projections. When kind evidence is present, the
+full <code>(kind, component, rank, resource)</code> association must match.
+When kind evidence is also supplied, the <code>(kind, component)</code> association must
+match the injected actions; independently correct kind and component sets cannot
+be swapped across a correlated occurrence.
+The standalone SCOUT comparator applies the same rule to replay source prefixes:
+each <code>hidden.*</code>, <code>embedding.*</code>, or <code>output.*</code> source remains associated with the
+exact <code>(rank, resource)</code> pairs in the report that supplied it. Correct
+per-prefix rank and resource projections with their pairs crossed do not count
+as localization. Repeated actions with the same source and target are
+deduplicated for this set comparison.
+Parameter and optimizer-state SDC actions require both their <code>hidden.*</code>
+component evidence and SCOUT's <code>optimizer.*</code> updated-weight evidence; both
+families retain the same expected target association.
+Example detection counts also require a report with the expected failure kind;
+an unrelated report at the same iteration is retained as evidence but does not
+count as detecting the injected occurrence. For correlated incidents containing
+multiple failure kinds, each kind must identify its corresponding expected
+ranks; matching only the aggregate rank and kind sets is insufficient.
+SCOUT reports with <code>scope="peer_group"</code> are inconclusive. They may count as
+detection evidence, but their ranks, resources, kind, layer, and source fields
+are excluded from localization credit.
+<code>evaluate()</code> takes the campaign lifecycle lock before snapshotting every
+record, so expiration, recovery, replacement, and close cannot expose a
+half-transitioned correlated incident. A returned <code>CampaignReport</code> therefore
+represents one coherent lifecycle instant. Direct
+<code>FaultInjectionRecord.to_dict()</code> serialization uses the record lock and cannot
+expose a partially updated individual transition.
+Optimizer-boundary callbacks, recovery/replacement notifications, and session
+cleanup share one lifecycle lock. <code>close()</code> waits for an in-flight boundary and
+removes any effect or observer armed there before marking the session closed.
+External effect completion and rollback are independently serialized so a
+manager callback is never deactivated twice.</p>
+<p>Reports are rank-local.
+A distributed campaign runner or training manager should collect reports from all
+ranks and preserve the software, hardware, topology, model, and workload metadata.
+A rank-local evaluation of a correlated multi-rank occurrence remains
+unsuccessful when records for any manifest action are absent, even if the
+submitted localization identifies every job-wide target. Aggregate the
+rank-local injection records, as the eight-GPU example does, before certifying
+the complete occurrence. The example comparator also checks the embedded
+manifest and requires every fault action for an occurrence exactly once; a
+partial or duplicate aggregate cannot pass.
+It additionally requires a record for every manifest candidate at or before the
+artifact's <code>completed_iterations</code>, including explicit probability skips. Losing
+an entire occurrence therefore cannot reduce the certification denominator.
+The example treats the embedded manifest as the authenticated source of
+expected fault type, target, parameters, rank, resource, and component
+evidence. Each injection record must match that manifest exactly.
+Embedded <code>incident_id</code> values must be unique; duplicate IDs are rejected rather
+than allowing a later incident to replace an earlier action map.
+<code>injection_succeeded</code> and <code>verified</code> must be JSON booleans and must agree with
+the record lifecycle status; truthy strings, inconsistent statuses, and
+record-level target tampering are rejected before localization scoring.</p>
+<h2 id="current-boundaries">Current Boundaries<a class="headerlink" href="#current-boundaries" title="Permanent link">&para;</a></h2>
+<p>The schema and executor contract cover all canonical families above.
+The repository does not directly terminate the current process, damage arbitrary
+storage, alter a production network, or remove cluster resources.
+Those effects require an explicitly configured isolated or cluster executor.</p>
+<p>DeepSpeed clocks advance only when <code>global_steps</code> advances, so gradient
+accumulation microbatches do not consume campaign iterations. PipelineEngine
+uses the active <code>OptimizerStep</code> instruction-map entry, composing with an already
+enabled SCOUT wrapper. Under ZeRO-3, weight and bias effects mutate the
+rank-owned <code>ds_tensor</code> partition rather than the zero-sized model placeholder;
+gradient hooks remain attached to the original parameter so they receive the
+materialized backward gradient. Optimizer-state effects use the rank-owned FP32
+master-state fragment exposed by ZeRO-1/2 high-precision mappings or the
+ZeRO-3 local partition. ZeRO-3 optimizer offload is rejected because the
+injector cannot safely retain a live swapped state fragment across the fault
+lifetime.</p>
+<p>Permanent non-finite mutation of live parameter or optimizer state requires
+checkpoint recovery because the affected values cannot be retired while
+preserving subsequent updates. Use those state faults in isolated campaigns that
+recover or terminate after localization. <code>notify_recovery()</code> preserves values
+that were replaced by checkpoint loading and only removes an effect that is
+still visibly present.</p>
+<p>Before mutating or restoring live CUDA parameter or optimizer-state storage,
+the built-in executor synchronizes pending work on that device. This prevents a
+rare injected write from racing an asynchronous checkpoint copy that is still
+reading the same storage. The synchronization is limited to state-fault
+activation and cleanup; healthy optimizer iterations remain asynchronous.</p>
+              
+            </div>
+          </div><footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/LMResiliency/lm-resiliency" class="fa fa-code-fork" style="color: #fcfcfc"> LMResiliency/lm-resiliency</a>
+        </span>
+    
+    
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

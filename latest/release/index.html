@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Release Process - LM Resiliency</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Release Process";
+        var mkdocs_page_input_path = "release.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> LM Resiliency
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../api/">API Guide</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../compatibility/">Compatibility</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../gemini/">GEMINI</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../scout/">SCOUT</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../torchrun_resiliency/">Torchrun Resiliency</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../moe_execution_regimes/">MoE Execution Regimes</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../validation/">Validation</a>
+                </li>
+              </ul>
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">Release Process</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#repository-controls">Repository Controls</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#production-release">Production Release</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#testpypi">TestPyPI</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#verification">Verification</a>
+    </li>
+    </ul>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">LM Resiliency</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">Release Process</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/LMResiliency/lm-resiliency/edit/main/docs/release.md">Edit on LMResiliency/lm-resiliency</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="release-process">Release Process<a class="headerlink" href="#release-process" title="Permanent link">&para;</a></h1>
+<p>Production releases use one identified wheel and source distribution from build through validation, PyPI publication, and the immutable GitHub release.</p>
+<h2 id="repository-controls">Repository Controls<a class="headerlink" href="#repository-controls" title="Permanent link">&para;</a></h2>
+<ul>
+<li>The active <code>release tag protection</code> ruleset matches <code>refs/tags/v*</code>. Only organization administrators can create, update, or delete matching tags; non-fast-forward tag changes are blocked.</li>
+<li>Repository release immutability is enabled for releases created after <code>v0.1.0</code>. Published release tags and assets cannot be changed. The <code>v0.1.0</code> release predates this setting and remains outside the immutable-release guarantee.</li>
+<li>PyPI publication uses the protected <code>pypi</code> environment and OIDC trusted publishing. TestPyPI uses its separate protected environment.</li>
+</ul>
+<h2 id="production-release">Production Release<a class="headerlink" href="#production-release" title="Permanent link">&para;</a></h2>
+<ol>
+<li>Merge the release changes through protected <code>main</code> and wait for required CI and review policy.</li>
+<li>Update <code>pyproject.toml</code>, <code>CITATION.cff</code>, and this changelog to the same version.</li>
+<li>An organization administrator creates and pushes <code>v&lt;version&gt;</code> at the intended <code>main</code> commit. Do not reuse or move a release tag.</li>
+<li>The release workflow verifies that the tag matches <code>pyproject.toml</code>, resolves to the checked-out commit, and is an ancestor of current <code>origin/main</code>.</li>
+<li>The workflow reruns the pinned primary CPU suite, builds with a pinned toolchain, and writes <code>release-manifest.json</code> and <code>SHA256SUMS</code> for the wheel and source distribution.</li>
+<li>The exact downloaded artifacts pass manifest verification, clean installation, Quick Start, <code>pip check</code>, dependency audit, and GitHub build-provenance verification.</li>
+<li>After protected-environment approval, the workflow re-resolves the remote tag against the identified commit and publishes the same artifact bundle to PyPI.</li>
+<li>The workflow rechecks the tag again, creates a draft GitHub release, attaches every artifact plus its manifest and checksums, publishes it, then verifies the immutable release and each local asset.</li>
+</ol>
+<p>The workflow blocks PyPI publication when any source, tag, revision, version, digest, artifact-membership, validation, audit, provenance, or environment-approval check fails. GitHub release creation and immutable-asset verification necessarily follow PyPI publication; a failure in that final job leaves the workflow failed and requires operator intervention because published PyPI files cannot be rolled back.</p>
+<h2 id="testpypi">TestPyPI<a class="headerlink" href="#testpypi" title="Permanent link">&para;</a></h2>
+<p>A trusted maintainer can dispatch the same workflow on a selected revision. It builds and validates an identified artifact bundle, publishes it to TestPyPI after environment approval, and verifies a clean installation. Manual dispatch never enters the production PyPI or GitHub release jobs because those jobs require a <code>refs/tags/v*</code> event.</p>
+<h2 id="verification">Verification<a class="headerlink" href="#verification" title="Permanent link">&para;</a></h2>
+<p>Consumers can verify a future immutable release and a downloaded asset with GitHub CLI:</p>
+<pre><code class="language-bash">gh release verify vX.Y.Z --repo LMResiliency/lm-resiliency
+gh release verify-asset vX.Y.Z ./lm_resiliency-X.Y.Z-py3-none-any.whl \
+  --repo LMResiliency/lm-resiliency
+gh attestation verify ./lm_resiliency-X.Y.Z-py3-none-any.whl \
+  --repo LMResiliency/lm-resiliency
+</code></pre>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../validation/" class="btn btn-neutral float-left" title="Validation"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/LMResiliency/lm-resiliency" class="fa fa-code-fork" style="color: #fcfcfc"> LMResiliency/lm-resiliency</a>
+        </span>
+    
+    
+      <span><a href="../validation/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

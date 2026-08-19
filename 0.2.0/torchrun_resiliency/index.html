@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Torchrun Resiliency - LM Resiliency</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Torchrun Resiliency";
+        var mkdocs_page_input_path = "torchrun_resiliency.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> LM Resiliency
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../api/">API Guide</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../compatibility/">Compatibility</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../gemini/">GEMINI</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../scout/">SCOUT</a>
+                </li>
+              </ul>
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">Torchrun Resiliency</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#architecture-at-a-glance">Architecture at a Glance</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#the-recovery-cycle">The Recovery Cycle</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#running-the-integrated-path">Running the Integrated Path</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#validation-and-boundaries">Validation and Boundaries</a>
+    </li>
+    </ul>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../moe_execution_regimes/">MoE Execution Regimes</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../validation/">Validation</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../release/">Release Process</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">LM Resiliency</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">Torchrun Resiliency</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/LMResiliency/lm-resiliency/edit/main/docs/torchrun_resiliency.md">Edit on LMResiliency/lm-resiliency</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="closed-loop-recovery-for-torchrun-training">Closed-Loop Recovery for Torchrun Training<a class="headerlink" href="#closed-loop-recovery-for-torchrun-training" title="Permanent link">&para;</a></h1>
+<p>Distributed training can fail without producing a clean process crash. A rank may stop making progress, run slowly, desynchronize from its peers, or continue with corrupted state. Restarting workers is only part of the solution. The system must first decide what failed, which training state is safe, and whether the current machines should restart or a standby should take over.</p>
+<p>Torchrun already provides the worker lifecycle. LM Resiliency adds the evidence and recovery decisions around that lifecycle:</p>
+<ul>
+<li><strong>SCOUT</strong> detects and localizes failures.</li>
+<li><strong>GEMINI</strong> maintains recent in-memory checkpoints and identifies trusted recovery state.</li>
+<li>The <strong>LM Resiliency torchrun integration</strong> turns that decision into a coordinated restart or standby replacement.</li>
+</ul>
+<p>Together they create closed-loop recovery: protect the running job, detect a failure, select safe state, recover the worker group, and continue training.</p>
+<h2 id="architecture-at-a-glance">Architecture at a Glance<a class="headerlink" href="#architecture-at-a-glance" title="Permanent link">&para;</a></h2>
+<p>The design has three layers:</p>
+<pre><code class="language-text">+-------------------------------------------------------------+
+|                           torchrun                          |
+|  +-------------------------------------------------------+  |
+|  |                active + standby agents                |  |
+|  |               launch and restart workers              |  |
+|  +-------------------------------------------------------+  |
++-------------------------------------------------------------+
+               ^                                |
+               |                                |
+    committed recovery plan         launch + monitor workers
+               |                                |
+               |                                v
++-------------------------------------------------------------+
+|                        LM Resiliency                        |
+|  +-------------------------------------------------------+  |
+|  |        rendezvous backend + framework adapters        |  |
+|  |              GEMINI in-memory checkpoints             |  |
+|  |      SCOUT detection, localization, certification     |  |
+|  |                committed recovery plan                |  |
+|  +-------------------------------------------------------+  |
++-------------------------------------------------------------+
+               ^                                |
+               |                                |
+   state + failure evidence             bootstrap + hooks
+               |                                |
+               |                                v
++-------------------------------------------------------------+
+|         PyTorch / DeepSpeed / Megatron / TorchTitan         |
++-------------------------------------------------------------+
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Responsibility</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>torchrun</td>
+<td>Run active and standby agents; launch, monitor, stop, and restart workers</td>
+</tr>
+<tr>
+<td>LM Resiliency</td>
+<td>Protect training state, detect failures, select recovery state, and coordinate restart or replacement</td>
+</tr>
+<tr>
+<td>Training frameworks</td>
+<td>Execute the model and optimizer loop through their normal framework APIs</td>
+</tr>
+</tbody>
+</table>
+<p>The scheduler or infrastructure layer sits outside the diagram. It allocates the fleet and repairs or retires physical hardware.</p>
+<h2 id="the-recovery-cycle">The Recovery Cycle<a class="headerlink" href="#the-recovery-cycle" title="Permanent link">&para;</a></h2>
+<p>The interaction is easiest to understand by following one failure.</p>
+<p><strong>1. torchrun starts active and standby agents.</strong></p>
+<p>Suppose an allocation contains six nodes and the job needs four:</p>
+<pre><code class="language-text">active:   node-1, node-2, node-3, node-4
+standby:  node-5, node-6
+</code></pre>
+<p>Every allocated node runs a torchrun agent. Four nodes launch the training job; the other two remain parked until a replacement is needed.</p>
+<p><strong>2. LM Resiliency attaches to the training framework.</strong></p>
+<p>The active agents start the user module normally. LM Resiliency detects whether the job uses PyTorch, DeepSpeed, Megatron Core, or TorchTitan and attaches at the framework's initialization boundary.</p>
+<p><strong>3. The training framework runs its normal training loop.</strong></p>
+<p>The framework continues to execute forward, backward, optimizer, and scheduler steps through its existing APIs. LM Resiliency observes the framework-owned step boundaries without taking control of the loop.</p>
+<p><strong>4. LM Resiliency protects the healthy training loop.</strong></p>
+<p>GEMINI captures frequent in-memory checkpoints while SCOUT observes replay, progress, and health evidence. Their combined evidence distinguishes recent state from recent state that is safe to recover.</p>
+<p><strong>5. LM Resiliency commits one recovery decision.</strong></p>
+<p>Assume SCOUT localizes a persistent fault to <code>node-4</code>. LM Resiliency combines that result with GEMINI's trusted state. torchrun contributes worker-lifecycle and membership signals, while LM Resiliency combines the available evidence and publishes a committed recovery plan for torchrun to execute:</p>
+<pre><code class="language-text">faulty node:          node-4
+recovery checkpoint: step 1240
+replacement node:    node-5
+</code></pre>
+<p>The decision is committed before torchrun changes the worker group. It names the recovery checkpoint, the machines that may continue, and the standby that may join.</p>
+<p><strong>6. torchrun restarts or replaces the workers.</strong></p>
+<p>Torchrun stops the current worker group and launches the approved successor:</p>
+<pre><code class="language-text">active:       node-1, node-2, node-3, node-5
+quarantined:  node-4
+standby:      node-6
+</code></pre>
+<p>A process-only failure can restart the existing machines without consuming a standby. A persistent machine failure replaces only the affected machine.</p>
+<p><strong>7. LM Resiliency completes closed-loop recovery.</strong></p>
+<p>The framework adapter restores the selected model, optimizer, scheduler, RNG, and framework-owned progress state. After all workers agree on that state, the framework returns to its normal training loop and GEMINI and SCOUT resume protection. A later failure enters the same recovery cycle again.</p>
+<h2 id="running-the-integrated-path">Running the Integrated Path<a class="headerlink" href="#running-the-integrated-path" title="Permanent link">&para;</a></h2>
+<p>Without LM Resiliency, a single-node eight-GPU job can use torchrun's standard <code>c10d</code> rendezvous backend:</p>
+<pre><code class="language-bash">torchrun \
+  --nnodes=1:1 \
+  --nproc-per-node=8 \
+  --max-restarts=4 \
+  --rdzv-backend=c10d \
+  --rdzv-endpoint=&quot;${RDZV_HOST}:29400&quot; \
+  --rdzv-id=&quot;${RUN_ID}&quot; \
+  --module your_training.module
+</code></pre>
+<p>This command can restart workers, but it does not add SCOUT detection, GEMINI checkpoint recovery, or standby replacement.</p>
+<p>To enable LM Resiliency, select its rendezvous backend, allocate a standby, and supply a worker policy:</p>
+<pre><code class="language-bash">torchrun \
+  --nnodes=1:2 \
+  --nproc-per-node=8 \
+  --max-restarts=4 \
+  --rdzv-backend=lm_resiliency \
+  --rdzv-endpoint=&quot;${RDZV_HOST}:29400&quot; \
+  --rdzv-id=&quot;${RUN_ID}&quot; \
+  --rdzv-conf=&quot;store_type=tcp,\
+lm_resiliency_restart_context_path=${RESTART_CONTEXT},\
+lm_resiliency_worker_config=${WORKER_CONFIG}&quot; \
+  --module your_training.module
+</code></pre>
+<p>In this example, one eight-GPU node trains while a second eight-GPU node waits as standby. Both hosts run the same command. The training loop in <code>your_training.module</code> does not need any changes.</p>
+<p>See the <a href="https://github.com/LMResiliency/lm-resiliency/blob/f591cb1c28d86437665d332c900eb313162e2d3f/examples/torchrun/README.md">torchrun examples</a> for runnable bootstrap and recovery campaigns. See the <a href="../api/#enable-through-torchrun">API guide</a> for configuration and extension contracts.</p>
+<h2 id="validation-and-boundaries">Validation and Boundaries<a class="headerlink" href="#validation-and-boundaries" title="Permanent link">&para;</a></h2>
+<p>The integration has been exercised with native PyTorch, DeepSpeed, Megatron Core, and TorchTitan. Multi-generation validation covered same-node restarts, SCOUT-localized standby replacement, and exact checkpoint restoration.</p>
+<p>The current design intentionally targets fixed-size recovery:</p>
+<ul>
+<li>standby machines are allocated before failure;</li>
+<li>active world size remains stable during recovery;</li>
+<li>one shared rendezvous store coordinates the agents;</li>
+<li>built-in adapters restore GEMINI-managed state; and</li>
+<li>replacing a worker does not repair hardware or allocate a new host.</li>
+</ul>
+<p>Within those boundaries, LM Resiliency gives torchrun enough information to do more than relaunch processes: it recovers the training job from state that has already been checked for safety.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../scout/" class="btn btn-neutral float-left" title="SCOUT"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../moe_execution_regimes/" class="btn btn-neutral float-right" title="MoE Execution Regimes">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/LMResiliency/lm-resiliency" class="fa fa-code-fork" style="color: #fcfcfc"> LMResiliency/lm-resiliency</a>
+        </span>
+    
+    
+      <span><a href="../scout/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../moe_execution_regimes/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

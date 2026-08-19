@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>SCOUT - LM Resiliency</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "SCOUT";
+        var mkdocs_page_input_path = "scout.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> LM Resiliency
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../api/">API Guide</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../compatibility/">Compatibility</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../gemini/">GEMINI</a>
+                </li>
+              </ul>
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">SCOUT</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#coverage-contract">Coverage Contract</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#runtime-paths">Runtime Paths</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#peer-groups-and-consensus">Peer Groups and Consensus</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#replay-surfaces">Replay Surfaces</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#stragglers-and-communication-localization">Stragglers and Communication Localization</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#out-of-band-detection">Out-of-Band Detection</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#checkpoint-certification-and-recovery">Checkpoint Certification and Recovery</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#reports-and-manager-handoff">Reports and Manager Handoff</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#configuration">Configuration</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#hardware-telemetry">Hardware Telemetry</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#guarantee-boundary">Guarantee Boundary</a>
+    </li>
+    </ul>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../torchrun_resiliency/">Torchrun Resiliency</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../moe_execution_regimes/">MoE Execution Regimes</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../validation/">Validation</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../release/">Release Process</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">LM Resiliency</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">SCOUT</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/LMResiliency/lm-resiliency/edit/main/docs/scout.md">Edit on LMResiliency/lm-resiliency</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="scout">SCOUT<a class="headerlink" href="#scout" title="Permanent link">&para;</a></h1>
+<p>SCOUT localizes latent failures such as silent data corruption (SDC), stragglers, collective desynchronization (hangs), and process stalls by comparing equivalent training peers.
+It also localizes telemetry-visible permanent GPU and NVLink endpoint failures through direct hardware health sources.
+SCOUT also certifies which checkpoints are safe to use for recovery.</p>
+<p>For the system design, algorithms, and evaluation rationale, see <a href="https://arxiv.org/abs/2608.11034">SCOUT: Symmetric Consensus Outlier Detection for Failure Localization in LLM Pre-Training</a>.
+This guide defines the operational contract of the current implementation.</p>
+<h2 id="coverage-contract">Coverage Contract<a class="headerlink" href="#coverage-contract" title="Permanent link">&para;</a></h2>
+<p>All rank attribution requires equivalent peers and a strict healthy majority.
+Coverage is sampled rather than continuous.</p>
+<table>
+<thead>
+<tr>
+<th>Failure</th>
+<th>Evidence</th>
+<th>Localization requirement</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Compute, kernel, or HBM corruption</td>
+<td>Replay output or gradient signatures</td>
+<td>The failure recurs during sampled replay.</td>
+</tr>
+<tr>
+<td>Parameter or optimizer corruption</td>
+<td>Parameter-state or updated-weight signatures</td>
+<td>Peers own corresponding replicated state.</td>
+</tr>
+<tr>
+<td>Compute straggler</td>
+<td>Confirmed replay-time deviation</td>
+<td>Equivalent replay remains slow across confirmation rounds.</td>
+</tr>
+<tr>
+<td>Communication straggler</td>
+<td>Collective timing and overlapping process groups</td>
+<td>Independent slow groups implicate the same endpoint without a healthy contradiction.</td>
+</tr>
+<tr>
+<td>Collective desynchronization</td>
+<td>Out-of-band progress or collective fingerprints</td>
+<td>A strict majority agrees on expected progress or metadata.</td>
+</tr>
+<tr>
+<td>Process stall</td>
+<td>Out-of-band stall timer</td>
+<td>Visible progress has stopped.</td>
+</tr>
+<tr>
+<td>DataLoader stall</td>
+<td>Instrumented <code>next()</code> latency</td>
+<td>The delay exceeds absolute, relative, and persistence thresholds.</td>
+</tr>
+<tr>
+<td>Checkpoint I/O stall</td>
+<td>Instrumented read or write latency</td>
+<td>The delay exceeds absolute, relative, and persistence thresholds.</td>
+</tr>
+<tr>
+<td>Permanent GPU memory or device failure</td>
+<td>Uncorrectable ECC, row-remap failure, fatal XID, or device loss</td>
+<td>A health source reports the physical device and fatal metric.</td>
+</tr>
+<tr>
+<td>NVLink endpoint failure</td>
+<td>Per-GPU NVLink recovery and CRC error growth</td>
+<td>The counter delta exceeds the configured fatal threshold.</td>
+</tr>
+<tr>
+<td>Imminent thermal shutdown</td>
+<td>GPU temperature and hardware shutdown limit</td>
+<td>Temperature reaches the configured fatal margin below shutdown.</td>
+</tr>
+</tbody>
+</table>
+<p>Replay and out-of-band progress localization require equivalent peers and consensus.
+Direct health telemetry identifies the reporting physical device without cross-rank consensus.
+Correctable ECC growth, pending row remaps, nonfatal XIDs, and elevated temperature produce warnings but do not trigger recovery.</p>
+<p>SCOUT does not provide an oracle for common-mode failures.
+Two disagreeing peers can detect a mismatch but cannot identify the faulty peer without an independent reference.</p>
+<p>Pure single-owner FSDP or ZeRO-3 state also lacks an independent live copy.
+Use HSDP replication, a shadow copy, parity, trusted recomputation, or another independent reference when owner-shard corruption must be detected.</p>
+<h2 id="runtime-paths">Runtime Paths<a class="headerlink" href="#runtime-paths" title="Permanent link">&para;</a></h2>
+<p>SCOUT uses three complementary paths:</p>
+<ul>
+<li>In-process replay checks numerical results, optimizer transitions, and timing at optimizer boundaries.</li>
+<li>An out-of-band Gloo process compares progress and metadata while the training process may be blocked.</li>
+<li>A low-frequency health-monitor thread polls direct device or fabric telemetry independently of training progress.</li>
+</ul>
+<p>Replay uses the training GPU and cannot run while that process is blocked.
+The health monitor can report telemetry-visible failures without replaying the workload.
+The out-of-band process exits with its parent.
+Worker termination, relaunch, placement, and quarantine remain manager responsibilities.</p>
+<h2 id="peer-groups-and-consensus">Peer Groups and Consensus<a class="headerlink" href="#peer-groups-and-consensus" title="Permanent link">&para;</a></h2>
+<p>Dense replay peers occupy the same TP, PP, CP, and EP coordinates and vary only along a replicated data-parallel dimension.
+HSDP uses fixed-shard <code>dp_replicate</code> groups, so every peer owns the corresponding shard coordinate.
+Pure FSDP falls back to shard peers after materializing globally comparable replay evidence.</p>
+<p>SCOUT uses NCCL for GPU replay data and Gloo for small signatures, progress, and out-of-band coordination.
+Equivalent peers must use compatible hardware, software, model state, replay shapes, and deterministic behavior.</p>
+<p>C3 returns a status, peer-local bitmap, and ordered evidence:</p>
+<table>
+<thead>
+<tr>
+<th>Status</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Agree</code></td>
+<td>Evidence satisfies the comparison rule.</td>
+</tr>
+<tr>
+<td><code>Attributed</code></td>
+<td>A strict majority identifies one or more divergent peers.</td>
+</tr>
+<tr>
+<td><code>Inconclusive</code></td>
+<td>Evidence disagrees without enough support for attribution.</td>
+</tr>
+</tbody>
+</table>
+<p>An inconclusive exact result blocks checkpoint certification even when no culprit can be assigned.
+Bitmap positions map to global ranks through <code>ReplayResult.peer_ranks</code>.</p>
+<h2 id="replay-surfaces">Replay Surfaces<a class="headerlink" href="#replay-surfaces" title="Permanent link">&para;</a></h2>
+<p>Dense replay covers four independently scheduled recipe classes:</p>
+<ul>
+<li>embedding;</li>
+<li>rotating hidden layers;</li>
+<li>language-model output; and</li>
+<li>optimizer updates.</li>
+</ul>
+<p>At every scheduled replay boundary, equivalent peers first compare a compact readiness contract containing the optimizer step, scheduled recipe set, layer and shape identity, capture step, and tensor metadata.
+Recipe-specific collectives execute only when every peer reports the same ready contract.
+Missing or asymmetric capture evidence returns an explicit inconclusive replay result, leaves the scheduled cycle incomplete, and blocks checkpoint certification instead of allowing some ranks to skip while others enter C3.</p>
+<p>Before module execution, exact C3 verifies the broadcast invocation and synchronized RNG state.
+Replicated and HSDP paths also compare corresponding materialized parameter state.
+Forward-backward replay compares outputs, input gradients, parameter gradients, and adapter-provided updated state without mutating live gradients.</p>
+<p>DeepSpeed and Megatron optimizer replay use a bounded rotating slice.
+One source peer broadcasts copied pre-update parameters, effective gradients, optimizer state, and update configuration.
+Every peer verifies the same recipe, executes the optimizer kernel on isolated state, and compares the updated result.</p>
+<p>MoE replay rotates through a qualified execution-regime catalog.
+See <a href="../moe_execution_regimes/">MoE execution regimes</a> for catalog construction, validation, and qualification boundaries.</p>
+<p>SCOUT also captures Python-visible AllToAll layouts.
+The default replay policy executes bounded balanced and cyclic-permutation matrices with deterministic routing verification.
+Custom <code>AllToAllReplayPolicy</code> implementations may generate other representative matrices, but no bounded policy covers every possible traffic matrix.</p>
+<h2 id="stragglers-and-communication-localization">Stragglers and Communication Localization<a class="headerlink" href="#stragglers-and-communication-localization" title="Permanent link">&para;</a></h2>
+<p>A replay-time candidate must exceed configured absolute and relative thresholds for the required confirmation rounds.
+Detailed replay separates visible collective time from residual compute time.
+FSDP parameter materialization is reported independently as <code>fsdp_parameter_all_gather</code> communication evidence.</p>
+<p>SCOUT correlates complete observations from independently slow process groups.
+When their membership intersects at one rank and no healthy group contradicts the diagnosis, SCOUT maps that rank to its host and reports the host as the manager replacement scope.</p>
+<p>Framework-internal or compiled collectives that bypass public <code>torch.distributed</code> boundaries require adapter-visible timing.
+NIC, HCA, cable, link, port, and switch attribution requires deployment resource maps or an external fabric diagnostic source.</p>
+<h2 id="out-of-band-detection">Out-of-Band Detection<a class="headerlink" href="#out-of-band-detection" title="Permanent link">&para;</a></h2>
+<p>The training process publishes progress around repeated layers, public Python collectives, sampled DataLoader calls, and instrumented checkpoint I/O.
+The observer starts consensus only after progress stops for the configured threshold.
+Normal progress does not produce periodic out-of-band network traffic.</p>
+<p>Public collective fingerprints include operation type, process-group membership, fixed tensor metadata, reduction operation or root, and sequence position.
+Rank-dependent values such as valid expert AllToAll splits are excluded from equality checks.</p>
+<p>DataLoader and checkpoint-I/O localization require explicit instrumentation.
+SCOUT wraps certified durable checkpoint callbacks and framework fallback loads automatically.
+Use <code>instrument_dataloader(...)</code> and <code>checkpoint_io(...)</code> for other boundaries.</p>
+<p>An explicit <code>hang_master_addr</code> or <code>hang_master_port</code> selects TCP rendezvous.
+<code>hang_state_dir</code> remains available for status files and is used for file rendezvous only when no TCP endpoint is configured.
+When torchrun supplies the default TCP endpoint, SCOUT derives its OOB port from
+the torchrun run ID and LM Resiliency manager generation. Successor generations
+and back-to-back jobs therefore do not reuse a predecessor daemon's listener
+while it is shutting down.
+Each training publisher and daemon reader share an opaque run-, restart-generation-, process-, peer-group-, and rank-scoped shared-memory name plus an ownership token.
+A live publisher never attaches to or unlinks another owner's segment; a dead owner using the same exact channel can be reclaimed safely.
+Harness construction waits for the daemon's bounded readiness signal, and a supervisor reports unexpected post-start daemon exit as <code>oob_daemon_failure</code> while foreground step boundaries also fail explicitly if protection is unavailable.</p>
+<h2 id="checkpoint-certification-and-recovery">Checkpoint Certification and Recovery<a class="headerlink" href="#checkpoint-certification-and-recovery" title="Permanent link">&para;</a></h2>
+<p>SCOUT runs before checkpoint capture at the same optimizer boundary.</p>
+<table>
+<thead>
+<tr>
+<th>SCOUT result</th>
+<th>Checkpoint action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Healthy</td>
+<td>Capture and certify according to the recipe catalog.</td>
+</tr>
+<tr>
+<td>Straggler without SDC</td>
+<td>Capture and report the performance fault.</td>
+</tr>
+<tr>
+<td>SDC or inconclusive exact evidence</td>
+<td>Reject the current state and preserve the prior trusted checkpoint.</td>
+</tr>
+</tbody>
+</table>
+<p>The implementation uses three trust states:</p>
+<table>
+<thead>
+<tr>
+<th>State</th>
+<th>Recovery use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Latest GEMINI</td>
+<td>Accessible straggler or a complete clean emergency replay.</td>
+</tr>
+<tr>
+<td><code>CANDIDATE</code></td>
+<td>Persisted dynamic-catalog boundary that is not yet trusted for conservative recovery.</td>
+</tr>
+<tr>
+<td><code>RECOVERY_VERIFIED</code></td>
+<td>Dense accepted boundary or dynamic candidate validated by the following complete catalog cycle.</td>
+</tr>
+</tbody>
+</table>
+<p>An accepted dense check certifies the current checkpoint immediately.
+For a dynamic catalog, the first complete accepted cycle creates a candidate and the following complete accepted cycle promotes it to recovery-verified.
+Any comparison group reporting SDC rejects the candidate job-wide.</p>
+<p><code>DurableCheckpointConfig</code> connects this trust state to framework-owned checkpoint bytes.
+The adapter callbacks have the following execution contract:</p>
+<table>
+<thead>
+<tr>
+<th>Callback</th>
+<th>Called on</th>
+<th>Collectives</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>save_candidate</code></td>
+<td>Every checkpoint rank</td>
+<td>Allowed</td>
+</tr>
+<tr>
+<td><code>load_checkpoint</code></td>
+<td>Every checkpoint rank</td>
+<td>Allowed</td>
+</tr>
+<tr>
+<td><code>commit_candidate</code></td>
+<td>Manifest writer only</td>
+<td>Not allowed</td>
+</tr>
+<tr>
+<td><code>quarantine_candidate</code></td>
+<td>Manifest writer only</td>
+<td>Not allowed</td>
+</tr>
+</tbody>
+</table>
+<p>The manifest directory must have durability equivalent to the framework checkpoint store.
+Checkpoint bytes remain the framework's responsibility and must include model, optimizer, scheduler, input position, RNG state, and training step.</p>
+<p>Recovery selection follows this policy:</p>
+<table>
+<thead>
+<tr>
+<th>Failure condition</th>
+<th>Selected checkpoint</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Detected SDC</td>
+<td><code>RECOVERY_VERIFIED</code></td>
+</tr>
+<tr>
+<td>Required rank or machine inaccessible</td>
+<td><code>RECOVERY_VERIFIED</code></td>
+</tr>
+<tr>
+<td>Accessible straggler</td>
+<td>Latest complete GEMINI checkpoint</td>
+</tr>
+<tr>
+<td>Hang or uncertain failure with all ranks accessible</td>
+<td>Latest GEMINI only after a complete clean catalog replay</td>
+</tr>
+<tr>
+<td>Emergency replay is incomplete, unavailable, or detects SDC</td>
+<td><code>RECOVERY_VERIFIED</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="reports-and-manager-handoff">Reports and Manager Handoff<a class="headerlink" href="#reports-and-manager-handoff" title="Permanent link">&para;</a></h2>
+<p>In-process checks return <code>ReplayResult</code>.
+Important fields include:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>sdc_bitmap</code></td>
+<td>Peers with numerical disagreement</td>
+</tr>
+<tr>
+<td><code>sdc_sources</code></td>
+<td>Independent evidence surfaces</td>
+</tr>
+<tr>
+<td><code>c3_results</code></td>
+<td>Per-surface status, bitmap, and evidence</td>
+</tr>
+<tr>
+<td><code>checked_recipe_ids</code></td>
+<td>Dense recipes executed by the check</td>
+</tr>
+<tr>
+<td><code>straggler_bitmap</code></td>
+<td>Confirmed timing outliers</td>
+</tr>
+<tr>
+<td><code>collective_timings</code></td>
+<td>Per-collective timing with process-group membership</td>
+</tr>
+<tr>
+<td><code>cross_pg_result</code></td>
+<td>Correlated endpoint and host replacement scope</td>
+</tr>
+</tbody>
+</table>
+<p>Out-of-band failures use JSON-ready <code>SCOUTFaultReport</code> values.
+Checkpoint selection uses <code>RecoveryDecision</code>, including recovery mode, source,
+checkpoint step or durable ID, checkpoint-topology digest, availability, and
+reason.</p>
+<p><code>OrchestrationHooks</code> delivers both contracts to an external manager.
+SCOUT and the framework recommend a checkpoint; the manager owns restart, and the relaunched framework performs the rank-consistent load.</p>
+<h2 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">&para;</a></h2>
+<p><code>ReplayHarnessConfig</code> controls recipe intervals, deterministic replay, parameter comparison, AllToAll policy, straggler thresholds, temporal windows, and out-of-band thresholds.
+Set <code>check_interval=0</code> for manual replay.
+Explicit embedding, hidden, output, and optimizer intervals override the base interval, and zero disables that recipe.</p>
+<p>See the <a href="../api/#configure-protection">API guide</a> for configuration examples and the <a href="../api/#manager-integration">manager integration API</a> for orchestration callbacks.</p>
+<h2 id="hardware-telemetry">Hardware Telemetry<a class="headerlink" href="#hardware-telemetry" title="Permanent link">&para;</a></h2>
+<p>SCOUT complements workload-based inference with direct telemetry for permanent or imminent hardware failures.
+<code>HardwareHealthMonitor</code> polls caller-supplied <code>HealthSource</code> implementations in a low-frequency daemon thread and emits each fatal device-and-metric event once through <code>on_event</code>.</p>
+<p>The built-in <code>NvmlSource</code> reports:</p>
+<ul>
+<li>uncorrectable and correctable ECC state;</li>
+<li>pending or failed row remapping;</li>
+<li>aggregate per-GPU NVLink recovery and CRC errors;</li>
+<li>temperature and hardware shutdown limit; and</li>
+<li>device loss when all NVML queries fail.</li>
+</ul>
+<p>The monitor treats uncorrectable ECC, row-remap exhaustion, device loss, a configured fatal XID, severe NVLink error growth, and temperature near shutdown as fatal.
+Warnings record precursor conditions without requesting recovery.</p>
+<pre><code class="language-python">from lm_resiliency.manager_api import (
+    HardwareHealthMonitor,
+    HealthConfig,
+    NvmlSource,
+)
+
+health_monitor = HardwareHealthMonitor(
+    HealthConfig(),
+    [NvmlSource(device_index=physical_gpu_index)],
+    on_event=manager_health_callback,
+)
+health_monitor.start()
+</code></pre>
+<p>The caller resolves <code>physical_gpu_index</code> and supplies <code>manager_health_callback</code>.
+<code>device_index</code> is the physical NVML index, not necessarily the CUDA ordinal after <code>CUDA_VISIBLE_DEVICES</code> remapping.
+The built-in NVLink reading localizes a failing GPU endpoint, not an individual link, cable, or switch.
+Complete XID, InfiniBand, PCIe, NIC, HCA, or fabric coverage requires DCGM, system-log, or deployment-specific <code>HealthSource</code> implementations.</p>
+<p>Fatal health events are direct localization inputs to the manager.
+SCOUT does not terminate workers or quarantine hardware.</p>
+<h2 id="guarantee-boundary">Guarantee Boundary<a class="headerlink" href="#guarantee-boundary" title="Permanent link">&para;</a></h2>
+<ul>
+<li>SCOUT covers telemetry-visible permanent failures directly and active permanent or intermittent computational failures that recur under a qualified replay.</li>
+<li>Health localization is limited to signals exposed by configured sources and their device or endpoint granularity.</li>
+<li>One-shot transients, common-mode failures, and finite-signature collisions remain outside the guarantee.</li>
+<li>Replay samples computation and is not continuous duplication.</li>
+<li>Pure single-owner shards require an independent oracle.</li>
+<li>AllToAll replay covers policy-selected representative matrices.</li>
+<li>Automatic communication attribution requires complete observations from independently slow groups and no healthy contradiction.</li>
+<li>Framework-internal collectives require adapter-visible timing before they can participate in communication attribution.</li>
+<li>Process supervision, relaunch, replacement, quarantine, and fabric management remain external.</li>
+</ul>
+<p>See <a href="../validation/">validation</a> for measured coverage and <a href="../compatibility/">compatibility</a> for supported software versions.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../gemini/" class="btn btn-neutral float-left" title="GEMINI"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../torchrun_resiliency/" class="btn btn-neutral float-right" title="Torchrun Resiliency">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/LMResiliency/lm-resiliency" class="fa fa-code-fork" style="color: #fcfcfc"> LMResiliency/lm-resiliency</a>
+        </span>
+    
+    
+      <span><a href="../gemini/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../torchrun_resiliency/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

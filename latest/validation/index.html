@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <link rel="shortcut icon" href="../img/favicon.ico" />
+    <title>Validation - LM Resiliency</title>
+    <link rel="stylesheet" href="../css/theme.css" />
+    <link rel="stylesheet" href="../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Validation";
+        var mkdocs_page_input_path = "validation.md";
+        var mkdocs_page_url = null;
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href=".." class="icon icon-home"> LM Resiliency
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="..">Home</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../api/">API Guide</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../compatibility/">Compatibility</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../gemini/">GEMINI</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../scout/">SCOUT</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../torchrun_resiliency/">Torchrun Resiliency</a>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../moe_execution_regimes/">MoE Execution Regimes</a>
+                </li>
+              </ul>
+              <ul class="current">
+                <li class="toctree-l1 current"><a class="reference internal current" href="#">Validation</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#automated-qualification-status">Automated Qualification Status</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#historical-release-baseline">Historical Release Baseline</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#production-training-loops">Production Training Loops</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#native-pytorch">Native PyTorch</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#framework-parallelism">Framework Parallelism</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#detection-and-recovery-campaigns">Detection and Recovery Campaigns</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#moe-execution-regimes">MoE Execution Regimes</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#boundaries">Boundaries</a>
+    </li>
+    </ul>
+                </li>
+              </ul>
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../release/">Release Process</a>
+                </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="..">LM Resiliency</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".." class="icon icon-home" aria-label="Docs"></a></li>
+      <li class="breadcrumb-item active">Validation</li>
+    <li class="wy-breadcrumbs-aside">
+          <a href="https://github.com/LMResiliency/lm-resiliency/edit/main/docs/validation.md">Edit on LMResiliency/lm-resiliency</a>
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="validation">Validation<a class="headerlink" href="#validation" title="Permanent link">&para;</a></h1>
+<p>Date: 2026-08-13 UTC.</p>
+<p>This report summarizes validation evidence for GEMINI and SCOUT.
+Focused integration programs use deterministic training workloads and fault injection to verify checkpoint equivalence, exact fault localization, candidate exclusion, and framework topology handling.</p>
+<h2 id="automated-qualification-status">Automated Qualification Status<a class="headerlink" href="#automated-qualification-status" title="Permanent link">&para;</a></h2>
+<p>The <a href="https://github.com/LMResiliency/lm-resiliency/actions/workflows/gpu-qualification.yml">GPU Qualification workflow</a> runs weekly and on trusted maintainer dispatch using a two-GPU self-hosted runner. Each run uploads a <a href="https://github.com/LMResiliency/lm-resiliency/blob/f591cb1c28d86437665d332c900eb313162e2d3f/validation/README.md">schema-validated evidence bundle</a> whose manifest records its full commit SHA, package version, completion time, environment and topology inventory, exact commands, per-command logs, qualification boundaries, workflow-artifact location, and SHA-256 payload digests. The primary CPU matrix publishes the same format on every CI run.</p>
+<p>A passing result applies only to the commit in its manifest. Download the SHA-named artifact from the linked workflow run and invoke <code>scripts/validation_evidence.py verify --expected-commit &lt;sha&gt;</code> before treating it as current. The verifier reports the evidence as stale when <code>main</code> has advanced. README therefore labels the manually collected 16-GPU results below as historical instead of presenting an unqualified current passing claim.</p>
+<p>This frequent tier exercises single-GPU trajectory-equivalent recovery plus two-rank Gloo/NCCL replay, synchronized RNG, FSDP2 checkpoint recovery, and process-exit cleanup. It does not replace the larger release-qualification campaigns documented below. Self-hosted runner provisioning and isolation requirements are documented in the <a href="https://github.com/LMResiliency/lm-resiliency/blob/f591cb1c28d86437665d332c900eb313162e2d3f/tests/README.md#automated-gpu-qualification">test guide</a>.</p>
+<p>The same scheduled job runs the <a href="https://github.com/LMResiliency/lm-resiliency/blob/f591cb1c28d86437665d332c900eb313162e2d3f/benchmarks/README.md">healthy-path performance suite</a> in isolated baseline, GEMINI-only, SCOUT-only, and combined processes. It publishes workload, environment, topology, throughput, p50/p95 latency, peak memory, per-mode results, and threshold comparisons. Two-peer SCOUT measurements qualify overhead only, not exact fault attribution.</p>
+<h2 id="historical-release-baseline">Historical Release Baseline<a class="headerlink" href="#historical-release-baseline" title="Permanent link">&para;</a></h2>
+<p>The rows in this section were collected on 2026-08-13 before the revision-bound bundle
+format existed. They remain useful historical measurements, but they are not current
+release qualification and are not traceable to sealed manifests. New CPU, single-host
+GPU, multi-host, framework, GEMINI, SCOUT, and MoE campaigns must publish the common
+machine-readable bundle described above.</p>
+<table>
+<thead>
+<tr>
+<th>Check</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CPU unit tests</td>
+<td>634 passed</td>
+</tr>
+<tr>
+<td>Clean PyPI quick start</td>
+<td>Python 3.12 environment passed <code>pip check</code>; tiny CPU causal LM trained through step 4, recovered step 4, and continued through step 6</td>
+</tr>
+<tr>
+<td>Ruff</td>
+<td>Passed</td>
+</tr>
+<tr>
+<td>Python bytecode compilation</td>
+<td>Passed</td>
+</tr>
+<tr>
+<td>4-rank two-host OOB checkpoint I/O</td>
+<td>Delayed checkpoint write localized to rank 2 after two confirmations</td>
+</tr>
+<tr>
+<td>16-rank CUDA optimizer replay</td>
+<td>Different rank-local Adam transitions converged under one source recipe; injected rank-2 replay corruption localized exactly</td>
+</tr>
+<tr>
+<td>4-rank two-host NCCL AllToAll replay</td>
+<td>Uneven captured split metadata reconstructed; bounded balanced and cyclic-permutation matrices executed and verified on every rank</td>
+</tr>
+<tr>
+<td>4-rank two-host Cross-PG localization</td>
+<td>Slow overlapping NCCL groups intersected at rank 0 and selected its mapped host</td>
+</tr>
+<tr>
+<td>16-rank native PyTorch current lifecycle</td>
+<td>3/3 passed across DDP, FSDP2, and HSDP</td>
+</tr>
+<tr>
+<td>16-rank DeepSpeed current lifecycle</td>
+<td>2/2 passed across ZeRO-1 and ZeRO-2</td>
+</tr>
+<tr>
+<td>16-rank production training loops</td>
+<td>PyTorch, TorchTitan, Megatron Core, and DeepSpeed completed ten-step real framework loops with exact remote-rank fault localization and recovery handoff</td>
+</tr>
+<tr>
+<td>16-rank framework topology matrix</td>
+<td>11/11 passed across PyTorch, TorchTitan, Megatron Core, and DeepSpeed</td>
+</tr>
+<tr>
+<td>16-rank Megatron optimizer lifecycle</td>
+<td>3/3 passed across dense, pipeline, and expert topologies</td>
+</tr>
+<tr>
+<td>8-GPU two-recipe checkpoint lifecycle</td>
+<td>Candidate at step 2, recovery-verified at step 4, injected SDC at step 5 recovered step 2</td>
+</tr>
+<tr>
+<td>4-GPU native PyTorch DDP, superseded checkpoint protocol</td>
+<td>Dense two-cycle promotion and exact rank-1 SDC localization passed historically</td>
+</tr>
+<tr>
+<td>8-GPU multi-GPU recovery suite</td>
+<td>7/7 passed</td>
+</tr>
+<tr>
+<td>8-GPU save/load and signal-flush suite</td>
+<td>6/6 passed</td>
+</tr>
+<tr>
+<td>8-GPU TorchTitan Llama debug-model suite</td>
+<td>4/4 passed</td>
+</tr>
+<tr>
+<td>8-GPU Megatron integration suite</td>
+<td>11/11 passed, including exact two-cycle SDC recovery</td>
+</tr>
+<tr>
+<td>8-GPU DeepSpeed ZeRO-2 integration suite</td>
+<td>5/5 passed, including exact two-cycle SDC recovery</td>
+</tr>
+<tr>
+<td>16-rank native PyTorch matrix</td>
+<td>9/9 passed across DDP, FSDP2, and HSDP</td>
+</tr>
+<tr>
+<td>16-rank DeepSpeed matrix</td>
+<td>2/2 passed across ZeRO-1 and ZeRO-2</td>
+</tr>
+<tr>
+<td>16-rank framework lifecycle matrix</td>
+<td>11/11 passed across PyTorch, TorchTitan, Megatron, and durable dense and expert cases</td>
+</tr>
+</tbody>
+</table>
+<p>The CPU suite covers checkpoint capture and recovery, replay preconditions, peer metadata, local persistence, integrity failures, recipe-cycle accounting, emergency scheduler preservation, recovery-mode selection, durable promotion, checkpoint I/O boundaries, hardware-health classification and callback delivery, representative AllToAll policy generation, FSDP materialization timing, framework adapters, and public lifecycle behavior.</p>
+<p>The final distributed campaign used two hosts with eight A100 GPUs per host and 16 ranks over TCP on Amazon ENA.
+Every current-lifecycle and focused feature job completed successfully.
+The campaign directly validated structured C3 results, exact replay preconditions, immediate dense certification, embedding, hidden, output, and optimizer replay, source-broadcast optimizer recipes, representative AllToAll replay, fixed-shard HSDP groups, FSDP materialization timing, checkpoint-I/O localization, Cross-PG host selection, recovery-verified checkpoint handoff, global candidate rejection, and bitwise restart.</p>
+<p>The campaign identified and corrected three distributed-only integration defects.
+Explicit OOB TCP endpoints now take precedence over file rendezvous when a status directory is also configured.
+FSDP parameter preconditions now run before post-forward reshard invalidates materialized storage, and pure-FSDP replay evidence is materialized globally before C3.
+DDP boundary discovery now unwraps framework wrappers so embedding and output recipes remain visible.</p>
+<p>The production-loop campaign identified and corrected three additional framework-integration defects.
+Replay now restores the captured autocast context for mixed-precision framework loops.
+SCOUT captures output gradients with tensor hooks instead of module backward hooks, avoiding conflicts with Megatron's custom autograd functions.
+Replay transport now normalizes strided source tensors to owned contiguous storage before NCCL broadcast.</p>
+<h2 id="production-training-loops">Production Training Loops<a class="headerlink" href="#production-training-loops" title="Permanent link">&para;</a></h2>
+<p>The production-loop programs use real framework-owned training lifecycles and tiny causal language models.
+Only token generation, logging, and external storage services are synthetic.
+Each program completed ten optimizer steps on one eight-GPU host and on two eight-GPU hosts.
+PyTorch, TorchTitan, and DeepSpeed used BF16, while Megatron Core used FP32.</p>
+<p>At step 4, each campaign injected a transient hidden-layer fault only during SCOUT replay on the last global rank.
+The live training forward remained unchanged so the same process could validate rejection and clean post-fault certification without a relaunch.
+On two hosts, the injected rank was global rank 15 on the second host.</p>
+<table>
+<thead>
+<tr>
+<th>Framework</th>
+<th>Production path</th>
+<th>Two-host result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PyTorch</td>
+<td>Tiny causal LM through DDP forward, backward, and <code>AdamW.step()</code></td>
+<td>Exact rank-15 localization at step 4; checkpoint remained at step 3; application step, GEMINI, and all four SCOUT recipes reached clean step 10</td>
+</tr>
+<tr>
+<td>TorchTitan</td>
+<td>Llama 3 debug model through <code>Trainer.train()</code></td>
+<td>Exact rank-15 localization at step 4; checkpoint remained at step 3; trainer, scheduler, dataloader, GEMINI, and all four SCOUT recipes reached clean step 10</td>
+</tr>
+<tr>
+<td>Megatron Core</td>
+<td><code>GPTModel</code>, Megatron DDP, distributed Adam, forward/backward schedule, <code>train_step()</code>, and <code>training.train()</code></td>
+<td>Exact rank-15 localization at step 4; checkpoint remained at step 3; iteration, consumed samples, GEMINI, and all four SCOUT recipes reached clean step 10</td>
+</tr>
+<tr>
+<td>DeepSpeed</td>
+<td>Tiny causal LM through <code>DeepSpeedEngine.backward()</code> and <code>DeepSpeedEngine.step()</code> with ZeRO-2</td>
+<td>Exact rank-15 localization at step 4; checkpoint remained at step 3; engine global step, GEMINI, and all four SCOUT recipes reached clean step 10</td>
+</tr>
+</tbody>
+</table>
+<p>Every manager-facing decision selected recovery-verified GEMINI step 3.
+Each campaign completed six clean post-fault steps and certified step 10.
+The same protocol passed on one host with rank 7 as the injected rank.</p>
+<p>Native PyTorch does not prescribe a trainer.
+The production example validates its application-owned DDP loop.
+Dedicated lifecycle programs additionally validate FSDP2 and HSDP on the same two hosts.</p>
+<p>The executable <code>torchrun</code> commands are documented in the <a href="../torchrun_resiliency/">torchrun resiliency guide</a> and <a href="https://github.com/LMResiliency/lm-resiliency/blob/f591cb1c28d86437665d332c900eb313162e2d3f/examples/torchrun/README.md">torchrun workflows</a>.
+Systematic injection is exercised separately through the
+<a href="https://github.com/LMResiliency/lm-resiliency/blob/f591cb1c28d86437665d332c900eb313162e2d3f/tests/validation/fault_injection/README.md">manual fault-injection qualification campaign</a>,
+keeping the zero-import production loops free of validation-only fault controls.</p>
+<h2 id="native-pytorch">Native PyTorch<a class="headerlink" href="#native-pytorch" title="Permanent link">&para;</a></h2>
+<p>The package-root <code>enable_resiliency()</code> API was validated with a deterministic three-block transformer and AdamW.</p>
+<table>
+<thead>
+<tr>
+<th>Architecture</th>
+<th>Topology</th>
+<th>GEMINI recovery</th>
+<th>SCOUT SDC</th>
+<th>SCOUT straggler</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DDP</td>
+<td>One replica per rank across 16 ranks</td>
+<td>Passed</td>
+<td>Passed</td>
+<td>Passed</td>
+</tr>
+<tr>
+<td>FSDP2</td>
+<td>One-dimensional <code>dp_shard=16</code> mesh</td>
+<td>Passed</td>
+<td>Passed</td>
+<td>Passed</td>
+</tr>
+<tr>
+<td>HSDP</td>
+<td><code>dp_replicate=4</code>, <code>dp_shard=4</code> mesh</td>
+<td>Passed</td>
+<td>Passed</td>
+<td>Passed</td>
+</tr>
+</tbody>
+</table>
+<p>GEMINI restored model, AdamW, caller-owned, CPU RNG, and CUDA RNG state bitwise in every topology.
+DDP and FSDP2 peer replicas were byte-exact across hosts.
+HSDP recovered local shards using its natural replicas.</p>
+<p>SCOUT localized injected rank 9 exactly in every SDC and compute-straggler case.
+Healthy controls remained clean.
+Each SDC-contaminated step was excluded, candidate trust was rejected job-wide, and restart selected the exact prior recovery-verified state.
+All three architectures exercised embedding, hidden, output, and optimizer recipes.
+Replay-input and RNG preconditions agreed in every architecture.
+HSDP additionally verified corresponding materialized parameter state within fixed-shard replica groups.
+FSDP2 and HSDP retained parameter-AllGather timing as communication evidence.
+The manager-facing RecoveryDecision selected GEMINI step 2 before restart.</p>
+<p>Pure FSDP2 parameter-shard corruption without an independent replica remains outside the majority-comparison contract.
+The FSDP2 campaign therefore injected an independently observable rank-local replay-output fault.</p>
+<h2 id="framework-parallelism">Framework Parallelism<a class="headerlink" href="#framework-parallelism" title="Permanent link">&para;</a></h2>
+<p>SCOUT compared equivalent peers while preserving each framework's model-parallel coordinates.
+SDC cases required a clean control, exact injected-rank localization in each affected peer group, global candidate rejection, and a clean post-fault replay.
+GEMINI cases required bitwise recovery of model, optimizer, caller-owned, and RNG state.</p>
+<table>
+<thead>
+<tr>
+<th>Integration</th>
+<th>Validated configurations</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PyTorch <code>DeviceMesh</code></td>
+<td>TP with PP, CP, and EP with expert TP</td>
+<td>3/3 passed with replay-precondition agreement and exact rank-15 localization</td>
+</tr>
+<tr>
+<td>TorchTitan</td>
+<td>HSDP with TP, CP, and PP; sparse EP with expert TP</td>
+<td>2/2 detected injected disagreement; the two-peer dense group correctly did not claim a unique culprit</td>
+</tr>
+<tr>
+<td>Megatron Core</td>
+<td>Dense TP and CP, PP with virtual model chunks, and EP with expert TP</td>
+<td>3/3 passed using native parallel-state groups and source-broadcast optimizer replay</td>
+</tr>
+<tr>
+<td>DeepSpeed topology</td>
+<td>TP with PP, Ulysses SP, and EP with expert TP</td>
+<td>3/3 passed with replay-precondition agreement and exact rank-15 localization</td>
+</tr>
+<tr>
+<td>DeepSpeed ZeRO</td>
+<td>ZeRO stages 1 and 2</td>
+<td>2/2 passed source-broadcast optimizer replay, recovery handoff, and bitwise step-2 restart</td>
+</tr>
+</tbody>
+</table>
+<p>The current topology cases used live NCCL groups and each framework's native topology discovery.
+The current environment did not include Transformer Engine, so the earlier production Megatron MoE campaign was not repeated.
+That historical campaign remains documented below.</p>
+<p>A delayed TP collective on rank 15 was classified as a communication straggler for ranks 14 and 15 without a compute-straggler or SDC false positive.</p>
+<h2 id="detection-and-recovery-campaigns">Detection and Recovery Campaigns<a class="headerlink" href="#detection-and-recovery-campaigns" title="Permanent link">&para;</a></h2>
+<p>The following campaigns predate the current structured C3 and immediate dense-certification contracts.
+Their topology, detection, replay, and recovery results remain evidence, but they do not independently validate the current protocol.</p>
+<p>The framework campaign used 16 A100-SXM4-40GB GPUs, PyTorch 2.13.0+cu130, NCCL 2.29.7, TorchTitan 0.2.2, Megatron Core 0.18.2, and DeepSpeed 0.19.4.
+Inter-node traffic used TCP over Amazon ENA.</p>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>8-GPU peer replication</td>
+<td>Exact peer contents, unequal rank layouts, metadata, disk reload, and 256 KiB and 16 MiB chunking passed</td>
+</tr>
+<tr>
+<td>8-GPU DeepSpeed</td>
+<td>Capture, replay, corrupt/recover equivalence, and overhead smoke checks passed, 4/4</td>
+</tr>
+<tr>
+<td>Automatic exit cleanup</td>
+<td>Native PyTorch DDP, TorchTitan, Megatron Core, and DeepSpeed ZeRO-2 closed GEMINI, removed SCOUT hooks, restored framework hooks, and exited before process-group teardown across 8/8 rank processes</td>
+</tr>
+<tr>
+<td>16-GPU dense training</td>
+<td>Baseline, GEMINI, SCOUT, and combined runs matched loss and parameter trajectories in 20/20 trials with no false detections</td>
+</tr>
+<tr>
+<td>16-GPU replication matrix</td>
+<td>135/135 TCP cells passed across three checkpoint sizes, intervals, chunk sizes, and five seeds</td>
+</tr>
+<tr>
+<td>SCOUT numerical faults</td>
+<td>344/344 forward and parameter faults were localized, including 64 near-invisible cases; 30/30 healthy controls stayed clean</td>
+</tr>
+<tr>
+<td>SCOUT hangs and stalls</td>
+<td>120/120 primary launches and 30/30 focused out-of-band, DataLoader, and process-stall launches passed</td>
+</tr>
+<tr>
+<td>Durable certification</td>
+<td>46 candidate, commit, rejection, and recovery tests passed</td>
+</tr>
+<tr>
+<td>Production MoE replay</td>
+<td>Routed BF16 Megatron MoE and Transformer Engine <code>TEGroupedMLP</code> forward and backward replay passed on 16 A100s</td>
+</tr>
+<tr>
+<td>Production MoE faults</td>
+<td>A clean 128/512-row cycle certified, then localized a persistent expert-weight fault on rank 15 at both shapes</td>
+</tr>
+<tr>
+<td>EP All-to-All</td>
+<td>Four EP=4 replicas spanning both hosts passed routed forward and backward, clean replay, and rank-15 localization</td>
+</tr>
+<tr>
+<td>Expert tensor parallelism</td>
+<td>Four EP=2, expert-TP=2 replicas passed routed forward and backward, clean replay, and rank-15 localization</td>
+</tr>
+<tr>
+<td>Production MoE catalog</td>
+<td>Five post-prime profiles per shape were stable and selected distinct physical plans; missing role evidence retained exact recipes</td>
+</tr>
+<tr>
+<td>Environment soak</td>
+<td>A 16-GPU, two-hour run reported no numerical, ECC, XID, kernel, or link errors</td>
+</tr>
+</tbody>
+</table>
+<p>The soak is an environment health check, not a fault-tolerance guarantee.</p>
+<p>Production MoE validation used Megatron Core 0.18.2, Transformer Engine 2.10.0, PyTorch 2.10.0, CUDA 13.0, BF16, and top-2 routing.
+The baseline and expert-TP campaigns used four experts; the EP=4 campaign used eight.
+The routed layer exercised the router, dispatcher, <code>TEGroupedMLP</code>, backward path, inter-node EP All-to-All, and expert-TP AllGather and ReduceScatter.</p>
+<h2 id="moe-execution-regimes">MoE Execution Regimes<a class="headerlink" href="#moe-execution-regimes" title="Permanent link">&para;</a></h2>
+<p>The compression campaign used an instrumented Triton persistent grouped-GEMM with BF16 on A100-SXM4-40GB GPUs.
+The environment used NVIDIA driver 580.126.16, PyTorch 2.13.0+cu130, CUDA 13.0, and Triton 3.7.1.</p>
+<table>
+<thead>
+<tr>
+<th>Evidence</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Scalar compression</td>
+<td>3,457 exact scalar shapes compressed to 16 recipes across four regimes, a 99.54% reduction</td>
+</tr>
+<tr>
+<td>Role coverage</td>
+<td>1,134,224 target obligations covered; 5,960/5,960 representative work-item injections passed</td>
+</tr>
+<tr>
+<td>Distributed replay</td>
+<td>All 16 representatives replayed cleanly on 8 and 16 A100s; persistent faults localized rank 7 and rank 15</td>
+</tr>
+<tr>
+<td>Negative challenges</td>
+<td>Omitted roles forced exact fallback, wrong counts rejected compression, and environment drift rejected stale catalogs</td>
+</tr>
+<tr>
+<td>Projection sensitivity</td>
+<td>Six projections over 512, 1,024, and 2,048 shapes required 10-19 recipes</td>
+</tr>
+<tr>
+<td>Grouped expert count</td>
+<td>Physical execution of 1, 2, 4, 8, and 16 experts over 2,048 shapes required 12, 18, 27, 42, and 48 recipes</td>
+</tr>
+<tr>
+<td>Grouped role injections</td>
+<td>All 4,757 selected-role injections passed in each extended campaign and host-swapped repeat</td>
+</tr>
+<tr>
+<td>Heterogeneous routing</td>
+<td>Uniform cycles covered all tested <code>E=2</code> vectors at 512 shapes, but not arbitrary vectors for <code>E&gt;=4</code>; at 1,024 and 2,048 shapes they did not cover arbitrary vectors for any <code>E&gt;=2</code></td>
+</tr>
+</tbody>
+</table>
+<p>See <a href="../moe_execution_regimes/">MoE execution regimes</a> for the complete methodology, matrices, reproduction commands, and qualification boundary.</p>
+<h2 id="boundaries">Boundaries<a class="headerlink" href="#boundaries" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Multi-node transport used TCP over ENA; RDMA, EFA, NIXL, and line-rate performance were not validated.</li>
+<li>Scale beyond 16 GPUs was not tested.</li>
+<li>Production-loop validation uses tiny models, deterministic synthetic token data, and replay-only transient fault injection; it validates lifecycle integration, localization, candidate exclusion, recovery handoff, and post-fault certification, not publication-scale convergence or process relaunch.</li>
+<li>Production MoE coverage includes BF16 Megatron and Transformer Engine, EP up to 4, and expert TP up to 2.</li>
+<li>FP8, CUDA Graphs, communication overlap, and publication-scale repetitions were not validated.</li>
+<li>Transformer Engine recipes remained exact because independent CTA-role semantics were unavailable.</li>
+<li>Compression results apply only to the instrumented Triton backend and qualified environments.</li>
+<li>Uniform scalar catalogs are not qualified for arbitrary heterogeneous routing vectors.</li>
+<li>AllToAll validation covers the default bounded balanced and cyclic-permutation policy, not every possible traffic matrix.</li>
+<li>Software fault injection covers modeled semantic roles for permanent or reproducible triggers; one-shot transients and common-mode faults remain outside the result.</li>
+<li>Framework durable fallback after a fail-stop was not exercised.</li>
+<li>Scheduler policy, relaunch, placement, physical replacement, quarantine, and cluster observability remain outside this repository.</li>
+</ul>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../moe_execution_regimes/" class="btn btn-neutral float-left" title="MoE Execution Regimes"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../release/" class="btn btn-neutral float-right" title="Release Process">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+        <span>
+          <a href="https://github.com/LMResiliency/lm-resiliency" class="fa fa-code-fork" style="color: #fcfcfc"> LMResiliency/lm-resiliency</a>
+        </span>
+    
+    
+      <span><a href="../moe_execution_regimes/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../release/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "..";</script>
+    <script src="../js/theme_extra.js"></script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>
