@@ -2,12 +2,10 @@
 
 # LM Resiliency
 
-### Fast checkpoint recovery and fault localization for distributed LLM pre-training
+### Fast fault localization and checkpoint recovery for distributed LLM pre-training
 
-[![Historical 16 GPU Evidence](https://img.shields.io/badge/16_GPU_Evidence-historical_2026--08--13-lightgrey.svg)](docs/validation.md#historical-release-baseline)
-[![Revision-bound GPU Evidence](https://img.shields.io/badge/GPU_Evidence-revision--bound-informational.svg)](https://github.com/LMResiliency/lm-resiliency/actions/workflows/gpu-qualification.yml)
-[![pip](https://img.shields.io/pypi/v/lm-resiliency?color=blue)](https://pypi.org/project/lm-resiliency/)
 [![PyTorch 2.10–2.13](https://img.shields.io/badge/PyTorch-2.10--2.13-EE4C2C.svg)](https://pytorch.org/)
+[![torchrun native](https://img.shields.io/badge/torchrun-native-EE4C2C.svg)](docs/torchrun_resiliency.md)
 [![TorchTitan 0.2.2](https://img.shields.io/badge/TorchTitan-0.2.2-EE4C2C.svg)](https://github.com/pytorch/torchtitan)
 [![Megatron Core 0.18.2](https://img.shields.io/badge/Megatron_Core-0.18.2-76B900.svg)](https://github.com/NVIDIA/Megatron-LM)
 [![DeepSpeed 0.19.4](https://img.shields.io/badge/DeepSpeed-0.19.4-0078D4.svg)](https://github.com/deepspeedai/DeepSpeed)
