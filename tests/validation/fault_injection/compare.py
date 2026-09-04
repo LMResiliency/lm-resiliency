@@ -11,6 +11,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from lm_resiliency.fault_injection.config import (
     SCHEMA_VERSION,
     FailureType,
+    FaultSpec,
     FaultSurface,
     expected_failure_kind,
 )
@@ -538,6 +539,10 @@ def _validate_manifest_schema(
         raise ValueError(
             f"injection manifest system_failure_type requires schema_version {SCHEMA_VERSION}"
         )
+    if schema_version == SCHEMA_VERSION:
+        for actions in manifest_actions.values():
+            for action in actions.values():
+                FaultSpec.from_dict(action)
 
 
 def _validate_embedded_manifest_identity(

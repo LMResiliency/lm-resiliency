@@ -1357,6 +1357,41 @@ def test_comparison_rejects_system_failure_type_in_schema_one(
         compare_payloads(injection, localization)
 
 
+@pytest.mark.parametrize(
+    ("system_failure_type", "failure_type", "error"),
+    [
+        (
+            "unknown_system_failure",
+            "tensor_corruption",
+            "is not a valid SystemFailureType",
+        ),
+        (
+            "cuda_out_of_memory",
+            "network_partition",
+            "cannot produce observable effect network_partition",
+        ),
+    ],
+)
+def test_comparison_rejects_invalid_schema_two_root_cause_semantics(
+    system_failure_type: str,
+    failure_type: str,
+    error: str,
+) -> None:
+    injection = _injection_payload()
+    localization = _localization_payload()
+    action = injection["manifest"]["incidents"][0]["faults"][0]
+    record = injection["injections"][0]
+    injection["manifest"]["schema_version"] = SCHEMA_VERSION
+    action["system_failure_type"] = system_failure_type
+    action["type"] = failure_type
+    record["system_failure_type"] = system_failure_type
+    record["failure_type"] = failure_type
+    _refresh_manifest_identity(injection, localization)
+
+    with pytest.raises(ValueError, match=error):
+        compare_payloads(injection, localization)
+
+
 def test_comparison_rejects_extra_positive_layer_attribution() -> None:
     injection = _injection_payload()
     injection["injections"][0]["target"]["index"] = 0
