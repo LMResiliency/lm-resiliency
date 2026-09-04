@@ -63,7 +63,7 @@ dev = [
     "build==1.5.0",
     "detect-secrets==1.5.0",
     "mypy==2.3.0",
-    "packaging==25.0",
+    "packaging==26.3",
     "pip-audit==2.10.1",
     "pre-commit==4.6.2",
     "pytest==9.1.1",
