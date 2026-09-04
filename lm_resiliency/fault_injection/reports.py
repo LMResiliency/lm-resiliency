@@ -43,13 +43,13 @@ class FaultInjectionRecord:
     execution_rank: int
     target: Mapping[str, Any]
     parameters: Mapping[str, Any]
-    system_failure_type: str | None = None
     status: InjectionStatus = InjectionStatus.PENDING
     verified: bool = False
     activated_at_ns: int | None = None
     completed_at_ns: int | None = None
     evidence: Mapping[str, Any] = field(default_factory=dict)
     error: str | None = None
+    system_failure_type: str | None = None
     _lock: threading.RLock = field(
         default_factory=threading.RLock,
         init=False,

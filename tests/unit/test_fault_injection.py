@@ -25,6 +25,7 @@ from lm_resiliency import (
     FaultCampaign,
     FaultExecutionResult,
     FaultIncident,
+    FaultInjectionRecord,
     FaultInjectionSession,
     FaultMagnitude,
     FaultScope,
@@ -445,6 +446,40 @@ def test_system_failure_type_is_preserved_in_ground_truth_records() -> None:
     assert record.system_failure_type == SystemFailureType.HOST_MEMORY_EXHAUSTION.value
     assert record.to_dict()["system_failure_type"] == "host_memory_exhaustion"
     session.close()
+
+
+def test_fault_injection_record_preserves_legacy_positional_constructor() -> None:
+    record = FaultInjectionRecord(
+        "injection",
+        "occurrence",
+        "incident",
+        "fault",
+        1,
+        2,
+        "transient",
+        "delay",
+        "straggler",
+        "safe",
+        "pytorch",
+        "executor",
+        0,
+        {},
+        {},
+        InjectionStatus.COMPLETED,
+        True,
+        10,
+        20,
+        {"duration_ms": 1.0},
+        None,
+    )
+
+    assert record.status is InjectionStatus.COMPLETED
+    assert record.verified
+    assert record.activated_at_ns == 10
+    assert record.completed_at_ns == 20
+    assert record.evidence == {"duration_ms": 1.0}
+    assert record.error is None
+    assert record.system_failure_type is None
 
 
 def test_bounded_incident_rejects_overlapping_candidates() -> None:

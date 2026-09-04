@@ -1312,6 +1312,27 @@ def test_comparison_rejects_record_target_tampering() -> None:
         compare_payloads(injection, localization)
 
 
+@pytest.mark.parametrize("mutation", ["missing", "mismatched"])
+def test_comparison_rejects_record_system_failure_type_tampering(
+    mutation: str,
+) -> None:
+    injection = _injection_payload()
+    localization = _localization_payload()
+    action = injection["manifest"]["incidents"][0]["faults"][0]
+    record = injection["injections"][0]
+    action["system_failure_type"] = "transient_compute_corruption"
+    record["system_failure_type"] = "transient_compute_corruption"
+    _refresh_manifest_identity(injection, localization)
+
+    if mutation == "missing":
+        del record["system_failure_type"]
+    else:
+        record["system_failure_type"] = "common_mode_corruption"
+
+    with pytest.raises(ValueError, match="system_failure_type does not match"):
+        compare_payloads(injection, localization)
+
+
 def test_comparison_rejects_extra_positive_layer_attribution() -> None:
     injection = _injection_payload()
     injection["injections"][0]["target"]["index"] = 0

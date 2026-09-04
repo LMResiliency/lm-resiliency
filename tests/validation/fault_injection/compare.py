@@ -717,6 +717,25 @@ def _validate_record_against_manifest(
     expected_kind = _expected_action_kind(action)
     if _required_string(record.get("expected_kind"), "injection expected_kind") != expected_kind:
         raise ValueError("injection record expected_kind does not match the authenticated manifest")
+    if ("system_failure_type" in record) != ("system_failure_type" in action):
+        raise ValueError(
+            "injection record system_failure_type does not match the authenticated manifest"
+        )
+    if "system_failure_type" in action:
+        expected_system_failure_type = _required_string(
+            action.get("system_failure_type"),
+            "manifest system_failure_type",
+        )
+        if (
+            _required_string(
+                record.get("system_failure_type"),
+                "injection system_failure_type",
+            )
+            != expected_system_failure_type
+        ):
+            raise ValueError(
+                "injection record system_failure_type does not match the authenticated manifest"
+            )
     parameters = record.get("parameters")
     if not isinstance(parameters, Mapping):
         raise TypeError("injection record parameters must be an object")

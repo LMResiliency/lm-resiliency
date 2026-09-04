@@ -57,9 +57,9 @@ def test_torchrun_plugin_uses_zero_argument_handler_factory():
     pyproject = (ROOT / "pyproject.toml").read_text()
 
     assert (
-        'lm_resiliency = "lm_resiliency.integrations.torchrun:'
-        'get_rendezvous_handler_creator"'
-    ) in pyproject
+        'lm_resiliency = "lm_resiliency.integrations.torchrun:get_rendezvous_handler_creator"'
+        in pyproject
+    )
 
 
 def test_compatibility_guide_lists_each_ci_combination():
