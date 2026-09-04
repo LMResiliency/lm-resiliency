@@ -17,6 +17,7 @@ import torch
 import torch.nn as nn
 
 from lm_resiliency import (
+    SCHEMA_VERSION,
     CallbackFaultExecutor,
     ClockOrigin,
     ClockSpec,
@@ -341,6 +342,24 @@ def test_incident_campaign_json_round_trip(tmp_path) -> None:
     assert json.loads(path.read_text()) == campaign.to_dict()
     assert "framework" not in campaign.to_dict()
     assert campaign.clock.type.value == "training_iteration"
+    assert campaign.schema_version == SCHEMA_VERSION == 2
+
+
+def test_campaign_parser_retains_legacy_schema_version_one() -> None:
+    value = _campaign().to_dict()
+    value["schema_version"] = 1
+
+    restored = FaultCampaign.from_dict(value)
+
+    assert restored.schema_version == 1
+    assert restored.to_dict()["schema_version"] == 1
+
+
+def test_campaign_parser_treats_missing_schema_version_as_legacy() -> None:
+    value = _campaign().to_dict()
+    del value["schema_version"]
+
+    assert FaultCampaign.from_dict(value).schema_version == 1
 
 
 @pytest.mark.parametrize(
@@ -409,6 +428,26 @@ def test_system_failure_type_rejects_incompatible_observable_effect() -> None:
                 resource="gpu-0",
             ),
         )
+
+
+def test_system_failure_type_requires_schema_version_two() -> None:
+    fault = FaultSpec(
+        fault_id="host-oom",
+        type=FailureType.RESOURCE_EXHAUSTION,
+        system_failure_type=SystemFailureType.HOST_MEMORY_EXHAUSTION,
+        target=FaultTarget(
+            surface=FaultSurface.RESOURCE,
+            resource="host-0",
+        ),
+    )
+    value = _campaign(_incident(faults=(fault,))).to_dict()
+    value["schema_version"] = 1
+
+    with pytest.raises(
+        ValueError,
+        match="system_failure_type requires campaign schema_version 2",
+    ):
+        FaultCampaign.from_dict(value)
 
 
 def test_unspecified_system_failure_type_preserves_existing_manifest_shape() -> None:

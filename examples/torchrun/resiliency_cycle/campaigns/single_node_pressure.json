@@ -653,6 +653,6 @@
     "total_steps": 42
   },
   "name": "torchrun-resiliency-cycle-all-failure-types",
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": 29
 }

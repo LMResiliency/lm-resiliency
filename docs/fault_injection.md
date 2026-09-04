@@ -102,7 +102,7 @@ failure effects:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "name": "mixed-production-failures",
   "seed": 17,
   "clock": {
@@ -201,7 +201,7 @@ parameters.
 
 | Field | Required | Default | Meaning |
 |---|---:|---|---|
-| `schema_version` | No | `1` | Manifest compatibility version. Serialized campaigns always include it; unsupported versions are rejected. |
+| `schema_version` | No | `2` for newly constructed campaigns; omitted input is read as `1` | Manifest compatibility version. Readers accept versions `1` and `2`; version `2` adds `system_failure_type`. Serialized campaigns always include the selected version. |
 | `name` | Yes | - | Non-empty campaign identifier included in reports and state-store records. |
 | `seed` | No | `0` | Signed 128-bit seed used for deterministic probability selection and fault randomness. |
 | `clock` | No | `{"type": "training_iteration", "origin": "training_run"}` | Defines how incident trigger positions are interpreted. |
@@ -210,6 +210,8 @@ parameters.
 
 Integer fields use JSON integers only. Booleans and fractional numbers are not
 coerced into iteration, rank, index, lifetime, retry, seed, or schema values.
+Version `1` manifests remain readable but cannot contain
+`system_failure_type`; use version `2` when that field is present.
 The campaign `name`, every `incident_id`, and every `fault_id` must be
 non-empty strings. Nulls, booleans, and numeric identifiers are rejected rather
 than converted to strings because identifiers participate in manifest hashes,
@@ -319,7 +321,7 @@ cleanup cancels every still-active effect, including `campaign_end` effects.
 |---|---:|---|
 | `fault_id` | Yes | Non-empty action identifier unique within its incident. |
 | `type` | Yes | Canonical observable failure effect, such as `tensor_corruption`, `delay`, or `process_termination`. |
-| `system_failure_type` | No | Pre-training system root cause. It must be compatible with the observable `type`; omitting it preserves existing manifests. |
+| `system_failure_type` | No | Pre-training system root cause. It requires campaign schema version `2` and must be compatible with the observable `type`; omitting it preserves existing fault entries. |
 | `target` | Yes | Framework-neutral location where the effect is applied. |
 | `parameters` | No | Type- and executor-specific settings. Defaults to `{}`. |
 

@@ -15,7 +15,9 @@ from typing import Any, Mapping
 from lm_resiliency.failure_types import SystemFailureType
 from lm_resiliency.fault_injection._json import freeze_json_mapping, thaw_json
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+_LEGACY_SCHEMA_VERSION = 1
+_SUPPORTED_SCHEMA_VERSIONS = frozenset({_LEGACY_SCHEMA_VERSION, SCHEMA_VERSION})
 
 _CAMPAIGN_KEYS = {
     "schema_version",
@@ -1093,10 +1095,19 @@ class FaultCampaign:
             "metadata",
             freeze_json_mapping(self.metadata, "campaign metadata"),
         )
-        if self.schema_version != SCHEMA_VERSION:
+        if self.schema_version not in _SUPPORTED_SCHEMA_VERSIONS:
+            supported = ", ".join(str(version) for version in sorted(_SUPPORTED_SCHEMA_VERSIONS))
             raise ValueError(
                 f"unsupported campaign schema_version {self.schema_version}; "
-                f"expected {SCHEMA_VERSION}"
+                f"expected one of: {supported}"
+            )
+        if self.schema_version == _LEGACY_SCHEMA_VERSION and any(
+            fault.system_failure_type is not None
+            for incident in self.incidents
+            for fault in incident.faults
+        ):
+            raise ValueError(
+                f"system_failure_type requires campaign schema_version {SCHEMA_VERSION}"
             )
         if not -(2**127) <= self.seed < 2**127:
             raise ValueError("campaign seed must fit in a signed 128-bit integer")
@@ -1112,7 +1123,7 @@ class FaultCampaign:
     def from_dict(cls, value: Mapping[str, Any]) -> "FaultCampaign":
         _reject_unknown_keys(value, _CAMPAIGN_KEYS, "campaign")
         return cls(
-            schema_version=value.get("schema_version", SCHEMA_VERSION),
+            schema_version=value.get("schema_version", _LEGACY_SCHEMA_VERSION),
             name=value["name"],
             seed=value.get("seed", 0),
             clock=ClockSpec.from_dict(value.get("clock", {})),
