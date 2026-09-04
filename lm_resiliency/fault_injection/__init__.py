@@ -1,5 +1,6 @@
 """Framework-neutral fault campaigns and localization evaluation."""
 
+from lm_resiliency.failure_types import SystemFailureType
 from lm_resiliency.fault_injection.config import (
     SCHEMA_VERSION,
     ClockOrigin,
@@ -78,6 +79,7 @@ __all__ = [
     "MemoryCampaignStateStore",
     "RetriggerPolicy",
     "SafetyClass",
+    "SystemFailureType",
     "UnsupportedFaultError",
     "enable_fault_injection",
 ]

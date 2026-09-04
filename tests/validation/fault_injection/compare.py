@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from lm_resiliency.fault_injection.config import (
+    SCHEMA_VERSION,
     FailureType,
+    FaultSpec,
     FaultSurface,
     expected_failure_kind,
 )
@@ -34,6 +36,7 @@ def compare_payloads(
     for record in all_records:
         _record_injection_succeeded(record)
     expected_actions = _manifest_actions(injection)
+    _validate_manifest_schema(injection, expected_actions)
     _validate_probability_records(injection, all_records, expected_actions)
     _validate_scheduled_occurrence_coverage(injection, all_records)
     records = [
@@ -512,6 +515,36 @@ def _manifest_actions(
     return expected
 
 
+def _validate_manifest_schema(
+    injection: Mapping[str, Any],
+    manifest_actions: Mapping[str, Mapping[str, Mapping[str, Any]]],
+) -> None:
+    manifest = injection.get("manifest")
+    if not isinstance(manifest, Mapping):
+        raise ValueError("injection artifact requires an embedded manifest")
+    schema_version = _required_integer(
+        manifest.get("schema_version", 1),
+        "injection manifest schema_version",
+    )
+    if schema_version not in {1, SCHEMA_VERSION}:
+        raise ValueError(
+            f"unsupported injection manifest schema_version {schema_version}; "
+            f"expected one of: 1, {SCHEMA_VERSION}"
+        )
+    if schema_version == 1 and any(
+        "system_failure_type" in action
+        for actions in manifest_actions.values()
+        for action in actions.values()
+    ):
+        raise ValueError(
+            f"injection manifest system_failure_type requires schema_version {SCHEMA_VERSION}"
+        )
+    if schema_version == SCHEMA_VERSION:
+        for actions in manifest_actions.values():
+            for action in actions.values():
+                FaultSpec.from_dict(action)
+
+
 def _validate_embedded_manifest_identity(
     injection: Mapping[str, Any],
     expected_identity: str,
@@ -717,6 +750,25 @@ def _validate_record_against_manifest(
     expected_kind = _expected_action_kind(action)
     if _required_string(record.get("expected_kind"), "injection expected_kind") != expected_kind:
         raise ValueError("injection record expected_kind does not match the authenticated manifest")
+    if ("system_failure_type" in record) != ("system_failure_type" in action):
+        raise ValueError(
+            "injection record system_failure_type does not match the authenticated manifest"
+        )
+    if "system_failure_type" in action:
+        expected_system_failure_type = _required_string(
+            action.get("system_failure_type"),
+            "manifest system_failure_type",
+        )
+        if (
+            _required_string(
+                record.get("system_failure_type"),
+                "injection system_failure_type",
+            )
+            != expected_system_failure_type
+        ):
+            raise ValueError(
+                "injection record system_failure_type does not match the authenticated manifest"
+            )
     parameters = record.get("parameters")
     if not isinstance(parameters, Mapping):
         raise TypeError("injection record parameters must be an object")

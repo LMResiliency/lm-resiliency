@@ -14,6 +14,7 @@ nav:
   - Torchrun Resiliency: torchrun_resiliency.md
   - MoE Execution Regimes: moe_execution_regimes.md
   - Validation: validation.md
+  - Fault Injection Results: fault_injection_validation_2026-09-04.md
   - Release Process: release.md
 
 theme:

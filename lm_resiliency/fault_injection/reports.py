@@ -49,6 +49,7 @@ class FaultInjectionRecord:
     completed_at_ns: int | None = None
     evidence: Mapping[str, Any] = field(default_factory=dict)
     error: str | None = None
+    system_failure_type: str | None = None
     _lock: threading.RLock = field(
         default_factory=threading.RLock,
         init=False,
@@ -101,6 +102,7 @@ class FaultInjectionRecord:
                 execution_rank=self.execution_rank,
                 target=freeze_json_mapping(self.target, "injection target"),
                 parameters=freeze_json_mapping(self.parameters, "injection parameters"),
+                system_failure_type=self.system_failure_type,
                 status=self.status,
                 verified=self.verified,
                 activated_at_ns=self.activated_at_ns,
@@ -111,7 +113,7 @@ class FaultInjectionRecord:
 
     def to_dict(self) -> dict[str, Any]:
         with self._lock:
-            return {
+            value = {
                 "injection_id": self.injection_id,
                 "occurrence_id": self.occurrence_id,
                 "incident_id": self.incident_id,
@@ -135,6 +137,9 @@ class FaultInjectionRecord:
                 "evidence": thaw_json(self.evidence),
                 "error": self.error,
             }
+            if self.system_failure_type is not None:
+                value["system_failure_type"] = self.system_failure_type
+            return value
 
 
 @dataclass(frozen=True, slots=True)

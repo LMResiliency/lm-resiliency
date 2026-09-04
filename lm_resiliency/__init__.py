@@ -58,6 +58,7 @@ from lm_resiliency.fault_injection import (
     MemoryCampaignStateStore,
     RetriggerPolicy,
     SafetyClass,
+    SystemFailureType,
     UnsupportedFaultError,
     enable_fault_injection,
 )
@@ -117,6 +118,7 @@ __all__ = [
     "SCOUTFaultReport",
     "SCHEMA_VERSION",
     "SafetyClass",
+    "SystemFailureType",
     "RetriggerPolicy",
     "UnsupportedFaultError",
     "enable_fault_injection",

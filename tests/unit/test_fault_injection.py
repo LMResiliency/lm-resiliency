@@ -17,6 +17,7 @@ import torch
 import torch.nn as nn
 
 from lm_resiliency import (
+    SCHEMA_VERSION,
     CallbackFaultExecutor,
     ClockOrigin,
     ClockSpec,
@@ -25,6 +26,7 @@ from lm_resiliency import (
     FaultCampaign,
     FaultExecutionResult,
     FaultIncident,
+    FaultInjectionRecord,
     FaultInjectionSession,
     FaultMagnitude,
     FaultScope,
@@ -40,6 +42,7 @@ from lm_resiliency import (
     MemoryCampaignStateStore,
     RetriggerPolicy,
     SafetyClass,
+    SystemFailureType,
     UnsupportedFaultError,
     enable_fault_injection,
 )
@@ -237,6 +240,7 @@ def _campaign(
     name: str = "unit-campaign",
     seed: int = 17,
     origin: ClockOrigin = ClockOrigin.TRAINING_RUN,
+    schema_version: int = 1,
 ) -> FaultCampaign:
     return FaultCampaign(
         name=name,
@@ -244,6 +248,7 @@ def _campaign(
         clock=ClockSpec(origin=origin),
         incidents=incidents or (_incident(),),
         metadata={"suite": "unit"},
+        schema_version=schema_version,
     )
 
 
@@ -339,6 +344,219 @@ def test_incident_campaign_json_round_trip(tmp_path) -> None:
     assert json.loads(path.read_text()) == campaign.to_dict()
     assert "framework" not in campaign.to_dict()
     assert campaign.clock.type.value == "training_iteration"
+    assert campaign.schema_version == 1
+    assert SCHEMA_VERSION == 2
+
+
+def test_default_campaign_identity_matches_explicit_legacy_schema() -> None:
+    default_campaign = _campaign()
+    explicit_legacy = _campaign(schema_version=1)
+    journal = CampaignJournal(
+        campaign=default_campaign.name,
+        manifest_identity=explicit_legacy.manifest_identity,
+    )
+
+    journal.bind_manifest(default_campaign.manifest_identity)
+
+    assert default_campaign.to_dict()["schema_version"] == 1
+
+
+def test_campaign_parser_retains_legacy_schema_version_one() -> None:
+    value = _campaign().to_dict()
+    value["schema_version"] = 1
+
+    restored = FaultCampaign.from_dict(value)
+
+    assert restored.schema_version == 1
+    assert restored.to_dict()["schema_version"] == 1
+
+
+def test_campaign_parser_treats_missing_schema_version_as_legacy() -> None:
+    value = _campaign().to_dict()
+    del value["schema_version"]
+
+    assert FaultCampaign.from_dict(value).schema_version == 1
+
+
+@pytest.mark.parametrize(
+    ("system_failure_type", "effect"),
+    [
+        (SystemFailureType.HOST_MEMORY_EXHAUSTION, FailureType.RESOURCE_EXHAUSTION),
+        (SystemFailureType.HOST_RESOURCE_EXHAUSTION, FailureType.RESOURCE_EXHAUSTION),
+        (SystemFailureType.CUDA_OUT_OF_MEMORY, FailureType.RESOURCE_EXHAUSTION),
+        (SystemFailureType.CUDA_RUNTIME_FAILURE, FailureType.EXCEPTION),
+        (SystemFailureType.DURABLE_STORAGE_EXHAUSTION, FailureType.IO_ERROR),
+        (SystemFailureType.DURABLE_STORAGE_FAILURE, FailureType.CHECKPOINT_CORRUPTION),
+        (SystemFailureType.PCIE_LINK_FAILURE, FailureType.RESOURCE_UNAVAILABLE),
+        (SystemFailureType.PCIE_LINK_DEGRADATION, FailureType.DELAY),
+        (SystemFailureType.FABRIC_LINK_FAILURE, FailureType.NETWORK_PARTITION),
+        (SystemFailureType.FABRIC_CONGESTION, FailureType.DELAY),
+        (SystemFailureType.DATA_SAMPLE_CORRUPTION, FailureType.PAYLOAD_CORRUPTION),
+        (SystemFailureType.DATA_SHARD_UNAVAILABLE, FailureType.RESOURCE_UNAVAILABLE),
+        (SystemFailureType.INPUT_POSITION_DIVERGENCE, FailureType.STALE_STATE),
+        (SystemFailureType.SOFTWARE_ENVIRONMENT_DRIFT, FailureType.CONFIG_DRIFT),
+        (SystemFailureType.HOST_PERFORMANCE_DEGRADATION, FailureType.DELAY),
+        (SystemFailureType.GPU_THROTTLING, FailureType.DELAY),
+        (SystemFailureType.TRAINING_RUNTIME_FAILURE, FailureType.EXCEPTION),
+        (SystemFailureType.CONTROL_PLANE_FAILURE, FailureType.RESOURCE_UNAVAILABLE),
+        (SystemFailureType.TRANSIENT_COMPUTE_CORRUPTION, FailureType.TENSOR_CORRUPTION),
+        (SystemFailureType.COMMON_MODE_CORRUPTION, FailureType.TENSOR_CORRUPTION),
+        (SystemFailureType.SINGLE_OWNER_STATE_CORRUPTION, FailureType.STALE_STATE),
+    ],
+)
+def test_pretraining_system_failure_types_accept_compatible_effects(
+    system_failure_type: SystemFailureType,
+    effect: FailureType,
+) -> None:
+    parameters: dict[str, object] = {}
+    if effect is FailureType.TENSOR_CORRUPTION:
+        parameters["operation"] = CorruptionOperation.SIGN_FLIP.value
+    if effect is FailureType.DELAY:
+        parameters["delay_ms"] = 1.0
+
+    fault = FaultSpec(
+        fault_id=system_failure_type.value,
+        type=effect,
+        system_failure_type=system_failure_type,
+        target=FaultTarget(
+            surface=FaultSurface.RESOURCE,
+            resource="system-under-test",
+        ),
+        parameters=parameters,
+    )
+
+    restored = FaultSpec.from_dict(fault.to_dict())
+    assert restored == fault
+    assert restored.to_dict()["system_failure_type"] == system_failure_type.value
+
+
+def test_system_failure_type_rejects_incompatible_observable_effect() -> None:
+    with pytest.raises(
+        ValueError,
+        match="cuda_out_of_memory cannot produce observable effect network_partition",
+    ):
+        FaultSpec(
+            fault_id="invalid-cuda-oom",
+            type=FailureType.NETWORK_PARTITION,
+            system_failure_type=SystemFailureType.CUDA_OUT_OF_MEMORY,
+            target=FaultTarget(
+                surface=FaultSurface.RESOURCE,
+                resource="gpu-0",
+            ),
+        )
+
+
+def test_system_failure_type_requires_schema_version_two() -> None:
+    fault = FaultSpec(
+        fault_id="host-oom",
+        type=FailureType.RESOURCE_EXHAUSTION,
+        system_failure_type=SystemFailureType.HOST_MEMORY_EXHAUSTION,
+        target=FaultTarget(
+            surface=FaultSurface.RESOURCE,
+            resource="host-0",
+        ),
+    )
+    value = _campaign(
+        _incident(faults=(fault,)),
+        schema_version=SCHEMA_VERSION,
+    ).to_dict()
+    value["schema_version"] = 1
+
+    with pytest.raises(
+        ValueError,
+        match="system_failure_type requires campaign schema_version 2",
+    ):
+        FaultCampaign.from_dict(value)
+
+
+def test_schema_version_one_rejects_null_system_failure_type_field() -> None:
+    value = _campaign().to_dict()
+    value["incidents"][0]["faults"][0]["system_failure_type"] = None
+
+    with pytest.raises(
+        ValueError,
+        match="system_failure_type requires campaign schema_version 2",
+    ):
+        FaultCampaign.from_dict(value)
+
+
+def test_campaign_rejects_non_incident_before_schema_traversal() -> None:
+    with pytest.raises(TypeError, match="FaultIncident instances or mappings"):
+        FaultCampaign(name="invalid", incidents=(object(),))  # type: ignore[arg-type]
+
+
+def test_unspecified_system_failure_type_preserves_existing_manifest_shape() -> None:
+    value = _corruption().to_dict()
+
+    assert "system_failure_type" not in value
+
+
+def test_system_failure_type_is_preserved_in_ground_truth_records() -> None:
+    model = TinyModel()
+    events: list[tuple[str, str]] = []
+    fault = FaultSpec(
+        fault_id="host-oom",
+        type=FailureType.RESOURCE_EXHAUSTION,
+        system_failure_type=SystemFailureType.HOST_MEMORY_EXHAUSTION,
+        target=FaultTarget(
+            rank=0,
+            surface=FaultSurface.RESOURCE,
+            resource="host-0",
+        ),
+    )
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(
+            _incident(at=(1,), faults=(fault,)),
+            schema_version=SCHEMA_VERSION,
+        ),
+        executors=(
+            _recording_executor(
+                {FailureType.RESOURCE_EXHAUSTION},
+                events,
+            ),
+        ),
+    )
+
+    record = session.records[0]
+    assert record.system_failure_type == SystemFailureType.HOST_MEMORY_EXHAUSTION.value
+    assert record.to_dict()["system_failure_type"] == "host_memory_exhaustion"
+    session.close()
+
+
+def test_fault_injection_record_preserves_legacy_positional_constructor() -> None:
+    record = FaultInjectionRecord(
+        "injection",
+        "occurrence",
+        "incident",
+        "fault",
+        1,
+        2,
+        "transient",
+        "delay",
+        "straggler",
+        "safe",
+        "pytorch",
+        "executor",
+        0,
+        {},
+        {},
+        InjectionStatus.COMPLETED,
+        True,
+        10,
+        20,
+        {"duration_ms": 1.0},
+        None,
+    )
+
+    assert record.status is InjectionStatus.COMPLETED
+    assert record.verified
+    assert record.activated_at_ns == 10
+    assert record.completed_at_ns == 20
+    assert record.evidence == {"duration_ms": 1.0}
+    assert record.error is None
+    assert record.system_failure_type is None
 
 
 def test_bounded_incident_rejects_overlapping_candidates() -> None:

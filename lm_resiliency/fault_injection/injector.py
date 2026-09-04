@@ -1317,6 +1317,11 @@ class FaultInjectionSession:
             execution_rank=request.fault.target.execution_rank,
             target=request.fault.target.to_dict(),
             parameters=request.fault.parameters,
+            system_failure_type=(
+                None
+                if request.fault.system_failure_type is None
+                else request.fault.system_failure_type.value
+            ),
         )
 
     def _record_probability_skip(
@@ -1346,6 +1351,11 @@ class FaultInjectionSession:
                     execution_rank=fault.target.execution_rank,
                     target=fault.target.to_dict(),
                     parameters=fault.parameters,
+                    system_failure_type=(
+                        None
+                        if fault.system_failure_type is None
+                        else fault.system_failure_type.value
+                    ),
                     status=InjectionStatus.SKIPPED_PROBABILITY,
                     completed_at_ns=time.monotonic_ns(),
                 )
