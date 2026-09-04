@@ -8,7 +8,12 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from lm_resiliency import FaultCampaign, InjectionStatus, enable_fault_injection
+from lm_resiliency import (
+    SCHEMA_VERSION,
+    FaultCampaign,
+    InjectionStatus,
+    enable_fault_injection,
+)
 from tests.validation.fault_injection import pytorch as fault_injection_validation
 from tests.validation.fault_injection.compare import compare_artifacts, compare_payloads
 from tests.validation.fault_injection.generate_campaign import build_campaign
@@ -1320,6 +1325,7 @@ def test_comparison_rejects_record_system_failure_type_tampering(
     localization = _localization_payload()
     action = injection["manifest"]["incidents"][0]["faults"][0]
     record = injection["injections"][0]
+    injection["manifest"]["schema_version"] = SCHEMA_VERSION
     action["system_failure_type"] = "transient_compute_corruption"
     record["system_failure_type"] = "transient_compute_corruption"
     _refresh_manifest_identity(injection, localization)
@@ -1330,6 +1336,24 @@ def test_comparison_rejects_record_system_failure_type_tampering(
         record["system_failure_type"] = "common_mode_corruption"
 
     with pytest.raises(ValueError, match="system_failure_type does not match"):
+        compare_payloads(injection, localization)
+
+
+@pytest.mark.parametrize("explicit_schema", [False, True])
+def test_comparison_rejects_system_failure_type_in_schema_one(
+    explicit_schema: bool,
+) -> None:
+    injection = _injection_payload()
+    localization = _localization_payload()
+    action = injection["manifest"]["incidents"][0]["faults"][0]
+    record = injection["injections"][0]
+    if explicit_schema:
+        injection["manifest"]["schema_version"] = 1
+    action["system_failure_type"] = "transient_compute_corruption"
+    record["system_failure_type"] = "transient_compute_corruption"
+    _refresh_manifest_identity(injection, localization)
+
+    with pytest.raises(ValueError, match="system_failure_type requires schema_version 2"):
         compare_payloads(injection, localization)
 
 

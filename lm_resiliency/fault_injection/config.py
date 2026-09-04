@@ -1082,6 +1082,8 @@ class FaultCampaign:
             for incident in self.incidents
         )
         object.__setattr__(self, "incidents", normalized_incidents)
+        if not all(isinstance(incident, FaultIncident) for incident in self.incidents):
+            raise TypeError("campaign incidents must be FaultIncident instances or mappings")
         if isinstance(self.clock, Mapping):
             object.__setattr__(self, "clock", ClockSpec.from_dict(self.clock))
         object.__setattr__(
@@ -1113,8 +1115,6 @@ class FaultCampaign:
             raise ValueError("campaign seed must fit in a signed 128-bit integer")
         if not self.incidents:
             raise ValueError("campaign must contain at least one incident")
-        if not all(isinstance(incident, FaultIncident) for incident in self.incidents):
-            raise TypeError("campaign incidents must be FaultIncident instances or mappings")
         incident_ids = [incident.incident_id for incident in self.incidents]
         if len(set(incident_ids)) != len(incident_ids):
             raise ValueError("campaign incident_id values must be unique")

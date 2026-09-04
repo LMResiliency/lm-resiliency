@@ -480,6 +480,11 @@ def test_schema_version_one_rejects_null_system_failure_type_field() -> None:
         FaultCampaign.from_dict(value)
 
 
+def test_campaign_rejects_non_incident_before_schema_traversal() -> None:
+    with pytest.raises(TypeError, match="FaultIncident instances or mappings"):
+        FaultCampaign(name="invalid", incidents=(object(),))  # type: ignore[arg-type]
+
+
 def test_unspecified_system_failure_type_preserves_existing_manifest_shape() -> None:
     value = _corruption().to_dict()
 
