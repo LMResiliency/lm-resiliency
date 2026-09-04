@@ -23,7 +23,10 @@ from torch.distributed.elastic.rendezvous import (
     RendezvousTimeoutError,
 )
 
-from lm_resiliency.integrations.torchrun import create_rendezvous_handler
+from lm_resiliency.integrations.torchrun import (
+    create_rendezvous_handler,
+    get_rendezvous_handler_creator,
+)
 from lm_resiliency.integrations.torchrun._protocol import (
     ProtocolValidationError,
     RestartContext,
@@ -305,6 +308,27 @@ def test_public_entry_point_accepts_rendezvous_parameters(
     )
 
     assert create_rendezvous_handler(params) is sentinel
+
+
+def test_torchrun_plugin_entry_point_returns_handler_creator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    params = RendezvousParameters(
+        backend="lm_resiliency",
+        endpoint=str(tmp_path / "rdzv"),
+        run_id=RUN_ID,
+        min_nodes=1,
+        max_nodes=1,
+        lm_resiliency_restart_context_path=str((tmp_path / "context.json").resolve()),
+    )
+    sentinel = object()
+    monkeypatch.setattr(
+        "lm_resiliency.integrations.torchrun._simple_runtime._create_rendezvous_handler",
+        lambda received: sentinel if received is params else None,
+    )
+
+    assert get_rendezvous_handler_creator()(params) is sentinel
 
 
 @pytest.mark.parametrize(

@@ -5,6 +5,10 @@ Date: 2026-08-13 UTC.
 This report summarizes validation evidence for GEMINI and SCOUT.
 Focused integration programs use deterministic training workloads and fault injection to verify checkpoint equivalence, exact fault localization, candidate exclusion, and framework topology handling.
 
+The dated [2026-09-04 fault-injection report](fault_injection_validation_2026-09-04.md)
+records the current two-stage 21-type campaign, including the distinction
+between executor-verified injection ground truth and exact SCOUT localization.
+
 ## Automated Qualification Status
 
 The [GPU Qualification workflow](https://github.com/LMResiliency/lm-resiliency/actions/workflows/gpu-qualification.yml) runs weekly and on trusted maintainer dispatch using a two-GPU self-hosted runner. Each run uploads a [schema-validated evidence bundle](../validation/README.md) whose manifest records its full commit SHA, package version, completion time, environment and topology inventory, exact commands, per-command logs, qualification boundaries, workflow-artifact location, and SHA-256 payload digests. The primary CPU matrix publishes the same format on every CI run.

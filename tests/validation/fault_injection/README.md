@@ -4,6 +4,11 @@ This manual qualification campaign runs a real PyTorch DDP training loop,
 injects a systematic failure campaign through `enable_fault_injection()`, and
 uses `enable_resiliency()` to detect and localize every occurrence with SCOUT.
 
+See the
+[2026-09-04 two-stage result](../../../docs/fault_injection_validation_2026-09-04.md)
+for the latest eight-rank SCOUT run and the separate all-21-type
+restart/replacement campaign.
+
 Run the systematic campaign on eight GPUs:
 
 ```bash
