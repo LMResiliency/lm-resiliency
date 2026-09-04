@@ -68,7 +68,7 @@ dev = [
     "pre-commit==4.6.2",
     "pytest==9.1.1",
     "pytest-timeout==2.4.0",
-    "ruff==0.16.3",
+    "ruff==0.16.5",
     "twine==7.0.0",
 ]
 
