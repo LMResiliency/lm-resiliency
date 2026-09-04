@@ -11,7 +11,8 @@ The project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
   storage, PCIe, fabric, input-pipeline, environment, fail-slow, control-plane,
   and SDC coverage-gap campaigns, with cause/effect validation and ground-truth
   report propagation. Fault campaign schema version 2 carries the optional
-  root-cause field while version 1 manifests remain readable.
+  root-cause field, while unchanged campaigns default to version 1 so existing
+  manifest identities and journals remain compatible.
 
 ## [0.2.0] - 2026-08-19
 

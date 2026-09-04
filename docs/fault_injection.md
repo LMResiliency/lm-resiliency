@@ -201,7 +201,7 @@ parameters.
 
 | Field | Required | Default | Meaning |
 |---|---:|---|---|
-| `schema_version` | No | `2` for newly constructed campaigns; omitted input is read as `1` | Manifest compatibility version. Readers accept versions `1` and `2`; version `2` adds `system_failure_type`. Serialized campaigns always include the selected version. |
+| `schema_version` | No | `1` | Manifest compatibility version. Readers accept versions `1` and `2`; version `2` adds `system_failure_type`. Unchanged programmatic campaigns remain on version `1` so their manifest identities stay stable across upgrades. |
 | `name` | Yes | - | Non-empty campaign identifier included in reports and state-store records. |
 | `seed` | No | `0` | Signed 128-bit seed used for deterministic probability selection and fault randomness. |
 | `clock` | No | `{"type": "training_iteration", "origin": "training_run"}` | Defines how incident trigger positions are interpreted. |

@@ -1066,7 +1066,7 @@ class FaultCampaign:
 
     name: str
     incidents: tuple[FaultIncident, ...]
-    schema_version: int = SCHEMA_VERSION
+    schema_version: int = _LEGACY_SCHEMA_VERSION
     seed: int = 0
     clock: ClockSpec = field(default_factory=ClockSpec)
     metadata: Mapping[str, Any] = field(default_factory=dict)

@@ -1484,6 +1484,6 @@
     "world_size": 8
   },
   "name": "pytorch-8gpu-systematic-faults",
-  "schema_version": 2,
+  "schema_version": 1,
   "seed": 17
 }

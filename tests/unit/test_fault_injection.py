@@ -240,6 +240,7 @@ def _campaign(
     name: str = "unit-campaign",
     seed: int = 17,
     origin: ClockOrigin = ClockOrigin.TRAINING_RUN,
+    schema_version: int = 1,
 ) -> FaultCampaign:
     return FaultCampaign(
         name=name,
@@ -247,6 +248,7 @@ def _campaign(
         clock=ClockSpec(origin=origin),
         incidents=incidents or (_incident(),),
         metadata={"suite": "unit"},
+        schema_version=schema_version,
     )
 
 
@@ -342,7 +344,21 @@ def test_incident_campaign_json_round_trip(tmp_path) -> None:
     assert json.loads(path.read_text()) == campaign.to_dict()
     assert "framework" not in campaign.to_dict()
     assert campaign.clock.type.value == "training_iteration"
-    assert campaign.schema_version == SCHEMA_VERSION == 2
+    assert campaign.schema_version == 1
+    assert SCHEMA_VERSION == 2
+
+
+def test_default_campaign_identity_matches_explicit_legacy_schema() -> None:
+    default_campaign = _campaign()
+    explicit_legacy = _campaign(schema_version=1)
+    journal = CampaignJournal(
+        campaign=default_campaign.name,
+        manifest_identity=explicit_legacy.manifest_identity,
+    )
+
+    journal.bind_manifest(default_campaign.manifest_identity)
+
+    assert default_campaign.to_dict()["schema_version"] == 1
 
 
 def test_campaign_parser_retains_legacy_schema_version_one() -> None:
@@ -440,7 +456,10 @@ def test_system_failure_type_requires_schema_version_two() -> None:
             resource="host-0",
         ),
     )
-    value = _campaign(_incident(faults=(fault,))).to_dict()
+    value = _campaign(
+        _incident(faults=(fault,)),
+        schema_version=SCHEMA_VERSION,
+    ).to_dict()
     value["schema_version"] = 1
 
     with pytest.raises(
@@ -472,7 +491,10 @@ def test_system_failure_type_is_preserved_in_ground_truth_records() -> None:
     session = enable_fault_injection(
         model,
         _optimizer(model),
-        campaign=_campaign(_incident(at=(1,), faults=(fault,))),
+        campaign=_campaign(
+            _incident(at=(1,), faults=(fault,)),
+            schema_version=SCHEMA_VERSION,
+        ),
         executors=(
             _recording_executor(
                 {FailureType.RESOURCE_EXHAUSTION},

@@ -291,6 +291,7 @@ TorchTitan, Megatron Core, or DeepSpeed training objects:
 
 ```python
 from lm_resiliency import (
+    SCHEMA_VERSION,
     CorruptionOperation,
     FailureType,
     FaultCampaign,
@@ -307,6 +308,7 @@ from lm_resiliency import (
 
 campaign = FaultCampaign(
     name="output-sdc",
+    schema_version=SCHEMA_VERSION,
     incidents=(
         FaultIncident(
             incident_id="hidden-sdc",
