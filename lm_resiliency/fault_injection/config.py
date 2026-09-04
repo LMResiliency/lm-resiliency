@@ -10,7 +10,7 @@ from bisect import bisect_left
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from lm_resiliency.failure_types import SystemFailureType
 from lm_resiliency.fault_injection._json import freeze_json_mapping, thaw_json
@@ -1122,8 +1122,23 @@ class FaultCampaign:
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "FaultCampaign":
         _reject_unknown_keys(value, _CAMPAIGN_KEYS, "campaign")
+        schema_version = value.get("schema_version", _LEGACY_SCHEMA_VERSION)
+        if schema_version == _LEGACY_SCHEMA_VERSION:
+            for incident in value.get("incidents", ()):
+                if not isinstance(incident, Mapping):
+                    continue
+                faults = incident.get("faults", ())
+                if isinstance(faults, (str, bytes)) or not isinstance(faults, Sequence):
+                    continue
+                if any(
+                    isinstance(fault, Mapping) and "system_failure_type" in fault
+                    for fault in faults
+                ):
+                    raise ValueError(
+                        f"system_failure_type requires campaign schema_version {SCHEMA_VERSION}"
+                    )
         return cls(
-            schema_version=value.get("schema_version", _LEGACY_SCHEMA_VERSION),
+            schema_version=schema_version,
             name=value["name"],
             seed=value.get("seed", 0),
             clock=ClockSpec.from_dict(value.get("clock", {})),

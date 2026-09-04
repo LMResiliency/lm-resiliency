@@ -122,12 +122,15 @@ def test_single_node_pressure_campaign_uses_all_eight_gpus() -> None:
         / "single_node_pressure.json"
     )
     campaign = FaultCampaign.from_json(manifest)
-    assert hashlib.sha256(manifest.read_bytes()).hexdigest() == (
-        "36781f2b285876e29c9a134e99a2f943fe7fef60429aa91189acb3c8557b004e"
+    assert (
+        hashlib.sha256(manifest.read_bytes()).hexdigest()
+        == (
+            "36781f2b285876e29c9a134e99a2f943fe7fef60429aa91189acb3c8557b004e"  # pragma: allowlist secret
+        )
     )
     assert (
         campaign.manifest_identity
-        == "4c9177d8f739f2e0fe01608f66777e661966a8368db34a238aed58b4bbe9bf81"
+        == "4c9177d8f739f2e0fe01608f66777e661966a8368db34a238aed58b4bbe9bf81"  # pragma: allowlist secret
     )
     assert campaign == single_node_pressure_campaign()
     events = pressure_events(campaign)

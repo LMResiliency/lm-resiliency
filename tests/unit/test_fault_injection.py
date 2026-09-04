@@ -469,6 +469,17 @@ def test_system_failure_type_requires_schema_version_two() -> None:
         FaultCampaign.from_dict(value)
 
 
+def test_schema_version_one_rejects_null_system_failure_type_field() -> None:
+    value = _campaign().to_dict()
+    value["incidents"][0]["faults"][0]["system_failure_type"] = None
+
+    with pytest.raises(
+        ValueError,
+        match="system_failure_type requires campaign schema_version 2",
+    ):
+        FaultCampaign.from_dict(value)
+
+
 def test_unspecified_system_failure_type_preserves_existing_manifest_shape() -> None:
     value = _corruption().to_dict()
 
