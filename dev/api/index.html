@@ -118,6 +118,10 @@
                 </li>
               </ul>
               <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../fault_injection_validation_2026-09-04/">Fault Injection Results</a>
+                </li>
+              </ul>
+              <ul>
                 <li class="toctree-l1"><a class="reference internal" href="../release/">Release Process</a>
                 </li>
               </ul>
@@ -223,7 +227,7 @@ This guide covers the public integration contract; component design and validati
 </tr>
 <tr>
 <td>Fault injection evaluation</td>
-<td><code>enable_fault_injection</code>, <code>SCHEMA_VERSION</code>, <code>FaultCampaign</code>, <code>FaultIncident</code>, <code>IncidentTrigger</code>, <code>IncidentLifetime</code>, <code>IterationRange</code>, <code>ClockSpec</code>, <code>ClockType</code>, <code>ClockOrigin</code>, <code>FaultSpec</code>, <code>FaultTarget</code>, <code>FailureType</code>, <code>FaultSurface</code>, <code>FaultScope</code>, <code>FaultMagnitude</code>, <code>CorruptionOperation</code>, <code>SafetyClass</code>, <code>RetriggerPolicy</code>, <code>FaultExecutor</code>, <code>CallbackFaultExecutor</code>, <code>FaultExecutionRequest</code>, <code>FaultExecutionResult</code>, <code>UnsupportedFaultError</code>, <code>FaultInjectionSession</code>, <code>InjectionStatus</code>, <code>FaultInjectionRecord</code>, <code>LocalizationResult</code>, <code>FaultEvaluation</code>, <code>CampaignReport</code>, <code>CampaignJournal</code>, <code>CampaignStateStore</code>, <code>MemoryCampaignStateStore</code>, <code>JsonCampaignStateStore</code></td>
+<td><code>enable_fault_injection</code>, <code>SCHEMA_VERSION</code>, <code>FaultCampaign</code>, <code>FaultIncident</code>, <code>IncidentTrigger</code>, <code>IncidentLifetime</code>, <code>IterationRange</code>, <code>ClockSpec</code>, <code>ClockType</code>, <code>ClockOrigin</code>, <code>FaultSpec</code>, <code>FaultTarget</code>, <code>FailureType</code>, <code>SystemFailureType</code>, <code>FaultSurface</code>, <code>FaultScope</code>, <code>FaultMagnitude</code>, <code>CorruptionOperation</code>, <code>SafetyClass</code>, <code>RetriggerPolicy</code>, <code>FaultExecutor</code>, <code>CallbackFaultExecutor</code>, <code>FaultExecutionRequest</code>, <code>FaultExecutionResult</code>, <code>UnsupportedFaultError</code>, <code>FaultInjectionSession</code>, <code>InjectionStatus</code>, <code>FaultInjectionRecord</code>, <code>LocalizationResult</code>, <code>FaultEvaluation</code>, <code>CampaignReport</code>, <code>CampaignJournal</code>, <code>CampaignStateStore</code>, <code>MemoryCampaignStateStore</code>, <code>JsonCampaignStateStore</code></td>
 </tr>
 </tbody>
 </table>
@@ -535,6 +539,7 @@ Capture and restore caller-owned sample or dataset state with <code>extra_state_
 <p>The fault injection evaluation kit binds a declarative campaign to PyTorch,
 TorchTitan, Megatron Core, or DeepSpeed training objects:</p>
 <pre><code class="language-python">from lm_resiliency import (
+    SCHEMA_VERSION,
     CorruptionOperation,
     FailureType,
     FaultCampaign,
@@ -545,11 +550,13 @@ TorchTitan, Megatron Core, or DeepSpeed training objects:</p>
     FaultTarget,
     IncidentLifetime,
     IncidentTrigger,
+    SystemFailureType,
     enable_fault_injection,
 )
 
 campaign = FaultCampaign(
     name=&quot;output-sdc&quot;,
+    schema_version=SCHEMA_VERSION,
     incidents=(
         FaultIncident(
             incident_id=&quot;hidden-sdc&quot;,
@@ -559,6 +566,7 @@ campaign = FaultCampaign(
                 FaultSpec(
                     fault_id=&quot;hidden-sign-flip&quot;,
                     type=FailureType.TENSOR_CORRUPTION,
+                    system_failure_type=SystemFailureType.TRANSIENT_COMPUTE_CORRUPTION,
                     target=FaultTarget(
                         rank=0,
                         module_path=&quot;layers.2&quot;,
@@ -1029,7 +1037,7 @@ Import low-level checkpoint managers, replay detectors, topology objects, and co
 See <a href="../moe_execution_regimes/#build-and-audit-the-catalog">MoE execution regimes</a> for the command and catalog-qualification requirements.</p>
 <h2 id="related-guides">Related Guides<a class="headerlink" href="#related-guides" title="Permanent link">&para;</a></h2>
 <ul>
-<li><a href="https://github.com/LMResiliency/lm-resiliency/blob/14fdde7d579d428ab26d9744c01661c952cb3914/examples/README.md">Production-loop examples</a></li>
+<li><a href="https://github.com/LMResiliency/lm-resiliency/blob/eabcc5f2a38ca671aca0c21a757b5f4636cf311c/examples/README.md">Production-loop examples</a></li>
 <li><a href="../fault_injection/">Fault injection evaluation</a></li>
 <li><a href="../gemini/">GEMINI</a></li>
 <li><a href="../scout/">SCOUT</a></li>

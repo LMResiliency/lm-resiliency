@@ -82,6 +82,10 @@
                 </li>
               </ul>
               <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../fault_injection_validation_2026-09-04/">Fault Injection Results</a>
+                </li>
+              </ul>
+              <ul>
                 <li class="toctree-l1"><a class="reference internal" href="../release/">Release Process</a>
                 </li>
               </ul>
@@ -229,7 +233,7 @@ lm_resiliency_worker_config=${WORKER_CONFIG}&quot; \
   --module your_training.module
 </code></pre>
 <p>In this example, one eight-GPU node trains while a second eight-GPU node waits as standby. Both hosts run the same command. The training loop in <code>your_training.module</code> does not need any changes.</p>
-<p>See the <a href="https://github.com/LMResiliency/lm-resiliency/blob/14fdde7d579d428ab26d9744c01661c952cb3914/examples/torchrun/README.md">torchrun examples</a> for runnable bootstrap and recovery campaigns. See the <a href="../api/#enable-through-torchrun">API guide</a> for configuration and extension contracts.</p>
+<p>See the <a href="https://github.com/LMResiliency/lm-resiliency/blob/eabcc5f2a38ca671aca0c21a757b5f4636cf311c/examples/torchrun/README.md">torchrun examples</a> for runnable bootstrap and recovery campaigns. See the <a href="../api/#enable-through-torchrun">API guide</a> for configuration and extension contracts.</p>
 <h2 id="validation-and-boundaries">Validation and Boundaries<a class="headerlink" href="#validation-and-boundaries" title="Permanent link">&para;</a></h2>
 <p>The integration has been exercised with native PyTorch, DeepSpeed, Megatron Core, and TorchTitan. Multi-generation validation covered same-node restarts, SCOUT-localized standby replacement, and exact checkpoint restoration.</p>
 <p>The current design intentionally targets fixed-size recovery:</p>

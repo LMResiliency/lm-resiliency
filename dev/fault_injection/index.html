@@ -72,6 +72,10 @@
                 </li>
               </ul>
               <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../fault_injection_validation_2026-09-04/">Fault Injection Results</a>
+                </li>
+              </ul>
+              <ul>
                 <li class="toctree-l1"><a class="reference internal" href="../release/">Release Process</a>
                 </li>
               </ul>
@@ -105,10 +109,13 @@ PyTorch, TorchTitan, Megatron Core, and DeepSpeed pre-training workloads.
 It records verified ground truth and accepts neutral localization results, without
 depending on SCOUT, GEMINI, or another resiliency system.</p>
 <p>Campaigns describe observable failure effects.
+They may also name the pre-training system root cause separately, so an
+evaluation can distinguish effects such as a timeout caused by fabric congestion
+from the same effect caused by host pressure.
 Built-in hooks execute safe model and optimizer faults; callback executors connect
 the same schema to isolated process, storage, communication, and cluster controls.
 See the
-<a href="https://github.com/LMResiliency/lm-resiliency/blob/14fdde7d579d428ab26d9744c01661c952cb3914/tests/validation/fault_injection/README.md">manual fault injection and SCOUT localization campaign</a>
+<a href="https://github.com/LMResiliency/lm-resiliency/blob/eabcc5f2a38ca671aca0c21a757b5f4636cf311c/tests/validation/fault_injection/README.md">manual fault injection and SCOUT localization campaign</a>
 for an eight-GPU DDP qualification run that compares injection and localization
 JSON artifacts.</p>
 <h2 id="enable-a-campaign">Enable a Campaign<a class="headerlink" href="#enable-a-campaign" title="Permanent link">&para;</a></h2>
@@ -199,7 +206,7 @@ enablement instead.</p>
 <p>The versioned JSON format separates the incident schedule from its correlated
 failure effects:</p>
 <pre><code class="language-json">{
-  &quot;schema_version&quot;: 1,
+  &quot;schema_version&quot;: 2,
   &quot;name&quot;: &quot;mixed-production-failures&quot;,
   &quot;seed&quot;: 17,
   &quot;clock&quot;: {
@@ -221,6 +228,7 @@ failure effects:</p>
         {
           &quot;fault_id&quot;: &quot;hidden-output&quot;,
           &quot;type&quot;: &quot;tensor_corruption&quot;,
+          &quot;system_failure_type&quot;: &quot;transient_compute_corruption&quot;,
           &quot;target&quot;: {
             &quot;rank&quot;: 3,
             &quot;component&quot;: &quot;transformer_block&quot;,
@@ -301,7 +309,7 @@ parameters.</p>
 <td><code>schema_version</code></td>
 <td style="text-align: right;">No</td>
 <td><code>1</code></td>
-<td>Manifest compatibility version. Serialized campaigns always include it; unsupported versions are rejected.</td>
+<td>Manifest compatibility version. Readers accept versions <code>1</code> and <code>2</code>; version <code>2</code> adds <code>system_failure_type</code>. Unchanged programmatic campaigns remain on version <code>1</code> so their manifest identities stay stable across upgrades.</td>
 </tr>
 <tr>
 <td><code>name</code></td>
@@ -337,6 +345,8 @@ parameters.</p>
 </table>
 <p>Integer fields use JSON integers only. Booleans and fractional numbers are not
 coerced into iteration, rank, index, lifetime, retry, seed, or schema values.
+Version <code>1</code> manifests remain readable but cannot contain
+<code>system_failure_type</code>; use version <code>2</code> when that field is present.
 The campaign <code>name</code>, every <code>incident_id</code>, and every <code>fault_id</code> must be
 non-empty strings. Nulls, booleans, and numeric identifiers are rejected rather
 than converted to strings because identifiers participate in manifest hashes,
@@ -579,6 +589,11 @@ cleanup cancels every still-active effect, including <code>campaign_end</code> e
 <td><code>type</code></td>
 <td style="text-align: right;">Yes</td>
 <td>Canonical observable failure effect, such as <code>tensor_corruption</code>, <code>delay</code>, or <code>process_termination</code>.</td>
+</tr>
+<tr>
+<td><code>system_failure_type</code></td>
+<td style="text-align: right;">No</td>
+<td>Pre-training system root cause. It requires campaign schema version <code>2</code> and must be compatible with the observable <code>type</code>; omitting it preserves existing fault entries.</td>
 </tr>
 <tr>
 <td><code>target</code></td>
@@ -894,6 +909,70 @@ coerced by a framework adapter or executor.</p>
 </tr>
 </tbody>
 </table>
+<p><code>SystemFailureType</code> adds the missing root-cause dimension for pre-training
+campaigns. It intentionally excludes workload-shape imbalance and
+post-training/inference-only failures.</p>
+<table>
+<thead>
+<tr>
+<th>Family</th>
+<th>System failure types</th>
+<th>Representative observable effects</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Host resources</td>
+<td><code>host_memory_exhaustion</code>, <code>host_resource_exhaustion</code></td>
+<td><code>resource_exhaustion</code>, <code>exception</code>, <code>process_termination</code></td>
+</tr>
+<tr>
+<td>CUDA runtime</td>
+<td><code>cuda_out_of_memory</code>, <code>cuda_runtime_failure</code></td>
+<td><code>resource_exhaustion</code>, <code>exception</code>, <code>hang</code>, <code>resource_unavailable</code></td>
+</tr>
+<tr>
+<td>Durable storage</td>
+<td><code>durable_storage_exhaustion</code>, <code>durable_storage_failure</code></td>
+<td><code>io_error</code>, checkpoint corruption/truncation/missing, <code>timeout</code></td>
+</tr>
+<tr>
+<td>PCIe</td>
+<td><code>pcie_link_failure</code>, <code>pcie_link_degradation</code></td>
+<td><code>resource_unavailable</code>, <code>io_error</code>, <code>delay</code>, <code>timeout</code></td>
+</tr>
+<tr>
+<td>Network fabric</td>
+<td><code>fabric_link_failure</code>, <code>fabric_congestion</code></td>
+<td><code>network_partition</code>, <code>message_drop</code>, <code>delay</code>, <code>timeout</code>, <code>hang</code></td>
+</tr>
+<tr>
+<td>Input pipeline</td>
+<td><code>data_sample_corruption</code>, <code>data_shard_unavailable</code>, <code>input_position_divergence</code></td>
+<td>payload/tensor corruption, <code>io_error</code>, <code>drop</code>, stale/duplicate/reordered state</td>
+</tr>
+<tr>
+<td>Software and runtime</td>
+<td><code>software_environment_drift</code>, <code>training_runtime_failure</code>, <code>control_plane_failure</code></td>
+<td><code>config_drift</code>, <code>exception</code>, <code>process_termination</code>, <code>resource_unavailable</code></td>
+</tr>
+<tr>
+<td>Fail-slow resources</td>
+<td><code>host_performance_degradation</code>, <code>gpu_throttling</code></td>
+<td><code>delay</code>, <code>timeout</code>, <code>hang</code></td>
+</tr>
+<tr>
+<td>SDC coverage gaps</td>
+<td><code>transient_compute_corruption</code>, <code>common_mode_corruption</code>, <code>single_owner_state_corruption</code></td>
+<td>tensor/payload corruption, <code>stale_state</code>, checkpoint corruption</td>
+</tr>
+</tbody>
+</table>
+<p>The taxonomy is evaluation support, not an assertion that SCOUT can localize
+every root cause from current evidence. In particular, common-mode corruption
+and single-owner state have no healthy peer oracle by definition. Campaign
+ground truth retains the root cause while localization scoring continues to use
+the observable effect and neutral expected kind.</p>
 <p>The built-in local executor supports:</p>
 <ul>
 <li>numerical corruption of module inputs, outputs, weights, biases, gradients,
