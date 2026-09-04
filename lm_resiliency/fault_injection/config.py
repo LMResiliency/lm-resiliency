@@ -12,6 +12,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
 
+from lm_resiliency.failure_types import SystemFailureType
 from lm_resiliency.fault_injection._json import freeze_json_mapping, thaw_json
 
 SCHEMA_VERSION = 1
@@ -40,7 +41,14 @@ _TARGET_KEYS = {
     "path",
     "metadata",
 }
-_FAULT_KEYS = {"fault_id", "id", "type", "target", "parameters"}
+_FAULT_KEYS = {
+    "fault_id",
+    "id",
+    "type",
+    "system_failure_type",
+    "target",
+    "parameters",
+}
 _INCIDENT_KEYS = {
     "incident_id",
     "id",
@@ -193,6 +201,177 @@ _PROCESS_FAILURES = {
     FailureType.RESOURCE_EXHAUSTION,
     FailureType.PROCESS_TERMINATION,
     FailureType.RESOURCE_UNAVAILABLE,
+}
+
+_SYSTEM_FAILURE_EFFECTS: dict[SystemFailureType, frozenset[FailureType]] = {
+    SystemFailureType.HOST_MEMORY_EXHAUSTION: frozenset(
+        {
+            FailureType.RESOURCE_EXHAUSTION,
+            FailureType.PROCESS_TERMINATION,
+            FailureType.EXCEPTION,
+        }
+    ),
+    SystemFailureType.HOST_RESOURCE_EXHAUSTION: frozenset(
+        {
+            FailureType.RESOURCE_EXHAUSTION,
+            FailureType.PROCESS_TERMINATION,
+            FailureType.EXCEPTION,
+        }
+    ),
+    SystemFailureType.CUDA_OUT_OF_MEMORY: frozenset(
+        {
+            FailureType.RESOURCE_EXHAUSTION,
+            FailureType.PROCESS_TERMINATION,
+            FailureType.EXCEPTION,
+        }
+    ),
+    SystemFailureType.CUDA_RUNTIME_FAILURE: frozenset(
+        {
+            FailureType.EXCEPTION,
+            FailureType.PROCESS_TERMINATION,
+            FailureType.RESOURCE_UNAVAILABLE,
+            FailureType.HANG,
+            FailureType.TIMEOUT,
+        }
+    ),
+    SystemFailureType.DURABLE_STORAGE_EXHAUSTION: frozenset(
+        {
+            FailureType.IO_ERROR,
+            FailureType.RESOURCE_EXHAUSTION,
+            FailureType.CHECKPOINT_TRUNCATION,
+            FailureType.CHECKPOINT_MISSING,
+        }
+    ),
+    SystemFailureType.DURABLE_STORAGE_FAILURE: frozenset(
+        {
+            FailureType.IO_ERROR,
+            FailureType.RESOURCE_UNAVAILABLE,
+            FailureType.CHECKPOINT_CORRUPTION,
+            FailureType.CHECKPOINT_TRUNCATION,
+            FailureType.CHECKPOINT_MISSING,
+            FailureType.TIMEOUT,
+            FailureType.HANG,
+        }
+    ),
+    SystemFailureType.PCIE_LINK_FAILURE: frozenset(
+        {
+            FailureType.RESOURCE_UNAVAILABLE,
+            FailureType.PROCESS_TERMINATION,
+            FailureType.EXCEPTION,
+            FailureType.IO_ERROR,
+            FailureType.HANG,
+        }
+    ),
+    SystemFailureType.PCIE_LINK_DEGRADATION: frozenset(
+        {
+            FailureType.DELAY,
+            FailureType.TIMEOUT,
+            FailureType.IO_ERROR,
+        }
+    ),
+    SystemFailureType.FABRIC_LINK_FAILURE: frozenset(
+        {
+            FailureType.NETWORK_PARTITION,
+            FailureType.MESSAGE_DROP,
+            FailureType.RESOURCE_UNAVAILABLE,
+            FailureType.TIMEOUT,
+            FailureType.HANG,
+            FailureType.COLLECTIVE_DESYNC,
+        }
+    ),
+    SystemFailureType.FABRIC_CONGESTION: frozenset(
+        {
+            FailureType.DELAY,
+            FailureType.TIMEOUT,
+            FailureType.MESSAGE_DROP,
+            FailureType.HANG,
+        }
+    ),
+    SystemFailureType.DATA_SAMPLE_CORRUPTION: frozenset(
+        {
+            FailureType.PAYLOAD_CORRUPTION,
+            FailureType.TENSOR_CORRUPTION,
+        }
+    ),
+    SystemFailureType.DATA_SHARD_UNAVAILABLE: frozenset(
+        {
+            FailureType.RESOURCE_UNAVAILABLE,
+            FailureType.IO_ERROR,
+            FailureType.DROP,
+            FailureType.TIMEOUT,
+            FailureType.HANG,
+        }
+    ),
+    SystemFailureType.INPUT_POSITION_DIVERGENCE: frozenset(
+        {
+            FailureType.CONFIG_DRIFT,
+            FailureType.STALE_STATE,
+            FailureType.DUPLICATE,
+            FailureType.DROP,
+            FailureType.REORDER,
+        }
+    ),
+    SystemFailureType.SOFTWARE_ENVIRONMENT_DRIFT: frozenset(
+        {
+            FailureType.CONFIG_DRIFT,
+            FailureType.EXCEPTION,
+            FailureType.RESOURCE_UNAVAILABLE,
+        }
+    ),
+    SystemFailureType.HOST_PERFORMANCE_DEGRADATION: frozenset(
+        {
+            FailureType.DELAY,
+            FailureType.TIMEOUT,
+            FailureType.HANG,
+        }
+    ),
+    SystemFailureType.GPU_THROTTLING: frozenset(
+        {
+            FailureType.DELAY,
+            FailureType.TIMEOUT,
+            FailureType.HANG,
+        }
+    ),
+    SystemFailureType.TRAINING_RUNTIME_FAILURE: frozenset(
+        {
+            FailureType.EXCEPTION,
+            FailureType.HANG,
+            FailureType.TIMEOUT,
+            FailureType.PROCESS_TERMINATION,
+        }
+    ),
+    SystemFailureType.CONTROL_PLANE_FAILURE: frozenset(
+        {
+            FailureType.RESOURCE_UNAVAILABLE,
+            FailureType.NETWORK_PARTITION,
+            FailureType.TIMEOUT,
+            FailureType.HANG,
+            FailureType.CONFIG_DRIFT,
+            FailureType.MESSAGE_DROP,
+        }
+    ),
+    SystemFailureType.TRANSIENT_COMPUTE_CORRUPTION: frozenset(
+        {
+            FailureType.TENSOR_CORRUPTION,
+            FailureType.PAYLOAD_CORRUPTION,
+        }
+    ),
+    SystemFailureType.COMMON_MODE_CORRUPTION: frozenset(
+        {
+            FailureType.TENSOR_CORRUPTION,
+            FailureType.PAYLOAD_CORRUPTION,
+            FailureType.STALE_STATE,
+            FailureType.CONFIG_DRIFT,
+        }
+    ),
+    SystemFailureType.SINGLE_OWNER_STATE_CORRUPTION: frozenset(
+        {
+            FailureType.TENSOR_CORRUPTION,
+            FailureType.STALE_STATE,
+            FailureType.CONFIG_DRIFT,
+            FailureType.CHECKPOINT_CORRUPTION,
+        }
+    ),
 }
 
 
@@ -539,6 +718,7 @@ class FaultSpec:
     type: FailureType
     target: FaultTarget
     parameters: Mapping[str, Any] = field(default_factory=dict)
+    system_failure_type: SystemFailureType | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -547,6 +727,12 @@ class FaultSpec:
             _required_non_empty_string(self.fault_id, "fault_id"),
         )
         object.__setattr__(self, "type", FailureType(self.type))
+        if self.system_failure_type is not None:
+            object.__setattr__(
+                self,
+                "system_failure_type",
+                SystemFailureType(self.system_failure_type),
+            )
         if isinstance(self.target, Mapping):
             object.__setattr__(self, "target", FaultTarget.from_dict(self.target))
         if not isinstance(self.target, FaultTarget):
@@ -556,6 +742,7 @@ class FaultSpec:
             "parameters",
             freeze_json_mapping(self.parameters, "fault parameters"),
         )
+        self._validate_system_failure_type()
         self._validate_parameters()
 
     @property
@@ -622,6 +809,17 @@ class FaultSpec:
             if "value" not in self.parameters:
                 raise ValueError("set_value corruption requires parameters.value")
 
+    def _validate_system_failure_type(self) -> None:
+        if self.system_failure_type is None:
+            return
+        allowed = _SYSTEM_FAILURE_EFFECTS[self.system_failure_type]
+        if self.type not in allowed:
+            allowed_names = ", ".join(sorted(effect.value for effect in allowed))
+            raise ValueError(
+                f"system failure {self.system_failure_type.value} cannot produce "
+                f"observable effect {self.type.value}; expected one of: {allowed_names}"
+            )
+
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "FaultSpec":
         _reject_unknown_keys(value, _FAULT_KEYS, "fault")
@@ -631,15 +829,23 @@ class FaultSpec:
             type=FailureType(value["type"]),
             target=FaultTarget.from_dict(value["target"]),
             parameters=value.get("parameters", {}),
+            system_failure_type=(
+                None
+                if value.get("system_failure_type") is None
+                else SystemFailureType(value["system_failure_type"])
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        value = {
             "fault_id": self.fault_id,
             "type": self.type.value,
             "target": self.target.to_dict(),
             "parameters": thaw_json(self.parameters),
         }
+        if self.system_failure_type is not None:
+            value["system_failure_type"] = self.system_failure_type.value
+        return value
 
 
 def _validate_builtin_local_parameters(fault: FaultSpec) -> None:

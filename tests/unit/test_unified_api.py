@@ -893,6 +893,7 @@ class TestUnifiedAPIImport:
             "SCOUTFaultReport",
             "SCHEMA_VERSION",
             "SafetyClass",
+            "SystemFailureType",
             "RetriggerPolicy",
             "UnsupportedFaultError",
             "enable_fault_injection",

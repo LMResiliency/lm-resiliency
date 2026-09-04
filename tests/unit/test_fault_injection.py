@@ -40,6 +40,7 @@ from lm_resiliency import (
     MemoryCampaignStateStore,
     RetriggerPolicy,
     SafetyClass,
+    SystemFailureType,
     UnsupportedFaultError,
     enable_fault_injection,
 )
@@ -339,6 +340,111 @@ def test_incident_campaign_json_round_trip(tmp_path) -> None:
     assert json.loads(path.read_text()) == campaign.to_dict()
     assert "framework" not in campaign.to_dict()
     assert campaign.clock.type.value == "training_iteration"
+
+
+@pytest.mark.parametrize(
+    ("system_failure_type", "effect"),
+    [
+        (SystemFailureType.HOST_MEMORY_EXHAUSTION, FailureType.RESOURCE_EXHAUSTION),
+        (SystemFailureType.HOST_RESOURCE_EXHAUSTION, FailureType.RESOURCE_EXHAUSTION),
+        (SystemFailureType.CUDA_OUT_OF_MEMORY, FailureType.RESOURCE_EXHAUSTION),
+        (SystemFailureType.CUDA_RUNTIME_FAILURE, FailureType.EXCEPTION),
+        (SystemFailureType.DURABLE_STORAGE_EXHAUSTION, FailureType.IO_ERROR),
+        (SystemFailureType.DURABLE_STORAGE_FAILURE, FailureType.CHECKPOINT_CORRUPTION),
+        (SystemFailureType.PCIE_LINK_FAILURE, FailureType.RESOURCE_UNAVAILABLE),
+        (SystemFailureType.PCIE_LINK_DEGRADATION, FailureType.DELAY),
+        (SystemFailureType.FABRIC_LINK_FAILURE, FailureType.NETWORK_PARTITION),
+        (SystemFailureType.FABRIC_CONGESTION, FailureType.DELAY),
+        (SystemFailureType.DATA_SAMPLE_CORRUPTION, FailureType.PAYLOAD_CORRUPTION),
+        (SystemFailureType.DATA_SHARD_UNAVAILABLE, FailureType.RESOURCE_UNAVAILABLE),
+        (SystemFailureType.INPUT_POSITION_DIVERGENCE, FailureType.STALE_STATE),
+        (SystemFailureType.SOFTWARE_ENVIRONMENT_DRIFT, FailureType.CONFIG_DRIFT),
+        (SystemFailureType.HOST_PERFORMANCE_DEGRADATION, FailureType.DELAY),
+        (SystemFailureType.GPU_THROTTLING, FailureType.DELAY),
+        (SystemFailureType.TRAINING_RUNTIME_FAILURE, FailureType.EXCEPTION),
+        (SystemFailureType.CONTROL_PLANE_FAILURE, FailureType.RESOURCE_UNAVAILABLE),
+        (SystemFailureType.TRANSIENT_COMPUTE_CORRUPTION, FailureType.TENSOR_CORRUPTION),
+        (SystemFailureType.COMMON_MODE_CORRUPTION, FailureType.TENSOR_CORRUPTION),
+        (SystemFailureType.SINGLE_OWNER_STATE_CORRUPTION, FailureType.STALE_STATE),
+    ],
+)
+def test_pretraining_system_failure_types_accept_compatible_effects(
+    system_failure_type: SystemFailureType,
+    effect: FailureType,
+) -> None:
+    parameters: dict[str, object] = {}
+    if effect is FailureType.TENSOR_CORRUPTION:
+        parameters["operation"] = CorruptionOperation.SIGN_FLIP.value
+    if effect is FailureType.DELAY:
+        parameters["delay_ms"] = 1.0
+
+    fault = FaultSpec(
+        fault_id=system_failure_type.value,
+        type=effect,
+        system_failure_type=system_failure_type,
+        target=FaultTarget(
+            surface=FaultSurface.RESOURCE,
+            resource="system-under-test",
+        ),
+        parameters=parameters,
+    )
+
+    restored = FaultSpec.from_dict(fault.to_dict())
+    assert restored == fault
+    assert restored.to_dict()["system_failure_type"] == system_failure_type.value
+
+
+def test_system_failure_type_rejects_incompatible_observable_effect() -> None:
+    with pytest.raises(
+        ValueError,
+        match="cuda_out_of_memory cannot produce observable effect network_partition",
+    ):
+        FaultSpec(
+            fault_id="invalid-cuda-oom",
+            type=FailureType.NETWORK_PARTITION,
+            system_failure_type=SystemFailureType.CUDA_OUT_OF_MEMORY,
+            target=FaultTarget(
+                surface=FaultSurface.RESOURCE,
+                resource="gpu-0",
+            ),
+        )
+
+
+def test_unspecified_system_failure_type_preserves_existing_manifest_shape() -> None:
+    value = _corruption().to_dict()
+
+    assert "system_failure_type" not in value
+
+
+def test_system_failure_type_is_preserved_in_ground_truth_records() -> None:
+    model = TinyModel()
+    events: list[tuple[str, str]] = []
+    fault = FaultSpec(
+        fault_id="host-oom",
+        type=FailureType.RESOURCE_EXHAUSTION,
+        system_failure_type=SystemFailureType.HOST_MEMORY_EXHAUSTION,
+        target=FaultTarget(
+            rank=0,
+            surface=FaultSurface.RESOURCE,
+            resource="host-0",
+        ),
+    )
+    session = enable_fault_injection(
+        model,
+        _optimizer(model),
+        campaign=_campaign(_incident(at=(1,), faults=(fault,))),
+        executors=(
+            _recording_executor(
+                {FailureType.RESOURCE_EXHAUSTION},
+                events,
+            ),
+        ),
+    )
+
+    record = session.records[0]
+    assert record.system_failure_type == SystemFailureType.HOST_MEMORY_EXHAUSTION.value
+    assert record.to_dict()["system_failure_type"] == "host_memory_exhaustion"
+    session.close()
 
 
 def test_bounded_incident_rejects_overlapping_candidates() -> None:

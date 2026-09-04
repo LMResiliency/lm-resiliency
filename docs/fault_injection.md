@@ -6,6 +6,9 @@ It records verified ground truth and accepts neutral localization results, witho
 depending on SCOUT, GEMINI, or another resiliency system.
 
 Campaigns describe observable failure effects.
+They may also name the pre-training system root cause separately, so an
+evaluation can distinguish effects such as a timeout caused by fabric congestion
+from the same effect caused by host pressure.
 Built-in hooks execute safe model and optimizer faults; callback executors connect
 the same schema to isolated process, storage, communication, and cluster controls.
 See the
@@ -121,6 +124,7 @@ failure effects:
         {
           "fault_id": "hidden-output",
           "type": "tensor_corruption",
+          "system_failure_type": "transient_compute_corruption",
           "target": {
             "rank": 3,
             "component": "transformer_block",
@@ -315,6 +319,7 @@ cleanup cancels every still-active effect, including `campaign_end` effects.
 |---|---:|---|
 | `fault_id` | Yes | Non-empty action identifier unique within its incident. |
 | `type` | Yes | Canonical observable failure effect, such as `tensor_corruption`, `delay`, or `process_termination`. |
+| `system_failure_type` | No | Pre-training system root cause. It must be compatible with the observable `type`; omitting it preserves existing manifests. |
 | `target` | Yes | Framework-neutral location where the effect is applied. |
 | `parameters` | No | Type- and executor-specific settings. Defaults to `{}`. |
 
@@ -505,6 +510,28 @@ The canonical types cover common observable LLM pre-training failures:
 | Runtime and availability | `exception`, `resource_exhaustion`, `process_termination`, `resource_unavailable` |
 | Checkpoint and storage | `checkpoint_corruption`, `checkpoint_truncation`, `checkpoint_missing`, `io_error` |
 | Communication | `payload_corruption`, `collective_desync`, `message_drop`, `network_partition` |
+
+`SystemFailureType` adds the missing root-cause dimension for pre-training
+campaigns. It intentionally excludes workload-shape imbalance and
+post-training/inference-only failures.
+
+| Family | System failure types | Representative observable effects |
+|---|---|---|
+| Host resources | `host_memory_exhaustion`, `host_resource_exhaustion` | `resource_exhaustion`, `exception`, `process_termination` |
+| CUDA runtime | `cuda_out_of_memory`, `cuda_runtime_failure` | `resource_exhaustion`, `exception`, `hang`, `resource_unavailable` |
+| Durable storage | `durable_storage_exhaustion`, `durable_storage_failure` | `io_error`, checkpoint corruption/truncation/missing, `timeout` |
+| PCIe | `pcie_link_failure`, `pcie_link_degradation` | `resource_unavailable`, `io_error`, `delay`, `timeout` |
+| Network fabric | `fabric_link_failure`, `fabric_congestion` | `network_partition`, `message_drop`, `delay`, `timeout`, `hang` |
+| Input pipeline | `data_sample_corruption`, `data_shard_unavailable`, `input_position_divergence` | payload/tensor corruption, `io_error`, `drop`, stale/duplicate/reordered state |
+| Software and runtime | `software_environment_drift`, `training_runtime_failure`, `control_plane_failure` | `config_drift`, `exception`, `process_termination`, `resource_unavailable` |
+| Fail-slow resources | `host_performance_degradation`, `gpu_throttling` | `delay`, `timeout`, `hang` |
+| SDC coverage gaps | `transient_compute_corruption`, `common_mode_corruption`, `single_owner_state_corruption` | tensor/payload corruption, `stale_state`, checkpoint corruption |
+
+The taxonomy is evaluation support, not an assertion that SCOUT can localize
+every root cause from current evidence. In particular, common-mode corruption
+and single-owner state have no healthy peer oracle by definition. Campaign
+ground truth retains the root cause while localization scoring continues to use
+the observable effect and neutral expected kind.
 
 The built-in local executor supports:
 
