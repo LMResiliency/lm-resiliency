@@ -32,7 +32,7 @@ classifiers = [
 dependencies = [
     "numpy>=1.26,<3",
     "tomli>=2,<3; python_version < '3.11'",
-    "torch>=2.10,<2.14",
+    "torch>=2.10,<2.15",
 ]
 
 [project.scripts]
